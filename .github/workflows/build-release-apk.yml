@@ -1,0 +1,104 @@
+name: Build release APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Create or update the GitHub release for v0.1.0"
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v0.1.0"
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: dossier
+  VERSION_NAME: 0.1.0
+  APK_BASENAME: dossier-0.1.0
+  HAS_RELEASE_SIGNING: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.ANDROID_KEYSTORE_PASSWORD != '' && secrets.ANDROID_KEY_ALIAS != '' && secrets.ANDROID_KEY_PASSWORD != '' }}
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Test and assemble release APK
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
+
+      - name: Prepare unsigned APK artifact
+        run: |
+          mkdir -p release
+          cp app/build/outputs/apk/release/app-release-unsigned.apk "release/${APK_BASENAME}-unsigned.apk"
+
+      - name: Sign release APK
+        if: env.HAS_RELEASE_SIGNING == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > release-keystore.jks
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n 1)"
+          "$APKSIGNER" sign \
+            --ks release-keystore.jks \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+            --key-pass "pass:$ANDROID_KEY_PASSWORD" \
+            --out "release/${APK_BASENAME}.apk" \
+            "app/build/outputs/apk/release/app-release-unsigned.apk"
+          "$APKSIGNER" verify --verbose "release/${APK_BASENAME}.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_BASENAME }}
+          path: release/*.apk
+          if-no-files-found: error
+
+      - name: Create or update GitHub release
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${VERSION_NAME}"
+          TITLE="Dossier ${VERSION_NAME}"
+          RELEASE_APK="release/${APK_BASENAME}-unsigned.apk"
+          NOTES="Dossier ${VERSION_NAME} unsigned Android APK. Configure release signing secrets to publish an installable signed APK."
+
+          if [ -f "release/${APK_BASENAME}.apk" ]; then
+            RELEASE_APK="release/${APK_BASENAME}.apk"
+            NOTES="Dossier ${VERSION_NAME} signed Android APK."
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$RELEASE_APK" --clobber
+          else
+            gh release create "$TAG" "$RELEASE_APK" \
+              --target "$GITHUB_SHA" \
+              --title "$TITLE" \
+              --notes "$NOTES"
+          fi

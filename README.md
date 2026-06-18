@@ -61,10 +61,28 @@ Clone the repository and open it in Android Studio, or build from the command li
 ./gradlew :app:assembleDebug
 ```
 
+The debug APK is written to:
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
+
 Install the debug build on a connected device or emulator:
 
 ```sh
 ./gradlew :app:installDebug
+```
+
+Build an unsigned release APK:
+
+```sh
+./gradlew :app:assembleRelease
+```
+
+The unsigned release APK is written to:
+
+```text
+app/build/outputs/apk/release/app-release-unsigned.apk
 ```
 
 Run unit tests:
@@ -78,6 +96,24 @@ Clean generated outputs:
 ```sh
 ./gradlew clean
 ```
+
+## GitHub Release APK
+
+The workflow at `.github/workflows/build-release-apk.yml` builds Dossier `0.1.0`.
+
+To publish the APK to GitHub Releases, push the release tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+You can also run the workflow manually from GitHub Actions. Add these repository secrets to produce a signed installable release APK:
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
 
 ## Project Structure
 
