@@ -108,12 +108,34 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-You can also run the workflow manually from GitHub Actions. Add these repository secrets to produce a signed installable release APK:
+You can also run the workflow manually from GitHub Actions. The workflow uploads a debug APK artifact for quick testing, but GitHub Releases require a signed release APK. Unsigned release APKs are not installable on Android.
+
+Create a release keystore locally:
+
+```sh
+keytool -genkeypair \
+  -v \
+  -keystore dossier-release.jks \
+  -alias dossier \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 10000
+```
+
+Convert the keystore to a one-line base64 value for GitHub Secrets:
+
+```sh
+base64 < dossier-release.jks | tr -d '\n'
+```
+
+Add these repository secrets:
 
 - `ANDROID_KEYSTORE_BASE64`
 - `ANDROID_KEYSTORE_PASSWORD`
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEY_PASSWORD`
+
+Use the keystore password you entered for `ANDROID_KEYSTORE_PASSWORD`, the alias `dossier` for `ANDROID_KEY_ALIAS`, and the key password you entered for `ANDROID_KEY_PASSWORD`.
 
 ## Project Structure
 

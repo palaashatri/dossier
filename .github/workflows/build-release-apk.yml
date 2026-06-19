@@ -54,12 +54,13 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
 
-      - name: Test and assemble release APK
-        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
+      - name: Test and assemble APKs
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 
-      - name: Prepare unsigned APK artifact
+      - name: Prepare APK artifacts
         run: |
           mkdir -p release
+          cp app/build/outputs/apk/debug/app-debug.apk "release/${APK_BASENAME}-debug.apk"
           cp app/build/outputs/apk/release/app-release-unsigned.apk "release/${APK_BASENAME}-unsigned.apk"
 
       - name: Sign release APK
@@ -95,12 +96,12 @@ jobs:
         run: |
           TAG="v${VERSION_NAME}"
           TITLE="Dossier ${VERSION_NAME}"
-          RELEASE_APK="release/${APK_BASENAME}-unsigned.apk"
-          NOTES="Dossier ${VERSION_NAME} unsigned Android APK. Configure release signing secrets to publish an installable signed APK."
+          RELEASE_APK="release/${APK_BASENAME}.apk"
+          NOTES="Dossier ${VERSION_NAME} signed Android APK."
 
-          if [ -f "release/${APK_BASENAME}.apk" ]; then
-            RELEASE_APK="release/${APK_BASENAME}.apk"
-            NOTES="Dossier ${VERSION_NAME} signed Android APK."
+          if [ ! -f "$RELEASE_APK" ]; then
+            echo "::error::Refusing to publish an unsigned release APK. Add ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD repository secrets, then rerun this workflow."
+            exit 1
           fi
 
           if gh release view "$TAG" >/dev/null 2>&1; then
