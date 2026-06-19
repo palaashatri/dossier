@@ -163,13 +163,16 @@ object HandleExtractor {
         }
 
         // Bare @handles where the platform name appears nearby (within 40 chars).
+        // Match against the URL-stripped text so the match ranges index into the same
+        // string we slice for the lookup window (the original `text` still contains URLs
+        // which would make `lower` shorter than `text` and cause substring() to throw).
         val atHandleRegex = Regex("@([a-z0-9._-]{2,30})", RegexOption.IGNORE_CASE)
-        atHandleRegex.findAll(text).forEach { m ->
+        atHandleRegex.findAll(textWithoutUrls).forEach { m ->
             val handle = m.groupValues[1].trim()
             if (isNonProfileHandle(handle)) return@forEach
             // Look for a platform name within a window before/after the match.
             val start = (m.range.first - 40).coerceAtLeast(0)
-            val end = (m.range.last + 40).coerceAtMost(text.length)
+            val end = (m.range.last + 40).coerceAtMost(textWithoutUrls.length)
             val window = lower.substring(start, end)
             val platform = platformNames.entries.firstOrNull { (name, _) ->
                 window.contains(name) && name != "x" // "x" too noisy as a bare word

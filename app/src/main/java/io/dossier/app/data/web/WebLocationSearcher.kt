@@ -93,14 +93,16 @@ class WebLocationSearcher(private val context: Context) {
             }
         }
 
-        // Deep Research: fetch the top evidence pages and append their text to the
+        // Deep Research: fetch the top evidence pages and merge their text into the
         // clue pool for richer location context. Bounded to 2 extra fetches so it
-        // can't run away. Each fetch is individually try/caught.
+        // can't run away. Each fetch is individually try/caught. The enriched entry
+        // replaces the original in place (rather than being appended) so it keeps its
+        // rank and is not truncated away by the final evidence.take(6).
         if (deepResearch && evidence.isNotEmpty()) {
             evidence
                 .filter { it.url.startsWith("http") }
                 .take(2)
-                .forEach { ev ->
+                .forEachIndexed { idx, ev ->
                     try {
                         val req = Request.Builder()
                             .url(ev.url)
@@ -112,16 +114,14 @@ class WebLocationSearcher(private val context: Context) {
                                 val doc = Jsoup.parse(body)
                                 val pageText = doc.text().take(800)
                                 if (pageText.isNotBlank()) {
-                                    // Merge the fetched page text into the evidence snippet pool
+                                    // Merge the fetched page text into the evidence snippet
                                     // so resolveLocationFromEvidence can mine it for place names.
-                                    evidence.add(
-                                        ev.copy(snippet = (ev.snippet + " " + pageText).take(400))
-                                    )
+                                    evidence[idx] = ev.copy(snippet = (ev.snippet + " " + pageText).take(400))
                                 }
                             }
                         }
                     } catch (e: Exception) {
-                        e.printStackTrace()
+                        android.util.Log.w("WebLocationSearcher", "Deep-research fetch failed for ${ev.url}", e)
                     }
                 }
         }

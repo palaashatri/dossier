@@ -6,6 +6,8 @@ import io.dossier.app.data.ai.HybridAiClient
 import io.dossier.app.data.place.FaceAnalyzer
 import io.dossier.app.data.place.ExifParser
 import io.dossier.app.domain.model.PlaceScanResult
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class PlaceImageScanner(
     private val context: Context,
@@ -13,16 +15,18 @@ class PlaceImageScanner(
     private val exifParser: ExifParser,
     private val hybridAiClient: HybridAiClient
 ) {
-    suspend fun scanPlaceImage(uri: Uri): PlaceScanResult {
+    suspend fun scanPlaceImage(uri: Uri): PlaceScanResult = withContext(Dispatchers.IO) {
+        // Face/EXIF analysis does blocking BitmapFactory + ML Kit Tasks.await work, so the
+        // whole pipeline must run off the main thread to avoid ANRs.
         val faceResult = faceAnalyzer.analyze(uri)
         val gps = exifParser.parseGps(uri)
-        
+
         val aiResult = hybridAiClient.analyzeImage(uri)
         val faceDetected = faceResult.faceDetected || aiResult.containsFace
         val locationQuery = generateLocationQuery(gps, aiResult.extractedText, aiResult.detectedLandmarks)
 
         if (faceDetected) {
-            return PlaceScanResult(
+            PlaceScanResult(
                 gps = gps,
                 locationQuery = locationQuery,
                 faceSkipped = true,
@@ -30,16 +34,16 @@ class PlaceImageScanner(
                 extractedText = aiResult.extractedText,
                 detectedLandmarks = aiResult.detectedLandmarks
             )
+        } else {
+            PlaceScanResult(
+                gps = gps,
+                locationQuery = locationQuery,
+                faceSkipped = false,
+                faceWarning = null,
+                extractedText = aiResult.extractedText,
+                detectedLandmarks = aiResult.detectedLandmarks
+            )
         }
-
-        return PlaceScanResult(
-            gps = gps,
-            locationQuery = locationQuery,
-            faceSkipped = false,
-            faceWarning = null,
-            extractedText = aiResult.extractedText,
-            detectedLandmarks = aiResult.detectedLandmarks
-        )
     }
 
     private fun generateLocationQuery(gps: String?, ocrText: String?, landmarks: List<String>): String? {

@@ -13,7 +13,6 @@ import io.dossier.app.domain.ai.LocalAiModelType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.FileInputStream
-import java.io.InputStream
 import java.nio.channels.FileChannel
 
 /**
@@ -55,19 +54,15 @@ class MediaPipeEngine(private val context: Context) : LocalAiEngine {
             val modelSource: Any = when {
                 LocalAiModelDownloader.isModelDownloaded(context, LocalAiModelType.GEMMA_4_E2B) -> {
                     val file = LocalAiModelDownloader.getModelFile(context, LocalAiModelType.GEMMA_4_E2B)
-                    val fis = FileInputStream(file)
-                    val channel = fis.channel
-                    val buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size())
-                    fis.close()
-                    buffer
+                    FileInputStream(file).use { fis ->
+                        fis.channel.map(FileChannel.MapMode.READ_ONLY, 0, fis.channel.size())
+                    }
                 }
                 LocalAiModelDownloader.isModelDownloaded(context, LocalAiModelType.PALIGEMMA) -> {
                     val file = LocalAiModelDownloader.getModelFile(context, LocalAiModelType.PALIGEMMA)
-                    val fis = FileInputStream(file)
-                    val channel = fis.channel
-                    val buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size())
-                    fis.close()
-                    buffer
+                    FileInputStream(file).use { fis ->
+                        fis.channel.map(FileChannel.MapMode.READ_ONLY, 0, fis.channel.size())
+                    }
                 }
                 else -> {
                     val assets = context.assets.list("") ?: emptyArray()
@@ -93,10 +88,7 @@ class MediaPipeEngine(private val context: Context) : LocalAiEngine {
 
             val detector = ObjectDetector.createFromOptions(context, options)
 
-            val inputStream: InputStream? = context.contentResolver.openInputStream(imageUri)
-            val bitmap = BitmapFactory.decodeStream(inputStream)
-            inputStream?.close()
-
+            val bitmap = context.contentResolver.openInputStream(imageUri)?.use { BitmapFactory.decodeStream(it) }
             if (bitmap == null) {
                 detector.close()
                 return@withContext null
