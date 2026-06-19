@@ -121,7 +121,11 @@ fun WebBrowserScreen(url: String, onBack: () -> Unit) {
                         }
 
                         override fun shouldOverrideUrlLoading(view: WebView?, request: android.webkit.WebResourceRequest?): Boolean {
-                            return false // Force loading inside the in-app Webview
+                            // Only allow http(s) navigation inside the in-app browser. Block
+                            // javascript:, data:, file:, content:, intent:, and other schemes
+                            // that redirects or in-page links could trigger.
+                            val scheme = request?.url?.scheme?.lowercase()
+                            return scheme != "http" && scheme != "https"
                         }
                     }
 
@@ -133,7 +137,14 @@ fun WebBrowserScreen(url: String, onBack: () -> Unit) {
 
                     settings.apply {
                         javaScriptEnabled = true
-                        domStorageEnabled = true
+                        // Disable DOM storage and file/content access for defense in depth;
+                        // the browser is only meant to render public http(s) profile pages.
+                        domStorageEnabled = false
+                        setAllowFileAccess(false)
+                        setAllowContentAccess(false)
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                            mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                        }
                         loadWithOverviewMode = true
                         useWideViewPort = true
                         builtInZoomControls = true

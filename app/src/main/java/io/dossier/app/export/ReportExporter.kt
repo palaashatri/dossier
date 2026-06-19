@@ -13,7 +13,7 @@ class ReportExporter(private val context: Context) {
         return try {
             json.encodeToString(findings)
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("ReportExporter", "Failed to encode findings to JSON", e)
             "[]"
         }
     }
@@ -72,6 +72,15 @@ class ReportExporter(private val context: Context) {
         val chooser = Intent.createChooser(intent, "Share Dossier").apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        context.startActivity(chooser)
+        // Guard against devices with no app capable of handling ACTION_SEND.
+        if (chooser.resolveActivity(context.packageManager) == null) {
+            android.util.Log.w("ReportExporter", "No app available to share the dossier")
+            return
+        }
+        try {
+            context.startActivity(chooser)
+        } catch (e: android.content.ActivityNotFoundException) {
+            android.util.Log.w("ReportExporter", "Share activity not found", e)
+        }
     }
 }
