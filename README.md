@@ -1,34 +1,81 @@
 # Dossier
 
-Dossier is a consent-first Android privacy exposure audit app. It helps a user review their own public digital footprint by checking public profile pages, extracting exposed personal signals, estimating overall risk, and producing a locally generated report.
+<p align="center">
+  <strong>Private exposure intelligence for your own digital footprint.</strong>
+</p>
 
-The app is built with Kotlin, Jetpack Compose, Material 3, and on-device vision tools. It has no app backend: scan state, report generation, and image analysis orchestration live on the device. Public profile checks and location evidence searches still make normal network requests to the public web.
+<p align="center">
+  Dossier is a consent-first Android app for auditing public profile exposure, discovering reused handles, reviewing exposed personal signals, and generating a local privacy report.
+</p>
 
-## Features
+<p align="center">
+  <img alt="Android" src="https://img.shields.io/badge/platform-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white">
+  <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-2.1.0-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white">
+  <img alt="Jetpack Compose" src="https://img.shields.io/badge/Jetpack%20Compose-Material%203-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white">
+  <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-111111?style=for-the-badge">
+</p>
 
-- Guided consent and identity input flow for self-audits.
-- Username variant generation from supplied handles or names.
-- Public profile discovery across common platforms including GitHub, Instagram, X, Reddit, Stack Overflow, TikTok, YouTube, Medium, LinkedIn, Pinterest, Telegram, Bluesky, Mastodon, Dev.to, Twitch, GitLab, Hacker News, Threads, and Snapchat.
-- Best-effort profile verification through HTTP checks and embedded WebView rendering.
-- One-hop pivot discovery from self-disclosed links and handles.
-- Optional Deep Research mode that follows linked personal websites for richer public signals.
-- PII extraction for exposed emails, phone numbers, locations, organizations, usernames, profiles, and sensitive snippets.
-- Risk scoring and remediation guidance.
-- Shareable plain-text dossier report.
-- Reverse image location lookup using EXIF GPS, ML Kit OCR, scene labels, and public-web search of extracted text/label clues.
-- Face safety gate for image lookup: faces disable identity search while allowing location analysis to continue.
-- On-device AI engine configuration screen. ML Kit Vision is the default; other engines are shown honestly based on availability.
+<p align="center">
+  <img src="screenshots/emulator/01-consent.png" width="240" alt="Dossier consent screen">
+  <img src="screenshots/emulator/08-report.png" width="240" alt="Dossier report screen">
+  <img src="screenshots/emulator/09-image-lookup.png" width="240" alt="Dossier image lookup screen">
+</p>
+
+## Brand Promise
+
+Dossier turns a privacy self-audit into a calm intelligence brief. The app is built around three rules:
+
+- Consent first: audit only yourself or a target that explicitly consented.
+- Local by default: app state, report generation, and image analysis orchestration stay on device.
+- Evidence over drama: findings are best-effort public signals, never proof of identity or ownership.
+
+## What It Does
+
+- Guides a user through a self-audit consent and identity signal flow.
+- Generates username variants from supplied names and handles.
+- Checks public profile pages across common platforms.
+- Verifies profiles with public HTTP checks and rendered WebView fallback.
+- Discovers one-hop self-disclosed profile links and handles.
+- Offers optional Deep Research for linked personal websites.
+- Extracts exposed emails, phone numbers, locations, organizations, usernames, profiles, and sensitive snippets.
+- Scores exposure risk and generates remediation guidance.
+- Produces a shareable plain-text dossier report.
+- Estimates where an image was taken using EXIF GPS, on-device OCR, scene labels, and public-web search of extracted clues.
+- Applies a face safety gate during image lookup: face detection disables identity search while location analysis can continue.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><img src="screenshots/emulator/01-consent.png" width="220" alt="Consent screen"><br><sub>Consent</sub></td>
+    <td align="center"><img src="screenshots/emulator/02-identity-empty.png" width="220" alt="Identity input screen"><br><sub>Identity Input</sub></td>
+    <td align="center"><img src="screenshots/emulator/04-additional-signals.png" width="220" alt="Additional signals screen"><br><sub>Additional Signals</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="screenshots/emulator/05-links-visual.png" width="220" alt="Links and visual screen"><br><sub>Links &amp; Visual</sub></td>
+    <td align="center"><img src="screenshots/emulator/06-username-discovery.png" width="220" alt="Username discovery screen"><br><sub>Username Discovery</sub></td>
+    <td align="center"><img src="screenshots/emulator/07-scan-progress.png" width="220" alt="Scan progress screen"><br><sub>Scan Progress</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="screenshots/emulator/08-report.png" width="220" alt="Report screen"><br><sub>Dossier Report</sub></td>
+    <td align="center"><img src="screenshots/emulator/09-image-lookup.png" width="220" alt="Image lookup screen"><br><sub>Image Lookup</sub></td>
+    <td align="center"><img src="screenshots/emulator/10-models.png" width="220" alt="Models screen"><br><sub>Models</sub></td>
+  </tr>
+</table>
+
+The generated screenshot bundle is available at `screenshots/dossier-emulator-screenshots.zip`.
 
 ## Privacy And Safety Model
 
 Dossier is designed for self-consented audits.
 
-- Use it only for yourself or for targets that explicitly consented.
 - There is no telemetry or project-hosted backend in this app.
 - Identity scan data is held in local session state and can be purged from the app flow.
-- Image bytes stay on device during reverse image lookup. If GPS is absent, only extracted text and scene-label clues are searched on the public web.
+- Public profile scans and web evidence lookup make normal network requests to public websites.
+- Image bytes stay on device during reverse image lookup.
+- If image GPS is absent, only extracted text and scene-label clues are searched on the public web.
 - Face detection is used as a safety gate, not as public facial identification.
-- Results are best-effort signals, not proof of identity or ownership.
+- Results are best-effort signals and should be reviewed by a human.
 
 ## Tech Stack
 
@@ -38,11 +85,11 @@ Dossier is designed for self-consented audits.
 - Jetpack Compose with Material 3
 - Navigation Compose
 - Kotlinx Serialization
-- OkHttp and Jsoup for public-page fetching/parsing
-- Android WebView for rendered-page verification
+- OkHttp and Jsoup
+- Android WebView
 - ML Kit face detection, text recognition, and image labeling
 - MediaPipe Tasks dependencies for future local AI work
-- Lottie Compose for app transitions
+- Lottie Compose
 - JUnit unit tests
 
 ## Requirements
@@ -53,15 +100,15 @@ Dossier is designed for self-consented audits.
 
 Android Studio usually creates `local.properties` automatically with your local SDK path. Do not commit that file.
 
-## Getting Started
+## Build Locally
 
-Clone the repository and open it in Android Studio, or build from the command line:
+Build a debug APK:
 
 ```sh
 ./gradlew :app:assembleDebug
 ```
 
-The debug APK is written to:
+Debug APK output:
 
 ```text
 app/build/outputs/apk/debug/app-debug.apk
@@ -79,7 +126,7 @@ Build an unsigned release APK:
 ./gradlew :app:assembleRelease
 ```
 
-The unsigned release APK is written to:
+Unsigned release APK output:
 
 ```text
 app/build/outputs/apk/release/app-release-unsigned.apk
