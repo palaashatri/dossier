@@ -35,17 +35,17 @@ enum class LocalAiModelType(
     ),
     GEMMA_E2B(
         displayName = "Gemma E2B (MediaPipe LLM)",
-        description = "Import a compatible Gemma E2B MediaPipe LLM model file for local dossier summarization. No cloud required.",
+        description = "Download from Hugging Face LiteRT Community or import a compatible Gemma E2B MediaPipe LLM model file. Runs locally for dossier summarization.",
         downloadable = true,
-        url = "",
-        fileName = "gemma-e2b.task"
+        url = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.task?download=true",
+        fileName = "gemma-4-E2B-it-web.task"
     ),
     GEMMA_E4B(
         displayName = "Gemma E4B (MediaPipe LLM)",
-        description = "Import a compatible Gemma E4B MediaPipe LLM model file for stronger local summarization on capable devices.",
+        description = "Download from Hugging Face LiteRT Community or import a compatible Gemma E4B MediaPipe LLM model file. Runs locally for stronger summaries on capable devices.",
         downloadable = true,
-        url = "",
-        fileName = "gemma-e4b.task"
+        url = "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.task?download=true",
+        fileName = "gemma-4-E4B-it-web.task"
     ),
     PALIGEMMA(
         displayName = "PaliGemma (Vision Edge)",
