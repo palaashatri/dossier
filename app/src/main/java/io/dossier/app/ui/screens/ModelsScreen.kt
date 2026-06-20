@@ -21,7 +21,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.dossier.app.data.ai.AiModelDiscoveryService
 import io.dossier.app.data.ai.AiProviderConfigStore
+import io.dossier.app.data.ai.RemoteAiModel
 import io.dossier.app.domain.ai.AiProviderConfig
 import io.dossier.app.domain.ai.AiProviderType
 import io.dossier.app.domain.ai.LocalAiModelDownloader
@@ -372,6 +374,16 @@ private fun ProviderConfigCard(
     onConfigChange: (AiProviderConfig) -> Unit
 ) {
     val cardShape = io.dossier.app.ui.theme.DossierCardShape
+    val coroutineScope = rememberCoroutineScope()
+    var modelOptions by remember(config.provider, config.baseUrl, config.apiKey) {
+        mutableStateOf(AiModelDiscoveryService.presets(config.provider))
+    }
+    var modelDiscoveryMessage by remember(config.provider, config.baseUrl, config.apiKey) {
+        mutableStateOf<String?>(null)
+    }
+    var isRefreshingModels by remember(config.provider, config.baseUrl, config.apiKey) {
+        mutableStateOf(false)
+    }
 
     Column(
         modifier = Modifier
@@ -425,11 +437,126 @@ private fun ProviderConfigCard(
             label = "Model"
         )
         Spacer(modifier = Modifier.height(8.dp))
+        ProviderModelChooser(
+            currentModel = config.model,
+            models = modelOptions,
+            isRefreshing = isRefreshingModels,
+            message = modelDiscoveryMessage,
+            onRefresh = {
+                isRefreshingModels = true
+                modelDiscoveryMessage = null
+                coroutineScope.launch {
+                    val result = AiModelDiscoveryService().discover(config)
+                    modelOptions = result.models
+                    modelDiscoveryMessage = result.message
+                    isRefreshingModels = false
+                }
+            },
+            onModelSelected = { model ->
+                onConfigChange(config.copy(model = model.id))
+            }
+        )
+        Spacer(modifier = Modifier.height(8.dp))
         ProviderTextField(
             value = config.apiKey,
             onValueChange = { onConfigChange(config.copy(apiKey = it)) },
             label = if (config.provider == AiProviderType.OLLAMA) "Bearer token (optional)" else "API key",
             password = true
+        )
+    }
+}
+
+@Composable
+private fun ProviderModelChooser(
+    currentModel: String,
+    models: List<RemoteAiModel>,
+    isRefreshing: Boolean,
+    message: String?,
+    onRefresh: () -> Unit,
+    onModelSelected: (RemoteAiModel) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val choices = remember(models, currentModel) {
+        (listOfNotNull(
+            currentModel.takeIf { it.isNotBlank() }?.let { RemoteAiModel(it, "$it (current)") }
+        ) + models)
+            .distinctBy { it.id }
+            .take(100)
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedButton(
+            onClick = onRefresh,
+            enabled = !isRefreshing,
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan),
+            modifier = Modifier.weight(1f)
+        ) {
+            Text(
+                text = if (isRefreshing) "Refreshing..." else "Refresh models",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Box(modifier = Modifier.weight(1f)) {
+            OutlinedButton(
+                onClick = { expanded = true },
+                enabled = choices.isNotEmpty(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.TextPrimary),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Choose model",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                modifier = Modifier.heightIn(max = 360.dp)
+            ) {
+                choices.forEach { model ->
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(
+                                    text = model.displayName,
+                                    fontSize = 12.sp,
+                                    color = NeuralTheme.TextPrimary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                if (model.displayName != model.id) {
+                                    Text(
+                                        text = model.id,
+                                        fontSize = 10.sp,
+                                        color = NeuralTheme.TextSecondary,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        },
+                        onClick = {
+                            expanded = false
+                            onModelSelected(model)
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    message?.let {
+        Text(
+            text = it,
+            color = NeuralTheme.TextSecondary,
+            fontSize = 10.5.sp,
+            lineHeight = 14.sp,
+            modifier = Modifier.padding(top = 6.dp)
         )
     }
 }
