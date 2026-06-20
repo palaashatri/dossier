@@ -1,6 +1,7 @@
 package io.dossier.app.data.place
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import com.google.android.gms.tasks.Tasks
@@ -30,6 +31,11 @@ class ImageLabeler(private val context: Context) {
     /** Returns labels with confidence >= threshold, or empty list on failure. */
     fun label(uri: Uri): List<ReverseImageLookupResult.ImageLabel> {
         val bitmap = loadBitmap(uri) ?: return emptyList()
+        return label(bitmap)
+    }
+
+    /** Returns labels from an in-memory frame/bitmap. */
+    fun label(bitmap: Bitmap): List<ReverseImageLookupResult.ImageLabel> {
         val inputImage = InputImage.fromBitmap(bitmap, 0)
         val task = labeler.process(inputImage)
         val labels = try {
@@ -41,7 +47,7 @@ class ImageLabeler(private val context: Context) {
         return labels.map { ReverseImageLookupResult.ImageLabel(it.text, it.confidence) }
     }
 
-    private fun loadBitmap(uri: Uri): android.graphics.Bitmap? {
+    private fun loadBitmap(uri: Uri): Bitmap? {
         return try {
             val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
             inputStream.use { BitmapFactory.decodeStream(it) }

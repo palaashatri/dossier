@@ -1,6 +1,7 @@
 package io.dossier.app.data.place
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import com.google.android.gms.tasks.Tasks
@@ -23,6 +24,11 @@ class TextRecognizer(private val context: Context) {
     /** Returns the recognized text, or null if recognition failed/produced nothing. */
     fun recognize(uri: Uri): String? {
         val bitmap = loadBitmap(uri) ?: return null
+        return recognize(bitmap)
+    }
+
+    /** Returns the recognized text from an in-memory frame/bitmap. */
+    fun recognize(bitmap: Bitmap): String? {
         val inputImage = InputImage.fromBitmap(bitmap, 0)
         val task = recognizer.process(inputImage)
         val result = try {
@@ -35,7 +41,7 @@ class TextRecognizer(private val context: Context) {
         return text.ifBlank { null }
     }
 
-    private fun loadBitmap(uri: Uri): android.graphics.Bitmap? {
+    private fun loadBitmap(uri: Uri): Bitmap? {
         return try {
             val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
             inputStream.use { BitmapFactory.decodeStream(it) }

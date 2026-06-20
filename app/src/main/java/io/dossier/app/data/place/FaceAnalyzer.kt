@@ -23,8 +23,12 @@ class FaceAnalyzer(private val context: Context) {
 
     fun analyze(uri: Uri): FaceAnalysisResult {
         val bitmap = loadBitmap(uri) ?: return FaceAnalysisResult(false)
+        return analyze(bitmap)
+    }
+
+    fun analyze(bitmap: Bitmap): FaceAnalysisResult {
         val inputImage = InputImage.fromBitmap(bitmap, 0)
-        
+
         val task = detector.process(inputImage)
         val faces = try {
             Tasks.await(task)

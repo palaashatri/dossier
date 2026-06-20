@@ -1,6 +1,8 @@
 package io.dossier.app.ui.screens
 
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -27,7 +29,9 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.dossier.app.domain.model.ReverseImageLookupResult
+import io.dossier.app.domain.model.ReverseVideoLookupResult
 import io.dossier.app.domain.place.ReverseImageLookupService
+import io.dossier.app.domain.place.ReverseVideoLookupService
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.CircularWavyProgressIndicator
 import io.dossier.app.ui.components.GeminiSpark
@@ -46,14 +50,18 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
     val coroutineScope = rememberCoroutineScope()
 
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
+    var selectedVideoUri by remember { mutableStateOf<Uri?>(null) }
     var result by remember { mutableStateOf<ReverseImageLookupResult?>(null) }
+    var videoResult by remember { mutableStateOf<ReverseVideoLookupResult?>(null) }
     var isAnalyzing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
     // Shared analysis trigger — called when an image is selected (camera or gallery).
     fun startAnalysis(uri: Uri) {
         selectedUri = uri
+        selectedVideoUri = null
         result = null
+        videoResult = null
         error = null
         isAnalyzing = true
         coroutineScope.launch {
@@ -66,6 +74,31 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
                 isAnalyzing = false
             }
         }
+    }
+
+    fun startVideoAnalysis(uri: Uri) {
+        selectedVideoUri = uri
+        selectedUri = null
+        result = null
+        videoResult = null
+        error = null
+        isAnalyzing = true
+        coroutineScope.launch {
+            try {
+                videoResult = ReverseVideoLookupService(context).lookup(uri, deepResearch = io.dossier.app.domain.scanner.ScanSession.deepResearchEnabled.value)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                error = "Video lookup failed: ${e.localizedMessage ?: e.javaClass.simpleName}"
+            } finally {
+                isAnalyzing = false
+            }
+        }
+    }
+
+    val videoLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { startVideoAnalysis(it) }
     }
 
     val cardShape = io.dossier.app.ui.theme.DossierCardShape
@@ -84,7 +117,7 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "REVERSE IMAGE LOOKUP",
+                    text = "REVERSE MEDIA LOOKUP",
                     color = NeuralTheme.Cyan,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
@@ -94,14 +127,14 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
                 GeminiSpark(size = 18.dp, glowColor = NeuralTheme.Cyan)
             }
             Text(
-                text = "Image Location Intelligence",
+                text = "Image & Video Location Intelligence",
                 color = NeuralTheme.TextPrimary,
                 fontSize = 28.sp,
                 fontWeight = FontWeight.ExtraBold,
                 modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
             )
             Text(
-                text = "Estimate where an image was taken. EXIF GPS + on-device OCR/scene detection + public-web search of extracted clues. Faces disable identity search; location lookup continues.",
+                text = "Estimate where media was captured. EXIF GPS for images, sampled video frames, on-device OCR/scene detection, and public-web search of extracted clues. Faces disable identity search; location lookup continues.",
                 color = NeuralTheme.TextSecondary,
                 fontSize = 12.5.sp,
                 lineHeight = 17.sp,
@@ -118,12 +151,20 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
                 onImageSelected = { startAnalysis(it) }
             )
 
+            Spacer(modifier = Modifier.height(12.dp))
+
+            VideoSourcePicker(
+                label = "Target Video",
+                selectedUri = selectedVideoUri,
+                onClick = { videoLauncher.launch("video/*") }
+            )
+
             Spacer(modifier = Modifier.height(16.dp))
 
             // Deep Research toggle — fetches top evidence pages for richer location context.
             io.dossier.app.ui.components.DeepResearchToggle()
 
-            if (selectedUri != null) {
+            if (selectedUri != null || selectedVideoUri != null) {
                 Spacer(modifier = Modifier.height(12.dp))
                 Card(
                     colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
@@ -133,8 +174,10 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
                     shape = cardShape
                 ) {
                     Image(
-                        painter = androidx.compose.ui.res.painterResource(android.R.drawable.ic_menu_gallery),
-                        contentDescription = "Selected image preview",
+                        painter = androidx.compose.ui.res.painterResource(
+                            if (selectedVideoUri != null) android.R.drawable.ic_media_play else android.R.drawable.ic_menu_gallery
+                        ),
+                        contentDescription = if (selectedVideoUri != null) "Selected video" else "Selected image preview",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -174,7 +217,7 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
                     )
                 }
                 Text(
-                    text = "Extracting on-device clues + searching web...",
+                    text = "Extracting on-device media clues + searching web...",
                     color = NeuralTheme.Cobalt,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
@@ -206,6 +249,7 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
             }
 
             result?.let { res -> RenderLookupResult(res, cardShape, onNavigateToBrowser) }
+            videoResult?.let { res -> RenderVideoLookupResult(res, cardShape, onNavigateToBrowser) }
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -217,7 +261,7 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
                 shape = cardShape
             ) {
                 Text(
-                    text = "🔒 Privacy: location clues are extracted on-device, then only the text/label clues are searched on the public web. Image bytes never leave your device. No facial identification is performed.",
+                    text = "Privacy: location clues are extracted on-device, then only text/label clues are searched on the public web. Image and video bytes never leave your device. No facial identification is performed.",
                     color = NeuralTheme.TextSecondary,
                     fontSize = 11.sp,
                     fontStyle = FontStyle.Italic,
@@ -236,7 +280,8 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
 private fun RenderLookupResult(
     res: ReverseImageLookupResult,
     cardShape: RoundedCornerShape,
-    onNavigateToBrowser: (String) -> Unit
+    onNavigateToBrowser: (String) -> Unit,
+    showGps: Boolean = true
 ) {
     // Face safety gate warning — calm static border
     if (res.faceDetected) {
@@ -312,42 +357,44 @@ private fun RenderLookupResult(
         }
     }
 
-    Spacer(modifier = Modifier.height(20.dp))
+    if (showGps) {
+        Spacer(modifier = Modifier.height(20.dp))
 
-    // GPS card
-    SectionHeader("EXIF GPS")
-    Card(
-        colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, NeuralTheme.BorderColor, cardShape),
-        shape = cardShape
-    ) {
-        Column(modifier = Modifier.padding(18.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "GPS Coordinates",
-                    color = NeuralTheme.TextSecondary,
-                    fontSize = 13.sp
-                )
-                Text(
-                    text = res.gps ?: "NOT EMBEDDED",
-                    color = if (res.gps != null) NeuralTheme.Crimson else NeuralTheme.Emerald,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            if (res.gps == null) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "No EXIF GPS — location resolved from visual + web clues instead.",
-                    color = NeuralTheme.TextSecondary,
-                    fontSize = 11.sp
-                )
+        // GPS card
+        SectionHeader("EXIF GPS")
+        Card(
+            colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, NeuralTheme.BorderColor, cardShape),
+            shape = cardShape
+        ) {
+            Column(modifier = Modifier.padding(18.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "GPS Coordinates",
+                        color = NeuralTheme.TextSecondary,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = res.gps ?: "NOT EMBEDDED",
+                        color = if (res.gps != null) NeuralTheme.Crimson else NeuralTheme.Emerald,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                if (res.gps == null) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "No EXIF GPS — location resolved from visual + web clues instead.",
+                        color = NeuralTheme.TextSecondary,
+                        fontSize = 11.sp
+                    )
+                }
             }
         }
     }
@@ -443,6 +490,199 @@ private fun RenderLookupResult(
                 }
             }
         }
+    }
+}
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun RenderVideoLookupResult(
+    res: ReverseVideoLookupResult,
+    cardShape: RoundedCornerShape,
+    onNavigateToBrowser: (String) -> Unit
+) {
+    SectionHeader("Video Sampling")
+    Card(
+        colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, NeuralTheme.BorderColor, cardShape),
+        shape = cardShape
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Sampled frames",
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 13.sp
+                )
+                Text(
+                    text = res.sampledFrames.toString(),
+                    color = NeuralTheme.Cyan,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Duration",
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 13.sp
+                )
+                Text(
+                    text = formatDuration(res.durationMs),
+                    color = NeuralTheme.TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            if (res.frameSummaries.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(14.dp))
+                res.frameSummaries.take(5).forEach { frame ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 10.dp)
+                    ) {
+                        Text(
+                            text = "FRAME ${formatDuration(frame.timestampMs)}",
+                            color = NeuralTheme.TextSecondary,
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+                        if (!frame.extractedText.isNullOrBlank()) {
+                            Text(
+                                text = frame.extractedText.take(140),
+                                color = NeuralTheme.TextPrimary,
+                                fontSize = 11.5.sp,
+                                lineHeight = 15.sp,
+                                modifier = Modifier.padding(top = 3.dp)
+                            )
+                        }
+                        if (frame.labels.isNotEmpty()) {
+                            FlowRow(
+                                modifier = Modifier.padding(top = 5.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                frame.labels.take(4).forEach { label ->
+                                    Text(
+                                        text = label.text,
+                                        color = NeuralTheme.Cyan,
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                        if (frame.faceDetected) {
+                            Text(
+                                text = "Face safety gate active for this frame",
+                                color = NeuralTheme.Crimson,
+                                fontSize = 10.5.sp,
+                                modifier = Modifier.padding(top = 3.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(20.dp))
+    RenderLookupResult(
+        res = res.asImageLookupResult(),
+        cardShape = cardShape,
+        onNavigateToBrowser = onNavigateToBrowser,
+        showGps = false
+    )
+}
+
+@Composable
+private fun VideoSourcePicker(
+    label: String,
+    selectedUri: Uri?,
+    onClick: () -> Unit
+) {
+    val outlineColor = if (selectedUri != null) NeuralTheme.Cobalt else NeuralTheme.BorderColor
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            color = NeuralTheme.TextSecondary,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NeuralTheme.CardBackground, io.dossier.app.ui.theme.DossierCardShape)
+                .border(1.dp, outlineColor, io.dossier.app.ui.theme.DossierCardShape)
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onClick)
+                    .background(NeuralTheme.SurfaceDark.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                    .padding(vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "Select Video",
+                    color = NeuralTheme.Cobalt,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+
+        if (selectedUri != null) {
+            Text(
+                text = selectedUri.path?.substringAfterLast("/") ?: "Video selected",
+                color = NeuralTheme.Cobalt,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+    }
+}
+
+private fun ReverseVideoLookupResult.asImageLookupResult(): ReverseImageLookupResult {
+    return ReverseImageLookupResult(
+        gps = null,
+        extractedText = extractedText,
+        labels = labels,
+        faceDetected = faceDetected,
+        faceWarning = faceWarning,
+        resolvedLocation = resolvedLocation,
+        mapsUrl = mapsUrl,
+        webEvidence = webEvidence
+    )
+}
+
+private fun formatDuration(durationMs: Long?): String {
+    if (durationMs == null) return "Unknown"
+    val totalSeconds = durationMs / 1_000L
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    val tenths = (durationMs % 1_000L) / 100L
+    return if (minutes > 0L) {
+        "%d:%02d.%d".format(minutes, seconds, tenths)
+    } else {
+        "%d.%ds".format(seconds, tenths)
     }
 }
 

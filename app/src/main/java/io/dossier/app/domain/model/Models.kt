@@ -163,3 +163,30 @@ data class ReverseImageLookupResult(
     @Serializable
     data class WebEvidence(val title: String, val snippet: String, val url: String)
 }
+
+/**
+ * Result of a Reverse Video Lookup. Video bytes stay local: the app samples a
+ * small number of frames, extracts OCR/scene labels on-device, and searches only
+ * those text clues. Faces are safety-gated exactly like still images.
+ */
+@Serializable
+data class ReverseVideoLookupResult(
+    val durationMs: Long?,
+    val sampledFrames: Int,
+    val extractedText: String?,
+    val labels: List<ReverseImageLookupResult.ImageLabel>,
+    val faceDetected: Boolean,
+    val faceWarning: String?,
+    val resolvedLocation: String?,
+    val mapsUrl: String?,
+    val webEvidence: List<ReverseImageLookupResult.WebEvidence>,
+    val frameSummaries: List<FrameEvidence> = emptyList()
+) {
+    @Serializable
+    data class FrameEvidence(
+        val timestampMs: Long,
+        val extractedText: String?,
+        val labels: List<ReverseImageLookupResult.ImageLabel>,
+        val faceDetected: Boolean
+    )
+}
