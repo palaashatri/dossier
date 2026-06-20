@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBox
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -41,6 +42,7 @@ import io.dossier.app.ui.theme.NeuralTheme
 private enum class HubTab(val label: String) {
     DOSSIER("Dossier"),
     IMAGE_LOOKUP("Image Lookup"),
+    BREACH("Breach"),
     MODELS("Models")
 }
 
@@ -91,6 +93,7 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
                                     imageVector = when (tab) {
                                         HubTab.DOSSIER -> Icons.Default.AccountBox
                                         HubTab.IMAGE_LOOKUP -> Icons.Default.Search
+                                        HubTab.BREACH -> Icons.Default.Lock
                                         HubTab.MODELS -> Icons.Default.Settings
                                     },
                                     contentDescription = tab.label
@@ -127,6 +130,7 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
                     onNavigateToBrowser = onNavigateToBrowser
                 )
                 HubTab.IMAGE_LOOKUP -> ReverseImageLookupScreen(onNavigateToBrowser = onNavigateToBrowser)
+                HubTab.BREACH -> BreachCheckScreen(onNavigateToBrowser = onNavigateToBrowser)
                 HubTab.MODELS -> ModelsScreen()
             }
         }

@@ -33,19 +33,26 @@ enum class LocalAiModelType(
         url = "",
         fileName = ""
     ),
-    GEMMA_4_E2B(
-        displayName = "Gemma 2B (Edge LLM)",
-        description = "Gated model — no public ungated download URL is available. Shown for completeness; not downloadable in this build.",
-        downloadable = false,
+    GEMMA_E2B(
+        displayName = "Gemma E2B (MediaPipe LLM)",
+        description = "Import a compatible Gemma E2B MediaPipe LLM model file for local dossier summarization. No cloud required.",
+        downloadable = true,
         url = "",
-        fileName = "gemma-2b.tflite"
+        fileName = "gemma-e2b.task"
+    ),
+    GEMMA_E4B(
+        displayName = "Gemma E4B (MediaPipe LLM)",
+        description = "Import a compatible Gemma E4B MediaPipe LLM model file for stronger local summarization on capable devices.",
+        downloadable = true,
+        url = "",
+        fileName = "gemma-e4b.task"
     ),
     PALIGEMMA(
         displayName = "PaliGemma (Vision Edge)",
-        description = "Gated model — no public ungated download URL is available. Shown for completeness; not downloadable in this build.",
-        downloadable = false,
+        description = "Import a compatible PaliGemma MediaPipe model file for experimental local vision workflows.",
+        downloadable = true,
         url = "",
-        fileName = "paligemma.tflite"
+        fileName = "paligemma.task"
     );
 
     companion object {

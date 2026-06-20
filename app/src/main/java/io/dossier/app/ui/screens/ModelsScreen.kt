@@ -1,5 +1,7 @@
 package io.dossier.app.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -16,8 +18,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.dossier.app.data.ai.AiProviderConfigStore
+import io.dossier.app.domain.ai.AiProviderConfig
+import io.dossier.app.domain.ai.AiProviderType
 import io.dossier.app.domain.ai.LocalAiModelDownloader
 import io.dossier.app.domain.ai.LocalAiModelType
 import io.dossier.app.domain.scanner.ScanSession
@@ -35,6 +41,7 @@ import kotlinx.coroutines.launch
 fun ModelsScreen() {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val providerStore = remember { AiProviderConfigStore(context) }
 
     val selectedModel by ScanSession.selectedModel.collectAsState()
     val isDownloadingMap by LocalAiModelDownloader.isDownloading.collectAsState()
@@ -42,6 +49,21 @@ fun ModelsScreen() {
     val downloadErrorMap by LocalAiModelDownloader.downloadError.collectAsState()
 
     var refreshTrigger by remember { mutableStateOf(0) }
+    var pendingImportModel by remember { mutableStateOf<LocalAiModelType?>(null) }
+    var providerConfigs by remember { mutableStateOf(providerStore.getAll()) }
+
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val modelType = pendingImportModel
+        pendingImportModel = null
+        if (uri != null && modelType != null) {
+            coroutineScope.launch {
+                LocalAiModelDownloader.importModel(context, modelType, uri)
+                refreshTrigger++
+            }
+        }
+    }
 
     val cardShape = io.dossier.app.ui.theme.DossierCardShape
 
@@ -228,7 +250,28 @@ fun ModelsScreen() {
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
                             }
-                            if (modelType.downloadable && !isDownloaded && !isDownloading) {
+                            if (modelType.downloadable && !isDownloading) {
+                                OutlinedButton(
+                                    onClick = {
+                                        pendingImportModel = modelType
+                                        importLauncher.launch(
+                                            arrayOf(
+                                                "application/octet-stream",
+                                                "application/x-tflite",
+                                                "application/vnd.google-mediapipe.task",
+                                                "*/*"
+                                            )
+                                        )
+                                    },
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, NeuralTheme.BorderColor),
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                ) {
+                                    Text("Import", color = NeuralTheme.Cyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+                            if (modelType.downloadable && modelType.url.isNotBlank() && !isDownloaded && !isDownloading) {
                                 Button(
                                     onClick = {
                                         coroutineScope.launch {
@@ -272,6 +315,42 @@ fun ModelsScreen() {
                 modifier = Modifier.padding(horizontal = 4.dp)
             )
 
+            Spacer(modifier = Modifier.height(26.dp))
+            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 1.dp)
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "REMOTE AI PROVIDERS",
+                    color = NeuralTheme.Cyan,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 2.sp
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                GeminiSpark(size = 18.dp, glowColor = NeuralTheme.Cyan)
+            }
+            Text(
+                text = "External AI Configuration",
+                color = NeuralTheme.TextPrimary,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.ExtraBold,
+                modifier = Modifier.padding(top = 4.dp, bottom = 10.dp)
+            )
+
+            providerConfigs.forEach { config ->
+                ProviderConfigCard(
+                    config = config,
+                    onConfigChange = { updated ->
+                        providerStore.save(updated)
+                        providerConfigs = providerConfigs.map {
+                            if (it.provider == updated.provider) updated else it
+                        }
+                    }
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+
             Spacer(modifier = Modifier.height(40.dp))
         }
     }
@@ -285,4 +364,109 @@ private fun StatusLine(text: String, color: androidx.compose.ui.graphics.Color) 
         fontSize = 11.5.sp,
         fontWeight = FontWeight.Medium
     )
+}
+
+@Composable
+private fun ProviderConfigCard(
+    config: AiProviderConfig,
+    onConfigChange: (AiProviderConfig) -> Unit
+) {
+    val cardShape = io.dossier.app.ui.theme.DossierCardShape
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NeuralTheme.CardBackground.copy(alpha = 0.85f), cardShape)
+            .border(1.dp, NeuralTheme.BorderColor, cardShape)
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = config.provider.displayName,
+                    color = NeuralTheme.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = providerHint(config.provider),
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+            }
+            Switch(
+                checked = config.enabled,
+                onCheckedChange = { onConfigChange(config.copy(enabled = it)) },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = NeuralTheme.Cyan,
+                    checkedTrackColor = NeuralTheme.Cobalt.copy(alpha = 0.45f),
+                    uncheckedThumbColor = NeuralTheme.TextSecondary,
+                    uncheckedTrackColor = NeuralTheme.BorderColor
+                )
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        ProviderTextField(
+            value = config.baseUrl,
+            onValueChange = { onConfigChange(config.copy(baseUrl = it)) },
+            label = "Base URL"
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        ProviderTextField(
+            value = config.model,
+            onValueChange = { onConfigChange(config.copy(model = it)) },
+            label = "Model"
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        ProviderTextField(
+            value = config.apiKey,
+            onValueChange = { onConfigChange(config.copy(apiKey = it)) },
+            label = if (config.provider == AiProviderType.OLLAMA) "Bearer token (optional)" else "API key",
+            password = true
+        )
+    }
+}
+
+@Composable
+private fun ProviderTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    password: Boolean = false
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = NeuralTheme.Cobalt,
+            unfocusedBorderColor = NeuralTheme.BorderColor,
+            focusedTextColor = NeuralTheme.TextPrimary,
+            unfocusedTextColor = NeuralTheme.TextPrimary,
+            focusedLabelColor = NeuralTheme.Cyan,
+            unfocusedLabelColor = NeuralTheme.TextSecondary,
+            cursorColor = NeuralTheme.Cobalt,
+            focusedContainerColor = NeuralTheme.SurfaceDark,
+            unfocusedContainerColor = NeuralTheme.SurfaceDark
+        ),
+        singleLine = true,
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth()
+    )
+}
+
+private fun providerHint(provider: AiProviderType): String = when (provider) {
+    AiProviderType.OPENAI -> "OpenAI-compatible chat completions."
+    AiProviderType.ANTHROPIC -> "Anthropic Messages API."
+    AiProviderType.OLLAMA -> "Local, LAN, hosted, or subscription Ollama-compatible endpoint."
+    AiProviderType.HUGGINGFACE -> "Hugging Face Inference API model endpoint."
+    AiProviderType.OPENROUTER -> "OpenRouter chat completions gateway."
 }

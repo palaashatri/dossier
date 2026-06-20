@@ -33,8 +33,7 @@ class MediaPipeEngine(private val context: Context) : LocalAiEngine {
     override val name: String = "MediaPipe Tasks (Local vision model)"
 
     override suspend fun isAvailable(): Boolean = withContext(Dispatchers.IO) {
-        val hasDownloadedModel = LocalAiModelDownloader.isModelDownloaded(context, LocalAiModelType.GEMMA_4_E2B) ||
-            LocalAiModelDownloader.isModelDownloaded(context, LocalAiModelType.PALIGEMMA)
+        val hasDownloadedModel = LocalAiModelDownloader.isModelDownloaded(context, LocalAiModelType.PALIGEMMA)
         if (hasDownloadedModel) return@withContext true
 
         val hasAsset = try {
@@ -53,14 +52,6 @@ class MediaPipeEngine(private val context: Context) : LocalAiEngine {
             val baseOptionsBuilder = BaseOptions.builder()
 
             val modelSource: Any = when {
-                LocalAiModelDownloader.isModelDownloaded(context, LocalAiModelType.GEMMA_4_E2B) -> {
-                    val file = LocalAiModelDownloader.getModelFile(context, LocalAiModelType.GEMMA_4_E2B)
-                    val fis = FileInputStream(file)
-                    val channel = fis.channel
-                    val buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size())
-                    fis.close()
-                    buffer
-                }
                 LocalAiModelDownloader.isModelDownloaded(context, LocalAiModelType.PALIGEMMA) -> {
                     val file = LocalAiModelDownloader.getModelFile(context, LocalAiModelType.PALIGEMMA)
                     val fis = FileInputStream(file)

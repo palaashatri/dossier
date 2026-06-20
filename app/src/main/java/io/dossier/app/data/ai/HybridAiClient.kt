@@ -20,7 +20,7 @@ class HybridAiClient(private val context: Context) {
             if (selected == LocalAiModelType.AICORE && aiCoreEngine.isAvailable()) {
                 val result = aiCoreEngine.analyzeImage(imageUri)
                 if (result != null) return result
-            } else if (selected != LocalAiModelType.AICORE && selected != LocalAiModelType.MLKIT_VISION && mediaPipeEngine.isAvailable()) {
+            } else if (selected == LocalAiModelType.PALIGEMMA && mediaPipeEngine.isAvailable()) {
                 val result = mediaPipeEngine.analyzeImage(imageUri)
                 if (result != null) return result
             }

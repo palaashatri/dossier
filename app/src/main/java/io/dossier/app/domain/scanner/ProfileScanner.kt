@@ -1,6 +1,9 @@
 package io.dossier.app.domain.scanner
 
 import io.dossier.app.data.platform.PLATFORMS
+import io.dossier.app.data.platform.resolveProfileUrl
+import io.dossier.app.data.web.PublicImageSearchService
+import io.dossier.app.data.web.PublicSearchDiscoveryService
 import io.dossier.app.domain.model.*
 import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.username.UsernameVariant
@@ -8,7 +11,9 @@ import io.dossier.app.domain.username.UsernameVariantGenerator
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import java.io.IOException
+import java.net.URI
 import java.util.concurrent.TimeUnit
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
@@ -170,7 +175,33 @@ class ProfileScanner(
             emptyList()
         }
 
-        return initialResults + pivotResults
+        // ---- Pass 3: public-search discovery. This broadens coverage beyond
+        // deterministic username templates by querying public indexes for the
+        // audited name/handles/emails and site-specific sources (including
+        // Reddit + 4chan). These hits are review candidates, not verified account
+        // ownership, so they are surfaced with verified=false.
+        val publicSearchResults: List<ProfileScanResult> = try {
+            val confirmedUrls = (initialResults + pivotResults)
+                .filter { it.exists && it.verified }
+                .map { PublicSearchDiscoveryService.canonicalUrlKey(it.candidate.url) }
+                .toSet()
+            runPublicSearchPass(input, confirmedUrls, deepResearch)
+        } catch (e: Throwable) {
+            e.printStackTrace()
+            emptyList()
+        }
+
+        // ---- Pass 4: public image-index discovery. This searches image indexes
+        // by identity terms only; it does not upload the user's selfie or perform
+        // face recognition.
+        val publicImageResults: List<ProfileScanResult> = try {
+            runPublicImagePass(input, publicSearchResults, deepResearch)
+        } catch (e: Throwable) {
+            e.printStackTrace()
+            emptyList()
+        }
+
+        return initialResults + pivotResults + publicSearchResults + publicImageResults
     }
 
     /**
@@ -252,6 +283,192 @@ class ProfileScanner(
         }
     }
 
+    /**
+     * Public search pass for indexed evidence that template scans miss. Search
+     * results are intentionally marked unverified because search engines prove a
+     * page is indexed, not that the page belongs to the audited identity.
+     */
+    private suspend fun runPublicSearchPass(
+        input: IdentityInput,
+        alreadyConfirmedUrls: Set<String>,
+        deepResearch: Boolean
+    ): List<ProfileScanResult> {
+        val service = PublicSearchDiscoveryService(context)
+        val discovered = service.discover(input, deepResearch)
+        if (discovered.isEmpty()) return emptyList()
+
+        return discovered
+            .mapNotNull { searchResult ->
+                val result = buildPublicSearchProfileResult(searchResult, input)
+                val urlKey = PublicSearchDiscoveryService.canonicalUrlKey(result.candidate.url)
+                if (urlKey in alreadyConfirmedUrls) null else result
+            }
+            .distinctBy { PublicSearchDiscoveryService.canonicalUrlKey(it.candidate.url) }
+    }
+
+    private fun buildPublicSearchProfileResult(
+        searchResult: PublicSearchDiscoveryService.PublicSearchResult,
+        input: IdentityInput
+    ): ProfileScanResult {
+        val resolved = resolveProfileUrl(searchResult.url)
+        val candidateUrl = resolved?.url ?: searchResult.url
+        val platform = resolved?.platform ?: Platform.Website
+        val username = resolved?.username ?: hostLabel(searchResult.url)
+        val snippetText = listOf(searchResult.title, searchResult.snippet)
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
+            .ifBlank { searchResult.url }
+
+        val findings = mutableListOf<Finding>()
+        val confidenceSignals = mutableListOf(
+            "Indexed by ${searchResult.source} for query: ${searchResult.query}"
+        )
+        if (resolved != null) {
+            confidenceSignals.add("Search result URL matches known ${resolved.platform.name} profile pattern")
+            findings.add(
+                Finding(
+                    type = FindingType.PlausibleProfileMatch,
+                    value = candidateUrl,
+                    sourceUrl = candidateUrl,
+                    evidenceSnippet = "Public search candidate from ${searchResult.source}: ${searchResult.title}".take(220),
+                    confidence = searchResult.score,
+                    risk = if (searchResult.score >= 0.70f) RiskLevel.Medium else RiskLevel.Low,
+                    remediation = "Open and review this indexed profile candidate before treating it as yours."
+                )
+            )
+        }
+
+        findings.add(
+            Finding(
+                type = FindingType.PublicSearchEvidence,
+                value = searchResult.title.ifBlank { candidateUrl },
+                sourceUrl = candidateUrl,
+                evidenceSnippet = buildString {
+                    append("${searchResult.source} result for ${searchResult.query}")
+                    if (searchResult.snippet.isNotBlank()) append(": ${searchResult.snippet}")
+                }.take(280),
+                confidence = searchResult.score,
+                risk = when {
+                    searchResult.score >= 0.75f -> RiskLevel.Medium
+                    else -> RiskLevel.Low
+                },
+                remediation = "Review this indexed result and remove or de-index public personal details where possible."
+            )
+        )
+
+        if (snippetText.isNotBlank()) {
+            findings.addAll(
+                piiExtractor.extract(snippetText, candidateUrl, input)
+                    .map { piiFinding ->
+                        piiFinding.copy(
+                            confidence = (piiFinding.confidence * searchResult.score).coerceAtLeast(0.35f),
+                            remediation = "This appeared in a public search snippet. Review the source page and request removal or de-indexing if it exposes personal data."
+                        )
+                    }
+            )
+        }
+
+        return ProfileScanResult(
+            candidate = UsernameCandidate(
+                username = username,
+                platform = platform,
+                url = candidateUrl,
+                matchType = UsernameMatchType.FuzzyVariant,
+                confidence = searchResult.score
+            ),
+            exists = true,
+            httpStatus = null,
+            displayName = searchResult.title.ifBlank { null },
+            bio = searchResult.snippet.ifBlank { null },
+            links = listOf(candidateUrl),
+            extractedText = snippetText.take(1000),
+            findings = findings.distinctBy { it.type.name + it.value + it.sourceUrl },
+            confidenceSignals = confidenceSignals,
+            verified = false,
+            verificationStatus = if (resolved != null) {
+                "Plausible public-search candidate — review manually"
+            } else {
+                "Indexed public-search evidence — review manually"
+            },
+            provenance = "public search via ${searchResult.source}"
+        )
+    }
+
+    private fun hostLabel(url: String): String = try {
+        URI(url).host?.removePrefix("www.") ?: "web"
+    } catch (e: Exception) {
+        "web"
+    }
+
+    private suspend fun runPublicImagePass(
+        input: IdentityInput,
+        publicSearchResults: List<ProfileScanResult>,
+        deepResearch: Boolean
+    ): List<ProfileScanResult> {
+        val service = PublicImageSearchService(context)
+        val discovered = service.discover(input, deepResearch)
+        if (discovered.isEmpty()) return emptyList()
+
+        val alreadySurfaced = publicSearchResults
+            .map { PublicSearchDiscoveryService.canonicalUrlKey(it.candidate.url) }
+            .toSet()
+
+        return discovered
+            .mapNotNull { imageResult ->
+                val result = buildPublicImageProfileResult(imageResult)
+                val sourceKey = PublicSearchDiscoveryService.canonicalUrlKey(result.candidate.url)
+                if (sourceKey in alreadySurfaced && result.profileImageUrl == null) null else result
+            }
+            .distinctBy { result ->
+                PublicImageSearchService.canonicalImageKey(
+                    result.profileImageUrl.orEmpty(),
+                    result.candidate.url
+                )
+            }
+    }
+
+    private fun buildPublicImageProfileResult(
+        imageResult: PublicImageSearchService.PublicImageResult
+    ): ProfileScanResult {
+        val thumbnail = imageResult.thumbnailUrl ?: imageResult.imageUrl
+        val title = imageResult.title.ifBlank { "Public image result" }
+        val sourceHost = hostLabel(imageResult.sourcePageUrl)
+        val finding = Finding(
+            type = FindingType.PublicImageEvidence,
+            value = title,
+            sourceUrl = imageResult.sourcePageUrl,
+            evidenceSnippet = "${imageResult.source} image result for ${imageResult.query}. Image URL: ${imageResult.imageUrl}".take(300),
+            confidence = imageResult.score,
+            risk = if (imageResult.score >= 0.65f) RiskLevel.Medium else RiskLevel.Low,
+            remediation = "Review the source page and remove or de-index public photos or avatars you do not want associated with this identity."
+        )
+
+        return ProfileScanResult(
+            candidate = UsernameCandidate(
+                username = sourceHost,
+                platform = Platform.Website,
+                url = imageResult.sourcePageUrl,
+                matchType = UsernameMatchType.FuzzyVariant,
+                confidence = imageResult.score
+            ),
+            exists = true,
+            httpStatus = null,
+            displayName = title,
+            bio = "Public image-index result from ${imageResult.source}",
+            profileImageUrl = thumbnail,
+            links = listOf(imageResult.sourcePageUrl, imageResult.imageUrl),
+            extractedText = title,
+            findings = listOf(finding),
+            confidenceSignals = listOf(
+                "Public image index matched query: ${imageResult.query}",
+                "No selfie bytes uploaded; no face recognition performed"
+            ),
+            verified = false,
+            verificationStatus = "Public image-search evidence — review manually",
+            provenance = "public image search via ${imageResult.source}"
+        )
+    }
+
     // Concurrency limit for the (main-thread) embedded browser renders.
     private val webviewSemaphore = Semaphore(2)
 
@@ -282,6 +499,7 @@ class ProfileScanner(
         var httpStatus: Int? = null
         var displayName: String? = null
         var bio: String? = null
+        var profileImageUrl: String? = null
         val links = mutableListOf<String>()
         var extractedText = ""
         val findings = mutableListOf<Finding>()
@@ -310,7 +528,7 @@ class ProfileScanner(
                     }
                     response.isSuccessful -> {
                         val html = response.body?.string() ?: ""
-                        val doc = Jsoup.parse(html)
+                        val doc = Jsoup.parse(html, candidate.url)
                         val text = doc.text()
                         val title = doc.title()
                         // Drop on strong, specific not-found phrases (reliable on raw HTML).
@@ -339,6 +557,7 @@ class ProfileScanner(
                                 bio = doc.select("meta[name=description]").attr("content").trim().ifBlank {
                                     doc.select("p").firstOrNull()?.text()?.take(200)
                                 }
+                                profileImageUrl = extractProfileImageUrl(doc)
                                 doc.select("a[href]").forEach { element ->
                                     val linkUrl = element.attr("abs:href")
                                     if (linkUrl.startsWith("http")) {
@@ -382,7 +601,7 @@ class ProfileScanner(
         // fall through to the shared confidence/PII/finding assembly below.
         if (okhttpConfirmed) {
             return finalizeResult(candidate, exists, verified, verificationStatus, httpStatus,
-                displayName, bio, links, extractedText, findings, confidenceSignals, adjustedConfidence, input, provenance)
+                displayName, bio, profileImageUrl, links, extractedText, findings, confidenceSignals, adjustedConfidence, input, provenance)
         }
 
         // ---- Stage 2: WebView confirm (fallback for SPA/ambiguous/blocked) ----
@@ -419,7 +638,7 @@ class ProfileScanner(
                 )
             }
             is WebViewScraper.Result.Rendered -> {
-                val doc = Jsoup.parse(render.html)
+                val doc = Jsoup.parse(render.html, candidate.url)
                 extractedText = render.text
 
                 if (isProfileNotFoundPage(render.html, extractedText, doc.title(), candidate.username, candidate.platform)) {
@@ -439,6 +658,7 @@ class ProfileScanner(
                     bio = doc.select("meta[name=description]").attr("content").trim().ifBlank {
                         doc.select("p").firstOrNull()?.text()?.take(200)
                     }
+                    profileImageUrl = extractProfileImageUrl(doc)
                     doc.select("a[href]").forEach { element ->
                         val linkUrl = element.attr("abs:href")
                         if (linkUrl.startsWith("http")) {
@@ -458,7 +678,7 @@ class ProfileScanner(
         }
 
         return finalizeResult(candidate, exists, verified, verificationStatus, httpStatus,
-            displayName, bio, links, extractedText, findings, confidenceSignals, adjustedConfidence, input, provenance)
+            displayName, bio, profileImageUrl, links, extractedText, findings, confidenceSignals, adjustedConfidence, input, provenance)
     }
 
     /**
@@ -474,6 +694,7 @@ class ProfileScanner(
         httpStatus: Int?,
         displayName: String?,
         bio: String?,
+        profileImageUrl: String?,
         links: MutableList<String>,
         extractedText: String,
         findings: MutableList<Finding>,
@@ -580,6 +801,7 @@ class ProfileScanner(
             httpStatus = httpStatus,
             displayName = displayName,
             bio = bio,
+            profileImageUrl = profileImageUrl,
             links = links.take(10),
             extractedText = extractedText.take(1000),
             findings = finalFindings,
@@ -605,6 +827,7 @@ class ProfileScanner(
         httpStatus = httpStatus,
         displayName = null,
         bio = null,
+        profileImageUrl = null,
         links = emptyList(),
         extractedText = "",
         findings = emptyList(),
@@ -613,6 +836,58 @@ class ProfileScanner(
         verificationStatus = verificationStatus,
         provenance = provenance
     )
+
+    private fun extractProfileImageUrl(doc: Document): String? {
+        val metaSelectors = listOf(
+            "meta[property=og:image]",
+            "meta[name=og:image]",
+            "meta[name=twitter:image]",
+            "meta[property=twitter:image]",
+            "meta[name=twitter:image:src]",
+            "meta[property=twitter:image:src]",
+            "link[rel=image_src]"
+        )
+
+        metaSelectors.forEach { selector ->
+            val element = doc.select(selector).firstOrNull() ?: return@forEach
+            val raw = element.attr("abs:content").ifBlank {
+                element.attr("content")
+            }.ifBlank {
+                element.attr("abs:href")
+            }.ifBlank {
+                element.attr("href")
+            }
+            normalizeProfileImageUrl(raw)?.let { return it }
+        }
+
+        val imageSelectors = listOf(
+            "img.avatar",
+            "img[alt*=avatar]",
+            "img[alt*=profile]",
+            "img[src*=avatar]",
+            "img[src*=profile]"
+        )
+        imageSelectors.forEach { selector ->
+            val raw = doc.select(selector).firstOrNull()?.attr("abs:src").orEmpty()
+            normalizeProfileImageUrl(raw)?.let { return it }
+        }
+
+        return null
+    }
+
+    private fun normalizeProfileImageUrl(rawUrl: String): String? {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isBlank()) return null
+        val withScheme = when {
+            trimmed.startsWith("//") -> "https:$trimmed"
+            else -> trimmed
+        }
+        if (!withScheme.startsWith("http://", ignoreCase = true) &&
+            !withScheme.startsWith("https://", ignoreCase = true)) {
+            return null
+        }
+        return withScheme.substringBefore("#")
+    }
 
     /**
      * Conservative not-found check for the OkHttp pre-filter — only strong,

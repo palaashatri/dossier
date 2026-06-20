@@ -1,6 +1,7 @@
 package io.dossier.app.domain.ai
 
 import android.content.Context
+import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -116,6 +117,61 @@ object LocalAiModelDownloader {
             e.printStackTrace()
             if (tempFile.exists()) tempFile.delete()
             setError(modelType, "Download failed: ${e.localizedMessage ?: e.javaClass.simpleName}")
+        } finally {
+            _isDownloading.value = _isDownloading.value.toMutableMap().apply { put(modelType, false) }
+        }
+    }
+
+    suspend fun importModel(context: Context, modelType: LocalAiModelType, uri: Uri) = withContext(Dispatchers.IO) {
+        clearError(modelType)
+        if (!modelType.downloadable) {
+            setError(modelType, "This engine does not use an imported model file.")
+            return@withContext
+        }
+
+        _isDownloading.value = _isDownloading.value.toMutableMap().apply { put(modelType, true) }
+        _downloadProgress.value = _downloadProgress.value.toMutableMap().apply { put(modelType, 0f) }
+
+        val file = getModelFile(context, modelType)
+        val tempFile = File(file.parentFile, "${file.name}.tmp")
+        tempFile.delete()
+
+        try {
+            val input = context.contentResolver.openInputStream(uri)
+                ?: throw IllegalArgumentException("Could not open selected model file")
+            input.use { source ->
+                FileOutputStream(tempFile).use { output ->
+                    val buffer = ByteArray(1024 * 1024)
+                    var total = 0L
+                    var read: Int
+                    while (source.read(buffer).also { read = it } != -1) {
+                        output.write(buffer, 0, read)
+                        total += read
+                        // Unknown total size from content providers; show a
+                        // gentle bounded progress approximation until complete.
+                        val progress = (total / (256f * 1024f * 1024f)).coerceIn(0f, 0.95f)
+                        _downloadProgress.value = _downloadProgress.value.toMutableMap().apply {
+                            put(modelType, progress)
+                        }
+                    }
+                }
+            }
+
+            if (tempFile.length() <= 4096) {
+                setError(modelType, "Imported file too small to be a valid model (${tempFile.length()} bytes).")
+                tempFile.delete()
+                return@withContext
+            }
+
+            if (file.exists()) file.delete()
+            if (!tempFile.renameTo(file)) {
+                throw IllegalStateException("Could not finalize imported model file")
+            }
+            _downloadProgress.value = _downloadProgress.value.toMutableMap().apply { put(modelType, 1f) }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            if (tempFile.exists()) tempFile.delete()
+            setError(modelType, "Import failed: ${e.localizedMessage ?: e.javaClass.simpleName}")
         } finally {
             _isDownloading.value = _isDownloading.value.toMutableMap().apply { put(modelType, false) }
         }

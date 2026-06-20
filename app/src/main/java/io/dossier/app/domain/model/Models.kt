@@ -37,6 +37,8 @@ enum class FindingType {
     Organization,
     UsernameReuse,
     PlausibleProfileMatch,
+    PublicSearchEvidence,
+    PublicImageEvidence,
     ImageConsistency,
     SensitiveSnippet
 }
@@ -68,12 +70,14 @@ data class ProfileScanResult(
     val httpStatus: Int?,
     val displayName: String?,
     val bio: String?,
+    val profileImageUrl: String? = null,
     val links: List<String>,
     val extractedText: String,
     val findings: List<Finding>,
     val confidenceSignals: List<String>,
-    // True only when existence was confirmed against the rendered DOM in the
-    // embedded browser — never set by OkHttp HTML sniffing alone.
+    // True only when existence and attribution were confirmed by a direct page
+    // fetch/render. Public search hits can still be surfaced with verified=false
+    // so the user can review plausible candidates without treating them as proof.
     val verified: Boolean = false,
     // Human-readable explanation of how existence was decided, e.g.
     // "✓ Verified in-browser", "HTTP 404 — not found",

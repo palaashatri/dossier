@@ -45,7 +45,12 @@ import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.GeminiSpark
 import io.dossier.app.ui.components.SquigglyProgressIndicator
 import io.dossier.app.ui.theme.NeuralTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 @Composable
 fun ReportScreen(
@@ -58,6 +63,7 @@ fun ReportScreen(
     val faceMatches by ScanSession.faceConsistencyMatches.collectAsState()
     val riskLevel by ScanSession.riskLevel.collectAsState()
     val remediationTips by ScanSession.remediationTips.collectAsState()
+    val aiSummary by ScanSession.aiSummary.collectAsState()
     val input by ScanSession.currentInput.collectAsState()
     var selectedTab by remember { mutableStateOf(0) }
 
@@ -196,6 +202,26 @@ fun ReportScreen(
                             fontWeight = FontWeight.Bold
                         )
                     }
+                }
+            }
+
+            if (!aiSummary.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(16.dp))
+                ReportSectionHeader("AI Analysis")
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, NeuralTheme.BorderColor, cardShape),
+                    shape = cardShape
+                ) {
+                    Text(
+                        text = aiSummary!!,
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        modifier = Modifier.padding(18.dp)
+                    )
                 }
             }
 
@@ -418,9 +444,9 @@ fun ReportScreen(
                     Spacer(modifier = Modifier.height(24.dp))
 
                     // Discovered Profile Directory Header
-                    ReportSectionHeader("Subject Profile")
+                    ReportSectionHeader("Subject Profile Candidates")
                     Text(
-                        text = "Each profile below was individually loaded and verified in the embedded browser against the rendered page before being reported.",
+                        text = "Rows marked verified were directly fetched or rendered. Rows marked review came from public search indexes and need manual confirmation.",
                         color = NeuralTheme.TextSecondary,
                         
                         fontSize = 11.5.sp,
@@ -441,6 +467,12 @@ fun ReportScreen(
 
                     // Visual Similarity — honest: no embedding model in this build.
                     ReportSectionHeader("Visual Intelligence")
+                    val imageEvidenceResults = profileResults
+                        .filter { result ->
+                            result.exists &&
+                                result.profileImageUrl != null &&
+                                result.findings.any { it.type == FindingType.PublicImageEvidence }
+                        }
 
                     Card(
                         colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground),
@@ -450,18 +482,33 @@ fun ReportScreen(
                         shape = cardShape
                     ) {
                         Column(modifier = Modifier.padding(20.dp)) {
+                            if (imageEvidenceResults.isNotEmpty()) {
+                                Text(
+                                    text = "${imageEvidenceResults.size} public image result(s)",
+                                    color = NeuralTheme.TextPrimary,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                imageEvidenceResults.take(8).forEach { result ->
+                                    PublicImageEvidenceRow(
+                                        result = result,
+                                        onNavigateToBrowser = onNavigateToBrowser
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                            } else {
+                                Text(
+                                    text = "No public image results found",
+                                    color = NeuralTheme.TextPrimary,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                            }
                             Text(
-                                text = "Not available in this build",
-                                color = NeuralTheme.TextPrimary,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "Visual similarity scoring requires a face embedding model (e.g. FaceNet) " +
-                                    "and public profile-image fetching, neither of which is wired in this build. " +
-                                    "No similarity scores are shown — only confirmed profile existence and " +
-                                    "page-content attribution above. A real embedding model can be added later.",
+                                text = "Image search uses public image-index results from identity terms. It does not upload your selfie and does not perform face matching. Similarity scoring still requires a real face embedding model.",
                                 color = NeuralTheme.TextSecondary,
                                 fontSize = 12.5.sp,
                                 lineHeight = 18.sp
@@ -812,6 +859,93 @@ fun FindingItemCard(finding: Finding, onNavigateToBrowser: (String) -> Unit) {
 }
 
 @Composable
+fun PublicImageEvidenceRow(
+    result: ProfileScanResult,
+    onNavigateToBrowser: (String) -> Unit
+) {
+    val thumbnail = rememberRemoteImageBitmap(result.profileImageUrl)
+    val confPct = (result.candidate.confidence * 100).toInt()
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NeuralTheme.SurfaceDark, RoundedCornerShape(8.dp))
+            .border(1.dp, NeuralTheme.BorderColor, RoundedCornerShape(8.dp))
+            .clickable { onNavigateToBrowser(result.candidate.url) }
+            .padding(10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(58.dp)
+                .background(NeuralTheme.CardBackground, RoundedCornerShape(8.dp))
+                .border(1.dp, NeuralTheme.BorderColor, RoundedCornerShape(8.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (thumbnail != null) {
+                Image(
+                    bitmap = thumbnail,
+                    contentDescription = "Public image result",
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(8.dp))
+                )
+            } else {
+                Text(
+                    text = "IMG",
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = result.displayName ?: result.candidate.url,
+                color = NeuralTheme.TextPrimary,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2
+            )
+            Text(
+                text = result.candidate.url.replace("https://", "").replace("http://", ""),
+                color = NeuralTheme.Cyan,
+                fontSize = 10.5.sp,
+                fontFamily = FontFamily.Monospace,
+                textDecoration = TextDecoration.Underline,
+                maxLines = 1,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+            result.provenance?.let {
+                Text(
+                    text = it,
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 10.sp,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        Text(
+            text = "$confPct%",
+            color = when {
+                confPct >= 70 -> NeuralTheme.Amber
+                confPct >= 45 -> NeuralTheme.Emerald
+                else -> NeuralTheme.TextSecondary
+            },
+            fontSize = 12.sp,
+            fontWeight = FontWeight.ExtraBold
+        )
+    }
+}
+
+@Composable
 fun TabButton(text: String, isSelected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val bg = if (isSelected) NeuralTheme.GeminiGradient else Brush.linearGradient(colors = listOf(Color.Transparent, Color.Transparent))
     
@@ -901,6 +1035,43 @@ fun rememberUriImageBitmap(uri: Uri?): ImageBitmap? {
 }
 
 @Composable
+fun rememberRemoteImageBitmap(url: String?): ImageBitmap? {
+    var image by remember(url) { mutableStateOf<ImageBitmap?>(null) }
+    val client = remember {
+        OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
+            .build()
+    }
+
+    LaunchedEffect(url) {
+        image = null
+        val imageUrl = url?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
+            ?: return@LaunchedEffect
+
+        image = withContext(Dispatchers.IO) {
+            try {
+                val request = Request.Builder()
+                    .url(imageUrl)
+                    .header("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0")
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use null
+                    response.body?.byteStream()?.use { stream ->
+                        BitmapFactory.decodeStream(stream)?.asImageBitmap()
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                null
+            }
+        }
+    }
+
+    return image
+}
+
+@Composable
 fun rememberPlatformAvatar(context: Context, platform: Platform): ImageBitmap? {
     return remember(platform) {
         try {
@@ -942,6 +1113,7 @@ fun DiscoveredProfilesTable(
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
+            Spacer(modifier = Modifier.width(34.dp))
             Text(
                 text = "PLATFORM",
                 color = NeuralTheme.Cyan,
@@ -984,7 +1156,7 @@ fun DiscoveredProfilesTable(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "No public profiles discovered",
+                    text = "No public profile candidates discovered",
                     color = NeuralTheme.TextSecondary,
                     fontSize = 12.sp )
             }
@@ -999,10 +1171,15 @@ fun DiscoveredProfilesTable(
                 }
                 val platformName = matchedPlatform?.platform?.name ?: "Web"
 
+                val profileResult = profileResults.firstOrNull { r -> r.candidate.url == url && r.exists }
+                    ?: profileResults.firstOrNull { r -> r.candidate.url == url }
+                val isVerified = profileResult?.verified == true
+                val isPublicSearchCandidate = profileResult?.provenance?.startsWith("public search") == true
+                val avatarBitmap = rememberRemoteImageBitmap(profileResult?.profileImageUrl)
+
                 val hasFaceMatch = faceMatches.any { it.profileUrl == url }
                 val hasPiiLeak = findings.any { it.sourceUrl == url && (it.type == FindingType.Email || it.type == FindingType.Phone) }
 
-                val profileResult = profileResults.firstOrNull { r -> r.candidate.url == url }
                 val confidencePct = profileResult?.candidate?.confidence?.let { c -> (c * 100).toInt() }
                     ?: findings.firstOrNull { f -> f.sourceUrl == url && f.type == FindingType.PlausibleProfileMatch }
                         ?.confidence?.let { c -> (c * 100).toInt() }
@@ -1012,12 +1189,15 @@ fun DiscoveredProfilesTable(
                     hasFaceMatch && hasPiiLeak -> "MATCH+LEAK"
                     hasFaceMatch -> "FACE MATCH"
                     hasPiiLeak -> "PII LEAK"
+                    isVerified -> "VERIFIED"
+                    isPublicSearchCandidate -> "REVIEW"
                     else -> "FOUND"
                 }
                 val statusLevel = when {
                     hasFaceMatch && hasPiiLeak -> io.dossier.app.ui.components.HudLevel.CRIT
                     hasFaceMatch -> io.dossier.app.ui.components.HudLevel.WARN
                     hasPiiLeak -> io.dossier.app.ui.components.HudLevel.WARN
+                    isPublicSearchCandidate -> io.dossier.app.ui.components.HudLevel.WARN
                     else -> io.dossier.app.ui.components.HudLevel.OK
                 }
                 val confColor = when {
@@ -1026,7 +1206,6 @@ fun DiscoveredProfilesTable(
                     confidencePct >= 40 -> NeuralTheme.Emerald
                     else -> NeuralTheme.TextSecondary
                 }
-                val isVerified = profileResult?.verified == true
                 val verificationNote = profileResult?.verificationStatus
 
                 Row(
@@ -1037,6 +1216,29 @@ fun DiscoveredProfilesTable(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Box(
+                        modifier = Modifier.width(34.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        if (avatarBitmap != null) {
+                            Image(
+                                bitmap = avatarBitmap,
+                                contentDescription = "Public profile image",
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .border(1.dp, NeuralTheme.BorderColor, CircleShape)
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .background(NeuralTheme.CardBackground, CircleShape)
+                                    .border(1.dp, NeuralTheme.BorderColor, CircleShape)
+                            )
+                        }
+                    }
+
                     Text(
                         text = platformName,
                         color = NeuralTheme.TextPrimary,

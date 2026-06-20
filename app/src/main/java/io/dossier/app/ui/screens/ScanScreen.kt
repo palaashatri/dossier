@@ -190,6 +190,7 @@ fun ScanScreen(onScanComplete: () -> Unit) {
 private fun friendlyStage(raw: String): String = when {
     raw.contains("DISCOVERING", ignoreCase = true) -> "Resolving name → username variants"
     raw.contains("COMPILING", ignoreCase = true) -> "Compiling exposure levels"
+    raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating AI analysis"
     raw.contains("COMPARING", ignoreCase = true) -> "Comparing selfie vs profiles"
     raw.contains("AUDITING", ignoreCase = true) -> "Auditing place image metadata"
     else -> raw.lowercase().replace('_', ' ')
@@ -200,6 +201,7 @@ private fun friendlyStageLabel(raw: String): String = when {
     raw.isBlank() -> "Initializing"
     raw.contains("DISCOVERING", ignoreCase = true) -> "Discovering usernames"
     raw.contains("COMPILING", ignoreCase = true) -> "Compiling report"
+    raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating AI analysis"
     raw.contains("COMPARING", ignoreCase = true) -> "Comparing faces"
     else -> raw.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
 }

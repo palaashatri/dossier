@@ -20,6 +20,12 @@ class RemediationProvider {
         if (types.contains(FindingType.UsernameReuse)) {
             tips.add("Differentiate usernames across accounts to prevent automated cross-indexing of your digital footprint.")
         }
+        if (types.contains(FindingType.PublicSearchEvidence)) {
+            tips.add("Review indexed search results and request removal or de-indexing for pages exposing personal details.")
+        }
+        if (types.contains(FindingType.PublicImageEvidence)) {
+            tips.add("Review public image results and remove or de-index avatars/photos that link back to your identity.")
+        }
         if (types.contains(FindingType.ImageConsistency)) {
             tips.add("Avoid reusing identical avatar images across platforms; crop, tint, or use unique avatars.")
         }

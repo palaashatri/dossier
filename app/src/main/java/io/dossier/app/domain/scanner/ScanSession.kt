@@ -3,6 +3,7 @@ package io.dossier.app.domain.scanner
 import android.content.Context
 import android.net.Uri
 import io.dossier.app.domain.ai.LocalAiModelType
+import io.dossier.app.data.ai.AiInsightService
 import io.dossier.app.data.local.ProfileConsistencyCache
 import io.dossier.app.domain.model.*
 import io.dossier.app.domain.pii.PiiExtractor
@@ -40,6 +41,9 @@ object ScanSession {
 
     private val _remediationTips = MutableStateFlow<List<String>>(emptyList())
     val remediationTips: StateFlow<List<String>> = _remediationTips
+
+    private val _aiSummary = MutableStateFlow<String?>(null)
+    val aiSummary: StateFlow<String?> = _aiSummary
 
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning
@@ -84,6 +88,7 @@ object ScanSession {
         _faceConsistencyMatches.value = emptyList()
         _riskLevel.value = RiskLevel.Low
         _remediationTips.value = emptyList()
+        _aiSummary.value = null
 
 
         val cache = ProfileConsistencyCache(context)
@@ -122,6 +127,18 @@ object ScanSession {
             _remediationTips.value = remediationProvider.getGlobalTips(allFindings)
 
             _findings.value = allFindings.distinctBy { it.type.name + it.value + it.sourceUrl }
+
+            _progressText.value = "GENERATING_AI_SUMMARY..."
+            try {
+                _aiSummary.value = AiInsightService(context).summarizeDossier(
+                    input = inputToUse,
+                    profileResults = scanResults,
+                    findings = _findings.value
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _aiSummary.value = null
+            }
         } catch (e: Exception) {
             e.printStackTrace()
             // Surface a diagnostic so a scan failure is never silently empty.
@@ -154,6 +171,7 @@ object ScanSession {
         _faceConsistencyMatches.value = emptyList()
         _riskLevel.value = RiskLevel.Low
         _remediationTips.value = emptyList()
+        _aiSummary.value = null
         placeImageUri = null
 
         

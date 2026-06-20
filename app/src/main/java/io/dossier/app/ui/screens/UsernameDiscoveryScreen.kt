@@ -30,12 +30,16 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
     val primaryUsername = input?.primaryUsername ?: ""
     
     val generator = remember { UsernameVariantGenerator() }
-    val initialVariants = remember(primaryUsername) {
+    val fullName = input?.fullName ?: ""
+    val initialVariants = remember(primaryUsername, fullName) {
+        val variants = mutableListOf<String>()
         if (primaryUsername.isNotBlank()) {
-            generator.generate(primaryUsername).map { it.username }
-        } else {
-            emptyList()
+            variants.addAll(generator.generate(primaryUsername).map { it.username })
         }
+        if (fullName.isNotBlank()) {
+            variants.addAll(generator.generateFromName(fullName).map { it.username })
+        }
+        variants.distinct()
     }
 
     var variantStates by remember {
@@ -93,7 +97,7 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
             HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 1.dp)
             Spacer(modifier = Modifier.height(20.dp))
 
-            if (primaryUsername.isBlank()) {
+            if (primaryUsername.isBlank() && initialVariants.isEmpty()) {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
                     modifier = Modifier
@@ -102,7 +106,7 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
                     shape = cardShape
                 ) {
                     Text(
-                        text = "⚠️ No primary username supplied. Enter a custom variant below to compile exposure matches.",
+                        text = "No primary username supplied. Enter a custom variant below to compile exposure matches.",
                         color = NeuralTheme.Amber,
                         
                         fontSize = 13.sp,
@@ -111,7 +115,11 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
                 }
             } else {
                 Text(
-                    text = "Discovered Variants (Primary: @$primaryUsername)",
+                    text = if (primaryUsername.isNotBlank()) {
+                        "Discovered Variants (Primary: @$primaryUsername)"
+                    } else {
+                        "Discovered Variants (Name-derived)"
+                    },
                     color = NeuralTheme.Cyan,
                     
                     fontSize = 13.sp,
