@@ -43,7 +43,8 @@ data class AiProviderConfig(
     val enabled: Boolean,
     val apiKey: String,
     val baseUrl: String,
-    val model: String
+    val model: String,
+    val priority: Int
 ) {
     companion object {
         fun default(provider: AiProviderType): AiProviderConfig =
@@ -52,7 +53,8 @@ data class AiProviderConfig(
                 enabled = false,
                 apiKey = "",
                 baseUrl = provider.defaultBaseUrl,
-                model = provider.defaultModel
+                model = provider.defaultModel,
+                priority = provider.ordinal
             )
     }
 }

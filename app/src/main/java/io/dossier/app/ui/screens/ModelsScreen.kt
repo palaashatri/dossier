@@ -21,9 +21,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.dossier.app.data.ai.AiCoreEngine
+import io.dossier.app.data.ai.AiCoreStatus
 import io.dossier.app.data.ai.AiModelDiscoveryService
 import io.dossier.app.data.ai.AiProviderConfigStore
 import io.dossier.app.data.ai.RemoteAiModel
+import io.dossier.app.data.face.FaceEmbeddingCalibrationStore
+import io.dossier.app.data.face.FaceEmbeddingModelStore
 import io.dossier.app.domain.ai.AiProviderConfig
 import io.dossier.app.domain.ai.AiProviderType
 import io.dossier.app.domain.ai.LocalAiModelDownloader
@@ -44,6 +48,9 @@ fun ModelsScreen() {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val providerStore = remember { AiProviderConfigStore(context) }
+    val aiCoreEngine = remember { AiCoreEngine(context) }
+    val faceModelStore = remember { FaceEmbeddingModelStore(context) }
+    val faceCalibrationStore = remember { FaceEmbeddingCalibrationStore(context) }
 
     val selectedModel by ScanSession.selectedModel.collectAsState()
     val isDownloadingMap by LocalAiModelDownloader.isDownloading.collectAsState()
@@ -51,8 +58,33 @@ fun ModelsScreen() {
     val downloadErrorMap by LocalAiModelDownloader.downloadError.collectAsState()
 
     var refreshTrigger by remember { mutableStateOf(0) }
+    var faceModelRefreshTrigger by remember { mutableStateOf(0) }
+    var faceModelImportMessage by remember { mutableStateOf<String?>(null) }
+    var aiCoreStatus by remember { mutableStateOf<AiCoreStatus?>(null) }
+    var aiCoreChecking by remember { mutableStateOf(false) }
     var pendingImportModel by remember { mutableStateOf<LocalAiModelType?>(null) }
     var providerConfigs by remember { mutableStateOf(providerStore.getAll()) }
+    val isFaceModelImported = remember(faceModelRefreshTrigger) { faceModelStore.isModelImported() }
+    val faceModelSizeBytes = remember(faceModelRefreshTrigger) { faceModelStore.importedModelSizeBytes() }
+    val faceThresholds = remember(faceModelRefreshTrigger) { faceCalibrationStore.getThresholds() }
+
+    fun saveProviderConfigs(configs: List<AiProviderConfig>) {
+        val normalized = configs.mapIndexed { index, config -> config.copy(priority = index) }
+        normalized.forEach(providerStore::save)
+        providerConfigs = normalized
+    }
+
+    fun refreshAiCoreStatus(prepare: Boolean) {
+        coroutineScope.launch {
+            aiCoreChecking = true
+            aiCoreStatus = if (prepare) aiCoreEngine.prepare() else aiCoreEngine.status()
+            aiCoreChecking = false
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        refreshAiCoreStatus(prepare = false)
+    }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -63,6 +95,46 @@ fun ModelsScreen() {
             coroutineScope.launch {
                 LocalAiModelDownloader.importModel(context, modelType, uri)
                 refreshTrigger++
+            }
+        }
+    }
+    val faceModelImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            coroutineScope.launch {
+                runCatching {
+                    faceModelStore.importModel(uri)
+                }.onSuccess {
+                    faceModelRefreshTrigger++
+                    val modelSha256 = faceModelStore.importedModelSha256()
+                    faceModelImportMessage =
+                        "Face embedding model imported (${formatBytes(faceModelStore.importedModelSizeBytes())}). SHA-256 ${modelSha256?.take(12) ?: "unavailable"}..."
+                }.onFailure { error ->
+                    faceModelImportMessage = error.localizedMessage ?: "Unable to import face embedding model."
+                }
+            }
+        }
+    }
+    val faceCalibrationImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            coroutineScope.launch {
+                runCatching {
+                    faceCalibrationStore.importCalibration(uri)
+                }.onSuccess {
+                    faceModelRefreshTrigger++
+                    val thresholds = faceCalibrationStore.getThresholds()
+                    faceModelImportMessage =
+                        if (thresholds != null) {
+                            "Face calibration imported: review >= ${formatThreshold(thresholds.reviewThreshold)}, high >= ${formatThreshold(thresholds.samePersonThreshold)}."
+                        } else {
+                            "Face calibration import did not produce usable thresholds."
+                        }
+                }.onFailure { error ->
+                    faceModelImportMessage = error.localizedMessage ?: "Unable to import face calibration file."
+                }
             }
         }
     }
@@ -308,6 +380,27 @@ fun ModelsScreen() {
                 }
             }
 
+            FaceEmbeddingModelCard(
+                isImported = isFaceModelImported,
+                sizeBytes = faceModelSizeBytes,
+                message = faceModelImportMessage,
+                isCalibrationImported = faceThresholds != null,
+                calibrationSummary = faceThresholds.summaryText(),
+                onImport = { faceModelImportLauncher.launch(arrayOf("*/*")) },
+                onImportCalibration = {
+                    faceCalibrationImportLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
+                }
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            AiCoreStatusCard(
+                status = aiCoreStatus,
+                checking = aiCoreChecking,
+                onRefresh = { refreshAiCoreStatus(prepare = false) },
+                onPrepare = { refreshAiCoreStatus(prepare = true) }
+            )
+
             Spacer(modifier = Modifier.height(16.dp))
             Text(
                 text = "ML Kit Vision runs on every device. Optional LLM engines work only on supported hardware and require a download.",
@@ -340,14 +433,31 @@ fun ModelsScreen() {
                 modifier = Modifier.padding(top = 4.dp, bottom = 10.dp)
             )
 
-            providerConfigs.forEach { config ->
+            providerConfigs.forEachIndexed { index, config ->
                 ProviderConfigCard(
                     config = config,
-                    onConfigChange = { updated ->
-                        providerStore.save(updated)
-                        providerConfigs = providerConfigs.map {
-                            if (it.provider == updated.provider) updated else it
+                    canMoveUp = index > 0,
+                    canMoveDown = index < providerConfigs.lastIndex,
+                    onMoveUp = {
+                        if (index > 0) {
+                            val reordered = providerConfigs.toMutableList()
+                            val moved = reordered.removeAt(index)
+                            reordered.add(index - 1, moved)
+                            saveProviderConfigs(reordered)
                         }
+                    },
+                    onMoveDown = {
+                        if (index < providerConfigs.lastIndex) {
+                            val reordered = providerConfigs.toMutableList()
+                            val moved = reordered.removeAt(index)
+                            reordered.add(index + 1, moved)
+                            saveProviderConfigs(reordered)
+                        }
+                    },
+                    onConfigChange = { updated ->
+                        saveProviderConfigs(providerConfigs.map {
+                            if (it.provider == updated.provider) updated else it
+                        })
                     }
                 )
                 Spacer(modifier = Modifier.height(10.dp))
@@ -369,8 +479,209 @@ private fun StatusLine(text: String, color: androidx.compose.ui.graphics.Color) 
 }
 
 @Composable
+private fun AiCoreStatusCard(
+    status: AiCoreStatus?,
+    checking: Boolean,
+    onRefresh: () -> Unit,
+    onPrepare: () -> Unit
+) {
+    val cardShape = io.dossier.app.ui.theme.DossierCardShape
+    val resolvedStatus = status
+    val statusColor = when (resolvedStatus) {
+        AiCoreStatus.Available -> NeuralTheme.Emerald
+        AiCoreStatus.Downloadable,
+        AiCoreStatus.Downloading -> NeuralTheme.Cyan
+        is AiCoreStatus.Error -> NeuralTheme.Amber
+        AiCoreStatus.Unavailable,
+        null -> NeuralTheme.TextSecondary
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NeuralTheme.CardBackground.copy(alpha = 0.65f), cardShape)
+            .border(1.dp, NeuralTheme.BorderColor, cardShape)
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "AICore Gemini Nano",
+                    color = NeuralTheme.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = if (checking) {
+                        "Checking Android AICore feature status..."
+                    } else {
+                        resolvedStatus?.detail ?: "Status not checked yet."
+                    },
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(10.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(statusColor.copy(alpha = 0.16f))
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    text = if (checking) "Checking" else resolvedStatus?.label ?: "Unknown",
+                    color = statusColor,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = onRefresh,
+                enabled = !checking,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan)
+            ) {
+                Text("Check", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            OutlinedButton(
+                onClick = onPrepare,
+                enabled = !checking && resolvedStatus == AiCoreStatus.Downloadable,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan)
+            ) {
+                Text("Download", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FaceEmbeddingModelCard(
+    isImported: Boolean,
+    sizeBytes: Long,
+    message: String?,
+    isCalibrationImported: Boolean,
+    calibrationSummary: String,
+    onImport: () -> Unit,
+    onImportCalibration: () -> Unit
+) {
+    val cardShape = io.dossier.app.ui.theme.DossierCardShape
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NeuralTheme.CardBackground.copy(alpha = 0.65f), cardShape)
+            .border(1.dp, NeuralTheme.BorderColor, cardShape)
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Face Embedding Model",
+                    color = NeuralTheme.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = if (isImported) {
+                        "Imported model stored locally (${formatBytes(sizeBytes)}). Import calibrated thresholds before treating scores as identity evidence."
+                    } else {
+                        "Optional FaceNet/ArcFace ONNX or TFLite import for local similarity scoring."
+                    },
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(10.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(
+                        if (isImported) NeuralTheme.Cyan.copy(alpha = 0.16f) else NeuralTheme.BorderColor.copy(alpha = 0.35f)
+                    )
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    text = if (isImported) "Imported" else "Optional",
+                    color = if (isImported) NeuralTheme.Cyan else NeuralTheme.TextSecondary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        if (message != null) {
+            Text(
+                text = message,
+                color = if (isImported) NeuralTheme.Cyan else NeuralTheme.Amber,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 10.dp)
+            )
+        }
+
+        Text(
+            text = calibrationSummary,
+            color = if (isCalibrationImported) NeuralTheme.Cyan else NeuralTheme.Amber,
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.padding(top = 10.dp)
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        OutlinedButton(
+            onClick = onImport,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan)
+        ) {
+            Text(
+                text = if (isImported) "Replace Model" else "Import Model",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedButton(
+            onClick = onImportCalibration,
+            enabled = isImported,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan)
+        ) {
+            Text(
+                text = if (isCalibrationImported) "Replace Calibration" else "Import Calibration JSON",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
 private fun ProviderConfigCard(
     config: AiProviderConfig,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
     onConfigChange: (AiProviderConfig) -> Unit
 ) {
     val cardShape = io.dossier.app.ui.theme.DossierCardShape
@@ -421,6 +732,39 @@ private fun ProviderConfigCard(
                     uncheckedTrackColor = NeuralTheme.BorderColor
                 )
             )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Priority ${config.priority + 1}",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.weight(1f)
+            )
+            OutlinedButton(
+                onClick = onMoveUp,
+                enabled = canMoveUp,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                modifier = Modifier.height(32.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan)
+            ) {
+                Text("Up", fontSize = 11.sp)
+            }
+            OutlinedButton(
+                onClick = onMoveDown,
+                enabled = canMoveDown,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                modifier = Modifier.height(32.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan)
+            ) {
+                Text("Down", fontSize = 11.sp)
+            }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -589,6 +933,23 @@ private fun ProviderTextField(
         modifier = Modifier.fillMaxWidth()
     )
 }
+
+private fun formatBytes(bytes: Long): String =
+    when {
+        bytes >= 1024L * 1024L -> "${bytes / (1024L * 1024L)} MB"
+        bytes >= 1024L -> "${bytes / 1024L} KB"
+        else -> "$bytes B"
+    }
+
+private fun io.dossier.app.data.face.FaceEmbeddingThresholds?.summaryText(): String =
+    if (this != null) {
+        "Calibrated thresholds: review >= ${formatThreshold(reviewThreshold)}, high >= ${formatThreshold(samePersonThreshold)} ($source, ${positivePairCount}+/${negativePairCount}- pairs, model ${modelSha256.take(12)}...)."
+    } else {
+        "No calibrated threshold file imported; face scores are computed but not used as identity evidence."
+    }
+
+private fun formatThreshold(value: Float): String =
+    "%.2f".format(value)
 
 private fun providerHint(provider: AiProviderType): String = when (provider) {
     AiProviderType.OPENAI -> "OpenAI-compatible chat completions."

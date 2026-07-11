@@ -1,10 +1,13 @@
 package io.dossier.app.data.ai
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.imageclassifier.ImageClassifier
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
 import io.dossier.app.domain.ai.LocalAiAnalysisResult
 import io.dossier.app.domain.ai.LocalAiEngine
@@ -13,116 +16,149 @@ import io.dossier.app.domain.ai.LocalAiModelType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.FileInputStream
-import java.io.InputStream
+import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 
 /**
- * MediaPipe Tasks engine for downloaded local vision models (Gemma/PaliGemma).
+ * MediaPipe Tasks engine for imported/bundled local vision models.
  *
- * HONESTY: the previous implementation returned hardcoded mock strings ("Caution:
- * High Voltage", "transmission tower") on any failure, and `isAvailable()` treated
- * the 1KB dummy file from simulateMockDownload as a real model. Both are fixed:
- *  - isAvailable() requires a real model file (> 4KB) or a real bundled asset.
- *  - On any load/inference failure we return null so the caller degrades honestly.
- *
- * Note: ML Kit Vision (OCR/face/labels) is the primary, always-available vision
- * path now — see TextRecognizer / ImageLabeler / FaceAnalyzer. This engine is
- * only relevant if a genuine downloadable model is present.
+ * HONESTY:
+ * - Multimodal scene *descriptions* (free-form text about what is in the image)
+ *   are handled by [AiCoreEngine] / Gemini Nano, not this path.
+ * - This engine runs MediaPipe **ImageClassifier** first (scene-level labels),
+ *   then falls back to **ObjectDetector** for object-category labels.
+ * - It never fabricates OCR text or landmarks. OCR stays with ML Kit
+ *   TextRecognizer. On any load/inference failure it returns null so callers
+ *   degrade honestly.
  */
 class MediaPipeEngine(private val context: Context) : LocalAiEngine {
-    override val name: String = "MediaPipe Tasks (Local vision model)"
+    override val name: String = "MediaPipe Tasks (Local vision labels)"
 
     override suspend fun isAvailable(): Boolean = withContext(Dispatchers.IO) {
-        val hasDownloadedModel = LocalAiModelDownloader.isModelDownloaded(context, LocalAiModelType.PALIGEMMA)
-        if (hasDownloadedModel) return@withContext true
-
-        val hasAsset = try {
-            val assetsList = context.assets.list("") ?: emptyArray()
-            assetsList.any { it.endsWith(".tflite") }
-        } catch (e: Exception) {
-            false
-        }
-        hasAsset
+        resolveModelSource() != null
     }
 
     override suspend fun analyzeImage(imageUri: Uri): LocalAiAnalysisResult? = withContext(Dispatchers.IO) {
-        if (!isAvailable()) return@withContext null
+        val modelSource = resolveModelSource() ?: return@withContext null
+        val bitmap = decodeBitmap(imageUri) ?: return@withContext null
+        val mpImage = BitmapImageBuilder(bitmap).build()
 
-        try {
-            val baseOptionsBuilder = BaseOptions.builder()
+        runClassifier(modelSource, mpImage)
+            ?: runObjectDetector(modelSource, mpImage)
+    }
 
-            val modelSource: Any = when {
-                LocalAiModelDownloader.isModelDownloaded(context, LocalAiModelType.PALIGEMMA) -> {
-                    val file = LocalAiModelDownloader.getModelFile(context, LocalAiModelType.PALIGEMMA)
-                    val fis = FileInputStream(file)
+    private fun resolveModelSource(): ModelSource? {
+        if (LocalAiModelDownloader.isModelDownloaded(context, LocalAiModelType.PALIGEMMA)) {
+            return runCatching {
+                val file = LocalAiModelDownloader.getModelFile(context, LocalAiModelType.PALIGEMMA)
+                FileInputStream(file).use { fis ->
                     val channel = fis.channel
                     val buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size())
-                    fis.close()
-                    buffer
+                    ModelSource.Buffer(buffer)
                 }
-                else -> {
-                    val assets = context.assets.list("") ?: emptyArray()
-                    val modelName = assets.firstOrNull { it.endsWith(".tflite") }
-                        ?: return@withContext null
-                    modelName
+            }.getOrNull()
+        }
+
+        val assets = runCatching { context.assets.list("") ?: emptyArray() }.getOrDefault(emptyArray())
+        val modelName = assets.firstOrNull { it.endsWith(".tflite") } ?: return null
+        return ModelSource.AssetPath(modelName)
+    }
+
+    private fun decodeBitmap(imageUri: Uri): Bitmap? =
+        context.contentResolver.openInputStream(imageUri)?.use { input ->
+            BitmapFactory.decodeStream(input)
+        }
+
+    private fun runClassifier(
+        modelSource: ModelSource,
+        mpImage: com.google.mediapipe.framework.image.MPImage
+    ): LocalAiAnalysisResult? =
+        runCatching {
+            val options = ImageClassifier.ImageClassifierOptions.builder()
+                .setBaseOptions(modelSource.toBaseOptions())
+                .setRunningMode(RunningMode.IMAGE)
+                .setMaxResults(8)
+                .setScoreThreshold(0.25f)
+                .build()
+            val classifier = ImageClassifier.createFromOptions(context, options)
+            try {
+                val result = classifier.classify(mpImage)
+                val categories = result.classificationResult()
+                    ?.classifications()
+                    .orEmpty()
+                    .flatMap { it.categories().orEmpty() }
+
+                if (categories.isEmpty()) return@runCatching null
+
+                var faceDetected = false
+                val labels = mutableListOf<String>()
+                categories.forEach { category ->
+                    val name = category.categoryName().orEmpty().trim()
+                    if (name.isEmpty()) return@forEach
+                    val lower = name.lowercase()
+                    if (lower == "person" || lower == "face" || lower.contains("portrait")) {
+                        faceDetected = true
+                    } else if (lower != "background") {
+                        labels.add(name)
+                    }
                 }
+                LocalAiAnalysisResult(
+                    extractedText = null,
+                    detectedLandmarks = labels.distinct(),
+                    containsFace = faceDetected
+                )
+            } finally {
+                classifier.close()
             }
+        }.getOrNull()
 
-            when (modelSource) {
-                is java.nio.ByteBuffer -> baseOptionsBuilder.setModelAssetBuffer(modelSource)
-                is String -> baseOptionsBuilder.setModelAssetPath(modelSource)
-                else -> return@withContext null
-            }
-
-            val baseOptions = baseOptionsBuilder.build()
-
+    private fun runObjectDetector(
+        modelSource: ModelSource,
+        mpImage: com.google.mediapipe.framework.image.MPImage
+    ): LocalAiAnalysisResult? =
+        runCatching {
             val options = ObjectDetector.ObjectDetectorOptions.builder()
-                .setBaseOptions(baseOptions)
+                .setBaseOptions(modelSource.toBaseOptions())
                 .setScoreThreshold(0.5f)
                 .setRunningMode(RunningMode.IMAGE)
                 .build()
-
             val detector = ObjectDetector.createFromOptions(context, options)
-
-            val inputStream: InputStream? = context.contentResolver.openInputStream(imageUri)
-            val bitmap = BitmapFactory.decodeStream(inputStream)
-            inputStream?.close()
-
-            if (bitmap == null) {
-                detector.close()
-                return@withContext null
-            }
-
-            val mpImage = com.google.mediapipe.framework.image.BitmapImageBuilder(bitmap).build()
-            val detectionResult = detector.detect(mpImage)
-
-            var faceDetected = false
-            val landmarks = mutableListOf<String>()
-
-            detectionResult.detections().forEach { detection ->
-                detection.categories().forEach { category ->
-                    val name = category.categoryName().lowercase()
-                    if (name == "person" || name == "face") {
-                        faceDetected = true
-                    } else if (name != "background") {
-                        landmarks.add(name)
+            try {
+                val detectionResult = detector.detect(mpImage)
+                var faceDetected = false
+                val landmarks = mutableListOf<String>()
+                detectionResult.detections().forEach { detection ->
+                    detection.categories().forEach { category ->
+                        val name = category.categoryName().lowercase()
+                        if (name == "person" || name == "face") {
+                            faceDetected = true
+                        } else if (name != "background" && name.isNotBlank()) {
+                            landmarks.add(name)
+                        }
                     }
                 }
+                if (landmarks.isEmpty() && !faceDetected) return@runCatching null
+                LocalAiAnalysisResult(
+                    extractedText = null,
+                    detectedLandmarks = landmarks.distinct(),
+                    containsFace = faceDetected
+                )
+            } finally {
+                detector.close()
             }
+        }.getOrNull()
 
-            detector.close()
+    private sealed class ModelSource {
+        data class Buffer(val buffer: ByteBuffer) : ModelSource()
+        data class AssetPath(val path: String) : ModelSource()
 
-            // No fabricated OCR text — only real detected object labels are reported.
-            // OCR is handled by the dedicated TextRecognizer (ML Kit).
-            LocalAiAnalysisResult(
-                extractedText = null,
-                detectedLandmarks = landmarks.distinct(),
-                containsFace = faceDetected
-            )
-        } catch (e: Exception) {
-            e.printStackTrace()
-            // No mock fallback — return null so the caller degrades honestly.
-            null
+        fun toBaseOptions(): BaseOptions {
+            val builder = BaseOptions.builder()
+            when (this) {
+                is Buffer -> builder.setModelAssetBuffer(buffer)
+                is AssetPath -> builder.setModelAssetPath(path)
+            }
+            return builder.build()
         }
     }
 }

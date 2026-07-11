@@ -2,9 +2,13 @@ package io.dossier.app.domain.scanner
 
 import android.content.Context
 import android.net.Uri
-import io.dossier.app.domain.ai.LocalAiModelType
 import io.dossier.app.data.ai.AiInsightService
+import io.dossier.app.data.face.FaceEmbeddingModelStore
+import io.dossier.app.data.face.ProfileImageDownloader
 import io.dossier.app.data.local.ProfileConsistencyCache
+import io.dossier.app.domain.ai.LocalAiModelType
+import io.dossier.app.domain.face.FaceConsistencyChecker
+import io.dossier.app.domain.face.FaceEmbeddingService
 import io.dossier.app.domain.model.*
 import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.remediation.RemediationProvider
@@ -14,7 +18,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
-import java.io.File
 
 object ScanSession {
     var tempInput: IdentityInput? = null
@@ -111,12 +114,14 @@ object ScanSession {
             }
 
 
-            // Face consistency is SKIPPED honestly: there is no embedding model
-            // and no real profile-image scraping in this build, so any "similarity
-            // score" would be fabricated. The ReportScreen shows an honest message
-            // instead. (A real FaceNet model + profile avatar scraping would be
-            // needed to restore this; until then, no fake scores.)
-            _faceConsistencyMatches.value = emptyList()
+            _progressText.value = "COMPARING_FACE_CONSISTENCY..."
+            val faceMatches = runFaceConsistency(
+                context = context,
+                input = inputToUse,
+                profileResults = scanResults
+            )
+            _faceConsistencyMatches.value = faceMatches
+            allFindings.addAll(faceFindingsFromMatches(faceMatches))
 
             _progressText.value = "COMPILING_EXPOSURE_LEVELS..."
             val riskScorer = RiskScorer()
@@ -174,9 +179,56 @@ object ScanSession {
         _aiSummary.value = null
         placeImageUri = null
 
-        
         val cache = ProfileConsistencyCache(context)
         cache.clearAll()
         cache.close()
+        ProfileImageDownloader(context).clearCache()
     }
+
+    private suspend fun runFaceConsistency(
+        context: Context,
+        input: IdentityInput,
+        profileResults: List<ProfileScanResult>
+    ): List<FaceConsistencyMatch> {
+        if (input.selfieUri.isNullOrBlank()) return emptyList()
+
+        val modelStore = FaceEmbeddingModelStore(context)
+        if (!modelStore.isModelImported()) {
+            // Honest empty result: ReportScreen explains that a model is required.
+            return emptyList()
+        }
+
+        val downloader = ProfileImageDownloader(context)
+        val profileImages = FaceConsistencyChecker.buildProfileImageMap(
+            profileResults = profileResults,
+            download = { url -> downloader.download(url) }
+        )
+        if (profileImages.isEmpty()) return emptyList()
+
+        return FaceConsistencyChecker(FaceEmbeddingService(context))
+            .checkSelfieVsProfiles(input, profileImages)
+    }
+
+    /**
+     * Elevates only calibrated review/high face scores into formal findings.
+     * Uncalibrated cosine scores remain visible in the report log but do not
+     * change risk scoring until a matching calibration sidecar is imported.
+     */
+    internal fun faceFindingsFromMatches(matches: List<FaceConsistencyMatch>): List<Finding> =
+        matches.mapNotNull { match ->
+            val warning = match.warning.lowercase()
+            val isHigh = warning.contains("high visual similarity")
+            val isReview = warning.contains("review-range")
+            if (!isHigh && !isReview) return@mapNotNull null
+
+            Finding(
+                type = FindingType.ImageConsistency,
+                value = "Face similarity ${(match.similarityScore * 100).toInt()}% vs ${match.profileUrl}",
+                sourceUrl = match.profileUrl,
+                evidenceSnippet = match.warning,
+                confidence = match.similarityScore.coerceIn(0f, 1f),
+                risk = if (isHigh) RiskLevel.High else RiskLevel.Medium,
+                remediation = "Confirm ownership of this profile and avoid reusing the same avatar/selfie across accounts."
+            )
+        }
 }

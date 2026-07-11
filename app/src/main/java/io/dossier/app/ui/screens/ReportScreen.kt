@@ -465,7 +465,6 @@ fun ReportScreen(
 
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    // Visual Similarity — honest: no embedding model in this build.
                     ReportSectionHeader("Visual Intelligence")
                     val imageEvidenceResults = profileResults
                         .filter { result ->
@@ -473,6 +472,10 @@ fun ReportScreen(
                                 result.profileImageUrl != null &&
                                 result.findings.any { it.type == FindingType.PublicImageEvidence }
                         }
+                    val calibratedFaceMatches = faceMatches.filter {
+                        it.warning.contains("high visual similarity", ignoreCase = true) ||
+                            it.warning.contains("review-range", ignoreCase = true)
+                    }
 
                     Card(
                         colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground),
@@ -508,7 +511,11 @@ fun ReportScreen(
                                 Spacer(modifier = Modifier.height(6.dp))
                             }
                             Text(
-                                text = "Image search uses public image-index results from identity terms. It does not upload your selfie and does not perform face matching. Similarity scoring still requires a real face embedding model.",
+                                text = faceConsistencySummary(
+                                    hasSelfie = !input?.selfieUri.isNullOrBlank(),
+                                    faceMatchCount = faceMatches.size,
+                                    calibratedMatchCount = calibratedFaceMatches.size
+                                ),
                                 color = NeuralTheme.TextSecondary,
                                 fontSize = 12.5.sp,
                                 lineHeight = 18.sp
@@ -526,14 +533,18 @@ fun ReportScreen(
 
                     faceMatches.forEach { match ->
                         val matchLabel = when {
-                            match.similarityScore > 0.8f -> "Profile image appears visually similar"
-                            match.similarityScore > 0.6f -> "Potential reuse — verify account"
-                            else -> "No match found"
+                            match.warning.contains("high visual similarity", ignoreCase = true) ->
+                                "Profile image appears visually similar"
+                            match.warning.contains("review-range", ignoreCase = true) ->
+                                "Potential reuse — verify account"
+                            match.warning.contains("low similarity", ignoreCase = true) ->
+                                "Low calibrated similarity"
+                            else -> match.warning
                         }
                         
                         val consistencyColor = when {
-                            match.similarityScore > 0.8f -> NeuralTheme.Crimson
-                            match.similarityScore > 0.6f -> NeuralTheme.Amber
+                            match.warning.contains("high visual similarity", ignoreCase = true) -> NeuralTheme.Crimson
+                            match.warning.contains("review-range", ignoreCase = true) -> NeuralTheme.Amber
                             else -> NeuralTheme.Emerald
                         }
 
@@ -943,6 +954,29 @@ fun PublicImageEvidenceRow(
             fontWeight = FontWeight.ExtraBold
         )
     }
+}
+
+internal fun faceConsistencySummary(
+    hasSelfie: Boolean,
+    faceMatchCount: Int,
+    calibratedMatchCount: Int
+): String = when {
+    !hasSelfie ->
+        "Image search uses public image-index results from identity terms only. " +
+            "Provide a selfie and import a face embedding model plus calibration JSON on Models " +
+            "to score visual consistency against discovered profile avatars."
+    faceMatchCount == 0 ->
+        "Selfie provided. Face consistency runs when a face embedding model is imported and " +
+            "profile avatars are downloadable. Calibrated thresholds are required before scores " +
+            "count as identity evidence. Public image search never uploads your selfie."
+    calibratedMatchCount > 0 ->
+        "Face consistency: $faceMatchCount comparison(s), $calibratedMatchCount calibrated " +
+            "review/high match(es). Treat scores as supporting evidence only — confirm ownership manually. " +
+            "Public image search never uploads your selfie."
+    else ->
+        "Face consistency: $faceMatchCount comparison(s). Scores are present but not treated as " +
+            "identity evidence until a matching calibration JSON is imported for the current model. " +
+            "Public image search never uploads your selfie."
 }
 
 @Composable

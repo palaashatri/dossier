@@ -14,10 +14,10 @@ class HybridAiClient(private val context: Context) {
         val selected = ScanSession.selectedModel.value
 
         try {
-            // AICore / MediaPipe are best-effort downloadable/LLM engines.
-            // MLKIT_VISION is handled directly by the dedicated TextRecognizer /
-            // ImageLabeler / FaceAnalyzer classes (not via this client).
-            if (selected == LocalAiModelType.AICORE && aiCoreEngine.isAvailable()) {
+            // Multimodal free-form scene text: AICore (Gemini Nano).
+            // MediaPipe path: ImageClassifier / ObjectDetector labels only.
+            // MLKIT_VISION is handled by TextRecognizer / ImageLabeler / FaceAnalyzer.
+            if (selected == LocalAiModelType.AICORE) {
                 val result = aiCoreEngine.analyzeImage(imageUri)
                 if (result != null) return result
             } else if (selected == LocalAiModelType.PALIGEMMA && mediaPipeEngine.isAvailable()) {
@@ -28,7 +28,7 @@ class HybridAiClient(private val context: Context) {
             e.printStackTrace()
         }
 
-        // Dynamic fallback: try whatever optional engine is available.
+        // Dynamic fallback prefers true multimodal (AICore) before label-only MediaPipe.
         try {
             if (aiCoreEngine.isAvailable()) {
                 val result = aiCoreEngine.analyzeImage(imageUri)

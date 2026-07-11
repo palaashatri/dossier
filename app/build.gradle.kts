@@ -9,6 +9,17 @@ android {
     namespace = "io.dossier.app"
     compileSdk = 35
 
+    val releaseStoreFile = providers.gradleProperty("RELEASE_STORE_FILE").orNull
+    val releaseStorePassword = providers.gradleProperty("RELEASE_STORE_PASSWORD").orNull
+    val releaseKeyAlias = providers.gradleProperty("RELEASE_KEY_ALIAS").orNull
+    val releaseKeyPassword = providers.gradleProperty("RELEASE_KEY_PASSWORD").orNull
+    val releaseSigningConfigured = listOf(
+        releaseStoreFile,
+        releaseStorePassword,
+        releaseKeyAlias,
+        releaseKeyPassword
+    ).all { !it.isNullOrBlank() }
+
     defaultConfig {
         applicationId = "io.dossier.app"
         minSdk = 26
@@ -19,9 +30,23 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            if (releaseSigningConfigured) {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -59,12 +84,6 @@ dependencies {
     // Serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
-    // Room (In-Memory usage)
-    val roomVersion = "2.6.1"
-    implementation("androidx.room:room-runtime:$roomVersion")
-    implementation("androidx.room:room-ktx:$roomVersion")
-    // annotationProcessor("androidx.room:room-compiler:$roomVersion") // Use KSP for production, but keeping it simple for now
-
     // WorkManager
     implementation("androidx.work:work-runtime-ktx:2.10.0")
 
@@ -74,6 +93,7 @@ dependencies {
 
     // Lottie — hand-authored amber transition animations (compute/investigate/search/web)
     implementation("com.airbnb.android:lottie-compose:6.3.0")
+    implementation("com.google.mlkit:genai-prompt:1.0.0-beta2")
 
     // ML Kit & Face
     implementation("com.google.mlkit:face-detection:16.1.7")
@@ -84,9 +104,8 @@ dependencies {
     implementation("com.google.mlkit:image-labeling:17.0.9")
     implementation("com.google.mediapipe:tasks-vision:0.10.14")
     implementation("com.google.mediapipe:tasks-genai:0.10.14")
-    implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
-    // implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.1") // Add when needed
-    // implementation("org.tensorflow:tensorflow-lite:2.16.1") // Add when needed
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.1")
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

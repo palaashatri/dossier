@@ -13,31 +13,6 @@ class ProfileConsistencyCache(context: Context) {
         db = dbHelper.writableDatabase
     }
 
-    fun insertEmbedding(url: String, embedding: FloatArray) {
-        val db = this.db ?: return
-        val embeddingString = embedding.joinToString(",")
-        db.execSQL(
-            "INSERT OR REPLACE INTO consistency_cache (url, embedding) VALUES (?, ?)",
-            arrayOf(url, embeddingString)
-        )
-    }
-
-    fun getEmbedding(url: String): FloatArray? {
-        val db = this.db ?: return null
-        val cursor = db.rawQuery(
-            "SELECT embedding FROM consistency_cache WHERE url = ?",
-            arrayOf(url)
-        )
-        cursor.use {
-            if (it.moveToFirst()) {
-                val str = it.getString(0)
-                if (str.isBlank()) return null
-                return str.split(",").mapNotNull { s -> s.trim().toFloatOrNull() }.toFloatArray()
-            }
-        }
-        return null
-    }
-
     fun clearAll() {
         val db = this.db ?: return
         db.execSQL("DELETE FROM consistency_cache")
@@ -51,7 +26,7 @@ class ProfileConsistencyCache(context: Context) {
     private class DbHelper(context: Context) : SQLiteOpenHelper(context, null, null, 1) {
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL(
-                "CREATE TABLE consistency_cache (url TEXT PRIMARY KEY, embedding TEXT)"
+                "CREATE TABLE consistency_cache (url TEXT PRIMARY KEY)"
             )
         }
 

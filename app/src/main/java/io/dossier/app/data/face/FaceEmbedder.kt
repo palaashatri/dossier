@@ -3,57 +3,69 @@ package io.dossier.app.data.face
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Rect
 import android.net.Uri
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import java.io.InputStream
+import kotlin.math.max
+import kotlin.math.min
 
 /**
- * Honest face detection wrapper — detects whether a face is present in an image.
+ * ML Kit face detector utility.
  *
- * HONESTY: the prior implementation fabricated 128-dim "embeddings" from face
- * bounding-box geometry + random Gaussian noise, which FaceEmbeddingService
- * then compared via cosine similarity to produce fake "visual similarity scores."
- * That is removed. This class now reports face presence only — no embedding
- * model exists in this build, so no similarity scoring is possible.
- *
- * A real FaceNet/ONNX model (the facenet.onnx AGENTS.md references) would be
- * needed for genuine embeddings; until then, face comparison is honestly
- * unavailable.
+ * This class intentionally does not produce embeddings. It only detects faces
+ * and extracts a crop that a real ONNX/TFLite face embedding backend can use.
  */
 class FaceEmbedder(private val context: Context) {
+    private val detector by lazy {
+        FaceDetection.getClient(
+            FaceDetectorOptions.Builder()
+                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+                .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
+                .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+                .build()
+        )
+    }
 
-    private val options = FaceDetectorOptions.Builder()
-        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
-        .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
-        .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
-        .build()
+    fun hasFace(imageUri: Uri): Boolean =
+        detectLargestFace(loadBitmap(imageUri)) != null
 
-    private val detector = FaceDetection.getClient(options)
+    fun extractFaceBitmap(imageUri: Uri): Bitmap? {
+        val bitmap = loadBitmap(imageUri) ?: return null
+        val face = detectLargestFace(bitmap) ?: return null
+        val cropRect = expandedCropRect(face.boundingBox, bitmap.width, bitmap.height)
+        return Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
+    }
 
-    /** Returns true if at least one face is detected in the image. */
-    fun hasFace(imageUri: Uri): Boolean {
-        val bitmap = loadBitmap(imageUri) ?: return false
+    private fun detectLargestFace(bitmap: Bitmap?): Face? {
+        if (bitmap == null) return null
         val inputImage = InputImage.fromBitmap(bitmap, 0)
         val task = detector.process(inputImage)
-        val faces = try {
-            Tasks.await(task)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            emptyList()
-        }
-        return faces.isNotEmpty()
+        val faces = Tasks.await(task)
+        return faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
+    }
+
+    private fun expandedCropRect(box: Rect, imageWidth: Int, imageHeight: Int): Rect {
+        val expandX = (box.width() * FACE_CROP_MARGIN).toInt()
+        val expandY = (box.height() * FACE_CROP_MARGIN).toInt()
+        return Rect(
+            max(0, box.left - expandX),
+            max(0, box.top - expandY),
+            min(imageWidth, box.right + expandX),
+            min(imageHeight, box.bottom + expandY)
+        )
     }
 
     private fun loadBitmap(uri: Uri): Bitmap? {
-        return try {
-            val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
-            inputStream.use { BitmapFactory.decodeStream(it) }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
-        }
+        val inputStream: InputStream = context.contentResolver.openInputStream(uri) ?: return null
+        return inputStream.use { BitmapFactory.decodeStream(it) }
+    }
+
+    private companion object {
+        const val FACE_CROP_MARGIN = 0.20f
     }
 }

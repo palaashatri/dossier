@@ -878,15 +878,11 @@ class ProfileScanner(
     private fun normalizeProfileImageUrl(rawUrl: String): String? {
         val trimmed = rawUrl.trim()
         if (trimmed.isBlank()) return null
-        val withScheme = when {
-            trimmed.startsWith("//") -> "https:$trimmed"
-            else -> trimmed
-        }
-        if (!withScheme.startsWith("http://", ignoreCase = true) &&
-            !withScheme.startsWith("https://", ignoreCase = true)) {
-            return null
-        }
-        return withScheme.substringBefore("#")
+        // Profile images must already be absolute or scheme-relative HTTP(S) URLs.
+        if (!io.dossier.app.domain.util.UrlNormalizer.isHttpUrl(trimmed)) return null
+        return io.dossier.app.domain.util.UrlNormalizer.stripFragment(
+            io.dossier.app.domain.util.UrlNormalizer.ensureHttps(trimmed)
+        )
     }
 
     /**

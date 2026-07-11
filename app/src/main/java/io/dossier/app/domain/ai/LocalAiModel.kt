@@ -48,9 +48,9 @@ enum class LocalAiModelType(
         fileName = "gemma-4-E4B-it-web.task"
     ),
     PALIGEMMA(
-        displayName = "PaliGemma (Vision Edge)",
-        description = "Import a compatible PaliGemma MediaPipe model file for experimental local vision workflows.",
-        downloadable = true,
+        displayName = "MediaPipe Vision Labels",
+        description = "Import a MediaPipe ImageClassifier or ObjectDetector model for supplemental local labels. Free-form multimodal scene descriptions use AICore (Gemini Nano), not this path.",
+        downloadable = false,
         url = "",
         fileName = "paligemma.task"
     );

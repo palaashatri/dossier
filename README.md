@@ -66,7 +66,7 @@ The following data stays local in the current design:
 - Face detection is used as a safety gate; the app does not perform public facial identification or face matching.
 - Password plaintext is cleared from the breach screen after checks and is not included in results.
 
-API keys for remote AI providers are currently saved in Android `SharedPreferences`. Treat this as convenience storage, not hardened secret storage.
+API keys for remote AI providers are encrypted with Android Keystore-backed AES-GCM before persistence. HIBP API keys are entered per lookup and are not persisted.
 
 ## Screenshots
 
@@ -108,9 +108,31 @@ The Models screen supports both local and remote engines.
 Local engines:
 
 - ML Kit Vision is always available for OCR, face detection, and scene labeling.
-- AICore is listed as best-effort and depends on device support.
+- AICore uses ML Kit GenAI Prompt API with Gemini Nano on supported devices. The Models screen checks the official feature status (`AVAILABLE`, `DOWNLOADABLE`, `DOWNLOADING`, `UNAVAILABLE`) and exposes a user-triggered download action when Gemini Nano is downloadable.
 - Gemma E2B and Gemma E4B use public Hugging Face LiteRT Community `.task` downloads or user-imported MediaPipe task files.
-- PaliGemma is import-only and experimental in this build.
+- MediaPipe vision labels are import-only: ImageClassifier first, ObjectDetector fallback. Free-form multimodal scene text uses AICore (Gemini Nano), not this path.
+
+Face embedding models:
+
+- Import an ONNX or TFLite FaceNet/ArcFace-style model from the Models screen.
+- Provide a selfie during identity intake. During scan, Dossier downloads discovered profile avatars (bounded) and scores them against the selfie when a model is imported.
+- Import model-specific calibration JSON before using face scores as identity evidence. The calibration must include the SHA-256 of the imported model plus evaluation pair counts and measured rates; mismatched calibration files are rejected/ignored. Replacing the model clears the calibration sidecar.
+- Generate calibration offline from labeled same/different cosine pairs for the exact imported model (SHA-256 must match). Example shape:
+
+```json
+{
+  "reviewThreshold": 0.42,
+  "samePersonThreshold": 0.71,
+  "modelSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "positivePairCount": 200,
+  "negativePairCount": 1000,
+  "reviewFalseAcceptRate": 0.02,
+  "samePersonFalseAcceptRate": 0.001,
+  "reviewTrueAcceptRate": 0.98,
+  "samePersonTrueAcceptRate": 0.91,
+  "source": "arcface-lfw-eval"
+}
+```
 
 Remote providers:
 
@@ -120,7 +142,7 @@ Remote providers:
 - Hugging Face: `{baseUrl}/models/{model}`, curated presets only.
 - OpenRouter: OpenAI-compatible chat completions and model list from `/api/v1/models`.
 
-If multiple remote providers are enabled, the first usable provider in the app's enum order is used. Prefer enabling only the provider you want until explicit provider priority is added.
+If multiple remote providers are enabled, the Models screen priority order is used (first usable enabled provider with a key when required).
 
 ## Build Locally
 
@@ -150,7 +172,7 @@ Install on a connected emulator/device:
 ./gradlew :app:installDebug
 ```
 
-Build an unsigned release APK:
+Build a release APK. Without private signing properties this produces an unsigned artifact; with `RELEASE_*` Gradle properties it produces a signed artifact.
 
 ```sh
 ./gradlew :app:assembleRelease
@@ -185,7 +207,7 @@ app/src/main/java/io/dossier/app/
   domain/
     ai/        Local model types and downloader
     breach/    Breach result models
-    face/      Honest no-embedding face consistency stubs
+    face/      Local face model import, calibration JSON sidecar, and ONNX/TFLite similarity scoring
     model/     Shared app models
     pii/       PII extraction
     place/     Reverse image/video orchestration
@@ -208,20 +230,20 @@ app/src/test/java/io/dossier/app/
 - Username Discovery currently stores selected variants as username seeds, so the scanner may expand them again.
 - Search and image-index hits are review candidates, not verified ownership.
 - Reverse media location is an estimate. If no strong place phrase is found, the maps link may be based on raw OCR/label query text.
-- No public face recognition or visual identity matching is implemented. Face consistency scoring is intentionally disabled until a real embedding model and profile-avatar pipeline exist.
-- API keys are stored in `SharedPreferences`, not Android Keystore.
+- Face consistency requires a user-imported ONNX/TFLite face model. Scores become identity evidence only after a matching calibration JSON is imported. Without calibration, cosine scores are shown as non-evidence diagnostics.
+- Remote AI provider API keys are encrypted with Android Keystore-backed AES-GCM before persistence; HIBP keys are per-session inputs.
 - Remote AI calls send dossier summary prompts to the configured provider.
-- Release signing automation is not currently included in the tracked repository.
+- Release signing uses private `RELEASE_*` Gradle properties locally, or `ANDROID_KEYSTORE_*` secrets in `.github/workflows/build-release-apk.yml`. Unsigned release artifacts are never published as a GitHub release.
 
 ## Audit Status
 
 Last checked with:
 
 ```sh
-./gradlew :app:testDebugUnitTest :app:assembleDebug
+JAVA_HOME=/Library/Java/JavaVirtualMachines/zulu-21.jdk/Contents/Home ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --quiet
 ```
 
-The command passed locally. Gradle reported deprecation warnings related to future Gradle 10 compatibility.
+The command passed locally. `:app:assembleRelease --warning-mode all --quiet` also exits cleanly under JDK 21.
 
 ## License
 
