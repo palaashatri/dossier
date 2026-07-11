@@ -18,7 +18,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.username.UsernameVariantGenerator
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.theme.NeuralTheme
@@ -28,24 +27,27 @@ import io.dossier.app.ui.components.AnimatedObsidianBackground
 fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
     val input = ScanSession.tempInput
     val primaryUsername = input?.primaryUsername ?: ""
-    
-    val generator = remember { UsernameVariantGenerator() }
     val fullName = input?.fullName ?: ""
-    val initialVariants = remember(primaryUsername, fullName) {
-        val variants = mutableListOf<String>()
-        if (primaryUsername.isNotBlank()) {
-            variants.addAll(generator.generate(primaryUsername).map { it.username })
-        }
-        if (fullName.isNotBlank()) {
-            variants.addAll(generator.generateFromName(fullName).map { it.username })
-        }
-        variants.distinct()
+    val originalUsernames = remember(input) {
+        input?.usernames.orEmpty().map { it.trim() }.filter { it.isNotBlank() }
+    }
+    val emails = input?.emails.orEmpty()
+
+    val generator = remember { UsernameVariantGenerator() }
+    val initialVariants = remember(primaryUsername, fullName, originalUsernames, emails) {
+        generator.generateAllSeeds(
+            primary = primaryUsername.takeIf { it.isNotBlank() },
+            name = fullName.takeIf { it.isNotBlank() },
+            usernames = originalUsernames,
+            emails = emails
+        ).map { it.username }.distinct()
     }
 
+    // Default all discovered variants selected, including step-3 original usernames.
     var variantStates by remember {
         mutableStateOf(initialVariants.associateWith { true })
     }
-    
+
     var newCustomUsername by remember { mutableStateOf("") }
 
     val buttonGradient = Brush.horizontalGradient(
@@ -247,9 +249,27 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
 
                 Button(
                     onClick = {
-                        val selectedUsernames = variantStates.filter { it.value }.keys.toList()
+                        // Selected variants ∪ any original step-3 usernames that remain selected.
+                        // Never silently drop usernames the user entered earlier.
+                        val selected = variantStates.filter { it.value }.keys
+                        val preservedOriginals = originalUsernames.filter { u ->
+                            // Still selected if present in the map as true, or if the
+                            // user never saw it deselected (map may use a different key
+                            // casing — match case-insensitively against selected keys).
+                            val state = variantStates.entries.firstOrNull {
+                                it.key.equals(u, ignoreCase = true)
+                            }
+                            state == null || state.value
+                        }
+                        val mergedUsernames = (selected + preservedOriginals)
+                            .map { it.trim() }
+                            .filter { it.isNotBlank() }
+                            .distinctBy { it.lowercase() }
+                            .toList()
+
+                        // Preserve primaryUsername and all other IdentityInput fields.
                         ScanSession.tempInput = input?.copy(
-                            usernames = selectedUsernames
+                            usernames = mergedUsernames
                         )
                         onNext()
                     },

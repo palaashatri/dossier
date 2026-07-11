@@ -33,6 +33,8 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.dossier.app.data.platform.PLATFORMS
+import io.dossier.app.domain.model.BreachDigest
+import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
@@ -65,6 +67,17 @@ fun ReportScreen(
     val remediationTips by ScanSession.remediationTips.collectAsState()
     val aiSummary by ScanSession.aiSummary.collectAsState()
     val input by ScanSession.currentInput.collectAsState()
+    val profileResults by ScanSession.profileScanResults.collectAsState()
+    val entityGraph by ScanSession.entityGraph.collectAsState()
+    val breachDigests by ScanSession.breachDigests.collectAsState()
+    val entityGraphLines = remember(entityGraph, findings, profileResults) {
+        formatEntityGraphFromSession(entityGraph)
+            .ifEmpty { formatEntityGraphLines(findings, profileResults) }
+    }
+    val breachDigestLines = remember(breachDigests, findings) {
+        formatBreachDigestsFromSession(breachDigests)
+            .ifEmpty { formatBreachDigestLines(findings) }
+    }
     var selectedTab by remember { mutableStateOf(0) }
 
     val exporter = remember { ReportExporter(context) }
@@ -146,7 +159,7 @@ fun ReportScreen(
             )
 
             Text(
-                text = "Prepared $prepDate  ·  Self-audit  ·  Local processing only",
+                text = "Prepared $prepDate  ·  Authorized research / self-audit  ·  Public-web evidence",
                 color = NeuralTheme.TextSecondary,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp,
@@ -252,8 +265,6 @@ fun ReportScreen(
 
             if (selectedTab == 0) {
                 // IDENTITY DOSSIER VIEW
-                val profileResults by ScanSession.profileScanResults.collectAsState()
-
                 if (input != null) {
                     val selfieBitmap = rememberUriImageBitmap(input!!.selfieUri?.let { Uri.parse(it) })
 
@@ -522,6 +533,80 @@ fun ReportScreen(
                             )
                         }
                     }
+
+                    // Entity Graph — top entities/edges from session or derived findings
+                    Spacer(modifier = Modifier.height(24.dp))
+                    ReportSectionHeader("Entity Graph")
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, NeuralTheme.BorderColor, cardShape),
+                        shape = cardShape
+                    ) {
+                        Column(modifier = Modifier.padding(18.dp)) {
+                            if (entityGraphLines.isEmpty()) {
+                                Text(
+                                    text = "No entity links compiled for this scan yet.",
+                                    color = NeuralTheme.TextSecondary,
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp
+                                )
+                            } else {
+                                Text(
+                                    text = "Top entities and edges from extracted signals and profile sources.",
+                                    color = NeuralTheme.TextSecondary,
+                                    fontSize = 11.5.sp,
+                                    lineHeight = 16.sp,
+                                    modifier = Modifier.padding(bottom = 10.dp)
+                                )
+                                entityGraphLines.take(24).forEach { line ->
+                                    Text(
+                                        text = line,
+                                        color = NeuralTheme.TextPrimary,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 12.sp,
+                                        lineHeight = 17.sp,
+                                        modifier = Modifier.padding(vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Breach Exposure digests (session-backed when available)
+                    Spacer(modifier = Modifier.height(24.dp))
+                    ReportSectionHeader("Breach Exposure")
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, NeuralTheme.BorderColor, cardShape),
+                        shape = cardShape
+                    ) {
+                        Column(modifier = Modifier.padding(18.dp)) {
+                            if (breachDigestLines.isEmpty()) {
+                                Text(
+                                    text = "No email signals were scanned for breaches. Add emails on Identity " +
+                                        "to auto-check public exposure (and HIBP with an API key on the Breach tab).",
+                                    color = NeuralTheme.TextSecondary,
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp
+                                )
+                            } else {
+                                breachDigestLines.forEach { line ->
+                                    Text(
+                                        text = line,
+                                        color = NeuralTheme.TextPrimary,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 12.sp,
+                                        lineHeight = 17.sp,
+                                        modifier = Modifier.padding(vertical = 3.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
                 // RAW EXPOSURE LOGS VIEW
@@ -657,7 +742,6 @@ fun ReportScreen(
             // Deep Research — re-scan with personal-website link-following + AI
             // handle extraction to surface non-obvious handles (e.g. ones you only
             // mention on a linked personal site). Shown when results feel thin.
-            val profileResults by ScanSession.profileScanResults.collectAsState()
             val confirmedCount = profileResults.count { it.exists && it.verified }
             if (confirmedCount <= 5) {
                 OutlinedButton(
@@ -682,7 +766,35 @@ fun ReportScreen(
             }
 
             Button(
-                onClick = { exporter.shareReport(findings, input?.fullName?.trim()?.ifBlank { "UNKNOWN SUBJECT" } ?: "UNKNOWN SUBJECT") },
+                onClick = {
+                    val name = input?.fullName?.trim()?.ifBlank { "UNKNOWN SUBJECT" } ?: "UNKNOWN SUBJECT"
+                    val profileSummaries = profileResults
+                        .filter { it.exists }
+                        .map { result ->
+                            val status = when {
+                                result.verified -> "verified"
+                                else -> "review"
+                            }
+                            val platform = result.candidate.platform.name
+                            val handle = result.candidate.username
+                            val url = result.candidate.url
+                            val conf = "%.0f".format(result.candidate.confidence * 100)
+                            "$platform @$handle [$status conf=$conf%] $url" +
+                                (result.provenance?.let { " ← $it" } ?: "")
+                        }
+                    exporter.shareReport(
+                        findings = findings,
+                        subjectName = name,
+                        profileSummaries = profileSummaries,
+                        aiSummary = aiSummary,
+                        faceMatches = faceMatches,
+                        entityGraphSummary = entityGraphLines
+                            .takeIf { it.isNotEmpty() }
+                            ?.joinToString("\n"),
+                        breachDigests = breachDigestLines,
+                        riskLevel = riskLevel.name
+                    )
+                },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Color.Transparent
                 ),
@@ -964,19 +1076,132 @@ internal fun faceConsistencySummary(
     !hasSelfie ->
         "Image search uses public image-index results from identity terms only. " +
             "Provide a selfie and import a face embedding model plus calibration JSON on Models " +
-            "to score visual consistency against discovered profile avatars."
+            "to score visual consistency against discovered profile avatars. Face matching is " +
+            "local-only when enabled; it is not performed without a selfie and model."
     faceMatchCount == 0 ->
-        "Selfie provided. Face consistency runs when a face embedding model is imported and " +
+        "Selfie provided. Face consistency runs locally when a face embedding model is imported and " +
             "profile avatars are downloadable. Calibrated thresholds are required before scores " +
             "count as identity evidence. Public image search never uploads your selfie."
     calibratedMatchCount > 0 ->
-        "Face consistency: $faceMatchCount comparison(s), $calibratedMatchCount calibrated " +
+        "Face consistency (on-device): $faceMatchCount comparison(s), $calibratedMatchCount calibrated " +
             "review/high match(es). Treat scores as supporting evidence only — confirm ownership manually. " +
             "Public image search never uploads your selfie."
     else ->
-        "Face consistency: $faceMatchCount comparison(s). Scores are present but not treated as " +
+        "Face consistency (on-device): $faceMatchCount comparison(s). Scores are present but not treated as " +
             "identity evidence until a matching calibration JSON is imported for the current model. " +
             "Public image search never uploads your selfie."
+}
+
+/** Prefer the fused session graph built by EntityGraphBuilder. */
+internal fun formatEntityGraphFromSession(graph: EntityGraph): List<String> {
+    if (graph.entities.isEmpty() && graph.edges.isEmpty()) return emptyList()
+    val byId = graph.entities.associateBy { it.id }
+    val lines = mutableListOf<String>()
+    graph.entities
+        .sortedByDescending { it.confidence }
+        .take(18)
+        .forEach { entity ->
+            lines += "ENTITY  ${entity.type.name.uppercase()}  \"${entity.label}\"  conf=${(entity.confidence * 100).toInt()}%"
+            entity.sourceUrls.take(2).forEach { src ->
+                lines += "  SRC    $src"
+            }
+        }
+    graph.edges.take(22).forEach { edge ->
+        val from = byId[edge.fromId]?.label ?: edge.fromId
+        val to = byId[edge.toId]?.label ?: edge.toId
+        val evidence = edge.evidence?.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: ""
+        lines += "  EDGE   $from —[${edge.relation}]→ $to$evidence"
+    }
+    return lines.distinct().take(40)
+}
+
+internal fun formatBreachDigestsFromSession(digests: List<BreachDigest>): List<String> =
+    digests.map { digest ->
+        val sources = digest.sources.take(4).joinToString(", ").ifBlank { "public index / HIBP" }
+        val note = digest.note?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""
+        when {
+            digest.breachCount > 0 ->
+                "[HIGH] ${digest.email} — ${digest.breachCount} known breach(es): $sources$note"
+            digest.sources.isNotEmpty() ->
+                "[MED] ${digest.email} — public exposure hits: $sources$note"
+            else ->
+                "[INFO] ${digest.email} — no breach hits in this scan$note"
+        }
+    }
+
+/**
+ * Fallback entity lines when the session graph is empty (derived from findings).
+ */
+internal fun formatEntityGraphLines(
+    findings: List<Finding>,
+    profileResults: List<ProfileScanResult>
+): List<String> {
+    val lines = mutableListOf<String>()
+    val entityTypes = setOf(
+        FindingType.Email,
+        FindingType.Phone,
+        FindingType.Username,
+        FindingType.Organization,
+        FindingType.Location,
+        FindingType.Address,
+        FindingType.Profile,
+        FindingType.UsernameReuse
+    )
+
+    val entities = findings
+        .filter { it.type in entityTypes && it.value.isNotBlank() }
+        .distinctBy { "${it.type}:${it.value.lowercase()}" }
+        .take(16)
+
+    entities.forEach { f ->
+        lines += "ENTITY  ${f.type.name.uppercase()}  \"${f.value}\""
+        val src = f.sourceUrl
+        if (!src.isNullOrBlank()) {
+            lines += "  EDGE   extracted_from → $src"
+        }
+    }
+
+    profileResults
+        .filter { it.exists }
+        .take(12)
+        .forEach { r ->
+            val label = if (r.verified) "verified" else "review"
+            lines += "ENTITY  PROFILE  ${r.candidate.platform.name} @${r.candidate.username} [$label]"
+            lines += "  EDGE   candidate_url → ${r.candidate.url}"
+            r.provenance?.takeIf { it.isNotBlank() }?.let { prov ->
+                lines += "  EDGE   provenance → $prov"
+            }
+            r.links.take(3).forEach { link ->
+                lines += "  EDGE   outbound_link → $link"
+            }
+        }
+
+    return lines.distinct().take(40)
+}
+
+/**
+ * Breach digest lines for report/export. Prefer ScanSession.breachDigests when
+ * published; otherwise surface any findings that look like breach-related notes.
+ */
+internal fun formatBreachDigestLines(findings: List<Finding>): List<String> {
+    return findings
+        .filter { finding ->
+            val hay = listOfNotNull(
+                finding.value,
+                finding.evidenceSnippet,
+                finding.remediation
+            ).joinToString(" ").lowercase()
+            hay.contains("breach") ||
+                hay.contains("hibp") ||
+                hay.contains("pwned") ||
+                hay.contains("have i been")
+        }
+        .distinctBy { it.value + (it.sourceUrl ?: "") }
+        .take(12)
+        .map { f ->
+            val src = f.sourceUrl?.let { "  src=$it" } ?: ""
+            "[${f.risk}] ${f.value}$src"
+        }
 }
 
 @Composable

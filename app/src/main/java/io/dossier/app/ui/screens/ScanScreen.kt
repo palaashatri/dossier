@@ -189,9 +189,11 @@ fun ScanScreen(onScanComplete: () -> Unit) {
 /** Convert the raw progressText code into a friendly line for the log. */
 private fun friendlyStage(raw: String): String = when {
     raw.contains("DISCOVERING", ignoreCase = true) -> "Resolving name → username variants"
+    raw.contains("COMPARING", ignoreCase = true) -> "Comparing selfie vs profile avatars"
+    raw.contains("BREACH", ignoreCase = true) -> "Checking email breach / public exposure"
+    raw.contains("ENTITY", ignoreCase = true) -> "Building entity relationship graph"
     raw.contains("COMPILING", ignoreCase = true) -> "Compiling exposure levels"
     raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating AI analysis"
-    raw.contains("COMPARING", ignoreCase = true) -> "Comparing selfie vs profiles"
     raw.contains("AUDITING", ignoreCase = true) -> "Auditing place image metadata"
     else -> raw.lowercase().replace('_', ' ')
 }
@@ -200,8 +202,10 @@ private fun friendlyStage(raw: String): String = when {
 private fun friendlyStageLabel(raw: String): String = when {
     raw.isBlank() -> "Initializing"
     raw.contains("DISCOVERING", ignoreCase = true) -> "Discovering usernames"
+    raw.contains("COMPARING", ignoreCase = true) -> "Comparing faces"
+    raw.contains("BREACH", ignoreCase = true) -> "Breach exposure"
+    raw.contains("ENTITY", ignoreCase = true) -> "Entity graph"
     raw.contains("COMPILING", ignoreCase = true) -> "Compiling report"
     raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating AI analysis"
-    raw.contains("COMPARING", ignoreCase = true) -> "Comparing faces"
     else -> raw.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
 }

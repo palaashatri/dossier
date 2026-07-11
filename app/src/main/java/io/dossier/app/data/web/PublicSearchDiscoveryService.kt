@@ -128,8 +128,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
     )
 
     companion object {
-        private const val MAX_DEFAULT_QUERIES = 18
-        private const val MAX_DEEP_QUERIES = 32
+        private const val MAX_DEFAULT_QUERIES = 24
+        private const val MAX_DEEP_QUERIES = 40
         private const val MAX_PARALLEL_SEARCH_FETCHES = 6
         private const val MAX_PUBLIC_SEARCH_RESULTS = 24
         private const val MIN_PUBLIC_SEARCH_SCORE = 0.28f
@@ -186,6 +186,36 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 PUBLIC_FORUM_QUERY_SITES.forEach { site -> queries.add("$quotedName site:$site") }
             }
 
+            // High-signal contact queries first so they survive MAX_*_QUERIES truncation.
+            // Exact email search can reveal high-value leaks, but keep it bounded.
+            emails.take(if (deepResearch) 4 else 2).forEach { email ->
+                queries.add(quote(email))
+                // Local-part as handle-like query (without domain) when long enough.
+                val local = email.substringBefore("@").trim().removePrefix("+")
+                if (local.length >= 3) {
+                    queries.add(quote(local))
+                }
+                // Deep research only: site-scoped email leak probes.
+                if (deepResearch) {
+                    queries.add("${quote(email)} site:pastebin.com")
+                    queries.add("${quote(email)} site:github.com")
+                }
+            }
+
+            // Phone queries: digits-only and last-10 form, quoted when length >= 8.
+            input.phones
+                .map { it.filter { ch -> ch.isDigit() } }
+                .filter { it.length >= 8 }
+                .distinct()
+                .take(if (deepResearch) 3 else 2)
+                .forEach { digits ->
+                    queries.add(quote(digits))
+                    if (digits.length >= 10) {
+                        val last10 = digits.takeLast(10)
+                        if (last10 != digits) queries.add(quote(last10))
+                    }
+                }
+
             handles.take(if (deepResearch) 8 else 4).forEach { handle ->
                 val quotedHandle = quote(handle)
                 queries.add(quotedHandle)
@@ -203,11 +233,6 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     queries.add("$quotedAlias site:4chan.org")
                     queries.add("$quotedAlias site:boards.4chan.org")
                 }
-            }
-
-            // Exact email search can reveal high-value leaks, but keep it bounded.
-            emails.take(if (deepResearch) 4 else 2).forEach { email ->
-                queries.add(quote(email))
             }
 
             return queries.toList()

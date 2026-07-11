@@ -29,6 +29,13 @@ class RemediationProvider {
         if (types.contains(FindingType.ImageConsistency)) {
             tips.add("Avoid reusing identical avatar images across platforms; crop, tint, or use unique avatars.")
         }
+        if (findings.any {
+                it.evidenceSnippet?.contains("breach", ignoreCase = true) == true ||
+                    it.remediation.contains("MFA", ignoreCase = true)
+            }
+        ) {
+            tips.add("Rotate credentials for breached emails, enable MFA, and watch for account-recovery phishing.")
+        }
 
         if (tips.isEmpty()) {
             tips.add("No critical exposure patterns found. Continue practicing good digital hygiene.")

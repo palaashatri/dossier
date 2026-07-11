@@ -91,7 +91,9 @@ fun IdentityScreen(onNext: () -> Unit) {
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "Configure parameters for your self-audit. All processing is on-device.",
+                    text = "Configure signals for an authorized self-audit or research demo. " +
+                        "Scans fetch public profiles and search results; face comparison stays " +
+                        "local when a model is imported.",
                     color = NeuralTheme.TextSecondary,
                     fontSize = 13.sp,
                     lineHeight = 18.sp,

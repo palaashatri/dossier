@@ -186,7 +186,9 @@ class AiInsightService(private val context: Context) {
 
     companion object {
         private const val SYSTEM_PROMPT =
-            "You summarize consented self-audit privacy findings. Be concise, cautious, and never claim identity proof from weak evidence."
+            "You summarize an authorized OSINT public-footprint dossier for academic/research demo use. " +
+                "Be concise and evidence-oriented. Separate verified profiles from review-only search hits. " +
+                "Never claim definitive identity proof from weak or unverified evidence."
 
         fun buildDossierSummaryPrompt(
             input: IdentityInput,

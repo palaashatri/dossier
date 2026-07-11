@@ -181,4 +181,49 @@ class ProfileBelongingTest {
         )
         assertTrue("User-supplied email in page should be accepted", result)
     }
+
+    @Test
+    fun exactPrimaryUsername_onExistingPage_isAccepted() {
+        val inputWithHandle = IdentityInput(
+            fullName = "Jane",
+            primaryUsername = "samplecaster"
+        )
+        val page = "samplecaster's stream schedule and VODs."
+        val result = belongs(
+            candidateUsername = "samplecaster",
+            candidateUrl = "https://www.twitch.tv/samplecaster",
+            extractedText = page,
+            input = inputWithHandle
+        )
+        assertTrue("Exact primaryUsername match should attribute when page exists", result)
+    }
+
+    @Test
+    fun exactUsernameInUsernamesList_isAccepted() {
+        val inputWithHandle = IdentityInput(
+            fullName = "",
+            usernames = listOf("cool_hacker_42")
+        )
+        val page = "Projects by cool_hacker_42"
+        val result = belongs(
+            candidateUsername = "cool_hacker_42",
+            candidateUrl = "https://github.com/cool_hacker_42",
+            extractedText = page,
+            input = inputWithHandle
+        )
+        assertTrue("Exact match against input.usernames should attribute", result)
+    }
+
+    @Test
+    fun singleWordName_withEmailSignal_andNameOnPage_isAccepted() {
+        val weakWithEmail = IdentityInput(fullName = "Jane", emails = listOf("jane@example.com"))
+        val page = "Jane's profile on GitHub with some repositories."
+        val result = belongs(
+            candidateUsername = "otherhandle",
+            candidateUrl = "https://github.com/otherhandle",
+            extractedText = page,
+            input = weakWithEmail
+        )
+        assertTrue("Single-word name + email present may accept name-on-page", result)
+    }
 }

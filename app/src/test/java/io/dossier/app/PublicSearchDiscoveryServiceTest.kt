@@ -72,4 +72,53 @@ class PublicSearchDiscoveryServiceTest {
         assertTrue("High-signal profile result should score strongly", score >= 0.80f)
         assertNotNull(score)
     }
+
+    @Test
+    fun buildQueries_includesPhoneDigitsAndEmailLocalPart() {
+        val input = IdentityInput(
+            fullName = "Jane Doe",
+            primaryUsername = "janedoe",
+            emails = listOf("jane.doe@example.com"),
+            phones = listOf("+1 (415) 555-2671")
+        )
+
+        val queries = PublicSearchDiscoveryService.buildSearchQueries(input)
+
+        assertTrue(
+            "Should include digits-only phone query",
+            queries.any { it.contains("4155552671") }
+        )
+        assertTrue(
+            "Should include email local-part as handle-like query",
+            queries.any { it == "\"jane.doe\"" }
+        )
+        assertTrue(
+            "Exact email still searched",
+            queries.any { it.contains("jane.doe@example.com") }
+        )
+    }
+
+    @Test
+    fun buildQueries_deepResearchAddsEmailSiteProbes() {
+        val input = IdentityInput(
+            fullName = "Jane Doe",
+            emails = listOf("jane.doe@example.com")
+        )
+
+        val defaultQueries = PublicSearchDiscoveryService.buildSearchQueries(input, deepResearch = false)
+        val deepQueries = PublicSearchDiscoveryService.buildSearchQueries(input, deepResearch = true)
+
+        assertTrue(
+            "Default mode should not include pastebin email site probe",
+            defaultQueries.none { it.contains("site:pastebin.com") }
+        )
+        assertTrue(
+            "Deep research should probe pastebin for email",
+            deepQueries.any { it.contains("site:pastebin.com") && it.contains("jane.doe@example.com") }
+        )
+        assertTrue(
+            "Deep research should probe github for email",
+            deepQueries.any { it.contains("site:github.com") && it.contains("jane.doe@example.com") }
+        )
+    }
 }

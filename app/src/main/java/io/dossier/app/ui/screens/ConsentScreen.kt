@@ -1,7 +1,6 @@
 package io.dossier.app.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -22,9 +21,8 @@ import io.dossier.app.ui.components.GeminiSpark
 import io.dossier.app.ui.theme.NeuralTheme
 
 /**
- * Consent screen — calm, warm, inviting first impression. Clean typography,
- * generous whitespace, a single coral CTA. No pulsing, no sweep borders, no
- * monospace badges, no rotating bullets.
+ * Consent screen — academic / demo framing. Honest about network calls and
+ * optional remote AI; face comparison stays local only when a model is imported.
  */
 @Composable
 fun ConsentScreen(onAccepted: () -> Unit) {
@@ -46,7 +44,6 @@ fun ConsentScreen(onAccepted: () -> Unit) {
             ) {
                 Spacer(Modifier.height(40.dp))
 
-                // Calm static spark mark
                 GeminiSpark(size = 56.dp)
 
                 Spacer(Modifier.height(24.dp))
@@ -59,7 +56,7 @@ fun ConsentScreen(onAccepted: () -> Unit) {
                     textAlign = TextAlign.Center
                 )
                 Text(
-                    text = "Privacy Exposure Audit",
+                    text = "Public Footprint Investigation",
                     color = NeuralTheme.TextSecondary,
                     fontSize = 15.sp,
                     fontStyle = FontStyle.Italic,
@@ -68,7 +65,6 @@ fun ConsentScreen(onAccepted: () -> Unit) {
 
                 Spacer(Modifier.height(32.dp))
 
-                // Consent card — clean, flat, readable
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground),
@@ -83,10 +79,15 @@ fun ConsentScreen(onAccepted: () -> Unit) {
                             modifier = Modifier.padding(bottom = 10.dp)
                         )
                         Text(
-                            text = "This app audits your own public exposure using signals you supply. " +
-                                "It checks public profile pages for your name and handles, extracts " +
-                                "exposed PII, and estimates where images were taken. All processing " +
-                                "is on-device. No telemetry, no backend, no third-party identification.",
+                            text = "This app investigates a subject's public digital footprint from " +
+                                "identity signals you supply (name, handles, emails, profile URLs, " +
+                                "optional selfie). It makes network requests to public profile pages, " +
+                                "search engines, and image indexes. Optional breach checks (HIBP) and " +
+                                "optional remote AI summaries contact third-party services when you " +
+                                "enable them. Face comparison runs locally only when you import a face " +
+                                "embedding model — selfie and avatar bytes are not uploaded for matching. " +
+                                "There is no project-hosted backend or app telemetry, but processing is " +
+                                "not fully on-device.",
                             color = NeuralTheme.TextSecondary,
                             fontSize = 13.sp,
                             lineHeight = 20.sp
@@ -96,14 +97,12 @@ fun ConsentScreen(onAccepted: () -> Unit) {
 
                 Spacer(Modifier.height(20.dp))
 
-                // Safety points — static, clean
-                ConsentItem("Self-consented targets only")
-                ConsentItem("100% local, in-memory storage")
-                ConsentItem("Face matching is local and self-consented")
-                ConsentItem("EXIF GPS location safety gate")
+                ConsentItem("Authorized research, self-audit, or course demo only")
+                ConsentItem("Network: public profiles, search, optional HIBP / remote AI")
+                ConsentItem("Face comparison is local when a model is imported")
+                ConsentItem("Session data is in-memory; purge clears the dossier")
             }
 
-            // Single calm CTA
             Button(
                 onClick = onAccepted,
                 colors = ButtonDefaults.buttonColors(containerColor = NeuralTheme.Cobalt),

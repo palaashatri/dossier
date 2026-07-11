@@ -63,7 +63,8 @@ The following data stays local in the current design:
 
 - Selfie and selected image/video bytes are not uploaded by the reverse media lookup pipeline.
 - Video lookup samples frames locally and searches only OCR/label text.
-- Face detection is used as a safety gate; the app does not perform public facial identification or face matching.
+- Face *detection* is a safety gate for reverse media lookup (no public facial identification of strangers).
+- Face *consistency* scoring against discovered profile avatars is optional and on-device only when you import a face embedding model (and calibration for evidence thresholds). Avatar downloads are bounded; selfie bytes are not uploaded for matching.
 - Password plaintext is cleared from the breach screen after checks and is not included in results.
 
 API keys for remote AI providers are encrypted with Android Keystore-backed AES-GCM before persistence. HIBP API keys are entered per lookup and are not persisted.
@@ -224,6 +225,7 @@ app/src/test/java/io/dossier/app/
 
 ## Known Limitations
 
+- **Not fully on-device.** Profile checks, search/image indexes, optional HIBP, model downloads, and optional remote AI all use the network. Consent and export copy reflect this.
 - Public sites can block, rate-limit, challenge, hide content, or change markup at any time.
 - Search-engine scraping is best-effort; Google, Yandex, Bing, and DuckDuckGo may return consent/challenge pages or markup the parser cannot read.
 - The initial profile scan can still fan out heavily for many selected variants and platforms.
@@ -231,6 +233,7 @@ app/src/test/java/io/dossier/app/
 - Search and image-index hits are review candidates, not verified ownership.
 - Reverse media location is an estimate. If no strong place phrase is found, the maps link may be based on raw OCR/label query text.
 - Face consistency requires a user-imported ONNX/TFLite face model. Scores become identity evidence only after a matching calibration JSON is imported. Without calibration, cosine scores are shown as non-evidence diagnostics.
+- Breach digests in the dossier report are only populated when breach-related findings exist on the scan session; the dedicated Breach tab is the primary HIBP UI.
 - Remote AI provider API keys are encrypted with Android Keystore-backed AES-GCM before persistence; HIBP keys are per-session inputs.
 - Remote AI calls send dossier summary prompts to the configured provider.
 - Release signing uses private `RELEASE_*` Gradle properties locally, or `ANDROID_KEYSTORE_*` secrets in `.github/workflows/build-release-apk.yml`. Unsigned release artifacts are never published as a GitHub release.

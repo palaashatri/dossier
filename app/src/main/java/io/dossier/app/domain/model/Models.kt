@@ -190,3 +190,50 @@ data class ReverseVideoLookupResult(
         val faceDetected: Boolean
     )
 }
+
+// ---- Entity graph (dossier fusion) ------------------------------------------
+
+@Serializable
+enum class EntityType {
+    Person,
+    Username,
+    Email,
+    Phone,
+    Profile,
+    Organization,
+    Location,
+    Image,
+    Breach,
+    Website
+}
+
+@Serializable
+data class DossierEntity(
+    val id: String,
+    val type: EntityType,
+    val label: String,
+    val confidence: Float = 0.5f,
+    val sourceUrls: List<String> = emptyList()
+)
+
+@Serializable
+data class DossierEdge(
+    val fromId: String,
+    val toId: String,
+    val relation: String,
+    val evidence: String? = null
+)
+
+@Serializable
+data class EntityGraph(
+    val entities: List<DossierEntity> = emptyList(),
+    val edges: List<DossierEdge> = emptyList()
+)
+
+@Serializable
+data class BreachDigest(
+    val email: String,
+    val breachCount: Int,
+    val sources: List<String> = emptyList(),
+    val note: String? = null
+)

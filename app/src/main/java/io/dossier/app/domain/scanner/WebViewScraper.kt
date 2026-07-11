@@ -207,10 +207,11 @@ class WebViewScraper(private val context: Context) {
 
     companion object {
         // Overall budget for a single render (load + settle).
-        private const val RENDER_TIMEOUT_MS = 9_000L
+        // Slightly longer budget for JS-heavy social profiles (demo reliability).
+        private const val RENDER_TIMEOUT_MS = 14_000L
         // How long to wait between content-stability polls.
         private const val SETTLE_POLL_INTERVAL_MS = 500L
         // Max stability polls before we snapshot whatever we have.
-        private const val MAX_SETTLE_POLLS = 8
+        private const val MAX_SETTLE_POLLS = 12
     }
 }

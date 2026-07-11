@@ -3,12 +3,14 @@ package io.dossier.app.domain.scanner
 import android.content.Context
 import android.net.Uri
 import io.dossier.app.data.ai.AiInsightService
+import io.dossier.app.data.breach.BreachCheckService
 import io.dossier.app.data.face.FaceEmbeddingModelStore
 import io.dossier.app.data.face.ProfileImageDownloader
 import io.dossier.app.data.local.ProfileConsistencyCache
 import io.dossier.app.domain.ai.LocalAiModelType
 import io.dossier.app.domain.face.FaceConsistencyChecker
 import io.dossier.app.domain.face.FaceEmbeddingService
+import io.dossier.app.domain.graph.EntityGraphBuilder
 import io.dossier.app.domain.model.*
 import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.remediation.RemediationProvider
@@ -38,6 +40,12 @@ object ScanSession {
 
     private val _faceConsistencyMatches = MutableStateFlow<List<FaceConsistencyMatch>>(emptyList())
     val faceConsistencyMatches: StateFlow<List<FaceConsistencyMatch>> = _faceConsistencyMatches
+
+    private val _entityGraph = MutableStateFlow(EntityGraph())
+    val entityGraph: StateFlow<EntityGraph> = _entityGraph
+
+    private val _breachDigests = MutableStateFlow<List<BreachDigest>>(emptyList())
+    val breachDigests: StateFlow<List<BreachDigest>> = _breachDigests
 
     private val _riskLevel = MutableStateFlow(RiskLevel.Low)
     val riskLevel: StateFlow<RiskLevel> = _riskLevel
@@ -77,6 +85,33 @@ object ScanSession {
 
     fun getPlaceImage(): Uri? = placeImageUri
 
+    /**
+     * Snapshot of report-exportable session state after a scan.
+     */
+    data class ExportState(
+        val input: IdentityInput?,
+        val findings: List<Finding>,
+        val profileScanResults: List<ProfileScanResult>,
+        val faceConsistencyMatches: List<FaceConsistencyMatch>,
+        val entityGraph: EntityGraph,
+        val breachDigests: List<BreachDigest>,
+        val riskLevel: RiskLevel,
+        val remediationTips: List<String>,
+        val aiSummary: String?
+    )
+
+    fun exportState(): ExportState = ExportState(
+        input = _currentInput.value,
+        findings = _findings.value,
+        profileScanResults = _profileScanResults.value,
+        faceConsistencyMatches = _faceConsistencyMatches.value,
+        entityGraph = _entityGraph.value,
+        breachDigests = _breachDigests.value,
+        riskLevel = _riskLevel.value,
+        remediationTips = _remediationTips.value,
+        aiSummary = _aiSummary.value
+    )
+
     suspend fun executeScan(context: Context, input: IdentityInput, deepResearch: Boolean = false) = withContext(Dispatchers.IO) {
         // HONESTY: no mock selfie is generated. If the user didn't supply one,
         // face comparison is skipped entirely (the report shows an honest
@@ -89,6 +124,8 @@ object ScanSession {
         _placeScanResult.value = null
         _profileScanResults.value = emptyList()
         _faceConsistencyMatches.value = emptyList()
+        _entityGraph.value = EntityGraph()
+        _breachDigests.value = emptyList()
         _riskLevel.value = RiskLevel.Low
         _remediationTips.value = emptyList()
         _aiSummary.value = null
@@ -122,6 +159,26 @@ object ScanSession {
             )
             _faceConsistencyMatches.value = faceMatches
             allFindings.addAll(faceFindingsFromMatches(faceMatches))
+
+            // Breach check (best-effort) — never fails the scan.
+            _progressText.value = "CHECKING_BREACH_EXPOSURE..."
+            val digests = runBreachChecks(
+                context = context,
+                emails = inputToUse.emails,
+                deepResearch = deepResearch,
+                findingsOut = allFindings
+            )
+            _breachDigests.value = digests
+
+            _progressText.value = "BUILDING_ENTITY_GRAPH..."
+            val graph = EntityGraphBuilder.build(
+                input = inputToUse,
+                profileResults = scanResults,
+                findings = allFindings,
+                faceMatches = faceMatches,
+                breachDigests = digests
+            )
+            _entityGraph.value = graph
 
             _progressText.value = "COMPILING_EXPOSURE_LEVELS..."
             val riskScorer = RiskScorer()
@@ -174,6 +231,8 @@ object ScanSession {
         _placeScanResult.value = null
         _profileScanResults.value = emptyList()
         _faceConsistencyMatches.value = emptyList()
+        _entityGraph.value = EntityGraph()
+        _breachDigests.value = emptyList()
         _riskLevel.value = RiskLevel.Low
         _remediationTips.value = emptyList()
         _aiSummary.value = null
@@ -183,6 +242,65 @@ object ScanSession {
         cache.clearAll()
         cache.close()
         ProfileImageDownloader(context).clearCache()
+    }
+
+    private suspend fun runBreachChecks(
+        context: Context,
+        emails: List<String>,
+        deepResearch: Boolean,
+        findingsOut: MutableList<Finding>
+    ): List<BreachDigest> {
+        val cleanEmails = emails.map { it.trim() }.filter { it.isNotBlank() }.distinctBy { it.lowercase() }
+        if (cleanEmails.isEmpty()) return emptyList()
+
+        return try {
+            val service = BreachCheckService(context)
+            val results = service.checkEmails(cleanEmails, hibpApiKey = null, deepResearch = deepResearch)
+            results.map { result ->
+                val sources = buildList {
+                    addAll(result.breaches.map { it.title.ifBlank { it.name } })
+                    addAll(result.publicEvidence.map { it.url }.filter { it.isNotBlank() })
+                }.distinct()
+                val breachCount = result.breaches.size
+                val publicHits = result.publicEvidence.size
+
+                if (breachCount > 0) {
+                    findingsOut.add(
+                        Finding(
+                            type = FindingType.Email,
+                            value = result.email,
+                            sourceUrl = null,
+                            evidenceSnippet = "Appears in $breachCount known breach(es): ${result.breaches.take(5).joinToString { it.title.ifBlank { it.name } }}",
+                            confidence = 0.95f,
+                            risk = RiskLevel.High,
+                            remediation = "Change passwords for this address, enable MFA, and monitor for account takeover."
+                        )
+                    )
+                } else if (publicHits > 0) {
+                    findingsOut.add(
+                        Finding(
+                            type = FindingType.SensitiveSnippet,
+                            value = result.email,
+                            sourceUrl = result.publicEvidence.firstOrNull()?.url,
+                            evidenceSnippet = "Public index mentions this email ($publicHits hit(s)). ${result.error ?: ""}".trim(),
+                            confidence = 0.55f,
+                            risk = RiskLevel.Medium,
+                            remediation = "Review indexed pages and request de-indexing where personal data is exposed."
+                        )
+                    )
+                }
+
+                BreachDigest(
+                    email = result.email,
+                    breachCount = breachCount,
+                    sources = sources,
+                    note = result.error
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            emptyList()
+        }
     }
 
     private suspend fun runFaceConsistency(

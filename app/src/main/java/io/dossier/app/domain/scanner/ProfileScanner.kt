@@ -43,7 +43,14 @@ class ProfileScanner(
 
         val allCandidates = mutableListOf<UsernameCandidate>()
 
-        // If no usernames/primary username provided but name is, derive candidates from name
+        // Email local-parts always seed username variants (even when explicit
+        // usernames are also present). Critical for email-only scans.
+        val emailBasedCandidates: List<UsernameVariant> =
+            variantGenerator.generateFromEmails(input.emails)
+
+        // If no usernames/primary username provided but name is, derive candidates from name.
+        // Also derive name candidates when usernames are empty even if emails exist —
+        // emails alone still benefit from name-based fan-out when a name is present.
         val nameBasedCandidates: List<UsernameVariant> = if (usernames.isEmpty() && input.fullName.isNotBlank()) {
             variantGenerator.generateFromName(input.fullName)
         } else {
@@ -54,21 +61,25 @@ class ProfileScanner(
         usernames.forEach { baseUser ->
             val variants = variantGenerator.generate(baseUser)
             variants.forEach { variant ->
-                PLATFORMS.forEach { template ->
-                    if (template.shouldFetchByDefault) {
-                        val profileUrl = template.urlPattern.replace("{username}", variant.username)
-                        allCandidates.add(
-                            UsernameCandidate(
-                                username = variant.username,
-                                platform = template.platform,
-                                url = profileUrl,
-                                matchType = variant.type,
-                                confidence = if (variant.type == UsernameMatchType.Exact) 1.0f else 0.8f
-                            )
-                        )
-                    }
-                }
+                addPlatformCandidates(
+                    allCandidates = allCandidates,
+                    variant = variant,
+                    baseConfidence = if (variant.type == UsernameMatchType.Exact) 1.0f else 0.8f
+                )
             }
+        }
+
+        // Email-local candidates (slightly below explicit username confidence)
+        emailBasedCandidates.forEach { variant ->
+            addPlatformCandidates(
+                allCandidates = allCandidates,
+                variant = variant,
+                baseConfidence = when (variant.type) {
+                    UsernameMatchType.Exact -> 0.85f
+                    UsernameMatchType.FuzzyVariant -> 0.65f
+                    else -> 0.75f
+                }
+            )
         }
 
         // Name-derived candidates (slightly lower base confidence since inferred)
@@ -126,7 +137,8 @@ class ProfileScanner(
                         .split("/").firstOrNull() ?: ""
                     domain.isNotBlank() && normalizedUrl.contains(domain, ignoreCase = true)
                 }
-                val platform = matchedTemplate?.platform ?: Platform.GitHub
+                // Unknown host → Website, never default to GitHub
+                val platform = matchedTemplate?.platform ?: Platform.Website
                 val username = normalizedUrl.split("/").lastOrNull { it.isNotBlank() } ?: "unknown"
                 
                 allCandidates.add(
@@ -159,17 +171,41 @@ class ProfileScanner(
             deferredResults.awaitAll()
         }
 
-        // ---- Pass 2: one-hop pivot discovery. For every profile confirmed in
-        // pass 1, read its rendered content/links for OTHER handles the user
-        // self-disclosed, and check those as new candidates. This is the only way
-        // to find handles like "samplecaster" that don't derive from the name.
-        // (deanonymizer-style cross-platform pivot.)
+        // ---- Pass 2 (+ hop 2): multi-hop pivot discovery. For every profile
+        // confirmed in pass 1, read its rendered content/links for OTHER handles
+        // the user self-disclosed, and check those as new candidates. A second
+        // hop runs on newly verified pivot results (bounded total pivots).
         //
         // FAIL-SAFE: the entire pivot pass is wrapped so ANY failure here never
         // destroys the Pass-1 results. A broken pivot must not make the scan
         // return empty — Pass 1's findings are always surfaced.
         val pivotResults: List<ProfileScanResult> = try {
-            runPivotPass(initialResults, uniqueCandidates.map { it.url.lowercase() }.toSet(), input, deepResearch)
+            val scanned = uniqueCandidates.map { it.url.lowercase() }.toMutableSet()
+            val hop1 = runPivotPass(
+                seedResults = initialResults,
+                alreadyScannedUrls = scanned,
+                input = input,
+                deepResearch = deepResearch,
+                remainingBudget = MAX_PIVOT_CANDIDATES
+            )
+            hop1.forEach { scanned.add(it.candidate.url.lowercase()) }
+            // Hop 2: only on newly verified pivot results (soft-existence pages
+            // with verified=false do not seed further pivots). Shared budget across hops.
+            val usedBudget = hop1.size
+            val remaining = (MAX_PIVOT_CANDIDATES - usedBudget).coerceAtLeast(0)
+            val hop2Seeds = hop1.filter { it.exists && it.verified }
+            val hop2 = if (hop2Seeds.isNotEmpty() && remaining > 0) {
+                runPivotPass(
+                    seedResults = hop2Seeds,
+                    alreadyScannedUrls = scanned,
+                    input = input,
+                    deepResearch = deepResearch,
+                    remainingBudget = remaining
+                )
+            } else {
+                emptyList()
+            }
+            hop1 + hop2
         } catch (e: Throwable) {
             e.printStackTrace()
             emptyList()
@@ -209,14 +245,17 @@ class ProfileScanner(
      * try/catch by the caller without entangling Pass-1 logic.
      */
     private suspend fun runPivotPass(
-        initialResults: List<ProfileScanResult>,
+        seedResults: List<ProfileScanResult>,
         alreadyScannedUrls: Set<String>,
         input: IdentityInput,
-        deepResearch: Boolean
+        deepResearch: Boolean,
+        remainingBudget: Int
     ): List<ProfileScanResult> {
+        if (remainingBudget <= 0) return emptyList()
         val scannedUrls = alreadyScannedUrls.toMutableSet()
         val pivotCandidates = mutableListOf<HandleExtractor.PivotCandidate>()
-        initialResults.filter { it.exists && it.verified }.forEach { confirmed ->
+        seedResults.filter { it.exists && it.verified }.forEach { confirmed ->
+            if (pivotCandidates.size >= remainingBudget) return@forEach
             val sourceLabel = confirmed.candidate.platform.name
             val pivots = HandleExtractor.extract(
                 profileText = confirmed.extractedText,
@@ -226,7 +265,7 @@ class ProfileScanner(
                 sourcePlatformLabel = sourceLabel
             )
             pivots.forEach { pc ->
-                if (pc.candidate.url.lowercase() !in scannedUrls && pivotCandidates.size < MAX_PIVOT_CANDIDATES) {
+                if (pc.candidate.url.lowercase() !in scannedUrls && pivotCandidates.size < remainingBudget) {
                     pivotCandidates.add(pc)
                     scannedUrls.add(pc.candidate.url.lowercase())
                 }
@@ -236,7 +275,7 @@ class ProfileScanner(
             // profile, read their pages for MORE handles, and pivot from those
             // too. (deanonymizer's website link-follower.) Bounded to keep
             // runtime sane.
-            if (deepResearch && pivotCandidates.size < MAX_PIVOT_CANDIDATES) {
+            if (deepResearch && pivotCandidates.size < remainingBudget) {
                 val websiteFollower = io.dossier.app.data.web.WebsiteLinkFollower(context)
                 val personalSites = confirmed.links
                     .filter { link ->
@@ -259,7 +298,7 @@ class ProfileScanner(
                             sourcePlatformLabel = "$sourceLabel → website"
                         )
                         sitePivots.forEach { pc ->
-                            if (pc.candidate.url.lowercase() !in scannedUrls && pivotCandidates.size < MAX_PIVOT_CANDIDATES) {
+                            if (pc.candidate.url.lowercase() !in scannedUrls && pivotCandidates.size < remainingBudget) {
                                 pivotCandidates.add(pc)
                                 scannedUrls.add(pc.candidate.url.lowercase())
                             }
@@ -472,13 +511,34 @@ class ProfileScanner(
     // Concurrency limit for the (main-thread) embedded browser renders.
     private val webviewSemaphore = Semaphore(2)
 
-    // Bounds the one-hop pivot pass so it can't run away.
-    private val MAX_PIVOT_CANDIDATES = 20
+    // Bounds total pivot candidates across hops so the pass can't run away.
+    private val MAX_PIVOT_CANDIDATES = 30
     // Bounds the Deep Research website link-following per confirmed profile.
-    private val MAX_WEBSITE_FOLLOWS = 3
+    private val MAX_WEBSITE_FOLLOWS = 5
     // Bounds the initial fan-out (name-variants × platforms) so a long name with
     // many variants doesn't produce 100+ candidates. Sorted by confidence first.
-    private val MAX_INITIAL_CANDIDATES = 60
+    private val MAX_INITIAL_CANDIDATES = 80
+
+    private fun addPlatformCandidates(
+        allCandidates: MutableList<UsernameCandidate>,
+        variant: UsernameVariant,
+        baseConfidence: Float
+    ) {
+        PLATFORMS.forEach { template ->
+            if (template.shouldFetchByDefault) {
+                val profileUrl = template.urlPattern.replace("{username}", variant.username)
+                allCandidates.add(
+                    UsernameCandidate(
+                        username = variant.username,
+                        platform = template.platform,
+                        url = profileUrl,
+                        matchType = variant.type,
+                        confidence = baseConfidence
+                    )
+                )
+            }
+        }
+    }
 
     /**
      * Two-stage verification:
@@ -568,11 +628,16 @@ class ProfileScanner(
                                 confidenceSignals.add("Direct HTTP 200 page access — real content")
                                 okhttpConfirmed = true
                             } else {
-                                // Substantial page exists but doesn't belong to the user.
-                                return buildResult(
-                                    candidate, exists = false, verified = false,
-                                    verificationStatus = "Exists but not attributed to this identity",
-                                    httpStatus = httpStatus, adjustedConfidence = 0.0f
+                                // Soft existence: page is real but not attributed.
+                                // Surface as exists=true, verified=false so the report
+                                // can show "possible account" without high-risk PII.
+                                return buildSoftExistenceResult(
+                                    candidate = candidate,
+                                    httpStatus = httpStatus,
+                                    displayName = title.ifBlank { null },
+                                    extractedText = text,
+                                    verificationStatus = "Exists but not attributed to this identity — possible account",
+                                    provenance = provenance
                                 )
                             }
                         }
@@ -668,10 +733,14 @@ class ProfileScanner(
                     confidenceSignals.add("Embedded browser render confirmed against DOM")
                     adjustedConfidence = (adjustedConfidence * 0.95f).coerceAtLeast(0.3f)
                 } else {
-                    return buildResult(
-                        candidate, exists = false, verified = false,
-                        verificationStatus = "Exists but not attributed to this identity",
-                        httpStatus = httpStatus, adjustedConfidence = 0.0f
+                    // Soft existence for WebView path (same policy as OkHttp path).
+                    return buildSoftExistenceResult(
+                        candidate = candidate,
+                        httpStatus = httpStatus,
+                        displayName = doc.title().ifBlank { okhttpTitle },
+                        extractedText = extractedText,
+                        verificationStatus = "Exists but not attributed to this identity — possible account",
+                        provenance = provenance
                     )
                 }
             }
@@ -783,16 +852,24 @@ class ProfileScanner(
             )
         }
 
+        // CRITICAL: only rewrite risk/confidence for PlausibleProfileMatch.
+        // PII findings (Email/Phone/etc.) keep the extractor's original risk —
+        // overwriting them with profile confidence was elevating every email to
+        // Critical whenever the account matched well.
         val finalFindings = findings.map { finding ->
-            finding.copy(
-                confidence = adjustedConfidence,
-                risk = when {
-                    adjustedConfidence > 0.85f -> RiskLevel.Critical
-                    adjustedConfidence > 0.70f -> RiskLevel.High
-                    adjustedConfidence > 0.50f -> RiskLevel.Medium
-                    else -> RiskLevel.Low
-                }
-            )
+            if (finding.type == FindingType.PlausibleProfileMatch) {
+                finding.copy(
+                    confidence = adjustedConfidence,
+                    risk = when {
+                        adjustedConfidence > 0.85f -> RiskLevel.High
+                        adjustedConfidence > 0.70f -> RiskLevel.Medium
+                        adjustedConfidence > 0.50f -> RiskLevel.Low
+                        else -> RiskLevel.Low
+                    }
+                )
+            } else {
+                finding
+            }
         }
 
         return ProfileScanResult(
@@ -807,6 +884,45 @@ class ProfileScanner(
             findings = finalFindings,
             confidenceSignals = confidenceSignals,
             verified = verified,
+            verificationStatus = verificationStatus,
+            provenance = provenance
+        )
+    }
+
+    /**
+     * Page clearly exists (HTTP 200 substantial / rendered) but belonging failed.
+     * Report as a possible account without high-risk PII or PlausibleProfileMatch.
+     */
+    private fun buildSoftExistenceResult(
+        candidate: UsernameCandidate,
+        httpStatus: Int?,
+        displayName: String?,
+        extractedText: String,
+        verificationStatus: String,
+        provenance: String?
+    ): ProfileScanResult {
+        val softConfidence = (candidate.confidence * 0.25f).coerceIn(0.1f, 0.35f)
+        val softFinding = Finding(
+            type = FindingType.PublicSearchEvidence,
+            value = candidate.url,
+            sourceUrl = candidate.url,
+            evidenceSnippet = "Account appears to exist on ${candidate.platform.name} under \"${candidate.username}\" but could not be attributed to this identity.",
+            confidence = softConfidence,
+            risk = RiskLevel.Low,
+            remediation = "Review this possible account manually. Do not treat it as confirmed ownership."
+        )
+        return ProfileScanResult(
+            candidate = candidate.copy(confidence = softConfidence),
+            exists = true,
+            httpStatus = httpStatus,
+            displayName = displayName,
+            bio = null,
+            profileImageUrl = null,
+            links = emptyList(),
+            extractedText = extractedText.take(500),
+            findings = listOf(softFinding),
+            confidenceSignals = listOf("Page exists but not attributed to identity"),
+            verified = false,
             verificationStatus = verificationStatus,
             provenance = provenance
         )
@@ -1061,14 +1177,28 @@ class ProfileScanner(
                 return true
             }
 
-            // If user provided almost no identity signals, require VERY strong evidence.
-            // With only a single-word name and nothing else, we have no reliable way to
-            // distinguish the user's real accounts from random strangers — so ONLY accept
-            // URLs the user explicitly supplied (handled above).
+            val suppliedUsernames = buildList {
+                input.primaryUsername?.takeIf { it.isNotBlank() }?.let { add(it) }
+                addAll(input.usernames.filter { it.isNotBlank() })
+            }
+            val exactUsernameMatch = suppliedUsernames.any {
+                it.equals(candidateUsername, ignoreCase = true)
+            }
+
+            // Strong identity includes explicit usernames / primaryUsername —
+            // username-only scans must be able to attribute exact handle matches.
             val hasStrongIdentity = input.fullName.trim().split("\\s+".toRegex()).filter { it.isNotBlank() }.size > 1 ||
                 input.emails.any { it.isNotBlank() } ||
                 input.aliases.any { it.isNotBlank() } ||
-                input.profileUrls.any { it.isNotBlank() }
+                input.profileUrls.any { it.isNotBlank() } ||
+                input.primaryUsername?.isNotBlank() == true ||
+                input.usernames.any { it.isNotBlank() }
+
+            // Exact username match on a verified-existing page is enough when the
+            // user supplied that handle (hasStrongIdentity includes usernames).
+            if (exactUsernameMatch && hasStrongIdentity) {
+                return true
+            }
 
             if (!hasStrongIdentity) {
                 return false
@@ -1077,10 +1207,20 @@ class ProfileScanner(
             val text = (extractedText + " " + (displayName ?: "")).lowercase()
             val fullNameLower = input.fullName.trim().lowercase()
             val nameParts = input.fullName.trim().split("\\s+".toRegex()).filter { it.isNotBlank() }
+            val isSingleWordName = nameParts.size <= 1
+
+            // Single-word name is restricted: allow only when email/alias present
+            // (handled below via page matches) OR exact username match (above).
+            // Without those, fall through carefully — name-embedding is multi-word only.
 
             // 1. Check for full name match
             if (fullNameLower.isNotBlank() && text.contains(fullNameLower)) {
-                return true
+                // Single-word name alone is too weak unless email/alias also present
+                // or exact username already matched (handled above).
+                if (!isSingleWordName) return true
+                val hasEmailOrAlias = input.emails.any { it.isNotBlank() } ||
+                    input.aliases.any { it.isNotBlank() }
+                if (hasEmailOrAlias) return true
             }
 
             // 2. Check if both first and last name match (for multi-word names)
@@ -1100,10 +1240,9 @@ class ProfileScanner(
             }
 
             // 4. Check for any of the user's supplied aliases, locations, or organizations
-            // Guard: skip this for single-word names with no other identity signals,
-            // because aliases/locations/orgs will be empty and location-only matches are too broad.
             val hasMeaningfulIdentitySignals = nameParts.size > 1 ||
                 input.primaryUsername?.isNotBlank() == true ||
+                input.usernames.any { it.isNotBlank() } ||
                 input.emails.any { it.isNotBlank() } ||
                 input.aliases.any { it.isNotBlank() }
             if (hasMeaningfulIdentitySignals) {
@@ -1115,39 +1254,9 @@ class ProfileScanner(
                 }
             }
 
-            // 5. If the username exactly matches the user's primary username, require corroborating
-            // content on the page. A username match alone is NOT enough — random people can have
-            // the same username on different platforms.
-            if (input.primaryUsername?.equals(candidateUsername, ignoreCase = true) == true) {
-                // For multi-word names: accept if the page contains the full name OR both name parts
-                if (nameParts.size > 1 && candidateUsername.length >= 8) {
-                    val first = nameParts.first().lowercase()
-                    val last = nameParts.last().lowercase()
-                    if (text.contains(fullNameLower) || (text.contains(first) && text.contains(last))) {
-                        return true
-                    }
-                }
-                // For any name length: accept if page contains a user-supplied email or alias
-                val emailOnPage = input.emails.any { it.isNotBlank() && text.contains(it.lowercase()) }
-                val aliasOnPage = input.aliases.any { it.isNotBlank() && text.contains(it.lowercase()) }
-                if (emailOnPage || aliasOnPage) {
-                    return true
-                }
-                // Otherwise: primary-username match alone is insufficient — fall through to #6.
-            }
-
-            // 6. Name-derived handle: the candidate username embeds BOTH the full first
+            // 5. Name-derived handle: the candidate username embeds BOTH the full first
             //    AND last name (e.g. "janedoe", "jane.doe", "jane_doe" from
-            //    "Jane Doe"). Such a handle uniquely derives from this person's name,
-            //    so a verified-existing page under it is accepted as a plausible match.
-            //    Guards:
-            //      - multi-word name only (single-word names can't disambiguate)
-            //      - both parts >= 3 chars (avoid tiny fragments)
-            //      - the slug contains each FULL part (rejects initials like "jdoe" and
-            //        single names like "jane"/"doe", which stay ambiguous without
-            //        page-text corroboration).
-            //    Safe because this runs only after the WebView confirm stage verified the
-            //    page renders real content — not the old unverified-slug hallucination.
+            //    "Jane Doe"). Multi-word names only.
             if (nameParts.size > 1) {
                 val first = nameParts.first().lowercase()
                 val last = nameParts.last().lowercase()
