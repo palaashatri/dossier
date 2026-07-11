@@ -223,30 +223,29 @@ app/src/test/java/io/dossier/app/
   scanner attribution, PII extraction, username variants, risk scoring, and video sampling.
 ```
 
+## Status And Roadmap
+
+- **[STATUS.md](STATUS.md)** — what works today, verification, demo checklist, known limits  
+- **[ENHANCEMENTS.md](ENHANCEMENTS.md)** — prioritized next improvements (P0–P6)
+
 ## Known Limitations
 
-- **Not fully on-device.** Profile checks, search/image indexes, optional HIBP, model downloads, and optional remote AI all use the network. Consent and export copy reflect this.
-- Public sites can block, rate-limit, challenge, hide content, or change markup at any time.
-- Search-engine scraping is best-effort; Google, Yandex, Bing, and DuckDuckGo may return consent/challenge pages or markup the parser cannot read.
-- The initial profile scan can still fan out heavily for many selected variants and platforms.
-- Username Discovery currently stores selected variants as username seeds, so the scanner may expand them again.
+- **Not fully on-device.** Profile checks, search/image indexes, breach public search, model downloads, and optional remote AI use the network.
+- Public sites can block, rate-limit, challenge, or change markup at any time; many SPA social profiles stay *Unverifiable*.
 - Search and image-index hits are review candidates, not verified ownership.
-- Reverse media location is an estimate. If no strong place phrase is found, the maps link may be based on raw OCR/label query text.
-- Face consistency requires a user-imported ONNX/TFLite face model. Scores become identity evidence only after a matching calibration JSON is imported. Without calibration, cosine scores are shown as non-evidence diagnostics.
-- Breach digests in the dossier report are only populated when breach-related findings exist on the scan session; the dedicated Breach tab is the primary HIBP UI.
-- Remote AI provider API keys are encrypted with Android Keystore-backed AES-GCM before persistence; HIBP keys are per-session inputs.
-- Remote AI calls send dossier summary prompts to the configured provider.
-- Release signing uses private `RELEASE_*` Gradle properties locally, or `ANDROID_KEYSTORE_*` secrets in `.github/workflows/build-release-apk.yml`. Unsigned release artifacts are never published as a GitHub release.
+- Face consistency needs a user-imported ONNX/TFLite model; calibration JSON is required before scores affect risk.
+- HIBP email breach *catalog* needs an API key (Breach tab); scan fusion still runs public-index email evidence without a key.
+- Reverse media location is an estimate from EXIF/OCR/labels + text search.
+- Session state is in-memory; purge clears the case.
+- Release signing needs private `RELEASE_*` / CI keystore secrets for distribution builds.
 
-## Audit Status
-
-Last checked with:
+## Verification
 
 ```sh
 JAVA_HOME=/Library/Java/JavaVirtualMachines/zulu-21.jdk/Contents/Home ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --quiet
 ```
 
-The command passed locally. `:app:assembleRelease --warning-mode all --quiet` also exits cleanly under JDK 21.
+Passed under JDK 21 after the multi-source fusion work. Prefer JDK 21 (Android lint is unreliable on JDK 25 in this environment).
 
 ## License
 
