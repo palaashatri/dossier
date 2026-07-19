@@ -26,7 +26,7 @@ It is **not** an offline-only tool and **not** a full classified multi-source in
 | Pass 2 — pivots | Up to **30** pivot candidates across **2 hops** from verified profiles; Deep Research follows up to **5** personal sites |
 | Pass 3 — public search | DDG / Bing / Google / Yandex HTML scrape; phone + email local-part queries; unverified review hits |
 | Pass 4 — public images | Identity-term image index hits (no selfie upload) |
-| Face consistency | Selfie + imported ONNX/TFLite → download avatars → cosine scores; calibrated review/high → findings |
+| Face consistency | Selfie + **bundled FaceNet** (or user override) → download avatars → cosine scores; factory/imported calibration → findings |
 | Breach fusion | Auto public email exposure check during scan (HIBP breach titles need API key on Breach tab) |
 | Entity graph | `EntityGraphBuilder` fuses person, handles, emails, phones, profiles, PII, face, breaches |
 | Risk + remediation | Max risk across findings; type-based tips (PII risks no longer clobbered by profile confidence) |
@@ -67,7 +67,7 @@ Unit coverage includes: username variants (email locals, all seeds), belonging, 
 1. **Login-walled / bot-walled platforms** (LinkedIn, Instagram, X, etc.) often return *Unverifiable*; pivots only seed from **verified** profiles.
 2. **Search/image scraping** is fragile (CAPTCHA, markup churn); results are review-only.
 3. **HIBP email breach catalog** needs a user-supplied API key; without it, scan uses public-index email evidence only.
-4. **Face** needs a user-imported model; calibration JSON required before scores affect risk.
+4. **Face** uses bundled FaceNet + factory thresholds (research-grade evaluation still recommended for production claims).
 5. **No people-search / court / property / dark-web dump APIs** beyond HIBP + public web.
 6. **Session is in-memory**; purge clears state (good for privacy, no multi-day case files).
 7. **Release signing** needs private `RELEASE_*` / CI keystore secrets for distribution.

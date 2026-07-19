@@ -311,8 +311,8 @@ object ScanSession {
         if (input.selfieUri.isNullOrBlank()) return emptyList()
 
         val modelStore = FaceEmbeddingModelStore(context)
-        if (!modelStore.isModelImported()) {
-            // Honest empty result: ReportScreen explains that a model is required.
+        if (!modelStore.ensureModelAvailable()) {
+            // Bundled model missing from APK assets — report stays empty.
             return emptyList()
         }
 

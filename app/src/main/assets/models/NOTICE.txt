@@ -1,0 +1,17 @@
+Bundled face embedding weights
+==============================
+
+File: facenet.tflite
+Purpose: On-device face embedding for selfie vs profile-avatar cosine scoring.
+Format: TensorFlow Lite
+
+Source: Open FaceNet TFLite weights redistributed for Android on-device demos
+(compatible with common FaceNet TFLite Android sample projects; e.g. FaceNet
+weights used by public Android FaceNet recognition samples).
+
+Dossier does not upload faces. Embeddings are computed locally and are not
+persisted beyond the scan session scores.
+
+Factory calibration (facenet-calibration.json) is a conservative default pair
+of cosine thresholds for this exact file SHA-256. Replace with an evaluation
+set derived from labeled pairs for research-grade FAR/TAR claims.

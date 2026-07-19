@@ -12,7 +12,7 @@ Prioritized ideas for after the 0.1.0 demo baseline. Ordered by impact vs effort
 | **Soft-verify path for SPA profiles** | Many real profiles die at challenge walls | Cache “exists but unverifiable”; allow Deep Research to still open user-supplied URLs |
 | **Disambiguation UI for common names** | Homonyms flood false candidates | Cluster by co-occurring email/handle/org; “reject / promote” per candidate |
 | **Instrumented smoke test on emulator** | Catch UI/nav regressions before demos | Maestro/Espresso: consent → identity sample → scan cancel → report |
-| **Production face calibration pack** | Face findings never elevate risk without JSON | Ship docs + optional sample thresholds only for a *known* bundled/eval model SHA |
+| **Production face calibration pack** | Factory thresholds are conservative defaults, not a full LFW eval | Run labeled pairs on the shipped `facenet.tflite` SHA and replace asset JSON |
 
 ---
 

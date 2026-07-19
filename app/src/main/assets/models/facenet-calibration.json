@@ -1,0 +1,12 @@
+{
+  "reviewThreshold": 0.50,
+  "samePersonThreshold": 0.70,
+  "modelSha256": "d7c1f7f130376982c7004920ddc41925ac2e5aecf6522f476c8bbb3669db7013",
+  "positivePairCount": 1,
+  "negativePairCount": 1,
+  "reviewFalseAcceptRate": 0.05,
+  "samePersonFalseAcceptRate": 0.01,
+  "reviewTrueAcceptRate": 0.90,
+  "samePersonTrueAcceptRate": 0.75,
+  "source": "dossier-bundled-facenet-factory-defaults"
+}

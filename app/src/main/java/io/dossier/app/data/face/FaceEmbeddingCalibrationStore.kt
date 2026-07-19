@@ -16,19 +16,30 @@ class FaceEmbeddingCalibrationStore(private val context: Context) {
     private val calibrationFile = File(context.filesDir, CALIBRATION_FILE_NAME)
     private val modelStore = FaceEmbeddingModelStore(context)
 
-    fun getThresholds(): FaceEmbeddingThresholds? =
+    fun getThresholds(): FaceEmbeddingThresholds? {
+        // Prefer user-imported calibration when it matches the active model.
         if (calibrationFile.exists()) {
-            runCatching { parseCalibrationJson(calibrationFile.readText()) }
+            val imported = runCatching { parseCalibrationJson(calibrationFile.readText()) }
                 .mapCatching { thresholds ->
-                    thresholds.takeIf { it.modelSha256.equals(modelStore.importedModelSha256(), ignoreCase = true) }
+                    thresholds.takeIf {
+                        it.modelSha256.equals(modelStore.importedModelSha256(), ignoreCase = true)
+                    }
                 }
                 .getOrNull()
-        } else {
-            null
+            if (imported != null) return imported
         }
+        // Fall back to bundled factory defaults when using the shipped FaceNet.
+        return loadBundledThresholds()
+    }
 
     fun isCalibrationImported(): Boolean =
         getThresholds() != null
+
+    fun isUsingBundledCalibration(): Boolean {
+        val thresholds = getThresholds() ?: return false
+        return thresholds.source.contains("bundled", ignoreCase = true) ||
+            thresholds.source.contains("factory", ignoreCase = true)
+    }
 
     fun importCalibration(uri: Uri) {
         val json = context.contentResolver.openInputStream(uri)?.use { input ->
@@ -36,19 +47,50 @@ class FaceEmbeddingCalibrationStore(private val context: Context) {
         } ?: error("Unable to read selected calibration file.")
 
         val thresholds = parseCalibrationJson(json)
+        modelStore.ensureModelAvailable()
         val currentModelSha256 = modelStore.importedModelSha256()
-            ?: error("Import a face embedding model before importing calibration.")
+            ?: error("Face embedding model is not available.")
         require(thresholds.modelSha256.equals(currentModelSha256, ignoreCase = true)) {
-            "Calibration modelSha256 does not match the imported face model."
+            "Calibration modelSha256 does not match the active face model."
         }
 
+        writeCalibrationJson(json)
+    }
+
+    /**
+     * Installs the asset-shipped calibration JSON for the bundled FaceNet when
+     * the active model SHA matches. No-op for user overrides with different SHA.
+     */
+    fun ensureBundledCalibration() {
+        val bundled = loadBundledThresholdsFromAssets() ?: return
+        val activeSha = modelStore.importedModelSha256() ?: return
+        if (!bundled.modelSha256.equals(activeSha, ignoreCase = true)) return
+        // Only overwrite if missing or still the previous bundled file.
+        if (calibrationFile.exists()) {
+            val existing = runCatching { parseCalibrationJson(calibrationFile.readText()) }.getOrNull()
+            if (existing != null &&
+                !existing.source.contains("bundled", ignoreCase = true) &&
+                !existing.source.contains("factory", ignoreCase = true)
+            ) {
+                // Keep a real user-provided evaluation calibration.
+                if (existing.modelSha256.equals(activeSha, ignoreCase = true)) return
+            }
+        }
+        writeCalibrationJson(bundled.toCalibrationJson())
+    }
+
+    fun clearCalibration() {
+        if (calibrationFile.exists()) calibrationFile.delete()
+    }
+
+    private fun writeCalibrationJson(json: String) {
         val tempFile = File(context.filesDir, "$CALIBRATION_FILE_NAME.tmp")
         try {
             FileOutputStream(tempFile).use { output ->
                 output.write(json.toByteArray(Charsets.UTF_8))
             }
             if (!tempFile.renameTo(calibrationFile)) {
-                error("Unable to store selected calibration file.")
+                error("Unable to store calibration file.")
             }
         } catch (e: Exception) {
             if (tempFile.exists()) tempFile.delete()
@@ -56,12 +98,21 @@ class FaceEmbeddingCalibrationStore(private val context: Context) {
         }
     }
 
-    fun clearCalibration() {
-        if (calibrationFile.exists()) calibrationFile.delete()
+    private fun loadBundledThresholds(): FaceEmbeddingThresholds? {
+        val activeSha = modelStore.importedModelSha256() ?: return null
+        val bundled = loadBundledThresholdsFromAssets() ?: return null
+        return bundled.takeIf { it.modelSha256.equals(activeSha, ignoreCase = true) }
     }
+
+    private fun loadBundledThresholdsFromAssets(): FaceEmbeddingThresholds? =
+        runCatching {
+            context.assets.open(BUNDLED_CALIBRATION_ASSET).bufferedReader().use { it.readText() }
+                .let { parseCalibrationJson(it) }
+        }.getOrNull()
 
     companion object {
         private const val CALIBRATION_FILE_NAME = "face-embedding-calibration.json"
+        const val BUNDLED_CALIBRATION_ASSET = "models/facenet-calibration.json"
 
         fun parseCalibrationJson(json: String): FaceEmbeddingThresholds {
             val root = Json.parseToJsonElement(json).jsonObject

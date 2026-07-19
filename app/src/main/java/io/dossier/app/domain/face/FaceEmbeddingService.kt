@@ -10,15 +10,16 @@ import io.dossier.app.data.face.FaceEmbeddingThresholds
 import io.dossier.app.domain.model.FaceConsistencyMatch
 
 /**
- * Honest face consistency service.
+ * Face consistency service using a real embedding model.
  *
- * Earlier versions fabricated a 128-dimensional embedding from ML Kit face
- * bounding boxes. This version runs a user-imported ONNX/TFLite model when one
- * is available, otherwise it reports face presence without a fake score.
+ * Earlier versions fabricated embeddings from ML Kit bounding boxes. This version
+ * runs the **bundled FaceNet TFLite** shipped with the app (or a user-imported
+ * ONNX/TFLite override) and scores cosine similarity. Factory calibration is
+ * applied for the bundled model; users can replace both model and calibration.
  */
 class FaceEmbeddingService(context: Context) {
     private val faceEmbedder = FaceEmbedder(context)
-    private val modelStore = FaceEmbeddingModelStore(context)
+    private val modelStore = FaceEmbeddingModelStore(context).also { it.ensureModelAvailable() }
     private val calibrationStore = FaceEmbeddingCalibrationStore(context)
 
     suspend fun extractAndCompare(
@@ -54,11 +55,11 @@ class FaceEmbeddingService(context: Context) {
             )
         }
 
-        if (!modelStore.isModelImported()) {
+        if (!modelStore.ensureModelAvailable()) {
             return FaceConsistencyMatch(
                 profileUrl = profileUrl,
                 similarityScore = 0f,
-                warning = "Face presence confirmed, but no face embedding model is imported."
+                warning = "Face presence confirmed, but the face embedding model is unavailable."
             )
         }
 
@@ -77,7 +78,7 @@ class FaceEmbeddingService(context: Context) {
             FaceConsistencyMatch(
                 profileUrl = profileUrl,
                 similarityScore = 0f,
-                warning = "Imported face model could not run: ${error.localizedMessage ?: error.javaClass.simpleName}"
+                warning = "Face model could not run: ${error.localizedMessage ?: error.javaClass.simpleName}"
             )
         }
     }
@@ -88,7 +89,7 @@ class FaceEmbeddingService(context: Context) {
     private fun warningForScore(score: Float, thresholds: FaceEmbeddingThresholds?): String =
         when {
             thresholds == null ->
-                "Imported face model produced a cosine score, but no calibrated threshold file is imported."
+                "Face model produced a cosine score, but no matching calibration thresholds are available."
             thresholds.isSamePersonScore(score) ->
                 "Calibrated face model reports a high visual similarity score. Confirm account ownership manually."
             thresholds.isReviewScore(score) ->

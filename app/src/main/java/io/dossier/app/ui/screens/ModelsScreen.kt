@@ -36,7 +36,9 @@ import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.GeminiSpark
 import io.dossier.app.ui.theme.NeuralTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Models tab — manage on-device AI engines. Moved here from IdentityScreen so the
@@ -64,7 +66,16 @@ fun ModelsScreen() {
     var aiCoreChecking by remember { mutableStateOf(false) }
     var pendingImportModel by remember { mutableStateOf<LocalAiModelType?>(null) }
     var providerConfigs by remember { mutableStateOf(providerStore.getAll()) }
+    // Install bundled FaceNet + factory calibration on first Models visit.
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            faceModelStore.ensureModelAvailable()
+        }
+        faceModelRefreshTrigger++
+    }
     val isFaceModelImported = remember(faceModelRefreshTrigger) { faceModelStore.isModelImported() }
+    val faceModelSource = remember(faceModelRefreshTrigger) { faceModelStore.modelSourceLabel() }
+    val faceUsingBundled = remember(faceModelRefreshTrigger) { faceModelStore.isUsingBundledModel() }
     val faceModelSizeBytes = remember(faceModelRefreshTrigger) { faceModelStore.importedModelSizeBytes() }
     val faceThresholds = remember(faceModelRefreshTrigger) { faceCalibrationStore.getThresholds() }
 
@@ -381,12 +392,23 @@ fun ModelsScreen() {
             }
 
             FaceEmbeddingModelCard(
-                isImported = isFaceModelImported,
+                isReady = isFaceModelImported,
+                sourceLabel = faceModelSource,
+                usingBundled = faceUsingBundled,
                 sizeBytes = faceModelSizeBytes,
                 message = faceModelImportMessage,
                 isCalibrationImported = faceThresholds != null,
                 calibrationSummary = faceThresholds.summaryText(),
                 onImport = { faceModelImportLauncher.launch(arrayOf("*/*")) },
+                onRestoreBundled = {
+                    runCatching {
+                        faceModelStore.restoreBundledModel()
+                        faceModelRefreshTrigger++
+                        faceModelImportMessage = "Restored bundled FaceNet + factory calibration."
+                    }.onFailure { error ->
+                        faceModelImportMessage = error.localizedMessage ?: "Unable to restore bundled model."
+                    }
+                },
                 onImportCalibration = {
                     faceCalibrationImportLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
                 }
@@ -569,12 +591,15 @@ private fun AiCoreStatusCard(
 
 @Composable
 private fun FaceEmbeddingModelCard(
-    isImported: Boolean,
+    isReady: Boolean,
+    sourceLabel: String,
+    usingBundled: Boolean,
     sizeBytes: Long,
     message: String?,
     isCalibrationImported: Boolean,
     calibrationSummary: String,
     onImport: () -> Unit,
+    onRestoreBundled: () -> Unit,
     onImportCalibration: () -> Unit
 ) {
     val cardShape = io.dossier.app.ui.theme.DossierCardShape
@@ -597,10 +622,11 @@ private fun FaceEmbeddingModelCard(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = if (isImported) {
-                        "Imported model stored locally (${formatBytes(sizeBytes)}). Import calibrated thresholds before treating scores as identity evidence."
+                    text = if (isReady) {
+                        "$sourceLabel ready (${formatBytes(sizeBytes)}). Selfie vs profile avatars score on-device. " +
+                            "You can replace the model or calibration JSON for research."
                     } else {
-                        "Optional FaceNet/ArcFace ONNX or TFLite import for local similarity scoring."
+                        "Bundled FaceNet failed to install from app assets."
                     },
                     color = NeuralTheme.TextSecondary,
                     fontSize = 11.sp,
@@ -613,13 +639,13 @@ private fun FaceEmbeddingModelCard(
                 modifier = Modifier
                     .clip(RoundedCornerShape(999.dp))
                     .background(
-                        if (isImported) NeuralTheme.Cyan.copy(alpha = 0.16f) else NeuralTheme.BorderColor.copy(alpha = 0.35f)
+                        if (isReady) NeuralTheme.Cyan.copy(alpha = 0.16f) else NeuralTheme.BorderColor.copy(alpha = 0.35f)
                     )
                     .padding(horizontal = 10.dp, vertical = 5.dp)
             ) {
                 Text(
-                    text = if (isImported) "Imported" else "Optional",
-                    color = if (isImported) NeuralTheme.Cyan else NeuralTheme.TextSecondary,
+                    text = if (!isReady) "Missing" else if (usingBundled) "Bundled" else "Custom",
+                    color = if (isReady) NeuralTheme.Cyan else NeuralTheme.TextSecondary,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold
                 )
@@ -629,7 +655,7 @@ private fun FaceEmbeddingModelCard(
         if (message != null) {
             Text(
                 text = message,
-                color = if (isImported) NeuralTheme.Cyan else NeuralTheme.Amber,
+                color = if (isReady) NeuralTheme.Cyan else NeuralTheme.Amber,
                 fontSize = 11.sp,
                 lineHeight = 15.sp,
                 modifier = Modifier.padding(top = 10.dp)
@@ -652,22 +678,37 @@ private fun FaceEmbeddingModelCard(
             colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan)
         ) {
             Text(
-                text = if (isImported) "Replace Model" else "Import Model",
+                text = "Replace with Custom Model",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold
             )
+        }
+
+        if (!usingBundled && isReady) {
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onRestoreBundled,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan)
+            ) {
+                Text(
+                    text = "Restore Bundled FaceNet",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
         OutlinedButton(
             onClick = onImportCalibration,
-            enabled = isImported,
+            enabled = isReady,
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan)
         ) {
             Text(
-                text = if (isCalibrationImported) "Replace Calibration" else "Import Calibration JSON",
+                text = if (isCalibrationImported) "Replace Calibration JSON" else "Import Calibration JSON",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold
             )

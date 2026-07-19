@@ -115,10 +115,9 @@ Local engines:
 
 Face embedding models:
 
-- Import an ONNX or TFLite FaceNet/ArcFace-style model from the Models screen.
-- Provide a selfie during identity intake. During scan, Dossier downloads discovered profile avatars (bounded) and scores them against the selfie when a model is imported.
-- Import model-specific calibration JSON before using face scores as identity evidence. The calibration must include the SHA-256 of the imported model plus evaluation pair counts and measured rates; mismatched calibration files are rejected/ignored. Replacing the model clears the calibration sidecar.
-- Generate calibration offline from labeled same/different cosine pairs for the exact imported model (SHA-256 must match). Example shape:
+- **Bundled by default:** a FaceNet TFLite model ships in `app/src/main/assets/models/facenet.tflite` (~23 MB) with factory calibration (`facenet-calibration.json`). No import required for demos.
+- Provide a selfie during identity intake. During scan, Dossier downloads discovered profile avatars (bounded) and scores them on-device against the selfie.
+- Optional: replace with your own ONNX/TFLite model or evaluation calibration JSON on the Models screen (SHA-256 must match the active model).
 
 ```json
 {
@@ -233,7 +232,7 @@ app/src/test/java/io/dossier/app/
 - **Not fully on-device.** Profile checks, search/image indexes, breach public search, model downloads, and optional remote AI use the network.
 - Public sites can block, rate-limit, challenge, or change markup at any time; many SPA social profiles stay *Unverifiable*.
 - Search and image-index hits are review candidates, not verified ownership.
-- Face consistency needs a user-imported ONNX/TFLite model; calibration JSON is required before scores affect risk.
+- Face consistency uses the bundled FaceNet model (+ factory thresholds). Treat scores as supporting evidence; replace calibration with a real evaluation set for research rigor.
 - HIBP email breach *catalog* needs an API key (Breach tab); scan fusion still runs public-index email evidence without a key.
 - Reverse media location is an estimate from EXIF/OCR/labels + text search.
 - Session state is in-memory; purge clears the case.
