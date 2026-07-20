@@ -61,6 +61,15 @@ private enum class HubTab(val label: String) {
 fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
     var selectedTab by rememberSaveable { mutableStateOf(HubTab.DOSSIER) }
     val dossierNavController: NavHostController = rememberNavController()
+    val currentDossierRoute = dossierNavController.currentBackStackEntryAsState().value?.destination?.route
+
+    // Lock tab to DOSSIER while in the nested dossier flow (identity → scan → report)
+    // Once we navigate to report, stay on DOSSIER tab
+    LaunchedEffect(currentDossierRoute) {
+        if (currentDossierRoute in listOf("identity", "username_discovery", "scan", "report")) {
+            selectedTab = HubTab.DOSSIER
+        }
+    }
 
     // Lottie transition overlay — plays a tagged animation when the dossier
     // flow navigates between screens.

@@ -20,7 +20,8 @@ sealed class Screen(val route: String) {
 
 @Composable
 fun DossierNavHost(navController: NavHostController) {
-    NavHost(navController = navController, startDestination = Screen.Consent.route) {
+    // TEMP: Skip consent, go directly to MainHub for testing
+    NavHost(navController = navController, startDestination = Screen.MainHub.route) {
         composable(Screen.Consent.route) {
             ConsentScreen(
                 onAccepted = { navController.navigate(Screen.MainHub.route) }

@@ -93,14 +93,22 @@ fun ScanScreen(onScanComplete: () -> Unit) {
     var hasStarted by remember { mutableStateOf(false) }
     var navigationCompleted by remember { mutableStateOf(false) }
     LaunchedEffect(isScanning) {
+        android.util.Log.d("ScanScreen", "LaunchedEffect fired: isScanning=$isScanning, hasStarted=$hasStarted, navigationCompleted=$navigationCompleted")
         if (isScanning) {
             hasStarted = true
+            android.util.Log.d("ScanScreen", "Scan started")
         } else if (hasStarted && !navigationCompleted) {
+            android.util.Log.d("ScanScreen", "SCAN FINISHED: calling onScanComplete() NOW")
             liveLogs.add("Scan complete.")
-            delay(500)
             navigationCompleted = true
-            android.util.Log.d("ScanScreen", "Navigating to report (isScanning=$isScanning, hasStarted=$hasStarted)")
-            onScanComplete()
+            delay(500)
+            try {
+                android.util.Log.d("ScanScreen", "CALLING onScanComplete callback")
+                onScanComplete()
+                android.util.Log.d("ScanScreen", "onScanComplete returned successfully")
+            } catch (e: Exception) {
+                android.util.Log.e("ScanScreen", "ERROR in onScanComplete: ${e.message}", e)
+            }
         }
     }
 
