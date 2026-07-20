@@ -91,12 +91,15 @@ fun ScanScreen(onScanComplete: () -> Unit) {
     // false). Cancellation also flips it false, but then onScanComplete fires
     // from the cancel path via reset, so guard against double-navigation.
     var hasStarted by remember { mutableStateOf(false) }
+    var navigationCompleted by remember { mutableStateOf(false) }
     LaunchedEffect(isScanning) {
         if (isScanning) {
             hasStarted = true
-        } else if (hasStarted) {
+        } else if (hasStarted && !navigationCompleted) {
             liveLogs.add("Scan complete.")
             delay(500)
+            navigationCompleted = true
+            android.util.Log.d("ScanScreen", "Navigating to report (isScanning=$isScanning, hasStarted=$hasStarted)")
             onScanComplete()
         }
     }

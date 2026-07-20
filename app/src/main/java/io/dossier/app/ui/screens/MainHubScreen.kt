@@ -161,7 +161,19 @@ private fun DossierNavGraph(
             )
         }
         composable("scan") {
-            ScanScreen(onScanComplete = { navController.navigate("report") })
+            ScanScreen(onScanComplete = {
+                try {
+                    android.util.Log.d("MainHub", "ScanScreen.onScanComplete() called, navigating to report")
+                    android.util.Log.d("MainHub", "Current back stack: ${navController.currentBackStackEntry?.destination?.route}")
+                    navController.navigate("report") {
+                        // Don't pop anything — just push report onto the stack
+                        launchSingleTop = false
+                    }
+                    android.util.Log.d("MainHub", "Navigation to report succeeded")
+                } catch (e: Exception) {
+                    android.util.Log.e("MainHub", "Navigation to report failed: ${e.message}")
+                }
+            })
         }
         composable("report") {
             ReportScreen(

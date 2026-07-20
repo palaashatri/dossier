@@ -1,9 +1,11 @@
 # Dossier — Current Status
 
-**Date**: 2026-07-11  
+**Date**: 2026-07-20 (QA Audit)  
 **Branch**: `main`  
-**Latest commits**: `1bc48f5` (dossier fusion), `78842bc` (face consistency)  
+**Latest commits**: `2571b72` (M6-M16 milestones), `46b4136` (face embedding)  
 **Version**: 0.1.0 (`versionCode` 1)
+
+**⚠️ CRITICAL**: Commits 2571b72 and 46b4136 are UNTESTED on device. Build passes, 126 unit tests pass, but end-to-end flow on emulator blocked by navigation bug (Scan→Report fails; loops back to Identity instead).
 
 ---
 
@@ -12,6 +14,20 @@
 Dossier is an Android app for **authorized public-footprint investigation** (self-audit, research, or course demo). You supply identity signals; the app fans out over public profile templates, one- and two-hop pivots, search/image indexes, optional local face-vs-avatar scoring, fused email breach/public exposure checks, an entity graph, risk scoring, and an AI or baseline narrative.
 
 It is **not** an offline-only tool and **not** a full classified multi-source intelligence platform. Network access to public sites is required for a useful scan.
+
+---
+
+## BLOCKING BUG: Scan → Report Navigation
+
+**Status**: CRITICAL - Prevents device testing of all Report features  
+**Symptoms**: After scan completes, app navigates back to Identity screen instead of Report  
+**Evidence**:
+- ScanScreen logs show scan completing (isScanning → false)
+- onScanComplete() callback should fire and call navController.navigate("report")
+- Instead, user is returned to IdentityScreen  
+**Impact**: Cannot test Report, Entity Graph, Case Comparison, or any downstream features  
+**Workaround**: None (blocking full QA)  
+**Added**: Defensive logging in ScanScreen (line 100) and MainHubScreen (lines 164-175) to capture failure point when device testing resumes
 
 ---
 
