@@ -17,17 +17,17 @@ It is **not** an offline-only tool and **not** a full classified multi-source in
 
 ---
 
-## FIX APPLIED: Scan → Report Navigation
+## BLOCKING BUG: Scan → Report Navigation
 
-**Status**: FIXED (2026-07-20)  
-**Original Issue**: After scan completes, app was not navigating to Report screen  
-**Root Cause**: Unnecessary complexity in LaunchedEffect triggered timing issues  
-**Fix Applied**:
-- Simplified ScanScreen navigation logic (removed 500ms delay, unnecessary logging)
-- Streamlined completion callback to fire immediately when isScanning → false
-- Cleaned up MainHubScreen navigation with direct error handling
-**Verification**: Build passes, 126 unit tests pass  
-**Status**: Ready for device testing to verify Report screen and downstream features
+**Status**: CRITICAL - Prevents device testing of all Report features  
+**Symptoms**: After scan completes, app navigates back to Identity screen instead of Report  
+**Evidence**:
+- ScanScreen logs show scan completing (isScanning → false)
+- onScanComplete() callback should fire and call navController.navigate("report")
+- Instead, user is returned to IdentityScreen  
+**Impact**: Cannot test Report, Entity Graph, Case Comparison, or any downstream features  
+**Workaround**: None (blocking full QA)  
+**Added**: Defensive logging in ScanScreen (line 100) and MainHubScreen (lines 164-175) to capture failure point when device testing resumes
 
 ---
 
