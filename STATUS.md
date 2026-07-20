@@ -29,10 +29,46 @@ It is **not** an offline-only tool and **not** a full classified multi-source in
 | Face consistency | Selfie + **bundled FaceNet** (or user override) → download avatars → cosine scores; factory/imported calibration → findings |
 | Breach fusion | Auto public email exposure check during scan (HIBP breach titles need API key on Breach tab) |
 | Entity graph | `EntityGraphBuilder` fuses person, handles, emails, phones, profiles, PII, face, breaches |
+| Identity graph UI | Interactive node-link `EntityGraphView` (Compose Canvas): type-colored nodes, tap-to-highlight evidence/edges |
+| Evidence layer | Parallel `Evidence`/`EvidenceCollection` model + bidirectional `Evidence ↔ Finding` adapter; `ScannerPlugin`/`EvidenceProducer`/`RelationshipProvider`/`ConfidenceContributor` SDK contracts (no consumers rewritten yet) |
 | Risk + remediation | Max risk across findings; type-based tips (PII risks no longer clobbered by profile confidence) |
 | AI summary | Local Gemma → remote providers (priority order, Keystore keys) → deterministic baseline |
 | Report | Dossier + exposure logs; entity graph + breach sections; full plain-text share |
 | Breach / media / models tabs | Still available as dedicated tools |
+
+---
+
+## Roadmap status (see ROADMAP.md for full mapping)
+
+| Milestone | Status | Notes |
+|---|---|---|
+| 1 Identity Engine | Done | Models, `EntityGraph`, serialization, renderer interface (`EntityGraphView`) |
+| 2 Scanner Framework | Done | `ProfileScanner` + PII/face/breach passes; plugin SDK contracts added (M15) |
+| 3 Reverse Image Pipeline | Done | `ReverseImageLookupService` (EXIF/OCR/labels, no selfie upload) |
+| 4 Username Correlation | Done | `UsernameVariantGenerator` + platform checks |
+| 5 Public Page Intelligence | Done | PII extraction on profiles/search |
+| 6 Evidence Correlation | Done | `EntityGraphBuilder` now fuses `Evidence` natively (kind→entity mapping + scanner-asserted `EvidenceRelationship` seeding) alongside `Finding`; graph consumes the parallel Evidence layer directly |
+| 7 Confidence Engine | Done (core) | `ConfidenceEngine` + 4 contributors (username sim, email-domain, shared-identifier, shared-domain) → explainable per-edge confidence |
+| 8 Identity Graph | Done | Interactive `EntityGraphView` (Graph+List a11y) on Report |
+| 9 Exposure Engine | Done | `ExposureEngine` derives 6 sub-scores (Identity/Professional/Personal/Contact/Image/Location) + Top-10 findings; shown in report |
+| 10 Attack Paths | Done | `AttackPathFinder` BFS over graph from subject to breach/risk endpoints; shown in report |
+| 11 Remediation Engine | Done | `RemediationProvider.getStructuredTips` → Problem/Evidence/Risk/Fix/Impact; shown in report |
+| 12 AI Layer | Done | Local Gemma + remote providers + baseline |
+| 13 Timeline | Done | `CaseComparisonScreen` (CASES tab) lists saved local cases, single-case snapshot, auto-selects most-recent two |
+| 14 Scan Comparison | Done | `CaseComparisonScreen` renders CaseDiff: added/removed/changed findings, profiles/breaches delta, risk + exposure delta |
+| 15 Plugin SDK | Done (core) | `PluginRegistry` + `runPlugins` aggregator + `SeedEvidencePlugin` example; plugins feed confidence engine |
+| 16 Performance | Done | Cancellable scan scope + Cancel button; `MemoryGuard` caps retained findings (honest "N omitted" notice on report); `ScanResumeStore` persists a local resume point surfaced as "Resume last scan" on Identity |
+| 17 Android UX | Done | Compose hub + report + tabs |
+
+**Divergence from the idealized ROADMAP:** the shipped app uses `Finding` as the
+integration hub (produced by scanners, consumed by graph/risk/remediation/AI/
+export). The ROADMAP's `Evidence` type is introduced **in parallel** with a
+lossless adapter; the entity graph and confidence engine now consume `Evidence`
+directly (M6). `ProfileScanner` additionally emits an `EvidenceCollection`
+*natively* (`scanIdentityEvidence` / `toEvidenceCollection`) — profile matches,
+PII, and scanner-asserted relationships (username↔profile, PII-on-profile) — so
+the scanner's structural knowledge feeds the correlation engine without
+re-running the network scan. Existing `Finding`-based paths are untouched.
 
 ---
 

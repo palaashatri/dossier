@@ -33,7 +33,7 @@ Prioritized ideas for after the 0.1.0 demo baseline. Ordered by impact vs effort
 
 | Enhancement | Why | Notes |
 |---|---|---|
-| **Visual entity graph** | Force-directed or layered list with filters | Compose Canvas or simple adjacency list with types colored |
+| **Visual entity graph** | DONE — `EntityGraphView` (Compose Canvas, type-colored, tap-to-highlight evidence) on Report | Extend with zoom/pan + edge-filter by relation |
 | **Source confidence legend** | Verified vs search vs soft existence | Badges already partial; make consistent everywhere |
 | **PDF / Markdown export** | Better hand-in than plain text share | On-device template |
 | **Scan progress by platform** | “GitHub 12/12, Reddit…” | Better live demo narrative |
@@ -93,9 +93,10 @@ Only pursue with clear legal/ethical framing:
 
 1. Encrypted optional HIBP key + wire into scan fusion  
 2. Per-platform GitHub + Reddit JSON enrichment  
-3. Visual entity graph on Report  
+3. ~~Visual entity graph on Report~~ — DONE (`EntityGraphView`)  
 4. Emulator smoke test script  
-5. One public demo preset (e.g. well-known open-source maintainers’ *public* handles only)
+5. One public demo preset (e.g. well-known open-source maintainers’ *public* handles only)  
+6. Extend `ProfileScanner` to emit `EvidenceCollection` (parallel to `Finding`) and build a folding `ConfidenceEngine` from `ConfidenceContributor`s (completes M7)
 
 ---
 

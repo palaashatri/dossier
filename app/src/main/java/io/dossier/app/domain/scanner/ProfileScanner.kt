@@ -4,6 +4,11 @@ import io.dossier.app.data.platform.PLATFORMS
 import io.dossier.app.data.platform.resolveProfileUrl
 import io.dossier.app.data.web.PublicImageSearchService
 import io.dossier.app.data.web.PublicSearchDiscoveryService
+import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceCollection
+import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceRelationship
+import io.dossier.app.domain.evidence.toEvidence
 import io.dossier.app.domain.model.*
 import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.username.UsernameVariant
@@ -1269,4 +1274,107 @@ class ProfileScanner(
             return false
         }
     }
+
+    /**
+     * Native Evidence emission (ROADMAP: "Evidence is the universal language").
+     *
+     * Runs the same profile scan but returns an [EvidenceCollection] directly —
+     * profile-matches become [EvidenceKind.Profile] observations, each PII/other
+     * finding is bridged through the lossless [Finding.toEvidence] adapter, and
+     * the scanner's own structural knowledge (a username lives on a profile,
+     * a PII value was observed on a profile) is asserted as
+     * [EvidenceRelationship]s that the correlation engine generalizes. This lets
+     * new code consume the scanner's output as Evidence without the scan path
+     * itself being rewritten.
+     */
+    suspend fun scanIdentityEvidence(
+        input: IdentityInput,
+        deepResearch: Boolean = false
+    ): EvidenceCollection {
+        val results = scanIdentity(input, deepResearch = deepResearch)
+        return results.toEvidenceCollection(input)
+    }
+
+    /** Maps already-fetched [ProfileScanResult]s to Evidence without re-scanning. */
+    fun toEvidenceCollection(
+        results: List<ProfileScanResult>,
+        input: IdentityInput
+    ): EvidenceCollection = results.toEvidenceCollection(input)
+}
+
+/**
+ * Converts scanner [ProfileScanResult]s into a native [EvidenceCollection],
+ * asserting the scanner-known relationships (username↔profile, PII-on-profile)
+ * that are not recoverable from findings alone.
+ */
+internal fun List<ProfileScanResult>.toEvidenceCollection(
+    input: IdentityInput
+): EvidenceCollection {
+    val evidence = mutableListOf<Evidence>()
+    val relationships = mutableListOf<EvidenceRelationship>()
+
+    forEach { result ->
+        val url = result.candidate.url
+        val conf = result.candidate.confidence.coerceIn(0f, 1f)
+
+        // Profile observation (native, not via the Finding adapter).
+        evidence.add(
+            Evidence(
+                id = "profile:${url}",
+                kind = EvidenceKind.Profile,
+                value = url,
+                sourceUrl = url,
+                snippet = result.displayName?.let { "Profile: $it" },
+                confidence = conf,
+                risk = if (result.verified && result.exists) RiskLevel.High else RiskLevel.Low,
+                signals = result.confidenceSignals
+            )
+        )
+
+        // Username → profile assertion (scanner knowledge).
+        if (result.candidate.username.isNotBlank()
+            && result.candidate.username != "unknown"
+            && result.candidate.username != "web"
+        ) {
+            relationships.add(
+                EvidenceRelationship(
+                    fromValue = result.candidate.username,
+                    toValue = url,
+                    relation = "username_on_profile",
+                    evidence = result.candidate.platform.name
+                )
+            )
+        }
+
+        // Each finding bridges losslessly; PII-on-profile is asserted explicitly.
+        result.findings.forEach { finding ->
+            evidence.add(finding.toEvidence())
+            if (finding.sourceUrl == url || result.exists) {
+                relationships.add(
+                    EvidenceRelationship(
+                        fromValue = url,
+                        toValue = finding.value,
+                        relation = "mentions",
+                        evidence = finding.type.name
+                    )
+                )
+            }
+        }
+    }
+
+    // Identity seeds as native evidence too, so the collection is self-contained.
+    input.emails.filter { it.isNotBlank() }.forEach {
+        evidence.add(Evidence(id = "seed:email:$it", kind = EvidenceKind.Email, value = it, confidence = 1.0f))
+    }
+    input.phones.filter { it.isNotBlank() }.forEach {
+        evidence.add(Evidence(id = "seed:phone:$it", kind = EvidenceKind.Phone, value = it, confidence = 1.0f))
+    }
+    (listOfNotNull(input.primaryUsername) + input.usernames).filter { it.isNotBlank() }.distinctBy { it.lowercase() }.forEach {
+        evidence.add(Evidence(id = "seed:username:$it", kind = EvidenceKind.Username, value = it, confidence = 1.0f))
+    }
+
+    return EvidenceCollection(
+        evidence = evidence.distinctBy { it.id },
+        relationships = relationships.distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}" }
+    )
 }

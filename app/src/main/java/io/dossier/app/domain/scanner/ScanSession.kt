@@ -12,13 +12,21 @@ import io.dossier.app.domain.face.FaceConsistencyChecker
 import io.dossier.app.domain.face.FaceEmbeddingService
 import io.dossier.app.domain.graph.EntityGraphBuilder
 import io.dossier.app.domain.model.*
+import io.dossier.app.domain.evidence.*
+import io.dossier.app.domain.evidence.ExposureEngine.ExposureResult
+import io.dossier.app.domain.evidence.AttackPathFinder.AttackPath
+import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.case.CaseStore
 import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.remediation.RemediationProvider
+import io.dossier.app.domain.remediation.RemediationItem
 import io.dossier.app.domain.risk.RiskScorer
 import io.dossier.app.domain.username.UsernameVariantGenerator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 object ScanSession {
@@ -44,6 +52,17 @@ object ScanSession {
     private val _entityGraph = MutableStateFlow(EntityGraph())
     val entityGraph: StateFlow<EntityGraph> = _entityGraph
 
+    private val _relationshipConfidence =
+        MutableStateFlow<Map<String, RelationshipConfidence>>(emptyMap())
+    val relationshipConfidence: StateFlow<Map<String, RelationshipConfidence>> =
+        _relationshipConfidence
+
+    private val _exposure = MutableStateFlow<ExposureResult?>(null)
+    val exposure: StateFlow<ExposureResult?> = _exposure
+
+    private val _attackPaths = MutableStateFlow<List<AttackPath>>(emptyList())
+    val attackPaths: StateFlow<List<AttackPath>> = _attackPaths
+
     private val _breachDigests = MutableStateFlow<List<BreachDigest>>(emptyList())
     val breachDigests: StateFlow<List<BreachDigest>> = _breachDigests
 
@@ -53,6 +72,9 @@ object ScanSession {
     private val _remediationTips = MutableStateFlow<List<String>>(emptyList())
     val remediationTips: StateFlow<List<String>> = _remediationTips
 
+    private val _remediationItems = MutableStateFlow<List<RemediationItem>>(emptyList())
+    val remediationItems: StateFlow<List<RemediationItem>> = _remediationItems
+
     private val _aiSummary = MutableStateFlow<String?>(null)
     val aiSummary: StateFlow<String?> = _aiSummary
 
@@ -61,6 +83,45 @@ object ScanSession {
 
     private val _progressText = MutableStateFlow("")
     val progressText: StateFlow<String> = _progressText
+
+    // M16: memory guard — count of findings dropped because the hard cap was hit.
+    private val _memoryDropped = MutableStateFlow(0)
+    val memoryDropped: StateFlow<Int> = _memoryDropped
+
+    // M16: scans run on a dedicated scope so they can be cancelled cooperatively
+    // (e.g. user hits Cancel, or the app is reset). The job is stored so a
+    // cancel action anywhere can abort an in-flight scan.
+    private val scope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + Dispatchers.IO
+    )
+    private var scanJob: Job? = null
+
+    /** Launches the scan on the internal scope and tracks the job for cancellation. */
+    fun startScan(context: Context, input: IdentityInput, deepResearch: Boolean = false) {
+        // M16 (resumable): persist just the resume point — opt-in, local only.
+        ScanResumeStore(context).save(input, deepResearch)
+        scanJob?.cancel()
+        scanJob = scope.launch {
+            executeScan(context, input, deepResearch = deepResearch)
+        }
+    }
+
+    /** M16 (resumable): returns the last scan's input + deep-research flag, if any. */
+    fun loadResumePoint(context: Context): Pair<IdentityInput, Boolean>? =
+        ScanResumeStore(context).load()
+
+    /** M16 (resumable): clears the persisted resume point. */
+    fun clearResumePoint(context: Context) {
+        ScanResumeStore(context).clear()
+    }
+
+    /** Cooperatively cancels an in-flight scan. Partial results are kept. */
+    fun cancelScan() {
+        scanJob?.cancel()
+        scanJob = null
+        _isScanning.value = false
+        _progressText.value = "SCAN_CANCELLED"
+    }
 
     // Persistent, observable Deep Research toggle — shown on all search panels
     // (Identity + Reverse Image Lookup). When on, the scan/lookup follows linked
@@ -112,6 +173,39 @@ object ScanSession {
         aiSummary = _aiSummary.value
     )
 
+    /**
+     * Builds a persistable [DossierCase] from the current session state. The
+     * case is only written to disk when [saveCase] is called explicitly — Dossier
+     * stays in-memory by default (Principle 4).
+     */
+    fun buildCase(): DossierCase? {
+        val input = _currentInput.value ?: return null
+        val createdAt = java.time.LocalDateTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+        return DossierCase(
+            createdAt = createdAt,
+            subjectName = input.fullName.trim().ifBlank { input.primaryUsername ?: "UNKNOWN SUBJECT" },
+            input = input,
+            findings = _findings.value,
+            profileResults = _profileScanResults.value,
+            faceMatches = _faceConsistencyMatches.value,
+            entityGraph = _entityGraph.value,
+            breachDigests = _breachDigests.value,
+            riskLevel = _riskLevel.value,
+            exposure = _exposure.value,
+            attackPaths = _attackPaths.value,
+            relationshipConfidence = _relationshipConfidence.value,
+            aiSummary = _aiSummary.value
+        )
+    }
+
+    /** Persists the current case to local app storage. Returns the saved case, or null on failure. */
+    fun saveCase(context: Context): DossierCase? {
+        val case = buildCase() ?: return null
+        val ok = CaseStore(context).save(case)
+        return if (ok) case else null
+    }
+
     suspend fun executeScan(context: Context, input: IdentityInput, deepResearch: Boolean = false) = withContext(Dispatchers.IO) {
         // HONESTY: no mock selfie is generated. If the user didn't supply one,
         // face comparison is skipped entirely (the report shows an honest
@@ -126,8 +220,12 @@ object ScanSession {
         _faceConsistencyMatches.value = emptyList()
         _entityGraph.value = EntityGraph()
         _breachDigests.value = emptyList()
+        _relationshipConfidence.value = emptyMap()
+        _attackPaths.value = emptyList()
         _riskLevel.value = RiskLevel.Low
+        _exposure.value = null
         _remediationTips.value = emptyList()
+        _remediationItems.value = emptyList()
         _aiSummary.value = null
 
 
@@ -171,14 +269,39 @@ object ScanSession {
             _breachDigests.value = digests
 
             _progressText.value = "BUILDING_ENTITY_GRAPH..."
+            // M6/native: prefer the scanner's own Evidence emission (profile +
+            // PII + asserted relationships) as the primary Evidence source,
+            // merged with plugin evidence and the adapter-bridged findings.
+            val pluginCollection = runPlugins(inputToUse)
+            val scannerEvidence = profileScanner.toEvidenceCollection(scanResults, inputToUse)
+            val evidence = (scannerEvidence.evidence + pluginCollection.evidence + buildEvidence(inputToUse, allFindings))
+                .distinctBy { it.id }
             val graph = EntityGraphBuilder.build(
                 input = inputToUse,
                 profileResults = scanResults,
                 findings = allFindings,
                 faceMatches = faceMatches,
-                breachDigests = digests
+                breachDigests = digests,
+                evidence = evidence,
+                relationships = (scannerEvidence.relationships + pluginCollection.relationships)
+                    .distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}" }
             )
             _entityGraph.value = graph
+
+            _progressText.value = "SCORING_RELATIONSHIP_CONFIDENCE..."
+            val usernameSeeds = (listOfNotNull(inputToUse.primaryUsername) + inputToUse.usernames)
+                .filter { it.isNotBlank() }.map { it.lowercase() }.toSet()
+            _relationshipConfidence.value = ConfidenceEngine(
+                contributors = listOf(
+                    UsernameSimilarityContributor(),
+                    EmailDomainContributor(),
+                    SharedIdentifierContributor(usernameSeeds),
+                    SharedDomainContributor()
+                )
+            ).score(graph, evidence)
+
+            _progressText.value = "TRACING_ATTACK_PATHS..."
+            _attackPaths.value = AttackPathFinder().findPaths(graph, _relationshipConfidence.value)
 
             _progressText.value = "COMPILING_EXPOSURE_LEVELS..."
             val riskScorer = RiskScorer()
@@ -187,8 +310,20 @@ object ScanSession {
 
             val remediationProvider = RemediationProvider()
             _remediationTips.value = remediationProvider.getGlobalTips(allFindings)
+            _remediationItems.value = remediationProvider.getStructuredTips(allFindings)
 
-            _findings.value = allFindings.distinctBy { it.type.name + it.value + it.sourceUrl }
+            _progressText.value = "COMPILING_EXPOSURE_SCORES..."
+            _exposure.value = ExposureEngine().score(allFindings, digests)
+
+            val distinctFindings = allFindings.distinctBy { it.type.name + it.value + it.sourceUrl }
+            val capped = MemoryGuard.cap(distinctFindings)
+            _memoryDropped.value = capped.droppedCount
+            if (capped.droppedCount > 0) {
+                _progressText.value = "MEMORY_LIMIT: ${
+                    capped.droppedCount
+                } findings omitted (cap ${MemoryGuard.MAX_FINDINGS})"
+            }
+            _findings.value = capped.retained
 
             _progressText.value = "GENERATING_AI_SUMMARY..."
             try {
@@ -199,7 +334,9 @@ object ScanSession {
                 )
             } catch (e: Exception) {
                 e.printStackTrace()
-                _aiSummary.value = null
+        _aiSummary.value = null
+        _memoryDropped.value = 0
+
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -233,8 +370,12 @@ object ScanSession {
         _faceConsistencyMatches.value = emptyList()
         _entityGraph.value = EntityGraph()
         _breachDigests.value = emptyList()
+        _relationshipConfidence.value = emptyMap()
+        _attackPaths.value = emptyList()
         _riskLevel.value = RiskLevel.Low
+        _exposure.value = null
         _remediationTips.value = emptyList()
+        _remediationItems.value = emptyList()
         _aiSummary.value = null
         placeImageUri = null
 
@@ -349,4 +490,28 @@ object ScanSession {
                 remediation = "Confirm ownership of this profile and avoid reusing the same avatar/selfie across accounts."
             )
         }
+
+    /**
+     * Builds the [Evidence] list that feeds the [ConfidenceEngine]. Starts from
+     * the identity seeds (emails/phones/usernames) and the scanner findings,
+     * both converted through the lossless [Finding.toEvidence] adapter. This is
+     * the bridge that lets the parallel Evidence model observe what scanners
+     * already produced, without rewriting the scanners themselves.
+     */
+    internal fun buildEvidence(input: IdentityInput, findings: List<Finding>): List<Evidence> {
+        val seeds = buildList {
+            input.emails.filter { it.isNotBlank() }.forEach {
+                add(Evidence(id = "seed:email:$it", kind = EvidenceKind.Email, value = it, confidence = 1.0f))
+            }
+            input.phones.filter { it.isNotBlank() }.forEach {
+                add(Evidence(id = "seed:phone:$it", kind = EvidenceKind.Phone, value = it, confidence = 1.0f))
+            }
+            (listOfNotNull(input.primaryUsername) + input.usernames)
+                .filter { it.isNotBlank() }.distinctBy { it.lowercase() }.forEach {
+                    add(Evidence(id = "seed:username:$it", kind = EvidenceKind.Username, value = it, confidence = 1.0f))
+                }
+        }
+        val fromFindings = findings.map { it.toEvidence() }
+        return (seeds + fromFindings).distinctBy { it.kind to it.value.lowercase() }
+    }
 }

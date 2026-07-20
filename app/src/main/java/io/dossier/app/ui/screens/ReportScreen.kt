@@ -41,12 +41,17 @@ import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.Platform
 import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.remediation.RemediationItem
+import io.dossier.app.domain.evidence.ExposureDimension
+import io.dossier.app.domain.evidence.ExposureEngine
+import io.dossier.app.domain.evidence.AttackPathFinder
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.export.ReportExporter
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.GeminiSpark
 import io.dossier.app.ui.components.SquigglyProgressIndicator
 import io.dossier.app.ui.theme.NeuralTheme
+import io.dossier.app.ui.screens.EntityGraphView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -65,10 +70,15 @@ fun ReportScreen(
     val faceMatches by ScanSession.faceConsistencyMatches.collectAsState()
     val riskLevel by ScanSession.riskLevel.collectAsState()
     val remediationTips by ScanSession.remediationTips.collectAsState()
+    val remediationItems by ScanSession.remediationItems.collectAsState()
     val aiSummary by ScanSession.aiSummary.collectAsState()
     val input by ScanSession.currentInput.collectAsState()
+    val memoryDropped by ScanSession.memoryDropped.collectAsState()
     val profileResults by ScanSession.profileScanResults.collectAsState()
     val entityGraph by ScanSession.entityGraph.collectAsState()
+    val relationshipConfidence by ScanSession.relationshipConfidence.collectAsState()
+    val exposure by ScanSession.exposure.collectAsState()
+    val attackPaths by ScanSession.attackPaths.collectAsState()
     val breachDigests by ScanSession.breachDigests.collectAsState()
     val entityGraphLines = remember(entityGraph, findings, profileResults) {
         formatEntityGraphFromSession(entityGraph)
@@ -214,6 +224,112 @@ fun ReportScreen(
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
+                    }
+                }
+            }
+
+            // M16: honest notice when the memory cap dropped findings.
+            if (memoryDropped > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "$memoryDropped finding(s) omitted — memory limit (${io.dossier.app.domain.scanner.MemoryGuard.MAX_FINDINGS}) reached",
+                    color = NeuralTheme.Amber,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.padding(horizontal = 2.dp)
+                )
+            }
+
+            // Exposure Breakdown — six-dimension sub-scores (ROADMAP M9)
+            exposure?.let { exp ->
+                Spacer(modifier = Modifier.height(16.dp))
+                ReportSectionHeader("Exposure Breakdown")
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, NeuralTheme.BorderColor, cardShape),
+                    shape = cardShape
+                ) {
+                    Column(modifier = Modifier.padding(18.dp)) {
+                        exp.dimensions.forEach { dim ->
+                            ExposureDimensionRow(dim.dimension, dim.score)
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        if (exp.topFindings.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "TOP RISK FINDINGS",
+                                color = NeuralTheme.TextSecondary,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 10.5.sp,
+                                letterSpacing = 1.sp
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            exp.topFindings.take(10).forEach { f ->
+                                val c = when (f.risk) {
+                                    RiskLevel.Low -> NeuralTheme.Emerald
+                                    RiskLevel.Medium -> NeuralTheme.Amber
+                                    RiskLevel.High -> NeuralTheme.Amber
+                                    RiskLevel.Critical -> NeuralTheme.Crimson
+                                }
+                                Text(
+                                    text = "• [${f.risk.name}] ${f.type.name}: ${f.value.take(48)}",
+                                    color = c,
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.padding(vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Attack Paths — explainable reachability from subject to exposure (M10)
+            if (attackPaths.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(16.dp))
+                ReportSectionHeader("Attack Paths")
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, NeuralTheme.BorderColor, cardShape),
+                    shape = cardShape
+                ) {
+                    Column(modifier = Modifier.padding(18.dp)) {
+                        attackPaths.forEach { path ->
+                            Text(
+                                text = "→ ${path.endpointLabel}",
+                                color = NeuralTheme.Crimson,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 12.5.sp
+                            )
+                            path.steps.forEach { step ->
+                                val conf = step.confidence?.let { "  ${(it * 100).toInt()}%" } ?: ""
+                                Text(
+                                    text = "  ${step.fromLabel} —[${step.relation}$conf]→ ${step.toLabel}",
+                                    color = NeuralTheme.TextPrimary,
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.padding(vertical = 1.dp)
+                                )
+                                step.evidence?.takeIf { it.isNotBlank() }?.let {
+                                    Text(
+                                        text = "    (${it.take(60)})",
+                                        color = NeuralTheme.TextSecondary,
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(10.dp))
+                        }
                     }
                 }
             }
@@ -534,9 +650,9 @@ fun ReportScreen(
                         }
                     }
 
-                    // Entity Graph — top entities/edges from session or derived findings
+                    // Entity Graph — interactive node-link view (ROADMAP Milestone 8)
                     Spacer(modifier = Modifier.height(24.dp))
-                    ReportSectionHeader("Entity Graph")
+                    ReportSectionHeader("Identity Graph")
                     Card(
                         colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
                         modifier = Modifier
@@ -545,7 +661,7 @@ fun ReportScreen(
                         shape = cardShape
                     ) {
                         Column(modifier = Modifier.padding(18.dp)) {
-                            if (entityGraphLines.isEmpty()) {
+                            if (entityGraph.entities.isEmpty()) {
                                 Text(
                                     text = "No entity links compiled for this scan yet.",
                                     color = NeuralTheme.TextSecondary,
@@ -553,23 +669,10 @@ fun ReportScreen(
                                     lineHeight = 18.sp
                                 )
                             } else {
-                                Text(
-                                    text = "Top entities and edges from extracted signals and profile sources.",
-                                    color = NeuralTheme.TextSecondary,
-                                    fontSize = 11.5.sp,
-                                    lineHeight = 16.sp,
-                                    modifier = Modifier.padding(bottom = 10.dp)
+                                EntityGraphView(
+                                    graph = entityGraph,
+                                    confidenceByEdge = relationshipConfidence
                                 )
-                                entityGraphLines.take(24).forEach { line ->
-                                    Text(
-                                        text = line,
-                                        color = NeuralTheme.TextPrimary,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 12.sp,
-                                        lineHeight = 17.sp,
-                                        modifier = Modifier.padding(vertical = 2.dp)
-                                    )
-                                }
                             }
                         }
                     }
@@ -727,10 +830,73 @@ fun ReportScreen(
                                 Text(
                                     text = tip,
                                     color = NeuralTheme.TextPrimary,
-                                    
+
                                     fontSize = 13.sp,
                                     lineHeight = 18.sp
                                 )
+                            }
+                        }
+
+                        if (remediationItems.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(14.dp))
+                            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "STRUCTURED REMEDIATION",
+                                color = NeuralTheme.TextSecondary,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 10.5.sp,
+                                letterSpacing = 1.sp
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            remediationItems.forEach { item ->
+                                val riskColor = when (item.risk) {
+                                    RiskLevel.Low -> NeuralTheme.Emerald
+                                    RiskLevel.Medium -> NeuralTheme.Amber
+                                    RiskLevel.High -> NeuralTheme.Amber
+                                    RiskLevel.Critical -> NeuralTheme.Crimson
+                                }
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 6.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = "[${item.risk.name}] ",
+                                            color = riskColor,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.5.sp,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                        Text(
+                                            text = item.problem,
+                                            color = NeuralTheme.TextPrimary,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 11.5.sp
+                                        )
+                                    }
+                                    Text(
+                                        text = "evidence: ${item.evidence.take(80)}",
+                                        color = NeuralTheme.TextSecondary,
+                                        fontSize = 10.5.sp,
+                                        lineHeight = 14.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    Text(
+                                        text = "fix: ${item.suggestedFix}",
+                                        color = NeuralTheme.TextPrimary,
+                                        fontSize = 11.sp,
+                                        lineHeight = 15.sp
+                                    )
+                                    Text(
+                                        text = "impact: ${item.estimatedImpact}",
+                                        color = NeuralTheme.TextSecondary,
+                                        fontSize = 10.5.sp,
+                                        lineHeight = 14.sp
+                                    )
+                                }
                             }
                         }
                     }
@@ -813,6 +979,39 @@ fun ReportScreen(
                     color = Color.White,
                     fontSize = 14.sp,
                     letterSpacing = 1.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Save Case — opt-in local persistence (M13/M14). Dossier stays
+            // in-memory by default; writing a case is an explicit user action.
+            var savedCaseLabel by remember { mutableStateOf<String?>(null) }
+            OutlinedButton(
+                onClick = {
+                    val saved = ScanSession.saveCase(context)
+                    savedCaseLabel = saved?.label
+                },
+                border = BorderStroke(1.2.dp, NeuralTheme.Cobalt.copy(alpha = 0.7f)),
+                shape = io.dossier.app.ui.theme.DossierButtonShape,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+            ) {
+                Text(
+                    text = savedCaseLabel?.let { "SAVED ✓" } ?: "SAVE CASE",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    letterSpacing = 1.sp
+                )
+            }
+            savedCaseLabel?.let {
+                Text(
+                    text = "Saved locally: $it",
+                    color = NeuralTheme.Emerald,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 6.dp, bottom = 4.dp)
                 )
             }
 
@@ -918,7 +1117,7 @@ fun FindingItemCard(finding: Finding, onNavigateToBrowser: (String) -> Unit) {
                     }
                 }
             }
-            
+
             Spacer(modifier = Modifier.height(10.dp))
             
             Text(
@@ -1267,6 +1466,47 @@ fun ReportSectionHeader(text: String) {
             modifier = Modifier
                 .padding(top = 4.dp)
                 .width(40.dp)
+        )
+    }
+}
+
+@Composable
+private fun ExposureDimensionRow(dimension: ExposureDimension, score: Int) {
+    val color = when {
+        score >= 80 -> NeuralTheme.Crimson
+        score >= 50 -> NeuralTheme.Amber
+        score > 0 -> NeuralTheme.Amber
+        else -> NeuralTheme.Emerald
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = dimension.name,
+            color = NeuralTheme.TextSecondary,
+            fontSize = 11.5.sp,
+            modifier = Modifier.width(96.dp)
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(8.dp)
+                .background(NeuralTheme.BorderColor, RoundedCornerShape(4.dp))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(score.toFloat() / 100f)
+                    .height(8.dp)
+                    .background(color, RoundedCornerShape(4.dp))
+            )
+        }
+        Text(
+            text = "$score",
+            color = color,
+            fontSize = 11.5.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(start = 8.dp)
         )
     }
 }

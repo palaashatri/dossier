@@ -1,5 +1,8 @@
 package io.dossier.app
 
+import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.graph.EntityGraphBuilder
 import io.dossier.app.domain.model.BreachDigest
 import io.dossier.app.domain.model.EntityType
@@ -149,5 +152,52 @@ class EntityGraphBuilderTest {
 
         val graph = EntityGraphBuilder.build(input, profileResults = listOf(soft))
         assertTrue(graph.edges.any { it.relation == "possible_profile" })
+    }
+
+    @Test
+    fun m6FusesEvidenceAndRelationshipsDirectly() {
+        val input = IdentityInput(fullName = "Jane Doe", usernames = listOf("janedoe"))
+
+        val evidence = listOf(
+            Evidence(
+                id = "ev1",
+                kind = EvidenceKind.Email,
+                value = "jane@example.com",
+                sourceUrl = "https://github.com/janedoe",
+                snippet = "contact email",
+                confidence = 0.9f,
+                risk = RiskLevel.High
+            ),
+            Evidence(
+                id = "ev2",
+                kind = EvidenceKind.Organization,
+                value = "Acme Labs",
+                confidence = 0.7f
+            )
+        )
+        val relationships = listOf(
+            EvidenceRelationship(
+                fromValue = "janedoe",
+                toValue = "https://github.com/janedoe",
+                relation = "username_on_profile",
+                evidence = "github"
+            )
+        )
+
+        val graph = EntityGraphBuilder.build(
+            input = input,
+            evidence = evidence,
+            relationships = relationships
+        )
+
+        // Evidence maps to the same entity types as findings (no adapter needed).
+        assertTrue(graph.entities.any { it.type == EntityType.Email && it.label == "jane@example.com" })
+        assertTrue(graph.entities.any { it.type == EntityType.Organization && it.label == "Acme Labs" })
+        val personId = graph.entities.first { it.type == EntityType.Person }.id
+        assertTrue(graph.edges.any { it.fromId == personId && it.relation == "has_email" })
+        assertTrue(graph.edges.any { it.relation == "affiliated_with" })
+
+        // Scanner-asserted relationship seeds a direct edge.
+        assertTrue(graph.edges.any { it.relation == "username_on_profile" })
     }
 }

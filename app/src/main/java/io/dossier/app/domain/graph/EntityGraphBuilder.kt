@@ -1,5 +1,8 @@
 package io.dossier.app.domain.graph
 
+import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.model.BreachDigest
 import io.dossier.app.domain.model.DossierEdge
 import io.dossier.app.domain.model.DossierEntity
@@ -23,7 +26,9 @@ object EntityGraphBuilder {
         profileResults: List<ProfileScanResult> = emptyList(),
         findings: List<Finding> = emptyList(),
         faceMatches: List<FaceConsistencyMatch> = emptyList(),
-        breachDigests: List<BreachDigest> = emptyList()
+        breachDigests: List<BreachDigest> = emptyList(),
+        evidence: List<Evidence> = emptyList(),
+        relationships: List<EvidenceRelationship> = emptyList()
     ): EntityGraph {
         val entities = linkedMapOf<String, DossierEntity>()
         val edges = mutableListOf<DossierEdge>()
@@ -176,6 +181,21 @@ object EntityGraphBuilder {
             attachFinding(finding, subjectId, profileId, ::putEntity, ::link)
         }
 
+        // ---- Evidence layer (M6: first-class Evidence correlation) -----------
+        // Evidence is the universal language; the graph now fuses it directly
+        // rather than only through the Finding adapter. Scanner-asserted
+        // relationships seed edges before the correlation engine generalizes.
+        relationships.forEach { rel ->
+            val fromId = entityIdForValue(rel.fromValue)
+            val toId = entityIdForValue(rel.toValue)
+            putEntity(DossierEntity(id = fromId, type = EntityType.Website, label = rel.fromValue, confidence = 0.7f))
+            putEntity(DossierEntity(id = toId, type = EntityType.Website, label = rel.toValue, confidence = 0.7f))
+            link(fromId, toId, rel.relation, rel.evidence)
+        }
+        evidence.forEach { ev ->
+            attachEvidence(ev, subjectId, ::putEntity, ::link)
+        }
+
         // ---- Face consistency -----------------------------------------------
         faceMatches.forEach { match ->
             val profileId = entityId(EntityType.Profile, match.profileUrl)
@@ -294,6 +314,69 @@ object EntityGraphBuilder {
         FindingType.PublicSearchEvidence, FindingType.PublicImageEvidence -> EntityType.Website
         FindingType.ImageConsistency -> EntityType.Image
         FindingType.SensitiveSnippet -> null
+    }
+
+    private fun evidenceKindToEntityType(kind: EvidenceKind): EntityType? = when (kind) {
+        EvidenceKind.Email -> EntityType.Email
+        EvidenceKind.Phone -> EntityType.Phone
+        EvidenceKind.Address -> EntityType.Location
+        EvidenceKind.Location -> EntityType.Location
+        EvidenceKind.Username, EvidenceKind.UsernameReuse -> EntityType.Username
+        EvidenceKind.Profile, EvidenceKind.PlausibleProfileMatch -> EntityType.Profile
+        EvidenceKind.Organization -> EntityType.Organization
+        EvidenceKind.PublicSearchEvidence, EvidenceKind.PublicImageEvidence -> EntityType.Website
+        EvidenceKind.ImageConsistency -> EntityType.Image
+        EvidenceKind.SensitiveSnippet -> null
+    }
+
+    /**
+     * Fuses a single [Evidence] observation into the graph. Mirrors
+     * [attachFinding] but consumes Evidence natively (so scanners that emit
+     * Evidence directly — the canonical path per ROADMAP — feed the graph
+     * without round-tripping through the Finding adapter).
+     */
+    private fun attachEvidence(
+        ev: Evidence,
+        subjectId: String,
+        putEntity: (DossierEntity) -> Unit,
+        link: (String, String, String, String?) -> Unit
+    ) {
+        val value = ev.value.trim()
+        if (value.isBlank()) return
+        val type = evidenceKindToEntityType(ev.kind) ?: return
+        val id = entityId(type, value)
+        putEntity(
+            DossierEntity(
+                id = id,
+                type = type,
+                label = value,
+                confidence = ev.confidence.coerceIn(0f, 1f),
+                sourceUrls = listOfNotNull(ev.sourceUrl)
+            )
+        )
+        val relation = when (type) {
+            EntityType.Email -> "has_email"
+            EntityType.Phone -> "has_phone"
+            EntityType.Username -> "uses_username"
+            EntityType.Organization -> "affiliated_with"
+            EntityType.Location -> "associated_with_location"
+            EntityType.Profile -> "has_profile"
+            EntityType.Website -> "linked_website"
+            EntityType.Image -> "related_image"
+            EntityType.Breach -> "has_breach_exposure"
+            EntityType.Person -> "related_person"
+        }
+        link(subjectId, id, relation, ev.snippet)
+        if (ev.sourceUrl != null) {
+            val profileId = entityId(EntityType.Profile, ev.sourceUrl)
+            link(profileId, id, "mentions", ev.snippet)
+        }
+    }
+
+    /** Stable entity id for an arbitrary observed value (relationship endpoints). */
+    private fun entityIdForValue(raw: String): String {
+        val key = raw.trim().lowercase(Locale.US)
+        return "value:$key"
     }
 
     private fun entityId(type: EntityType, raw: String): String {

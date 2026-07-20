@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBox
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -43,6 +44,7 @@ private enum class HubTab(val label: String) {
     DOSSIER("Dossier"),
     IMAGE_LOOKUP("Image Lookup"),
     BREACH("Breach"),
+    CASES("Cases"),
     MODELS("Models")
 }
 
@@ -88,17 +90,18 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
                         NavigationBarItem(
                             selected = selected,
                             onClick = { selectedTab = tab },
-                            icon = {
-                                Icon(
-                                    imageVector = when (tab) {
-                                        HubTab.DOSSIER -> Icons.Default.AccountBox
-                                        HubTab.IMAGE_LOOKUP -> Icons.Default.Search
-                                        HubTab.BREACH -> Icons.Default.Lock
-                                        HubTab.MODELS -> Icons.Default.Settings
-                                    },
-                                    contentDescription = tab.label
-                                )
-                            },
+                                icon = {
+                                    Icon(
+                                        imageVector = when (tab) {
+                                            HubTab.DOSSIER -> Icons.Default.AccountBox
+                                            HubTab.IMAGE_LOOKUP -> Icons.Default.Search
+                                            HubTab.BREACH -> Icons.Default.Lock
+                                            HubTab.CASES -> Icons.Default.DateRange
+                                            HubTab.MODELS -> Icons.Default.Settings
+                                        },
+                                        contentDescription = tab.label
+                                    )
+                                },
                             label = {
                                 Text(
                                     tab.label,
@@ -131,6 +134,7 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
                 )
                 HubTab.IMAGE_LOOKUP -> ReverseImageLookupScreen(onNavigateToBrowser = onNavigateToBrowser)
                 HubTab.BREACH -> BreachCheckScreen(onNavigateToBrowser = onNavigateToBrowser)
+                HubTab.CASES -> CaseComparisonScreen()
                 HubTab.MODELS -> ModelsScreen()
             }
         }

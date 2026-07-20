@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -73,17 +76,29 @@ fun ScanScreen(onScanComplete: () -> Unit) {
         }
     }
 
+    // Kick off the scan once.
     LaunchedEffect(Unit) {
         val input = ScanSession.tempInput
         liveLogs.add("Starting scan…")
         if (input != null) {
             val deepResearch = ScanSession.deepResearchEnabled.value
             if (deepResearch) liveLogs.add("Deep Research enabled — following linked sites")
-            ScanSession.executeScan(context, input, deepResearch = deepResearch)
+            ScanSession.startScan(context, input, deepResearch = deepResearch)
         }
-        liveLogs.add("Scan complete.")
-        delay(500)
-        onScanComplete()
+    }
+
+    // Navigate to the report when the scan actually finishes (isScanning flips
+    // false). Cancellation also flips it false, but then onScanComplete fires
+    // from the cancel path via reset, so guard against double-navigation.
+    var hasStarted by remember { mutableStateOf(false) }
+    LaunchedEffect(isScanning) {
+        if (isScanning) {
+            hasStarted = true
+        } else if (hasStarted) {
+            liveLogs.add("Scan complete.")
+            delay(500)
+            onScanComplete()
+        }
     }
 
     // Auto-scroll the log to the bottom as entries arrive.
@@ -179,6 +194,28 @@ fun ScanScreen(onScanComplete: () -> Unit) {
                                 lineHeight = 16.sp
                             )
                         }
+                    }
+                }
+
+                // Cancel — cooperatively abort the in-flight scan (M16).
+                if (isScanning) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedButton(
+                        onClick = {
+                            ScanSession.cancelScan()
+                            onScanComplete()
+                        },
+                        border = BorderStroke(1.2.dp, NeuralTheme.Crimson.copy(alpha = 0.8f)),
+                        shape = io.dossier.app.ui.theme.DossierButtonShape,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Crimson),
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) {
+                        Text(
+                            text = "CANCEL SCAN",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            letterSpacing = 1.sp
+                        )
                     }
                 }
             }

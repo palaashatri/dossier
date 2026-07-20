@@ -61,6 +61,14 @@ fun IdentityScreen(onNext: () -> Unit) {
     var profileUrls by remember { mutableStateOf("") }
     var selfieUri by remember { mutableStateOf<Uri?>(null) }
 
+    // M16 (resumable): surface a "Resume last scan" affordance if a resume point
+    // from a previous run was persisted locally.
+    val context = LocalContext.current
+    var resumePoint by remember { mutableStateOf<Pair<IdentityInput, Boolean>?>(null) }
+    LaunchedEffect(Unit) {
+        resumePoint = ScanSession.loadResumePoint(context)
+    }
+
     // Step 1 validation: at least one of (username, name, email) must be provided.
     val hasName = firstName.isNotBlank() || lastName.isNotBlank()
     val hasUsername = primaryUsername.isNotBlank()
@@ -143,6 +151,20 @@ fun IdentityScreen(onNext: () -> Unit) {
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.TextPrimary)
                     ) { Text("Back", fontWeight = FontWeight.Medium) }
+                }
+
+                // M16 resumable: jump straight into the last scan's subject.
+                resumePoint?.let { (input, deep) ->
+                    OutlinedButton(
+                        onClick = {
+                            ScanSession.tempInput = input
+                            ScanSession.setDeepResearch(deep)
+                            onNext()
+                        },
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Emerald)
+                    ) { Text("Resume last scan", fontWeight = FontWeight.Medium) }
                 }
 
                 Button(
