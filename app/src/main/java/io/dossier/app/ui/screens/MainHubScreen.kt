@@ -162,14 +162,16 @@ private fun DossierNavGraph(
         }
         composable("scan") {
             ScanScreen(onScanComplete = {
-                android.util.Log.d("DossierNav", "ScanScreen.onScanComplete() FIRING - about to navigate to 'report'")
-                // Use try-catch to ensure we get error details if something fails
                 try {
-                    navController.navigate("report")
-                    android.util.Log.d("DossierNav", "Successfully called navigate('report')")
+                    android.util.Log.d("MainHub", "ScanScreen.onScanComplete() called, navigating to report")
+                    android.util.Log.d("MainHub", "Current back stack: ${navController.currentBackStackEntry?.destination?.route}")
+                    navController.navigate("report") {
+                        // Don't pop anything — just push report onto the stack
+                        launchSingleTop = false
+                    }
+                    android.util.Log.d("MainHub", "Navigation to report succeeded")
                 } catch (e: Exception) {
-                    android.util.Log.e("DossierNav", "navigate('report') FAILED: ${e.message}", e)
-                    // Fallback: this should never happen, but if it does, we need to know
+                    android.util.Log.e("MainHub", "Navigation to report failed: ${e.message}")
                 }
             })
         }
