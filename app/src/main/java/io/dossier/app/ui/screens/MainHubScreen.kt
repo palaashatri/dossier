@@ -114,7 +114,10 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
                             label = {
                                 Text(
                                     tab.label,
-                                    fontSize = 11.sp,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
                                 )
                             },
@@ -173,10 +176,9 @@ private fun DossierNavGraph(
             ScanScreen(onScanComplete = {
                 try {
                     android.util.Log.d("MainHub", "ScanScreen.onScanComplete() called, navigating to report")
-                    android.util.Log.d("MainHub", "Current back stack: ${navController.currentBackStackEntry?.destination?.route}")
                     navController.navigate("report") {
-                        // Don't pop anything — just push report onto the stack
-                        launchSingleTop = false
+                        popUpTo("scan") { inclusive = true }
+                        launchSingleTop = true
                     }
                     android.util.Log.d("MainHub", "Navigation to report succeeded")
                 } catch (e: Exception) {

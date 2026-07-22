@@ -1,7 +1,7 @@
 # Dossier QA Audit — 2026-07-20
 
 **Status**: Testing in progress  
-**Tester**: Palaash Atri (self-audit)  
+**Tester**: Lab Owner (self-audit)  
 **Emulator**: Android 36, API 35  
 **Build**: Debug APK installed successfully  
 
@@ -182,5 +182,5 @@ JAVA_HOME=/Library/Java/JavaVirtualMachines/zulu-21.jdk/Contents/Home \
 ---
 
 **Audit Date**: 2026-07-20  
-**Auditor**: Claude (on behalf of Palaash Atri)  
+**Auditor**: Claude (on behalf of Lab Owner)  
 **Status**: Awaiting device testing to complete QA

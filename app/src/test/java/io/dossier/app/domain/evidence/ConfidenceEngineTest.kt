@@ -17,19 +17,19 @@ class ConfidenceEngineTest {
     fun scoresUsernameEdgeFromEvidence() {
         val graph = EntityGraph(
             entities = listOf(
-                DossierEntity("person:palaashatri", EntityType.Person, "palaashatri", 1.0f),
-                DossierEntity("username:palaash.atri", EntityType.Username, "palaash.atri", 0.85f)
+                DossierEntity("person:janedoe", EntityType.Person, "janedoe", 1.0f),
+                DossierEntity("username:jane.doe", EntityType.Username, "jane.doe", 0.85f)
             ),
             edges = listOf(
-                DossierEdge("person:palaashatri", "username:palaash.atri", "uses_username")
+                DossierEdge("person:janedoe", "username:jane.doe", "uses_username")
             )
         )
         val evidence = listOf(
-            Evidence(id = "e1", kind = EvidenceKind.Username, value = "palaashatri"),
-            Evidence(id = "e2", kind = EvidenceKind.Username, value = "palaash.atri")
+            Evidence(id = "e1", kind = EvidenceKind.Username, value = "janedoe"),
+            Evidence(id = "e2", kind = EvidenceKind.Username, value = "jane.doe")
         )
         val scored = engine.score(graph, evidence)
-        val key = ConfidenceEngine.edgeKey("person:palaashatri", "username:palaash.atri", "uses_username")
+        val key = ConfidenceEngine.edgeKey("person:janedoe", "username:jane.doe", "uses_username")
         val result = scored[key]
         assertNotNull(result)
         assertEquals(0.85f, result!!.score, 1e-6f)

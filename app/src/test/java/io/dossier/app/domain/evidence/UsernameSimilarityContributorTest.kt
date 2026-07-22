@@ -10,8 +10,8 @@ class UsernameSimilarityContributorTest {
 
     @Test
     fun exactVariantScoresHigh() {
-        val a = Evidence(id = "1", kind = EvidenceKind.Username, value = "palaashatri")
-        val b = Evidence(id = "2", kind = EvidenceKind.Username, value = "palaash.atri")
+        val a = Evidence(id = "1", kind = EvidenceKind.Username, value = "janedoe")
+        val b = Evidence(id = "2", kind = EvidenceKind.Username, value = "jane.doe")
         val signals = contributor.contribute(a, b)
         assertEquals(0.85f, signals!!.score, 1e-6f)
         assertEquals(true, signals.reasons.any { it.contains("separators") })
@@ -19,8 +19,8 @@ class UsernameSimilarityContributorTest {
 
     @Test
     fun substringScoresMedium() {
-        val a = Evidence(id = "1", kind = EvidenceKind.Username, value = "palaash")
-        val b = Evidence(id = "2", kind = EvidenceKind.Username, value = "palaash_atri")
+        val a = Evidence(id = "1", kind = EvidenceKind.Username, value = "jane")
+        val b = Evidence(id = "2", kind = EvidenceKind.Username, value = "jane_doe")
         val signals = contributor.contribute(a, b)
         assertEquals(0.6f, signals!!.score, 1e-6f)
     }

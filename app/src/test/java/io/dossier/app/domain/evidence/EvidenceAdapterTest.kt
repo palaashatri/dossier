@@ -36,9 +36,9 @@ class EvidenceAdapterTest {
     fun findingToEvidencePreservesSharedFields() {
         val finding = Finding(
             type = FindingType.UsernameReuse,
-            value = "palaash_atri",
-            sourceUrl = "https://github.com/palaash_atri",
-            evidenceSnippet = "dot variant of palaashatri",
+            value = "jane_doe",
+            sourceUrl = "https://github.com/jane_doe",
+            evidenceSnippet = "dot variant of janedoe",
             confidence = 0.8f,
             risk = RiskLevel.Medium,
             remediation = "use distinct handles"
@@ -46,9 +46,9 @@ class EvidenceAdapterTest {
         val evidence = finding.toEvidence()
 
         assertEquals(EvidenceKind.UsernameReuse, evidence.kind)
-        assertEquals("palaash_atri", evidence.value)
-        assertEquals("https://github.com/palaash_atri", evidence.sourceUrl)
-        assertEquals("dot variant of palaashatri", evidence.snippet)
+        assertEquals("jane_doe", evidence.value)
+        assertEquals("https://github.com/jane_doe", evidence.sourceUrl)
+        assertEquals("dot variant of janedoe", evidence.snippet)
         assertEquals(0.8f, evidence.confidence, 1e-6f)
         assertEquals(RiskLevel.Medium, evidence.risk)
         assertEquals(listOf("use distinct handles"), evidence.signals)

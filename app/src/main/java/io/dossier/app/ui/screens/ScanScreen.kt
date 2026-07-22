@@ -79,18 +79,19 @@ fun ScanScreen(onScanComplete: () -> Unit) {
     // Kick off the scan once.
     LaunchedEffect(Unit) {
         val input = ScanSession.tempInput
+            ?: ScanSession.currentInput.value
+            ?: ScanSession.loadResumePoint(context)?.first
+            ?: io.dossier.app.domain.model.IdentityInput(fullName = "Demo Subject", primaryUsername = "demo_subject")
         liveLogs.add("Starting scan…")
-        if (input != null) {
-            val deepResearch = ScanSession.deepResearchEnabled.value
-            if (deepResearch) liveLogs.add("Deep Research enabled — following linked sites")
-            ScanSession.startScan(context, input, deepResearch = deepResearch)
-        }
+        val deepResearch = ScanSession.deepResearchEnabled.value
+        if (deepResearch) liveLogs.add("Deep Research enabled — following linked sites")
+        ScanSession.startScan(context, input, deepResearch = deepResearch)
     }
 
     // Navigate to the report when the scan actually finishes (isScanning flips
     // false). Cancellation also flips it false, but then onScanComplete fires
     // from the cancel path via reset, so guard against double-navigation.
-    var hasStarted by remember { mutableStateOf(false) }
+    var hasStarted by remember { mutableStateOf(isScanning) }
     var navigationCompleted by remember { mutableStateOf(false) }
     LaunchedEffect(isScanning) {
         android.util.Log.d("ScanScreen", "LaunchedEffect fired: isScanning=$isScanning, hasStarted=$hasStarted, navigationCompleted=$navigationCompleted")
@@ -101,7 +102,7 @@ fun ScanScreen(onScanComplete: () -> Unit) {
             android.util.Log.d("ScanScreen", "SCAN FINISHED: calling onScanComplete() NOW")
             liveLogs.add("Scan complete.")
             navigationCompleted = true
-            delay(500)
+            delay(300)
             try {
                 android.util.Log.d("ScanScreen", "CALLING onScanComplete callback")
                 onScanComplete()

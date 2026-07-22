@@ -66,7 +66,7 @@ adb shell pm clear io.dossier.app
    - ✅ Expected: Navigate to Identity screen (3-step form)
 
 3. **Fill in identity** (Step 1/3)
-   - Enter a name (e.g., "Palaash Atri")
+   - Enter a name (e.g., "Jane Doe")
    - Tap "Continue"
    - ✅ Expected: Navigate to Step 2 (optional signals: aliases, emails, phones, etc.)
 

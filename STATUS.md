@@ -1,11 +1,11 @@
 # Dossier — Current Status
 
-**Date**: 2026-07-20 (QA Audit)  
+**Date**: 2026-07-22 (Full E2E QA Audit)  
 **Branch**: `main`  
 **Latest commits**: `2571b72` (M6-M16 milestones), `46b4136` (face embedding)  
 **Version**: 0.1.0 (`versionCode` 1)
 
-**⚠️ CRITICAL**: Commits 2571b72 and 46b4136 are UNTESTED on device. Build passes, 126 unit tests pass, but end-to-end flow on emulator blocked by navigation bug (Scan→Report fails; loops back to Identity instead).
+**✅ ALL CLEAR**: Build passes (0 errors), 126 unit tests pass, debug APK (~88.9MB) builds cleanly, Scan→Report navigation bug RESOLVED, and 17 end-to-end screen captures verified on emulator.
 
 ---
 
@@ -17,17 +17,15 @@ It is **not** an offline-only tool and **not** a full classified multi-source in
 
 ---
 
-## BLOCKING BUG: Scan → Report Navigation
+## RESOLVED: Scan → Report Navigation
 
-**Status**: CRITICAL - Prevents device testing of all Report features  
-**Symptoms**: After scan completes, app navigates back to Identity screen instead of Report  
-**Evidence**:
-- ScanScreen logs show scan completing (isScanning → false)
-- onScanComplete() callback should fire and call navController.navigate("report")
-- Instead, user is returned to IdentityScreen  
-**Impact**: Cannot test Report, Entity Graph, Case Comparison, or any downstream features  
-**Workaround**: None (blocking full QA)  
-**Added**: Defensive logging in ScanScreen (line 100) and MainHubScreen (lines 164-175) to capture failure point when device testing resumes
+**Status**: ✅ FIXED (2026-07-22)  
+**Resolution**:
+- Fixed input fallback initialization in `ScanScreen.kt` so scan execution and state observation trigger reliably.
+- Updated `MainHubScreen.kt` navigation to pop `scan` from backstack (`popUpTo("scan") { inclusive = true }`) upon scan completion.
+- Restored `Screen.Consent.route` as app `startDestination` in `DossierNavHost.kt`.
+- Verified end-to-end navigation from Consent → Identity Wizard → Username Discovery → Scan → Report → Bottom Navigation Tabs on Android API 36 emulator.
+
 
 ---
 

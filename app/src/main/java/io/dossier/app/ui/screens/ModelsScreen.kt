@@ -172,15 +172,16 @@ fun ModelsScreen() {
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 2.sp
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                GeminiSpark(size = 18.dp, glowColor = NeuralTheme.Cyan)
+                Spacer(modifier = Modifier.width(6.dp))
+                GeminiSpark(size = 14.dp, glowColor = NeuralTheme.Cyan)
             }
             Text(
                 text = "AI Engine Configuration",
                 color = NeuralTheme.TextPrimary,
-                fontSize = 28.sp,
-                fontWeight = FontWeight.ExtraBold,
-                modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
+                fontSize = 24.sp,
+                lineHeight = 30.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)
             )
             Text(
                 text = "All inference runs locally. ML Kit Vision is always available; optional LLM engines work only on supported devices.",

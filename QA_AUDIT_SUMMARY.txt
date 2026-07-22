@@ -196,7 +196,7 @@ AUDIT SIGN-OFF
 
 Auditor: Claude (Anthropic)
 Date: 2026-07-20 16:51 UTC+5:30
-Behalf of: Palaash Atri
+Behalf of: Lab Owner
 Status: READY FOR DEVICE TESTING (critical bug instrumented for diagnosis)
 
 All findings documented in:

@@ -54,19 +54,24 @@ fun BreachCheckScreen(onNavigateToBrowser: (String) -> Unit) {
         ) {
             Spacer(modifier = Modifier.height(16.dp))
 
-            Text(
-                text = "BREACH INTELLIGENCE",
-                color = NeuralTheme.Cyan,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 2.sp
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "BREACH INTELLIGENCE",
+                    color = NeuralTheme.Cyan,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 2.sp
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                io.dossier.app.ui.components.GeminiSpark(size = 14.dp, glowColor = NeuralTheme.Cyan)
+            }
             Text(
                 text = "Exposure Check",
                 color = NeuralTheme.TextPrimary,
-                fontSize = 28.sp,
-                fontWeight = FontWeight.ExtraBold,
-                modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
+                fontSize = 24.sp,
+                lineHeight = 30.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)
             )
             Text(
                 text = "Passwords are checked by SHA-1 prefix only. The app does not fetch or reveal leaked passwords from dumps.",

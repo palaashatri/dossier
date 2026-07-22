@@ -70,20 +70,31 @@ fun CaseComparisonScreen() {
             .padding(horizontal = 24.dp, vertical = 16.dp)
             .verticalScroll(rememberScrollState())
     ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "INVESTIGATION TIMELINE",
+                color = NeuralTheme.Cyan,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 2.sp
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            io.dossier.app.ui.components.GeminiSpark(size = 14.dp, glowColor = NeuralTheme.Cyan)
+        }
         Text(
-            text = "SAVED CASES",
+            text = "Saved Cases & Delta",
             color = NeuralTheme.TextPrimary,
-            fontFamily = FontFamily.Monospace,
+            fontSize = 24.sp,
+            lineHeight = 30.sp,
             fontWeight = FontWeight.Bold,
-            fontSize = 18.sp,
-            letterSpacing = 0.5.sp
+            modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)
         )
         Text(
             text = "Local only · no cloud · compare two scans to see what changed",
             color = NeuralTheme.TextSecondary,
-            fontSize = 12.sp,
-            lineHeight = 16.sp,
-            modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
+            fontSize = 12.5.sp,
+            lineHeight = 17.sp,
+            modifier = Modifier.padding(bottom = 16.dp)
         )
 
         if (cases.isEmpty()) {

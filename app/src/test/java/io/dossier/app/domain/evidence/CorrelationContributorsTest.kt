@@ -24,22 +24,22 @@ class CorrelationContributorsTest {
 
     @Test
     fun sharedIdentifierFindsUsernameInEmail() {
-        val user = Evidence(id = "1", kind = EvidenceKind.Username, value = "palaashatri")
-        val mail = Evidence(id = "2", kind = EvidenceKind.Email, value = "palaashatri@gmail.com")
-        val s = SharedIdentifierContributor(setOf("palaashatri")).contribute(user, mail)
+        val user = Evidence(id = "1", kind = EvidenceKind.Username, value = "janedoe")
+        val mail = Evidence(id = "2", kind = EvidenceKind.Email, value = "janedoe@gmail.com")
+        val s = SharedIdentifierContributor(setOf("janedoe")).contribute(user, mail)
         assertEquals(0.65f, s!!.score, 1e-6f)
     }
 
     @Test
     fun sharedIdentifierNoSeedsReturnsNull() {
-        val user = Evidence(id = "1", kind = EvidenceKind.Username, value = "palaashatri")
+        val user = Evidence(id = "1", kind = EvidenceKind.Username, value = "janedoe")
         val mail = Evidence(id = "2", kind = EvidenceKind.Email, value = "x@gmail.com")
         assertNull(SharedIdentifierContributor().contribute(user, mail))
     }
 
     @Test
     fun sharedDomainMatchesProfileLinks() {
-        val a = Evidence(id = "1", kind = EvidenceKind.Profile, value = "https://github.com/palaashatri")
+        val a = Evidence(id = "1", kind = EvidenceKind.Profile, value = "https://github.com/janedoe")
         val b = Evidence(id = "2", kind = EvidenceKind.PublicSearchEvidence, value = "http://www.github.com/about")
         val s = SharedDomainContributor().contribute(a, b)
         assertEquals(0.6f, s!!.score, 1e-6f)

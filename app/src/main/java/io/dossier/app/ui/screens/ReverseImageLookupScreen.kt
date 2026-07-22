@@ -123,15 +123,16 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 2.sp
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                GeminiSpark(size = 18.dp, glowColor = NeuralTheme.Cyan)
+                Spacer(modifier = Modifier.width(6.dp))
+                GeminiSpark(size = 14.dp, glowColor = NeuralTheme.Cyan)
             }
             Text(
                 text = "Image & Video Location Intelligence",
                 color = NeuralTheme.TextPrimary,
-                fontSize = 28.sp,
-                fontWeight = FontWeight.ExtraBold,
-                modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
+                fontSize = 24.sp,
+                lineHeight = 30.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)
             )
             Text(
                 text = "Estimate where media was captured. EXIF GPS for images, sampled video frames, on-device OCR/scene detection, and public-web search of extracted clues. Faces disable identity search; location lookup continues.",

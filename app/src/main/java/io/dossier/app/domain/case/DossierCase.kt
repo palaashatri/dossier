@@ -33,7 +33,7 @@ data class DossierCase(
     val aiSummary: String? = null
 ) {
 
-    /** Stable display label, e.g. "palaashatri · 2026-07-20 14:03". */
+    /** Stable display label, e.g. "janedoe · 2026-07-20 14:03". */
     val label: String
         get() = buildString {
             append(subjectName.ifBlank { "UNKNOWN SUBJECT" })
