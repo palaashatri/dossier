@@ -1,57 +1,75 @@
 package io.dossier.app
 
-import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.model.FindingType
-import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.domain.model.IdentityInput
-
-import org.junit.Assert.*
+import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.pii.PiiExtractor
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PiiExtractorTest {
 
     @Test
-    fun testEmailExtraction() {
-        val extractor = PiiExtractor()
-        val text = "Contact me at user@example.com for audits."
-        val findings = extractor.extract(text, "https://github.com/user")
-
-        val emailFinding = findings.firstOrNull { it.type == FindingType.Email }
-        assertNotNull("Should extract email finding", emailFinding)
-        assertEquals("user@example.com", emailFinding?.value)
-        assertEquals(RiskLevel.High, emailFinding?.risk)
+    fun genericEmailIsDetectedButNotAttributedAtHighRisk() {
+        val findings = PiiExtractor().extract(
+            "Contact the site administrator at user@example.com for audits.",
+            "https://example.org/about"
+        )
+        val email = findings.firstOrNull { it.type == FindingType.Email }
+        assertNotNull(email)
+        assertEquals("user@example.com", email?.value)
+        assertEquals(RiskLevel.Low, email?.risk)
+        assertTrue((email?.confidence ?: 1f) < 0.5f)
     }
 
     @Test
-    fun testPhoneExtraction() {
-        val extractor = PiiExtractor()
-        val text = "My direct phone number is +1-555-0199."
-        val findings = extractor.extract(text, "https://github.com/user")
-
-        val phoneFinding = findings.firstOrNull { it.type == FindingType.Phone }
-        assertNotNull("Should extract phone finding", phoneFinding)
-        assertEquals("+1-555-0199", phoneFinding?.value)
-        assertEquals(RiskLevel.Critical, phoneFinding?.risk)
+    fun exactSuppliedEmailReceivesStrongAttribution() {
+        val identity = IdentityInput(fullName = "Jane Doe", emails = listOf("jane@example.com"))
+        val findings = PiiExtractor().extract(
+            "Jane Doe can be reached at jane@example.com.",
+            "https://example.org/jane",
+            identity
+        )
+        val email = findings.firstOrNull { it.type == FindingType.Email }
+        assertEquals(RiskLevel.High, email?.risk)
+        assertTrue((email?.confidence ?: 0f) >= 0.95f)
     }
 
     @Test
-    fun testLocationAndOrgExtraction() {
-        val extractor = PiiExtractor()
-        val text = "I am from New York and I works at Google."
-        val findings = extractor.extract(text, "https://github.com/user")
-
-        val locationFinding = findings.firstOrNull { it.type == FindingType.Location }
-        assertNotNull("Should extract location finding", locationFinding)
-        assertEquals("New York", locationFinding?.value)
-
-        val orgFinding = findings.firstOrNull { it.type == FindingType.Organization }
-        assertNotNull("Should extract organization finding", orgFinding)
-        assertEquals("Google", orgFinding?.value)
+    fun genericPhoneRequiresPhoneContextAndStaysReviewOnly() {
+        val findings = PiiExtractor().extract(
+            "My direct phone number is +1-555-0199.",
+            "https://example.org/user"
+        )
+        val phone = findings.firstOrNull { it.type == FindingType.Phone }
+        assertNotNull(phone)
+        assertEquals(RiskLevel.Low, phone?.risk)
     }
 
     @Test
-    fun testNameAndAliasExposureExtraction() {
-        val extractor = PiiExtractor()
+    fun datesAndCountersAreNotPhoneFindings() {
+        val findings = PiiExtractor().extract(
+            "Build date 2026-08-02. Views 12345678.",
+            "https://example.org/releases"
+        )
+        assertNull(findings.firstOrNull { it.type == FindingType.Phone })
+    }
+
+    @Test
+    fun extractsAndReclassifiesLocationAndOrganizationContext() {
+        val findings = PiiExtractor().extract(
+            "I am from New York and I works at Google.",
+            "https://github.com/user"
+        )
+        assertEquals("New York", findings.firstOrNull { it.type == FindingType.Location }?.value)
+        assertEquals("Google", findings.firstOrNull { it.type == FindingType.Organization }?.value)
+    }
+
+    @Test
+    fun extractsSelfSuppliedNameAliasLocationAndOrganization() {
         val identity = IdentityInput(
             fullName = "Jane Doe",
             aliases = listOf("janedoe", "doe-jane"),
@@ -61,34 +79,23 @@ class PiiExtractorTest {
             organizations = listOf("Dossier Security")
         )
         val text = "This is Jane Doe. My alias is janedoe. I live in New Delhi and work at Dossier Security."
-        val findings = extractor.extract(text, "https://github.com/janedoe", identity)
+        val findings = PiiExtractor().extract(text, "https://github.com/janedoe", identity)
 
-        val nameFinding = findings.firstOrNull { it.value == "Name Exposure: Jane Doe" }
-        assertNotNull("Should extract name exposure finding", nameFinding)
-        assertEquals(FindingType.SensitiveSnippet, nameFinding?.type)
-
-        val aliasFinding = findings.firstOrNull { it.value == "Alias Exposure: janedoe" }
-        assertNotNull("Should extract alias exposure finding", aliasFinding)
-
-        val locationFinding = findings.firstOrNull { it.type == FindingType.Location && it.value == "New Delhi" }
-        assertNotNull("Should extract location finding", locationFinding)
-
-        val orgFinding = findings.firstOrNull { it.type == FindingType.Organization && it.value == "Dossier Security" }
-        assertNotNull("Should extract organization finding", orgFinding)
+        assertNotNull(findings.firstOrNull { it.value == "Name Exposure: Jane Doe" })
+        assertNotNull(findings.firstOrNull { it.value == "Alias Exposure: janedoe" })
+        assertNotNull(findings.firstOrNull { it.type == FindingType.Location && it.value == "New Delhi" })
+        assertNotNull(findings.firstOrNull { it.type == FindingType.Organization && it.value == "Dossier Security" })
     }
 
     @Test
-    fun testSmartReclassification() {
-        val extractor = PiiExtractor()
-        val text = "Jane is a developer from Replit who works at Delhi."
-        val findings = extractor.extract(text, "https://github.com/jane")
-        
-        val replitFinding = findings.firstOrNull { it.value == "Replit" }
-        assertNotNull("Should find Replit", replitFinding)
-        assertEquals("Replit matched 'from Replit' but should be classified as Organization", FindingType.Organization, replitFinding?.type)
-
-        val delhiFinding = findings.firstOrNull { it.value == "Delhi" }
-        assertNotNull("Should find Delhi", delhiFinding)
-        assertEquals("Delhi matched 'works at Delhi' but should be classified as Location", FindingType.Location, delhiFinding?.type)
+    fun smartReclassificationUsesKnownEntityContext() {
+        val findings = PiiExtractor().extract(
+            "Jane is a developer from Replit who works at Delhi.",
+            "https://github.com/jane"
+        )
+        val replit = findings.firstOrNull { it.value == "Replit" }
+        val delhi = findings.firstOrNull { it.value == "Delhi" }
+        assertEquals(FindingType.Organization, replit?.type)
+        assertEquals(FindingType.Location, delhi?.type)
     }
 }
