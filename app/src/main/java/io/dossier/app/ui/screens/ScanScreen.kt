@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,8 +14,10 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,18 +36,27 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.dossier.app.data.face.FaceCorrelationConsentStore
+import io.dossier.app.data.face.FaceCorrelationModelPack
+import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.LottieLoop
 import io.dossier.app.ui.components.LottieTags
 import io.dossier.app.ui.theme.NeuralTheme
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * Scan screen backed only by real ScanSession state.
  *
  * Missing navigation/session input is a visible recoverable error. Dossier must
  * never fabricate a subject and generate a plausible-looking report for it.
+ *
+ * A selfie does not silently enable cross-photo biometric-derived correlation.
+ * The first eligible scan presents an explicit install/consent decision. The
+ * user may continue with basic near-duplicate/photo-reuse matching instead.
  */
 @Composable
 fun ScanScreen(
@@ -52,16 +65,33 @@ fun ScanScreen(
     onInvalidInput: () -> Unit = onScanCancelled
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val progressText by ScanSession.progressText.collectAsState()
     val isScanning by ScanSession.isScanning.collectAsState()
     val profileResults by ScanSession.profileScanResults.collectAsState()
 
+    val modelPack = remember { FaceCorrelationModelPack(context) }
+    val consentStore = remember { FaceCorrelationConsentStore(context) }
     val liveLogs = remember { mutableStateListOf<String>() }
     val scrollState = rememberScrollState()
     var startError by remember { mutableStateOf<String?>(null) }
     var hasStarted by remember { mutableStateOf(false) }
     var navigationCompleted by remember { mutableStateOf(false) }
     var cancelledByUser by remember { mutableStateOf(false) }
+    var pendingInput by remember { mutableStateOf<IdentityInput?>(null) }
+    var pendingDeepResearch by remember { mutableStateOf(false) }
+    var showFaceSetup by remember { mutableStateOf(false) }
+    var facePackInstalling by remember { mutableStateOf(false) }
+    var facePackProgress by remember { mutableStateOf(0f) }
+    var facePackError by remember { mutableStateOf<String?>(null) }
+
+    fun startResolvedScan(input: IdentityInput, deepResearch: Boolean, visualMode: String) {
+        showFaceSetup = false
+        liveLogs.add(visualMode)
+        liveLogs.add("Starting scan…")
+        if (deepResearch) liveLogs.add("Deep Research enabled — following linked sites")
+        ScanSession.startScan(context, input, deepResearch = deepResearch)
+    }
 
     LaunchedEffect(progressText) {
         if (progressText.isNotBlank() && liveLogs.lastOrNull() != progressText) {
@@ -86,14 +116,29 @@ fun ScanScreen(
             return@LaunchedEffect
         }
 
-        liveLogs.add("Starting scan…")
         val deepResearch = if (ScanSession.tempInput == null && ScanSession.currentInput.value == null) {
             resume?.second ?: ScanSession.deepResearchEnabled.value
         } else {
             ScanSession.deepResearchEnabled.value
         }
-        if (deepResearch) liveLogs.add("Deep Research enabled — following linked sites")
-        ScanSession.startScan(context, input, deepResearch = deepResearch)
+        val selfiePresent = !input.selfieUri.isNullOrBlank()
+        val strongCorrelationReady = modelPack.isReady() && consentStore.hasConsent()
+        if (selfiePresent && !strongCorrelationReady) {
+            pendingInput = input
+            pendingDeepResearch = deepResearch
+            showFaceSetup = true
+            liveLogs.add("Waiting for local face-correlation choice")
+        } else {
+            startResolvedScan(
+                input,
+                deepResearch,
+                if (selfiePresent) {
+                    "Strong on-device YuNet/SFace correlation enabled"
+                } else {
+                    "No selfie supplied — face correlation skipped"
+                }
+            )
+        }
     }
 
     LaunchedEffect(isScanning) {
@@ -116,6 +161,126 @@ fun ScanScreen(
         if (liveLogs.isNotEmpty()) scrollState.animateScrollTo(scrollState.maxValue)
     }
 
+    if (showFaceSetup) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!facePackInstalling) {
+                    pendingInput?.let { input ->
+                        startResolvedScan(
+                            input,
+                            pendingDeepResearch,
+                            "Strong face correlation declined — using basic photo-reuse matching"
+                        )
+                    }
+                }
+            },
+            title = {
+                Text(
+                    text = "Enable strong local face correlation?",
+                    color = NeuralTheme.TextPrimary,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Dossier can compare different photos using YuNet five-landmark alignment and SFace embeddings. This is biometric-derived processing and requires explicit consent.",
+                        color = NeuralTheme.TextSecondary,
+                        fontSize = 12.5.sp,
+                        lineHeight = 18.sp
+                    )
+                    Text(
+                        text = "The verified model pack is about ${formatFacePackSize(modelPack.status().expectedBytes)}. Images, aligned crops, landmarks and embeddings stay on this device and are discarded after each comparison. Results remain supporting evidence, never proof of identity.",
+                        color = NeuralTheme.TextSecondary,
+                        fontSize = 12.5.sp,
+                        lineHeight = 18.sp
+                    )
+                    if (facePackInstalling) {
+                        LinearProgressIndicator(
+                            progress = { facePackProgress },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(
+                            text = "Downloading and verifying models… ${(facePackProgress * 100).toInt()}%",
+                            color = NeuralTheme.Cobalt,
+                            fontSize = 11.5.sp
+                        )
+                    }
+                    facePackError?.let { error ->
+                        Text(
+                            text = error,
+                            color = NeuralTheme.Crimson,
+                            fontSize = 11.5.sp,
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val input = pendingInput ?: return@Button
+                        if (modelPack.isReady()) {
+                            consentStore.grantForInstalledPipeline()
+                            startResolvedScan(
+                                input,
+                                pendingDeepResearch,
+                                "Explicit consent recorded — strong on-device YuNet/SFace correlation enabled"
+                            )
+                        } else {
+                            coroutineScope.launch {
+                                facePackInstalling = true
+                                facePackError = null
+                                facePackProgress = 0f
+                                try {
+                                    modelPack.install { progress -> facePackProgress = progress }
+                                    consentStore.grantForInstalledPipeline()
+                                    startResolvedScan(
+                                        input,
+                                        pendingDeepResearch,
+                                        "Verified YuNet/SFace pack installed; explicit local-correlation consent recorded"
+                                    )
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (error: Exception) {
+                                    facePackError = error.localizedMessage
+                                        ?: "Unable to install the verified face-correlation models."
+                                } finally {
+                                    facePackInstalling = false
+                                }
+                            }
+                        }
+                    },
+                    enabled = !facePackInstalling,
+                    colors = ButtonDefaults.buttonColors(containerColor = NeuralTheme.Cobalt)
+                ) {
+                    Text(
+                        if (modelPack.isReady()) "ENABLE LOCALLY" else "INSTALL & ENABLE",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
+                    )
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = {
+                        pendingInput?.let { input ->
+                            startResolvedScan(
+                                input,
+                                pendingDeepResearch,
+                                "Strong face correlation declined — using basic photo-reuse matching"
+                            )
+                        }
+                    },
+                    enabled = !facePackInstalling
+                ) {
+                    Text("USE BASIC MATCHING", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                }
+            },
+            containerColor = NeuralTheme.CardBackground
+        )
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         AnimatedObsidianBackground(showGrid = false)
 
@@ -133,6 +298,7 @@ fun ScanScreen(
                 Text(
                     text = when {
                         startError != null -> "Input required"
+                        showFaceSetup -> "Consent required"
                         isScanning -> "Scanning"
                         else -> "Compiling report"
                     },
@@ -153,7 +319,7 @@ fun ScanScreen(
                 io.dossier.app.ui.components.SquigglyProgressIndicator(
                     size = 160.dp,
                     progress = when {
-                        startError != null -> 0f
+                        startError != null || showFaceSetup -> 0f
                         isScanning -> null
                         else -> 1f
                     }
@@ -170,7 +336,8 @@ fun ScanScreen(
                 horizontalAlignment = Alignment.Start
             ) {
                 Text(
-                    text = startError?.let { "Scan cannot start" } ?: friendlyStageLabel(progressText),
+                    text = startError?.let { "Scan cannot start" }
+                        ?: if (showFaceSetup) "Waiting for face-correlation choice" else friendlyStageLabel(progressText),
                     color = if (startError == null) NeuralTheme.Cobalt else NeuralTheme.Crimson,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
@@ -178,7 +345,7 @@ fun ScanScreen(
                 )
 
                 io.dossier.app.ui.components.LinearWavyProgressIndicator(
-                    progress = if (isScanning) null else if (startError == null) 1f else 0f,
+                    progress = if (isScanning) null else if (startError == null && !showFaceSetup) 1f else 0f,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
                     strokeWidth = 3.dp
                 )
@@ -249,13 +416,16 @@ fun ScanScreen(
     }
 }
 
-private fun hasUsableIdentityInput(input: io.dossier.app.domain.model.IdentityInput): Boolean =
+private fun hasUsableIdentityInput(input: IdentityInput): Boolean =
     input.fullName.isNotBlank() ||
         !input.primaryUsername.isNullOrBlank() ||
         input.usernames.any { it.isNotBlank() } ||
         input.emails.any { it.isNotBlank() } ||
         input.phones.any { it.isNotBlank() } ||
         input.profileUrls.any { it.isNotBlank() }
+
+private fun formatFacePackSize(bytes: Long): String =
+    "%.1f MB".format(bytes.toDouble() / (1024.0 * 1024.0))
 
 private fun friendlyStage(raw: String): String = when {
     raw.contains("DISCOVERING", ignoreCase = true) -> "Resolving name → username variants"
