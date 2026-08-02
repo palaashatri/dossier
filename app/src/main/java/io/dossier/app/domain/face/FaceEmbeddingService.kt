@@ -31,7 +31,9 @@ import kotlinx.coroutines.CancellationException
 class FaceEmbeddingService(context: Context) {
     private val appContext = context.applicationContext
     private val faceEmbedder = FaceEmbedder(appContext)
-    private val modelStore = FaceEmbeddingModelStore(appContext).also { it.ensureModelAvailable() }
+    private val modelStore = FaceEmbeddingModelStore(appContext).also {
+        it.ensureModelAvailable()
+    }
     private val calibrationStore = FaceEmbeddingCalibrationStore(appContext)
     private val correlationPack = FaceCorrelationModelPack(appContext)
     private val correlationConsent = FaceCorrelationConsentStore(appContext)
@@ -59,18 +61,26 @@ class FaceEmbeddingService(context: Context) {
         profileUri: Uri,
         profileUrl: String
     ): FaceConsistencyMatch {
-        val strongAllowed = FaceCorrelationSessionPolicy.isStrongCorrelationEnabled() &&
-            correlationConsent.hasConsent() &&
-            correlationPack.isReady()
+        val strongAllowed =
+            FaceCorrelationSessionPolicy.isStrongCorrelationEnabled() &&
+                correlationConsent.hasConsent() &&
+                correlationPack.isReady()
         if (strongAllowed) {
             try {
+                check(correlationPack.verifyForInference()) {
+                    "Pinned YuNet/SFace files failed SHA-256 verification before inference."
+                }
                 return correlationEngine.compare(selfieUri, profileUri, profileUrl)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
                 // A native/model failure must not silently disable the entire
                 // scan. Fall back, but disclose the failed strong pipeline.
-                val fallback = compareWithLegacyBackends(selfieUri, profileUri, profileUrl)
+                val fallback = compareWithLegacyBackends(
+                    selfieUri,
+                    profileUri,
+                    profileUrl
+                )
                 return fallback.copy(
                     warning = "${fallback.warning} Verified YuNet/SFace correlation could not run: " +
                         (error.localizedMessage ?: error.javaClass.simpleName)
@@ -87,19 +97,23 @@ class FaceEmbeddingService(context: Context) {
             correlationPack.isReady()
         ) {
             val thresholds = correlationCalibration.getThresholds()
-            return thresholds.measured && thresholds.decision(score) != FaceCorrelationDecision.NO_SUPPORT
+            return thresholds.measured &&
+                thresholds.decision(score) != FaceCorrelationDecision.NO_SUPPORT
         }
         return calibrationStore.getThresholds()?.isReviewScore(score) == true
     }
 
     fun strongCorrelationStatus(): String = when {
-        !correlationPack.isReady() -> "YuNet/SFace model pack is not installed."
-        !correlationConsent.hasConsent() -> "YuNet/SFace is installed but installation consent is not active."
+        !correlationPack.isReady() ->
+            "YuNet/SFace model pack is not installed."
+        !correlationConsent.hasConsent() ->
+            "YuNet/SFace is installed but installation consent is not active."
         !FaceCorrelationSessionPolicy.isStrongCorrelationEnabled() ->
             "YuNet/SFace is installed but basic matching was selected for this scan."
         correlationCalibration.hasMeasuredCalibration() ->
             "YuNet/SFace is active with a measured, hash-bound calibration."
-        else -> "YuNet/SFace is active with the reference threshold policy; results remain manual-review evidence."
+        else ->
+            "YuNet/SFace is active with the reference threshold policy; results remain manual-review evidence."
     }
 
     private suspend fun compareWithLegacyBackends(
@@ -146,7 +160,10 @@ class FaceEmbeddingService(context: Context) {
         val runner = FaceEmbeddingModelRunner(modelStore.getModelFile())
         val selfieEmbedding = runner.embed(selfieFace)
         val profileEmbedding = runner.embed(profileFace)
-        val score = FaceEmbeddingModelRunner.cosineSimilarity(selfieEmbedding, profileEmbedding)
+        val score = FaceEmbeddingModelRunner.cosineSimilarity(
+            selfieEmbedding,
+            profileEmbedding
+        )
         val thresholds = calibrationStore.getThresholds()
         FaceConsistencyMatch(
             profileUrl = profileUrl,
@@ -154,7 +171,11 @@ class FaceEmbeddingService(context: Context) {
             warning = warningForModelScore(score, thresholds)
         )
     }.getOrElse { error ->
-        val fallback = runAppearanceFallback(selfieFace, profileFace, profileUrl)
+        val fallback = runAppearanceFallback(
+            selfieFace,
+            profileFace,
+            profileUrl
+        )
         fallback.copy(
             warning = "${fallback.warning} The configured embedding model failed: " +
                 (error.localizedMessage ?: error.javaClass.simpleName)
@@ -168,7 +189,10 @@ class FaceEmbeddingService(context: Context) {
     ): FaceConsistencyMatch {
         val selfieDescriptor = FaceAppearanceDescriptor.describe(selfieFace)
         val profileDescriptor = FaceAppearanceDescriptor.describe(profileFace)
-        val raw = FaceAppearanceDescriptor.cosineSimilarity(selfieDescriptor, profileDescriptor)
+        val raw = FaceAppearanceDescriptor.cosineSimilarity(
+            selfieDescriptor,
+            profileDescriptor
+        )
         // Appearance descriptors tend to cluster high; remap the useful region
         // conservatively and keep thresholds strict to avoid identity claims.
         val score = ((raw - 0.55f) / 0.45f).coerceIn(0f, 1f)
@@ -186,15 +210,17 @@ class FaceEmbeddingService(context: Context) {
         return FaceConsistencyMatch(profileUrl, score, warning)
     }
 
-    private fun warningForModelScore(score: Float, thresholds: FaceEmbeddingThresholds?): String =
-        when {
-            thresholds == null ->
-                "Face embedding model produced a cosine score, but no matching calibration thresholds are available."
-            thresholds.isSamePersonScore(score) ->
-                "Calibrated face model reports a high visual similarity score. Confirm account ownership manually."
-            thresholds.isReviewScore(score) ->
-                "Calibrated face model reports a review-range similarity score. Treat as supporting evidence only."
-            else ->
-                "Calibrated face model reports a low similarity score."
-        }
+    private fun warningForModelScore(
+        score: Float,
+        thresholds: FaceEmbeddingThresholds?
+    ): String = when {
+        thresholds == null ->
+            "Face embedding model produced a cosine score, but no matching calibration thresholds are available."
+        thresholds.isSamePersonScore(score) ->
+            "Calibrated face model reports a high visual similarity score. Confirm account ownership manually."
+        thresholds.isReviewScore(score) ->
+            "Calibrated face model reports a review-range similarity score. Treat as supporting evidence only."
+        else ->
+            "Calibrated face model reports a low similarity score."
+    }
 }
