@@ -1,36 +1,40 @@
 package io.dossier.app.data.face
 
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Matrix
 import android.net.Uri
-import androidx.exifinterface.media.ExifInterface
 import io.dossier.app.domain.model.FaceConsistencyMatch
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.opencv.android.OpenCVLoader
-import org.opencv.android.Utils
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.MatOfDouble
 import org.opencv.core.Size
+import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 import org.opencv.objdetect.FaceDetectorYN
 import org.opencv.objdetect.FaceRecognizerSF
+import java.io.ByteArrayOutputStream
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 /**
  * Exact OpenCV reference pipeline for strong, local cross-photo correlation:
  *
- * bounded EXIF-corrected decode -> YuNet detection and five landmarks ->
- * quality/ambiguity gates -> SFace alignCrop -> SFace feature -> cosine match.
+ * bounded OpenCV decode -> EXIF orientation -> INTER_AREA resize -> YuNet
+ * detection and five landmarks -> quality/ambiguity gates -> SFace alignCrop ->
+ * SFace feature -> cosine match.
+ *
+ * Android and `tools/face_calibration.py` deliberately use the same OpenCV
+ * `IMREAD_COLOR` decoder and resize policy. This prevents a calibration produced
+ * against one preprocessing stack from being applied to a materially different
+ * Android stack.
  *
  * The detector and recognizer are loaded once per service and protected by a
  * mutex because OpenCV DNN instances are not treated as concurrently reusable.
@@ -39,7 +43,8 @@ import kotlin.math.hypot
 class YuNetSFaceCorrelationEngine(
     context: Context,
     private val modelPack: FaceCorrelationModelPack = FaceCorrelationModelPack(context),
-    private val calibrationStore: FaceCorrelationCalibrationStore = FaceCorrelationCalibrationStore(context)
+    private val calibrationStore: FaceCorrelationCalibrationStore =
+        FaceCorrelationCalibrationStore(context)
 ) {
     private val appContext = context.applicationContext
     private val inferenceMutex = Mutex()
@@ -59,9 +64,12 @@ class YuNetSFaceCorrelationEngine(
         val laplacianVariance: Float
     ) {
         fun summary(): String =
-            "detector=${format(detectorScore)}, face=${faceWidth.toInt()}x${faceHeight.toInt()}, " +
-                "eyes=${eyeDistance.toInt()}px, roll=${format(rollDegrees)}°, " +
-                "brightness=${brightness.toInt()}, sharpness=${laplacianVariance.toInt()}"
+            "detector=${format(detectorScore)}, " +
+                "face=${faceWidth.toInt()}x${faceHeight.toInt()}, " +
+                "eyes=${eyeDistance.toInt()}px, " +
+                "roll=${format(rollDegrees)}°, " +
+                "brightness=${brightness.toInt()}, " +
+                "sharpness=${laplacianVariance.toInt()}"
 
         private fun format(value: Float): String = "%.2f".format(value)
     }
@@ -114,7 +122,9 @@ class YuNetSFaceCorrelationEngine(
         runtime: Runtime
     ): FaceConsistencyMatch {
         val selfie = prepare(selfieUri, "selected selfie", runtime)
-        if (selfie is Preparation.Rejected) return rejected(profileUrl, selfie.reason)
+        if (selfie is Preparation.Rejected) {
+            return rejected(profileUrl, selfie.reason)
+        }
         val selfieFace = (selfie as Preparation.Ready).face
 
         val profile = prepare(profileUri, "profile image", runtime)
@@ -125,7 +135,7 @@ class YuNetSFaceCorrelationEngine(
         val profileFace = (profile as Preparation.Ready).face
 
         return try {
-            val score = runtime.recognizer.match(
+            val rawCosine = runtime.recognizer.match(
                 selfieFace.feature,
                 profileFace.feature,
                 FaceRecognizerSF.FR_COSINE
@@ -133,10 +143,12 @@ class YuNetSFaceCorrelationEngine(
             val thresholds = calibrationStore.getThresholds()
             FaceConsistencyMatch(
                 profileUrl = profileUrl,
-                similarityScore = score,
+                // Existing report/UI surfaces model this field as a 0..1
+                // similarity. Preserve the signed cosine in the evidence text.
+                similarityScore = rawCosine.coerceIn(0f, 1f),
                 warning = warningFor(
-                    decision = thresholds.decision(score),
-                    score = score,
+                    decision = thresholds.decision(rawCosine),
+                    score = rawCosine,
                     thresholds = thresholds,
                     selfieQuality = selfieFace.quality,
                     profileQuality = profileFace.quality
@@ -150,8 +162,12 @@ class YuNetSFaceCorrelationEngine(
 
     private fun runtime(): Runtime {
         loadedRuntime?.let { return it }
-        check(modelPack.isReady()) { "Verified YuNet/SFace model pack is not installed." }
-        check(OpenCVLoader.initLocal()) { "OpenCV native runtime could not be initialized." }
+        check(modelPack.isReady()) {
+            "Verified YuNet/SFace model pack is not installed."
+        }
+        check(OpenCVLoader.initLocal()) {
+            "OpenCV native runtime could not be initialized."
+        }
         return Runtime(
             detector = FaceDetectorYN.create(
                 modelPack.yunetModelFile().absolutePath,
@@ -168,82 +184,111 @@ class YuNetSFaceCorrelationEngine(
         ).also { loadedRuntime = it }
     }
 
-    private fun prepare(uri: Uri, label: String, runtime: Runtime): Preparation {
-        val bitmap = loadBoundedOrientedBitmap(uri)
-            ?: return Preparation.Rejected("$label could not be decoded safely; face correlation was not run.")
-        val rgba = Mat()
-        val bgr = Mat()
+    private fun prepare(
+        uri: Uri,
+        label: String,
+        runtime: Runtime
+    ): Preparation {
+        val bgr = loadBoundedBgrMat(uri)
+            ?: return Preparation.Rejected(
+                "$label could not be decoded safely; face correlation was not run."
+            )
         val faces = Mat()
-        try {
-            Utils.bitmapToMat(bitmap, rgba)
-            Imgproc.cvtColor(rgba, bgr, Imgproc.COLOR_RGBA2BGR)
+        var faceRow: Mat? = null
+        var aligned: Mat? = null
+        var feature: Mat? = null
+        var ownershipTransferred = false
+
+        return try {
             runtime.detector.setInputSize(bgr.size())
             runtime.detector.detect(bgr, faces)
-            if (faces.empty() || faces.rows() <= 0 || faces.cols() < FACE_OUTPUT_COLUMNS) {
-                bgr.release()
-                return Preparation.Rejected("No usable face was detected in the $label; face correlation was not scored.")
+            if (
+                faces.empty() ||
+                faces.rows() <= 0 ||
+                faces.cols() < FACE_OUTPUT_COLUMNS
+            ) {
+                return Preparation.Rejected(
+                    "No usable face was detected in the $label; " +
+                        "face correlation was not scored."
+                )
             }
 
             val selectedIndex = when (val selection = selectFace(faces)) {
                 is FaceSelection.Selected -> selection.row
                 FaceSelection.None -> {
-                    bgr.release()
                     return Preparation.Rejected(
-                        "No face in the $label passed the detector-confidence and size gates."
+                        "No face in the $label passed the detector-confidence " +
+                            "and size gates."
                     )
                 }
                 FaceSelection.Ambiguous -> {
-                    bgr.release()
                     return Preparation.Rejected(
-                        "Multiple similarly prominent faces were detected in the $label. " +
-                            "Choose an image containing one clear consenting subject."
+                        "Multiple similarly prominent faces were detected in " +
+                            "the $label. Choose an image containing one clear " +
+                            "consenting subject."
                     )
                 }
             }
 
-            val faceRow = faces.row(selectedIndex).clone()
-            val aligned = Mat()
+            faceRow = faces.row(selectedIndex).clone()
+            aligned = Mat()
             runtime.recognizer.alignCrop(bgr, faceRow, aligned)
             if (aligned.empty()) {
-                faceRow.release()
-                bgr.release()
-                return Preparation.Rejected("Five-landmark alignment failed for the $label.")
-            }
-
-            val quality = evaluateQuality(faceRow, aligned, bgr.width(), bgr.height())
-            if (!quality.accepted) {
-                faceRow.release()
-                aligned.release()
-                bgr.release()
                 return Preparation.Rejected(
-                    "Insufficient $label quality: ${quality.reason}. ${quality.summary()}."
+                    "Five-landmark alignment failed for the $label."
                 )
             }
 
-            val feature = Mat()
+            val quality = evaluateQuality(
+                faceRow,
+                aligned,
+                bgr.width(),
+                bgr.height()
+            )
+            if (!quality.accepted) {
+                return Preparation.Rejected(
+                    "Insufficient $label quality: ${quality.reason}. " +
+                        "${quality.summary()}."
+                )
+            }
+
+            feature = Mat()
             runtime.recognizer.feature(aligned, feature)
             if (feature.empty()) {
-                faceRow.release()
-                aligned.release()
-                feature.release()
-                bgr.release()
-                return Preparation.Rejected("SFace could not produce an embedding for the $label.")
+                return Preparation.Rejected(
+                    "SFace could not produce an embedding for the $label."
+                )
             }
+
             val retainedFeature = feature.clone()
             feature.release()
-            return Preparation.Ready(PreparedFace(bgr, faceRow, aligned, retainedFeature, quality))
-        } catch (cancelled: CancellationException) {
-            bgr.release()
-            throw cancelled
+            feature = null
+            val retainedFaceRow = checkNotNull(faceRow)
+            val retainedAligned = checkNotNull(aligned)
+            faceRow = null
+            aligned = null
+            ownershipTransferred = true
+            Preparation.Ready(
+                PreparedFace(
+                    sourceBgr = bgr,
+                    faceRow = retainedFaceRow,
+                    aligned = retainedAligned,
+                    feature = retainedFeature,
+                    quality = quality
+                )
+            )
         } catch (error: Exception) {
-            bgr.release()
-            return Preparation.Rejected(
-                "$label processing failed: ${error.localizedMessage ?: error.javaClass.simpleName}."
+            Preparation.Rejected(
+                "$label processing failed: " +
+                    (error.localizedMessage ?: error.javaClass.simpleName) +
+                    "."
             )
         } finally {
+            feature?.release()
+            aligned?.release()
+            faceRow?.release()
             faces.release()
-            rgba.release()
-            bitmap.recycle()
+            if (!ownershipTransferred) bgr.release()
         }
     }
 
@@ -255,14 +300,27 @@ class YuNetSFaceCorrelationEngine(
             val width = values[2].toFloat().coerceAtLeast(0f)
             val height = values[3].toFloat().coerceAtLeast(0f)
             val score = values[14].toFloat()
-            if (width <= 0f || height <= 0f || score < MIN_ACCEPTED_DETECTOR_SCORE) return@mapNotNull null
+            if (
+                width <= 0f ||
+                height <= 0f ||
+                score < MIN_ACCEPTED_DETECTOR_SCORE
+            ) {
+                return@mapNotNull null
+            }
             FaceCandidate(row, width * height, score)
         }.sortedByDescending { it.area * it.score }
+
         val first = candidates.firstOrNull() ?: return FaceSelection.None
-        val second = candidates.getOrNull(1) ?: return FaceSelection.Selected(first.row)
-        val similarlyProminent = second.area >= first.area * AMBIGUOUS_AREA_RATIO &&
-            second.score >= first.score - AMBIGUOUS_SCORE_DELTA
-        return if (similarlyProminent) FaceSelection.Ambiguous else FaceSelection.Selected(first.row)
+        val second = candidates.getOrNull(1)
+            ?: return FaceSelection.Selected(first.row)
+        val similarlyProminent =
+            second.area >= first.area * AMBIGUOUS_AREA_RATIO &&
+                second.score >= first.score - AMBIGUOUS_SCORE_DELTA
+        return if (similarlyProminent) {
+            FaceSelection.Ambiguous
+        } else {
+            FaceSelection.Selected(first.row)
+        }
     }
 
     internal fun evaluateQuality(
@@ -273,8 +331,19 @@ class YuNetSFaceCorrelationEngine(
     ): FaceQuality {
         val values = faceRow.get(0, 0) ?: doubleArrayOf()
         if (values.size < FACE_OUTPUT_COLUMNS) {
-            return FaceQuality(false, "invalid detector output", 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+            return FaceQuality(
+                false,
+                "invalid detector output",
+                0f,
+                0f,
+                0f,
+                0f,
+                0f,
+                0f,
+                0f
+            )
         }
+
         val width = values[2].toFloat()
         val height = values[3].toFloat()
         val detectorScore = values[14].toFloat()
@@ -284,11 +353,16 @@ class YuNetSFaceCorrelationEngine(
         val leftEyeY = values[7].toFloat()
         val eyeDistance = hypot(leftEyeX - rightEyeX, leftEyeY - rightEyeY)
         val roll = Math.toDegrees(
-            atan2((leftEyeY - rightEyeY).toDouble(), (leftEyeX - rightEyeX).toDouble())
+            atan2(
+                (leftEyeY - rightEyeY).toDouble(),
+                (leftEyeX - rightEyeX).toDouble()
+            )
         ).toFloat()
         val faceAreaRatio = if (imageWidth > 0 && imageHeight > 0) {
             width * height / (imageWidth.toFloat() * imageHeight.toFloat())
-        } else 0f
+        } else {
+            0f
+        }
 
         val gray = Mat()
         val laplacian = Mat()
@@ -311,15 +385,23 @@ class YuNetSFaceCorrelationEngine(
         }
 
         val rejection = when {
-            detectorScore < MIN_ACCEPTED_DETECTOR_SCORE -> "low detector confidence"
-            width < MIN_FACE_DIMENSION || height < MIN_FACE_DIMENSION -> "face is too small"
-            faceAreaRatio < MIN_FACE_AREA_RATIO -> "face occupies too little of the image"
-            eyeDistance < MIN_EYE_DISTANCE -> "facial landmarks are too close for stable alignment"
-            abs(roll) > MAX_ABS_ROLL_DEGREES -> "face rotation is too large"
-            brightness !in MIN_BRIGHTNESS..MAX_BRIGHTNESS -> "face is severely underexposed or overexposed"
-            variance < MIN_LAPLACIAN_VARIANCE -> "face crop is too blurred or compressed"
+            detectorScore < MIN_ACCEPTED_DETECTOR_SCORE ->
+                "low detector confidence"
+            width < MIN_FACE_DIMENSION || height < MIN_FACE_DIMENSION ->
+                "face is too small"
+            faceAreaRatio < MIN_FACE_AREA_RATIO ->
+                "face occupies too little of the image"
+            eyeDistance < MIN_EYE_DISTANCE ->
+                "facial landmarks are too close for stable alignment"
+            abs(roll) > MAX_ABS_ROLL_DEGREES ->
+                "face rotation is too large"
+            brightness !in MIN_BRIGHTNESS..MAX_BRIGHTNESS ->
+                "face is severely underexposed or overexposed"
+            variance < MIN_LAPLACIAN_VARIANCE ->
+                "face crop is too blurred or compressed"
             else -> null
         }
+
         return FaceQuality(
             accepted = rejection == null,
             reason = rejection ?: "accepted",
@@ -340,74 +422,126 @@ class YuNetSFaceCorrelationEngine(
         selfieQuality: FaceQuality,
         profileQuality: FaceQuality
     ): String {
-        val prefix = "YuNet five-landmark alignment + SFace cosine=${"%.3f".format(score)}; " +
-            "pipeline=${thresholds.pipelineVersion}; ${thresholds.summary()} "
-        val quality = "Selfie quality [${selfieQuality.summary()}]; profile quality [${profileQuality.summary()}]. "
+        val prefix =
+            "YuNet five-landmark alignment + SFace cosine=" +
+                "${"%.3f".format(score)}; " +
+                "pipeline=${thresholds.pipelineVersion}; " +
+                "${thresholds.summary()} "
+        val quality =
+            "Selfie quality [${selfieQuality.summary()}]; " +
+                "profile quality [${profileQuality.summary()}]. "
         val interpretation = when (decision) {
-            FaceCorrelationDecision.HIGH_SIMILARITY -> if (thresholds.measured) {
-                "Measured high visual similarity band. This is strong supporting evidence only; confirm ownership with independent identifiers."
-            } else {
-                "Reference high-band similarity. Dossier-specific false-match performance has not been measured, so manual review is required."
+            FaceCorrelationDecision.HIGH_SIMILARITY -> {
+                if (thresholds.measured) {
+                    "Measured high visual similarity band. This is strong " +
+                        "supporting evidence only; confirm ownership with " +
+                        "independent identifiers."
+                } else {
+                    "Reference high-band similarity. Dossier-specific " +
+                        "false-match performance has not been measured, so " +
+                        "manual review is required."
+                }
             }
-            FaceCorrelationDecision.MANUAL_REVIEW -> if (thresholds.measured) {
-                "Measured review-range similarity. Treat it only as supporting evidence and inspect independent signals."
-            } else {
-                "Reference review-band similarity. It does not alter risk until a matching measured calibration is installed."
+            FaceCorrelationDecision.MANUAL_REVIEW -> {
+                if (thresholds.measured) {
+                    "Measured review-range similarity. Treat it only as " +
+                        "supporting evidence and inspect independent signals."
+                } else {
+                    "Reference review-band similarity. It does not alter risk " +
+                        "until a matching measured calibration is installed."
+                }
             }
-            else -> "No visual support for a cross-photo relationship at the active thresholds."
+            else ->
+                "No visual support for a cross-photo relationship at the " +
+                    "active thresholds."
         }
         return prefix + quality + interpretation +
-            " Images, aligned crops, landmarks, and embeddings remained on-device and were discarded after comparison."
+            " Images, aligned crops, landmarks, and embeddings remained " +
+            "on-device and were discarded after comparison."
     }
 
-    private fun rejected(profileUrl: String, reason: String): FaceConsistencyMatch =
-        FaceConsistencyMatch(
-            profileUrl = profileUrl,
-            similarityScore = 0f,
-            warning = "$reason No identity conclusion was produced."
-        )
+    private fun rejected(
+        profileUrl: String,
+        reason: String
+    ): FaceConsistencyMatch = FaceConsistencyMatch(
+        profileUrl = profileUrl,
+        similarityScore = 0f,
+        warning = "$reason No identity conclusion was produced."
+    )
 
-    private fun loadBoundedOrientedBitmap(uri: Uri): Bitmap? {
-        val resolver = appContext.contentResolver
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: return null
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-        var sample = 1
-        while (bounds.outWidth / sample > MAX_DECODE_DIMENSION ||
-            bounds.outHeight / sample > MAX_DECODE_DIMENSION
-        ) {
-            sample *= 2
+    /**
+     * Reads a bounded encoded image, then decodes it through OpenCV using the
+     * same flag as the calibration tool. `IMREAD_COLOR` applies EXIF orientation
+     * and produces BGR pixels. Large images are resized with `INTER_AREA` using
+     * the same continuous scale policy as the desktop evaluator.
+     */
+    private fun loadBoundedBgrMat(uri: Uri): Mat? {
+        val encodedBytes = appContext.contentResolver.openInputStream(uri)?.use { input ->
+            val output = ByteArrayOutputStream(INITIAL_ENCODED_BUFFER_BYTES)
+            val buffer = ByteArray(STREAM_BUFFER_BYTES)
+            var total = 0
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (read == 0) continue
+                total += read
+                if (total > MAX_ENCODED_IMAGE_BYTES) return null
+                output.write(buffer, 0, read)
+            }
+            output.toByteArray()
+        } ?: return null
+        if (encodedBytes.isEmpty()) return null
+
+        val encoded = Mat(1, encodedBytes.size, CvType.CV_8U)
+        val decoded: Mat
+        try {
+            encoded.put(0, 0, encodedBytes)
+            decoded = Imgcodecs.imdecode(encoded, Imgcodecs.IMREAD_COLOR)
+        } finally {
+            encoded.release()
         }
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = sample
-            inPreferredConfig = Bitmap.Config.ARGB_8888
+        if (decoded.empty()) {
+            decoded.release()
+            return null
         }
-        val decoded = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
-            ?: return null
-        val orientation = resolver.openInputStream(uri)?.use { input ->
-            runCatching {
-                ExifInterface(input).let { it.rotationDegrees to it.isFlipped }
-            }.getOrDefault(0 to false)
-        } ?: (0 to false)
-        if (orientation.first == 0 && !orientation.second) return decoded
-        val matrix = Matrix().apply {
-            if (orientation.second) postScale(-1f, 1f)
-            if (orientation.first != 0) postRotate(orientation.first.toFloat())
+        if (decoded.total() > MAX_DECODE_PIXELS) {
+            decoded.release()
+            return null
         }
-        val transformed = Bitmap.createBitmap(
-            decoded,
-            0,
-            0,
-            decoded.width,
-            decoded.height,
-            matrix,
-            true
-        )
-        if (transformed !== decoded) decoded.recycle()
-        return transformed
+
+        val largestDimension = max(decoded.width(), decoded.height())
+        if (largestDimension <= MAX_DECODE_DIMENSION) return decoded
+
+        val scale = MAX_DECODE_DIMENSION.toDouble() / largestDimension.toDouble()
+        val resized = Mat()
+        return try {
+            Imgproc.resize(
+                decoded,
+                resized,
+                Size(
+                    (decoded.width() * scale).roundToInt().coerceAtLeast(1).toDouble(),
+                    (decoded.height() * scale).roundToInt().coerceAtLeast(1).toDouble()
+                ),
+                0.0,
+                0.0,
+                Imgproc.INTER_AREA
+            )
+            if (resized.empty()) {
+                resized.release()
+                null
+            } else {
+                resized
+            }
+        } finally {
+            decoded.release()
+        }
     }
 
-    private data class FaceCandidate(val row: Int, val area: Float, val score: Float)
+    private data class FaceCandidate(
+        val row: Int,
+        val area: Float,
+        val score: Float
+    )
 
     companion object {
         private const val DEFAULT_DETECTOR_SIZE = 320.0
@@ -426,5 +560,9 @@ class YuNetSFaceCorrelationEngine(
         private const val AMBIGUOUS_AREA_RATIO = 0.58f
         private const val AMBIGUOUS_SCORE_DELTA = 0.08f
         private const val MAX_DECODE_DIMENSION = 1_600
+        private const val MAX_DECODE_PIXELS = 40_000_000L
+        private const val MAX_ENCODED_IMAGE_BYTES = 32 * 1024 * 1024
+        private const val INITIAL_ENCODED_BUFFER_BYTES = 128 * 1024
+        private const val STREAM_BUFFER_BYTES = 64 * 1024
     }
 }
