@@ -6,7 +6,6 @@ import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.EntityType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ConfidenceEngineTest {
@@ -41,29 +40,28 @@ class ConfidenceEngineTest {
         val graph = EntityGraph(
             entities = listOf(
                 DossierEntity("person:x", EntityType.Person, "x", 1.0f),
-                DossierEntity("email:a@b.com", EntityType.Email, "a@b.com", 0.9f)
+                DossierEntity("email:a@example.test", EntityType.Email, "a@example.test", 0.9f)
             ),
-            edges = listOf(DossierEdge("person:x", "email:a@b.com", "has_email"))
+            edges = listOf(DossierEdge("person:x", "email:a@example.test", "has_email"))
         )
         val evidence = listOf(
             Evidence(id = "e1", kind = EvidenceKind.Username, value = "x"),
-            Evidence(id = "e2", kind = EvidenceKind.Email, value = "a@b.com")
+            Evidence(id = "e2", kind = EvidenceKind.Email, value = "a@example.test")
         )
         val scored = engine.score(graph, evidence)
-        // No contributor fires for username↔email, so the edge is unscored.
         assertEquals(true, scored.isEmpty())
     }
 
     @Test
     fun fallsBackToSyntheticEvidenceFromEntityLabel() {
-        // Evidence list has no matching value, but the engine should still derive
-        // a username-kind evidence from the entity label and score the edge.
         val graph = EntityGraph(
             entities = listOf(
-                DossierEntity("person:palaashatri", EntityType.Person, "palaashatri", 1.0f),
-                DossierEntity("username:palaash_atri", EntityType.Username, "palaash_atri", 0.85f)
+                DossierEntity("person:sampleuser", EntityType.Person, "sampleuser", 1.0f),
+                DossierEntity("username:sample_user", EntityType.Username, "sample_user", 0.85f)
             ),
-            edges = listOf(DossierEdge("person:palaashatri", "username:palaash_atri", "uses_username"))
+            edges = listOf(
+                DossierEdge("person:sampleuser", "username:sample_user", "uses_username")
+            )
         )
         val scored = engine.score(graph, emptyList())
         assertEquals(false, scored.isEmpty())
