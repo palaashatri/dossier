@@ -77,17 +77,17 @@ class DiscoveryPrecisionRecallTest {
         )
 
         assertTrue(assessment.directScore >= 0.95f)
-        assertEquals(0.97f, assessment.confidenceCeiling)
+        assertEquals(0.97f, assessment.confidenceCeiling, 0.0001f)
     }
 
     @Test
     fun providerConsensusRaisesIndexedConfidence() {
-        val input = IdentityInput(fullName = "Jane Doe", primaryUsername = "janedoe")
+        val input = IdentityInput(fullName = "", primaryUsername = "janedoe")
         val oneProvider = PublicSearchDiscoveryService.PublicSearchResult(
-            title = "Jane Doe - GitHub",
-            snippet = "janedoe open source profile",
-            url = "https://github.com/janedoe",
-            query = "\"janedoe\" site:github.com",
+            title = "janedoe profile",
+            snippet = "public account",
+            url = "https://example.com/users/janedoe",
+            query = "\"janedoe\"",
             source = "DuckDuckGo",
             providerCount = 1
         )
