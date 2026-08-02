@@ -9,6 +9,8 @@ import androidx.exifinterface.media.ExifInterface
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.opencv.android.OpenCVLoader
 import org.opencv.android.Utils
@@ -30,8 +32,9 @@ import kotlin.math.hypot
  * bounded EXIF-corrected decode -> YuNet detection and five landmarks ->
  * quality/ambiguity gates -> SFace alignCrop -> SFace feature -> cosine match.
  *
- * No image, crop, landmark, or embedding leaves the device. Intermediates live
- * only for the duration of one comparison and are released immediately.
+ * The detector and recognizer are loaded once per service and protected by a
+ * mutex because OpenCV DNN instances are not treated as concurrently reusable.
+ * Image matrices, aligned crops and embeddings are released after every pair.
  */
 class YuNetSFaceCorrelationEngine(
     context: Context,
@@ -39,6 +42,10 @@ class YuNetSFaceCorrelationEngine(
     private val calibrationStore: FaceCorrelationCalibrationStore = FaceCorrelationCalibrationStore(context)
 ) {
     private val appContext = context.applicationContext
+    private val inferenceMutex = Mutex()
+
+    @Volatile
+    private var loadedRuntime: Runtime? = null
 
     data class FaceQuality(
         val accepted: Boolean,
@@ -58,6 +65,11 @@ class YuNetSFaceCorrelationEngine(
 
         private fun format(value: Float): String = "%.2f".format(value)
     }
+
+    private data class Runtime(
+        val detector: FaceDetectorYN,
+        val recognizer: FaceRecognizerSF
+    )
 
     private data class PreparedFace(
         val sourceBgr: Mat,
@@ -79,52 +91,51 @@ class YuNetSFaceCorrelationEngine(
         data class Rejected(val reason: String) : Preparation()
     }
 
+    private sealed class FaceSelection {
+        data class Selected(val row: Int) : FaceSelection()
+        data object None : FaceSelection()
+        data object Ambiguous : FaceSelection()
+    }
+
     suspend fun compare(
         selfieUri: Uri,
         profileUri: Uri,
         profileUrl: String
     ): FaceConsistencyMatch = withContext(Dispatchers.Default) {
-        check(modelPack.isReady()) { "Verified YuNet/SFace model pack is not installed." }
-        check(OpenCVLoader.initLocal()) { "OpenCV native runtime could not be initialized." }
-
-        val detector = FaceDetectorYN.create(
-            modelPack.yunetModelFile().absolutePath,
-            "",
-            Size(DEFAULT_DETECTOR_SIZE, DEFAULT_DETECTOR_SIZE),
-            DETECTION_SCORE_THRESHOLD,
-            NMS_THRESHOLD,
-            TOP_K
-        )
-        val recognizer = FaceRecognizerSF.create(
-            modelPack.sfaceModelFile().absolutePath,
-            ""
-        )
-
-        val selfie = prepare(selfieUri, "selected selfie", detector, recognizer)
-        if (selfie is Preparation.Rejected) {
-            return@withContext rejected(profileUrl, selfie.reason)
+        inferenceMutex.withLock {
+            compareLocked(selfieUri, profileUri, profileUrl, runtime())
         }
-        val profile = prepare(profileUri, "profile image", detector, recognizer)
-        if (profile is Preparation.Rejected) {
-            (selfie as Preparation.Ready).face.close()
-            return@withContext rejected(profileUrl, profile.reason)
-        }
+    }
 
+    private fun compareLocked(
+        selfieUri: Uri,
+        profileUri: Uri,
+        profileUrl: String,
+        runtime: Runtime
+    ): FaceConsistencyMatch {
+        val selfie = prepare(selfieUri, "selected selfie", runtime)
+        if (selfie is Preparation.Rejected) return rejected(profileUrl, selfie.reason)
         val selfieFace = (selfie as Preparation.Ready).face
+
+        val profile = prepare(profileUri, "profile image", runtime)
+        if (profile is Preparation.Rejected) {
+            selfieFace.close()
+            return rejected(profileUrl, profile.reason)
+        }
         val profileFace = (profile as Preparation.Ready).face
-        try {
-            val score = recognizer.match(
+
+        return try {
+            val score = runtime.recognizer.match(
                 selfieFace.feature,
                 profileFace.feature,
                 FaceRecognizerSF.FR_COSINE
             ).toFloat().coerceIn(-1f, 1f)
             val thresholds = calibrationStore.getThresholds()
-            val decision = thresholds.decision(score)
             FaceConsistencyMatch(
                 profileUrl = profileUrl,
                 similarityScore = score,
                 warning = warningFor(
-                    decision = decision,
+                    decision = thresholds.decision(score),
                     score = score,
                     thresholds = thresholds,
                     selfieQuality = selfieFace.quality,
@@ -137,12 +148,27 @@ class YuNetSFaceCorrelationEngine(
         }
     }
 
-    private fun prepare(
-        uri: Uri,
-        label: String,
-        detector: FaceDetectorYN,
-        recognizer: FaceRecognizerSF
-    ): Preparation {
+    private fun runtime(): Runtime {
+        loadedRuntime?.let { return it }
+        check(modelPack.isReady()) { "Verified YuNet/SFace model pack is not installed." }
+        check(OpenCVLoader.initLocal()) { "OpenCV native runtime could not be initialized." }
+        return Runtime(
+            detector = FaceDetectorYN.create(
+                modelPack.yunetModelFile().absolutePath,
+                "",
+                Size(DEFAULT_DETECTOR_SIZE, DEFAULT_DETECTOR_SIZE),
+                DETECTION_SCORE_THRESHOLD,
+                NMS_THRESHOLD,
+                TOP_K
+            ),
+            recognizer = FaceRecognizerSF.create(
+                modelPack.sfaceModelFile().absolutePath,
+                ""
+            )
+        ).also { loadedRuntime = it }
+    }
+
+    private fun prepare(uri: Uri, label: String, runtime: Runtime): Preparation {
         val bitmap = loadBoundedOrientedBitmap(uri)
             ?: return Preparation.Rejected("$label could not be decoded safely; face correlation was not run.")
         val rgba = Mat()
@@ -151,24 +177,33 @@ class YuNetSFaceCorrelationEngine(
         try {
             Utils.bitmapToMat(bitmap, rgba)
             Imgproc.cvtColor(rgba, bgr, Imgproc.COLOR_RGBA2BGR)
-            detector.setInputSize(bgr.size())
-            detector.detect(bgr, faces)
+            runtime.detector.setInputSize(bgr.size())
+            runtime.detector.detect(bgr, faces)
             if (faces.empty() || faces.rows() <= 0 || faces.cols() < FACE_OUTPUT_COLUMNS) {
                 bgr.release()
                 return Preparation.Rejected("No usable face was detected in the $label; face correlation was not scored.")
             }
 
-            val selectedIndex = selectUnambiguousFace(faces)
-                ?: run {
+            val selectedIndex = when (val selection = selectFace(faces)) {
+                is FaceSelection.Selected -> selection.row
+                FaceSelection.None -> {
+                    bgr.release()
+                    return Preparation.Rejected(
+                        "No face in the $label passed the detector-confidence and size gates."
+                    )
+                }
+                FaceSelection.Ambiguous -> {
                     bgr.release()
                     return Preparation.Rejected(
                         "Multiple similarly prominent faces were detected in the $label. " +
                             "Choose an image containing one clear consenting subject."
                     )
                 }
+            }
+
             val faceRow = faces.row(selectedIndex).clone()
             val aligned = Mat()
-            recognizer.alignCrop(bgr, faceRow, aligned)
+            runtime.recognizer.alignCrop(bgr, faceRow, aligned)
             if (aligned.empty()) {
                 faceRow.release()
                 bgr.release()
@@ -186,16 +221,17 @@ class YuNetSFaceCorrelationEngine(
             }
 
             val feature = Mat()
-            recognizer.feature(aligned, feature)
+            runtime.recognizer.feature(aligned, feature)
             if (feature.empty()) {
                 faceRow.release()
                 aligned.release()
+                feature.release()
                 bgr.release()
                 return Preparation.Rejected("SFace could not produce an embedding for the $label.")
             }
-            return Preparation.Ready(PreparedFace(bgr, faceRow, aligned, feature.clone(), quality)).also {
-                feature.release()
-            }
+            val retainedFeature = feature.clone()
+            feature.release()
+            return Preparation.Ready(PreparedFace(bgr, faceRow, aligned, retainedFeature, quality))
         } catch (cancelled: CancellationException) {
             bgr.release()
             throw cancelled
@@ -211,11 +247,8 @@ class YuNetSFaceCorrelationEngine(
         }
     }
 
-    /**
-     * Selects the strongest/largest face and rejects group-photo ambiguity.
-     * A tiny background face does not invalidate a clear foreground subject.
-     */
-    internal fun selectUnambiguousFace(faces: Mat): Int? {
+    /** A tiny background face does not invalidate one clear foreground subject. */
+    private fun selectFace(faces: Mat): FaceSelection {
         val candidates = (0 until faces.rows()).mapNotNull { row ->
             val values = faces.get(row, 0) ?: return@mapNotNull null
             if (values.size < FACE_OUTPUT_COLUMNS) return@mapNotNull null
@@ -225,11 +258,11 @@ class YuNetSFaceCorrelationEngine(
             if (width <= 0f || height <= 0f || score < MIN_ACCEPTED_DETECTOR_SCORE) return@mapNotNull null
             FaceCandidate(row, width * height, score)
         }.sortedByDescending { it.area * it.score }
-        val first = candidates.firstOrNull() ?: return -1
-        val second = candidates.getOrNull(1) ?: return first.row
+        val first = candidates.firstOrNull() ?: return FaceSelection.None
+        val second = candidates.getOrNull(1) ?: return FaceSelection.Selected(first.row)
         val similarlyProminent = second.area >= first.area * AMBIGUOUS_AREA_RATIO &&
             second.score >= first.score - AMBIGUOUS_SCORE_DELTA
-        return if (similarlyProminent) null else first.row
+        return if (similarlyProminent) FaceSelection.Ambiguous else FaceSelection.Selected(first.row)
     }
 
     internal fun evaluateQuality(
