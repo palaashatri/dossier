@@ -302,12 +302,12 @@ private fun GraphCanvas(
 
             graph.entities.forEach { entity ->
                 val position = layout.positions[entity.id]?.toPixels(density) ?: return@forEach
-                val color = typeColors[entity.type] ?: textSecondary
+                val nodeColor = typeColors[entity.type] ?: textSecondary
                 val dimmed = activeIds != null && entity.id !in activeIds
                 val radius = NODE_RADIUS_DP *
                     (0.78f + entity.confidence.coerceIn(0f, 1f) * 0.45f) * density
                 drawCircle(
-                    color = color.copy(alpha = if (dimmed) 0.25f else 0.95f),
+                    color = nodeColor.copy(alpha = if (dimmed) 0.25f else 0.95f),
                     radius = radius,
                     center = position
                 )
@@ -325,7 +325,7 @@ private fun GraphCanvas(
                     position.y - radius - 7f * density,
                     android.graphics.Paint().apply {
                         textSize = 11f * density
-                        color = android.graphics.Color.argb(
+                        this.color = android.graphics.Color.argb(
                             if (dimmed) 110 else 255,
                             (textPrimary.red * 255).toInt(),
                             (textPrimary.green * 255).toInt(),
