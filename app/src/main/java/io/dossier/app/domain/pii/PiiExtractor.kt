@@ -2,302 +2,269 @@ package io.dossier.app.domain.pii
 
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
-import io.dossier.app.domain.model.RiskLevel
-
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.RiskLevel
+import java.net.URI
 
+/** Attribution-aware PII extraction for public pages and search snippets. */
 class PiiExtractor {
-    private val emailRegex = Regex("[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}")
-    private val phoneRegex = Regex("\\+?\\d{1,4}?[-.\\s]?\\(?\\d{1,3}?\\)?[-.\\s]?\\d{1,4}[-.\\s]?\\d{1,4}[-.\\s]?\\d{1,9}")
-    private val locationRegex = Regex("\\b(?:lives in|Lives in|based in|Based in|located in|Located in|from|From)\\s+([A-Z][a-zA-Z]+(?:\\s+[A-Z][a-zA-Z]+)*)\\b")
-    private val orgRegex = Regex("\\b(?:works at|Works at|studied at|Studied at|employed at|Employed at|member of|Member of|developer at|Developer at|engineer at|Engineer at|student at|Student at|designer at|Designer at|lead at|Lead at|intern at|Intern at|manager at|Manager at)\\s+([A-Z][a-zA-Z0-9]+(?:\\s+[A-Z][a-zA-Z0-9]+)*)\\b")
+    private val emailRegex = Regex("(?i)\\b[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}\\b")
+    private val phoneRegex = Regex("(?<!\\d)(?:\\+\\d{1,3}[ .-]?)?(?:\\(?\\d{2,4}\\)?[ .-]?){2,5}\\d{2,4}(?!\\d)")
+    private val locationRegex = Regex(
+        "\\b(?i:lives in|based in|located in|from|location\\s*:)\\s+" +
+            "([A-Z][\\p{L}.'-]+(?:\\s+[A-Z][\\p{L}.'-]+){0,4})"
+    )
+    private val orgRegex = Regex(
+        "\\b(?i:works at|studied at|employed at|member of|developer at|engineer at|student at|" +
+            "designer at|lead at|intern at|manager at|company\\s*:)\\s+" +
+            "([A-Z][\\p{L}0-9&.'-]+(?:\\s+[A-Z][\\p{L}0-9&.'-]+){0,5})"
+    )
 
     fun extract(text: String, sourceUrl: String, identity: IdentityInput? = null): List<Finding> {
+        if (text.isBlank()) return emptyList()
         val findings = mutableListOf<Finding>()
+        val attribution = attribution(text, sourceUrl, identity)
+        val suppliedEmails = identity?.emails.orEmpty().map { it.trim().lowercase() }.toSet()
+        val suppliedPhones = identity?.phones.orEmpty().map(::digits).filter { it.length >= 8 }.toSet()
 
-        // 1. Email Extraction
         emailRegex.findAll(text).forEach { match ->
-            findings.add(
-                Finding(
-                    type = FindingType.Email,
-                    value = match.value,
-                    sourceUrl = sourceUrl,
-                    evidenceSnippet = getSnippet(text, match.range),
-                    confidence = 0.95f,
-                    risk = RiskLevel.High,
-                    remediation = "Remove public email visibility or use a masked email alias."
-                )
+            val exact = match.value.lowercase() in suppliedEmails
+            val associated = exact || attribution.strong
+            findings += Finding(
+                FindingType.Email,
+                match.value,
+                sourceUrl,
+                snippetWithAttribution(text, match.range, exact, associated),
+                when { exact -> 0.99f; associated -> 0.72f; else -> 0.42f },
+                when { exact -> RiskLevel.High; associated -> RiskLevel.Medium; else -> RiskLevel.Low },
+                if (exact) {
+                    "This exact self-supplied email is public. Remove it or replace it with a masked alias."
+                } else {
+                    "Review the source before associating this email with the audited identity."
+                }
             )
         }
 
-        // 2. Phone Extraction
         phoneRegex.findAll(text).forEach { match ->
-            val digitsOnly = match.value.filter { it.isDigit() }
-            if (digitsOnly.length in 8..15) {
-                findings.add(
-                    Finding(
-                        type = FindingType.Phone,
-                        value = match.value,
-                        sourceUrl = sourceUrl,
-                        evidenceSnippet = getSnippet(text, match.range),
-                        confidence = 0.85f,
-                        risk = RiskLevel.Critical,
-                        remediation = "Delete phone number from public bio or enable strict privacy settings."
-                    )
-                )
-            }
+            val normalized = digits(match.value)
+            val exact = normalized in suppliedPhones
+            if (normalized.length !in 8..15 || looksLikeDateOrCounter(normalized, match.value)) return@forEach
+            if (!exact && !hasPhoneContext(text, match.range)) return@forEach
+            val associated = exact || attribution.strong
+            findings += Finding(
+                FindingType.Phone,
+                match.value.trim(),
+                sourceUrl,
+                snippetWithAttribution(text, match.range, exact, associated),
+                when { exact -> 0.99f; associated -> 0.68f; else -> 0.36f },
+                when { exact -> RiskLevel.Critical; associated -> RiskLevel.High; else -> RiskLevel.Low },
+                if (exact) {
+                    "This exact self-supplied phone number is public. Remove it and review account recovery exposure."
+                } else {
+                    "Review the context before treating this phone number as belonging to the subject."
+                }
+            )
         }
 
-        // 3. Location Extraction
         locationRegex.findAll(text).forEach { match ->
-            val rawValue = match.groupValues[1].trim()
-            val fullMatch = match.value
-            val detectedType = determineTypeForLocationMatch(rawValue, fullMatch, identity)
-            findings.add(
-                Finding(
-                    type = detectedType,
-                    value = rawValue,
-                    sourceUrl = sourceUrl,
-                    evidenceSnippet = fullMatch,
-                    confidence = 0.75f,
-                    risk = if (detectedType == FindingType.Location) RiskLevel.Medium else RiskLevel.Low,
-                    remediation = if (detectedType == FindingType.Location) {
-                        "Avoid listing specific location details in public bio descriptions."
-                    } else {
-                        "Remove company associations to prevent spear-phishing or social engineering."
-                    }
-                )
-            )
+            addContextualFinding(findings, match.groupValues[1], match.value, sourceUrl, identity, attribution, true)
         }
-
-        // 4. Organization Extraction
         orgRegex.findAll(text).forEach { match ->
-            val rawValue = match.groupValues[1].trim()
-            val fullMatch = match.value
-            val detectedType = determineTypeForOrgMatch(rawValue, fullMatch, identity)
-            findings.add(
-                Finding(
-                    type = detectedType,
-                    value = rawValue,
-                    sourceUrl = sourceUrl,
-                    evidenceSnippet = fullMatch,
-                    confidence = 0.70f,
-                    risk = if (detectedType == FindingType.Location) RiskLevel.Medium else RiskLevel.Low,
-                    remediation = if (detectedType == FindingType.Location) {
-                        "Avoid listing specific location details in public bio descriptions."
-                    } else {
-                        "Remove company associations to prevent spear-phishing or social engineering."
-                    }
-                )
+            addContextualFinding(findings, match.groupValues[1], match.value, sourceUrl, identity, attribution, false)
+        }
+
+        identity?.let { supplied ->
+            addNamedExposure(
+                findings, text, sourceUrl, supplied.fullName, "Name Exposure",
+                if (attribution.signalCount >= 2) 0.95f else 0.65f,
+                if (attribution.signalCount >= 2) RiskLevel.High else RiskLevel.Medium,
+                "Reduce unnecessary real-name exposure on profiles that should not be connected."
             )
-        }
-
-        // --- SPECIFIC IDENTITY MATCHING (Direct Exposure Detection) ---
-        if (identity != null) {
-            // A. Full Name Exposure Check
-            val trimmedName = identity.fullName.trim()
-            if (trimmedName.isNotBlank()) {
-                val parts = trimmedName.split("\\s+".toRegex()).map { Regex.escape(it) }
-                val nameRegexPattern = "\\b" + parts.joinToString("\\s+") + "\\b"
-                val nameRegex = Regex(nameRegexPattern, RegexOption.IGNORE_CASE)
-                nameRegex.findAll(text).forEach { match ->
-                    findings.add(
-                        Finding(
-                            type = FindingType.SensitiveSnippet,
-                            value = "Name Exposure: $trimmedName",
-                            sourceUrl = sourceUrl,
-                            evidenceSnippet = getSnippet(text, match.range),
-                            confidence = 0.98f,
-                            risk = RiskLevel.High,
-                            remediation = "Remove real name from public profile headers, usernames, or bio contents."
-                        )
-                    )
-                }
+            supplied.aliases.forEach { alias ->
+                addNamedExposure(
+                    findings, text, sourceUrl, alias, "Alias Exposure",
+                    if (attribution.urlHandleMatch) 0.90f else 0.62f,
+                    if (attribution.urlHandleMatch) RiskLevel.Medium else RiskLevel.Low,
+                    "Confirm page ownership before changing an alias based on this result."
+                )
             }
-
-            // B. Aliases Exposure Check
-            identity.aliases.forEach { alias ->
-                val trimmedAlias = alias.trim()
-                if (trimmedAlias.isNotBlank()) {
-                    val aliasRegex = Regex("\\b${Regex.escape(trimmedAlias)}\\b", RegexOption.IGNORE_CASE)
-                    aliasRegex.findAll(text).forEach { match ->
-                        findings.add(
-                            Finding(
-                                type = FindingType.SensitiveSnippet,
-                                value = "Alias Exposure: $trimmedAlias",
-                                sourceUrl = sourceUrl,
-                                evidenceSnippet = getSnippet(text, match.range),
-                                confidence = 0.85f,
-                                risk = RiskLevel.Medium,
-                                remediation = "Change or dissociate known aliases to reduce correlation mapping."
-                            )
-                        )
-                    }
-                }
+            supplied.locations.forEach {
+                addExactTyped(findings, text, sourceUrl, it, FindingType.Location, attribution)
             }
-
-            // C. Direct Location hits
-            identity.locations.forEach { location ->
-                val trimmedLoc = location.trim()
-                if (trimmedLoc.isNotBlank() && !findings.any { it.type == FindingType.Location && it.value.contains(trimmedLoc, ignoreCase = true) }) {
-                    val locRegex = Regex("\\b${Regex.escape(trimmedLoc)}\\b", RegexOption.IGNORE_CASE)
-                    locRegex.findAll(text).forEach { match ->
-                        findings.add(
-                            Finding(
-                                type = FindingType.Location,
-                                value = trimmedLoc,
-                                sourceUrl = sourceUrl,
-                                evidenceSnippet = getSnippet(text, match.range),
-                                confidence = 0.90f,
-                                risk = RiskLevel.High,
-                                remediation = "Do not name your specific city or location details in bios."
-                            )
-                        )
-                    }
-                }
-            }
-
-            // D. Direct Organization hits
-            identity.organizations.forEach { org ->
-                val trimmedOrg = org.trim()
-                if (trimmedOrg.isNotBlank() && !findings.any { it.type == FindingType.Organization && it.value.contains(trimmedOrg, ignoreCase = true) }) {
-                    val orgRegex = Regex("\\b${Regex.escape(trimmedOrg)}\\b", RegexOption.IGNORE_CASE)
-                    orgRegex.findAll(text).forEach { match ->
-                        findings.add(
-                            Finding(
-                                type = FindingType.Organization,
-                                value = trimmedOrg,
-                                sourceUrl = sourceUrl,
-                                evidenceSnippet = getSnippet(text, match.range),
-                                confidence = 0.85f,
-                                risk = RiskLevel.High,
-                                remediation = "Dissociate company and school names from your public bios."
-                            )
-                        )
-                    }
-                }
+            supplied.organizations.forEach {
+                addExactTyped(findings, text, sourceUrl, it, FindingType.Organization, attribution)
             }
         }
 
-        return findings.distinctBy { it.type.name + it.value + it.sourceUrl }
+        return findings.filter { it.value.isNotBlank() }.distinctBy {
+            "${it.type}|${canonical(it.type, it.value)}|${it.sourceUrl}"
+        }
     }
 
-    private fun getSnippet(text: String, range: IntRange): String {
-        val start = (range.first - 30).coerceAtLeast(0)
-        val end = (range.last + 30).coerceAtMost(text.length)
-        return text.substring(start, end).replace("\n", " ").trim()
+    private fun addContextualFinding(
+        findings: MutableList<Finding>,
+        rawValue: String,
+        evidence: String,
+        sourceUrl: String,
+        identity: IdentityInput?,
+        attribution: Attribution,
+        preferLocation: Boolean
+    ) {
+        val value = rawValue.trim().trimEnd('.', ',', ';', ':')
+        val type = classify(value, evidence, identity, preferLocation)
+        val exact = when (type) {
+            FindingType.Location -> identity?.locations.orEmpty().any { same(it, value) }
+            FindingType.Organization -> identity?.organizations.orEmpty().any { same(it, value) }
+            else -> false
+        }
+        val associated = exact || attribution.strong
+        findings += Finding(
+            type,
+            value,
+            sourceUrl,
+            "$evidence ${label(exact, associated)}".take(260),
+            when { exact -> 0.90f; associated -> 0.64f; else -> 0.44f },
+            when {
+                exact && type == FindingType.Location -> RiskLevel.High
+                exact || associated -> RiskLevel.Medium
+                else -> RiskLevel.Low
+            },
+            if (type == FindingType.Location) {
+                "Review whether this location is necessary and reduce its precision where possible."
+            } else {
+                "Review whether this organisation association should remain public."
+            }
+        )
     }
 
-    private val KNOWN_ORGS = setOf(
-        "Replit", "Accenture", "Quandl", "Google", "Microsoft", "Facebook", "Meta", "Amazon", "Apple",
-        "Netflix", "Uber", "Lyft", "GitHub", "GitLab", "Twitter", "Azul", "Stanford", "MIT", "Harvard",
-        "Web Summit", "AI WEEK", "MCP Night", "Azul Systems", "Acme", "Acme Corp", "Stripe", "Spotify",
-        "Shopify", "Airbnb", "Tesla", "SpaceX", "Adobe", "Salesforce", "Oracle", "IBM", "Intel", "NVIDIA",
-        "AMD", "Qualcomm", "Cisco", "HP", "Dell", "Sony", "Samsung", "LG", "Flipkart", "Paytm", "Zomato",
-        "Swiggy", "Ola", "Razorpay", "TCS", "Infosys", "Wipro", "HCL", "Cognizant", "Tech Mahindra",
-        "Capgemini", "Deloitte", "PwC", "EY", "KPMG", "McKinsey", "BCG", "Bain", "Goldman Sachs",
-        "Morgan Stanley", "JPMorgan", "Chase", "Citi", "HSBC", "Barclays", "Plaid", "Brex", "Scale AI",
-        "OpenAI", "Anthropic", "Hugging Face", "Vercel", "Netlify", "Supabase", "Firebase", "MongoDB",
-        "PostgreSQL", "MySQL", "JetBrains", "Android", "Slack", "Zoom", "Discord", "Telegram", "Signal",
-        "WhatsApp", "Tiktok", "ByteDance", "Snapchat", "Pinterest", "LinkedIn", "Bitbucket", "Stack Overflow",
-        "Medium", "Dev.to", "Hashnode", "Reddit", "Quora", "Product Hunt", "Y Combinator", "Techstars",
-        "Berkeley", "Caltech", "Carnegie Mellon", "CMU", "Oxford", "Cambridge", "IIT", "IIT Delhi",
-        "IIT Bombay", "IIT Madras", "IIT Kharagpur", "IIT Kanpur", "IIT Roorkee", "IIT Guwahati",
-        "BITS Pilani", "IIIT", "IIIT Hyderabad", "IIIT Bangalore", "Delhi University", "DU", "NSUT",
-        "DTU", "PEC", "VIT", "SRM", "Manipal"
-    )
-
-    private val KNOWN_LOCATIONS = setOf(
-        "India", "Delhi", "New Delhi", "Gurgaon", "Gurugram", "Noida", "Bangalore", "Bengaluru", "Mumbai",
-        "Pune", "Hyderabad", "Chennai", "Kolkata", "San Francisco", "California", "New York", "London",
-        "UK", "USA", "Canada", "Germany", "Berlin", "Paris", "France", "Tokyo", "Japan", "Singapore",
-        "Sydney", "Australia", "Ahmedabad", "Surat", "Jaipur", "Lucknow", "Kanpur", "Nagpur", "Indore",
-        "Thane", "Bhopal", "Visakhapatnam", "Patna", "Vadodara", "Ghaziabad", "Ludhiana", "Agra", "Nashik",
-        "Faridabad", "Meerut", "Rajkot", "Kalyan-Dombivli", "Vasai-Virar", "Varanasi", "Srinagar",
-        "Aurangabad", "Dhanbad", "Amritsar", "Navi Mumbai", "Allahabad", "Ranchi", "Howrah", "Coimbatore",
-        "Jabalpur", "Gwalior", "Vijayawada", "Jodhpur", "Madurai", "Raipur", "Kota", "Guwahati", "Chandigarh",
-        "Solapur", "Hubli-Dharwad", "Bareilly", "Moradabad", "Mysore", "Haryana", "Karnataka", "Maharashtra",
-        "Tamil Nadu", "Telangana", "Uttar Pradesh", "West Bengal", "Gujarat", "Rajasthan", "Punjab",
-        "Kerala", "Bihar", "Madhya Pradesh", "Andhra Pradesh", "Assam", "Odisha", "Amsterdam", "Seattle",
-        "Chicago", "Boston", "Austin", "Silicon Valley", "Dublin", "Zurich", "Geneva", "Munich", "Seoul",
-        "Beijing", "Shanghai", "Hong Kong"
-    )
-
-    private fun determineTypeForLocationMatch(value: String, fullMatch: String = "", identity: IdentityInput? = null): FindingType {
-        val lowerValue = value.lowercase()
-        val lowerFull = fullMatch.lowercase()
-
-        // 1. Direct match with user self-declared details
-        identity?.organizations?.forEach { if (it.isNotBlank() && (it.equals(value, ignoreCase = true) || lowerValue.contains(it.lowercase()))) return FindingType.Organization }
-        identity?.locations?.forEach { if (it.isNotBlank() && (it.equals(value, ignoreCase = true) || lowerValue.contains(it.lowercase()))) return FindingType.Location }
-
-        // 2. Platform/Global Registry matches
-        if (KNOWN_ORGS.any { it.equals(value, ignoreCase = true) }) return FindingType.Organization
-        if (KNOWN_LOCATIONS.any { it.equals(value, ignoreCase = true) || lowerValue.contains(it.lowercase()) }) return FindingType.Location
-
-        if (hasOrgSuffix(lowerValue)) return FindingType.Organization
-        if (hasLocationSuffix(lowerValue)) return FindingType.Location
-
-        // 3. Heuristics based on preposition/prefix
-        if (lowerFull.startsWith("lives in") || lowerFull.startsWith("based in") || lowerFull.startsWith("located in")) {
-            return FindingType.Location
-        }
-
-        // If it looks like a common country/state/city name structure (capitalized words usually associated with location)
-        val locationClues = listOf("united states", "usa", "uk", "united kingdom", "germany", "france", "india", "canada", "australia", "switzerland", "netherlands", "singapore", "california", "new york", "london", "paris", "berlin", "tokyo", "delhi", "mumbai")
-        if (locationClues.any { lowerValue.contains(it) }) {
-            return FindingType.Location
-        }
-
-        // Default to Location for "from" prefix if we couldn't prove it's an org
-        return FindingType.Location
+    private fun addNamedExposure(
+        findings: MutableList<Finding>,
+        text: String,
+        sourceUrl: String,
+        supplied: String,
+        prefix: String,
+        confidence: Float,
+        risk: RiskLevel,
+        remediation: String
+    ) {
+        val clean = supplied.trim()
+        if (clean.length < 2) return
+        val match = exactTermRegex(clean).find(text) ?: return
+        findings += Finding(
+            FindingType.SensitiveSnippet,
+            "$prefix: $clean",
+            sourceUrl,
+            snippet(text, match.range),
+            confidence,
+            risk,
+            remediation
+        )
     }
 
-    private fun determineTypeForOrgMatch(value: String, fullMatch: String = "", identity: IdentityInput? = null): FindingType {
-        val lowerValue = value.lowercase()
-        val lowerFull = fullMatch.lowercase()
+    private fun addExactTyped(
+        findings: MutableList<Finding>,
+        text: String,
+        sourceUrl: String,
+        supplied: String,
+        type: FindingType,
+        attribution: Attribution
+    ) {
+        val clean = supplied.trim()
+        if (clean.length < 2 || findings.any { it.type == type && same(it.value, clean) }) return
+        val match = exactTermRegex(clean).find(text) ?: return
+        findings += Finding(
+            type,
+            clean,
+            sourceUrl,
+            "${snippet(text, match.range)} [exact self-supplied match]",
+            if (attribution.strong) 0.92f else 0.80f,
+            if (type == FindingType.Location) RiskLevel.High else RiskLevel.Medium,
+            if (type == FindingType.Location) "Reduce precise public location exposure." else "Review this public organisation association."
+        )
+    }
 
-        // 1. Direct match with user self-declared details
-        identity?.organizations?.forEach { if (it.isNotBlank() && (it.equals(value, ignoreCase = true) || lowerValue.contains(it.lowercase()))) return FindingType.Organization }
-        identity?.locations?.forEach { if (it.isNotBlank() && (it.equals(value, ignoreCase = true) || lowerValue.contains(it.lowercase()))) return FindingType.Location }
+    private data class Attribution(val urlHandleMatch: Boolean, val signalCount: Int) {
+        val strong: Boolean get() = urlHandleMatch || signalCount >= 2
+    }
 
-        // 2. Platform/Global Registry matches
-        if (KNOWN_ORGS.any { it.equals(value, ignoreCase = true) }) return FindingType.Organization
-        if (KNOWN_LOCATIONS.any { it.equals(value, ignoreCase = true) || lowerValue.contains(it.lowercase()) }) return FindingType.Location
+    private fun attribution(text: String, sourceUrl: String, identity: IdentityInput?): Attribution {
+        if (identity == null) return Attribution(false, 0)
+        val lowerText = text.lowercase()
+        val handles = (listOfNotNull(identity.primaryUsername) + identity.usernames + identity.aliases)
+            .map { it.trim().removePrefix("@").lowercase() }
+            .filter { it.length >= 2 }
+            .distinct()
+        val urlSegments = runCatching {
+            URI(sourceUrl).path.orEmpty().split('/').map { it.removePrefix("@").lowercase() }
+        }.getOrDefault(emptyList())
+        val urlHandleMatch = handles.any { it in urlSegments }
+        var signals = 0
+        if (identity.fullName.trim().length >= 3 && lowerText.contains(identity.fullName.trim().lowercase())) signals++
+        if (identity.emails.any { it.isNotBlank() && lowerText.contains(it.trim().lowercase()) }) signals += 2
+        val textDigits = text.filter(Char::isDigit)
+        if (identity.phones.map(::digits).filter { it.length >= 8 }.any(textDigits::contains)) signals += 2
+        if (handles.any(lowerText::contains)) signals++
+        if (identity.organizations.any { it.length >= 3 && lowerText.contains(it.trim().lowercase()) }) signals++
+        if (identity.locations.any { it.length >= 3 && lowerText.contains(it.trim().lowercase()) }) signals++
+        return Attribution(urlHandleMatch, signals)
+    }
 
-        if (hasOrgSuffix(lowerValue)) return FindingType.Organization
-        if (hasLocationSuffix(lowerValue)) return FindingType.Location
-
-        // 3. Heuristics based on preposition/prefix
-        if (lowerFull.startsWith("works at") || lowerFull.startsWith("studied at") || 
-            lowerFull.startsWith("employed at") || lowerFull.startsWith("member of") ||
-            lowerFull.contains("developer at") || lowerFull.contains("engineer at") ||
-            lowerFull.contains("student at") || lowerFull.contains("designer at") ||
-            lowerFull.contains("manager at")) {
+    private fun classify(value: String, evidence: String, identity: IdentityInput?, preferLocation: Boolean): FindingType {
+        if (identity?.organizations.orEmpty().any { same(it, value) }) return FindingType.Organization
+        if (identity?.locations.orEmpty().any { same(it, value) }) return FindingType.Location
+        val lower = value.lowercase()
+        if (KNOWN_ORGS.any { same(it, value) } || ORG_SUFFIXES.any(lower::endsWith)) return FindingType.Organization
+        if (KNOWN_LOCATIONS.any { same(it, value) } || LOCATION_SUFFIXES.any(lower::endsWith)) return FindingType.Location
+        val context = evidence.lowercase()
+        if (listOf("works at", "studied at", "employed at", "member of", "engineer at", "developer at").any(context::contains)) {
             return FindingType.Organization
         }
-
-        // Default to Organization for professional context
-        return FindingType.Organization
+        if (listOf("lives in", "based in", "located in", "location").any(context::contains)) return FindingType.Location
+        return if (preferLocation) FindingType.Location else FindingType.Organization
     }
 
-    private fun hasOrgSuffix(value: String): Boolean {
-        val orgSuffixes = listOf(
-            "university", "college", "school", "inc", "corp", "ltd", "llc", "systems", 
-            "technologies", "labs", "security", "foundation", "institute", "co", "group", 
-            "capital", "partners", "ventures", "fair", "forum", "summit", "association",
-            "corporation", "industries", "solutions", "software", "networks", "media",
-            "digital", "analytics", "consulting", "global", "holding", "holdings"
-        )
-        return orgSuffixes.any { value.endsWith(" $it") || value == it || value.contains(" $it ") }
+    private fun hasPhoneContext(text: String, range: IntRange): Boolean {
+        val context = snippet(text, range).lowercase()
+        return PHONE_CONTEXT.any(context::contains) || text.substring(range).trim().startsWith('+')
     }
 
-    private fun hasLocationSuffix(value: String): Boolean {
-        val locSuffixes = listOf(
-            "city", "state", "country", "province", "county", "district", "valley", 
-            "area", "region", "town", "village", "island", "lake", "beach", "mountain", 
-            "mountains", "park", "road", "street", "avenue", "square", "plaza"
-        )
-        return locSuffixes.any { value.endsWith(" $it") || value == it || value.contains(" $it ") }
+    private fun looksLikeDateOrCounter(normalized: String, raw: String): Boolean {
+        if (normalized.length == 8 && normalized.take(4).toIntOrNull() in 1900..2100) return true
+        if (raw.count { it == '-' || it == '/' } >= 2 && !raw.trim().startsWith('+')) return true
+        return normalized.toSet().size == 1
+    }
+
+    private fun snippetWithAttribution(text: String, range: IntRange, exact: Boolean, associated: Boolean): String =
+        "${snippet(text, range)} ${label(exact, associated)}"
+
+    private fun label(exact: Boolean, associated: Boolean): String = when {
+        exact -> "[exact self-supplied identifier]"
+        associated -> "[page has independent identity signals]"
+        else -> "[detected; attribution unconfirmed]"
+    }
+
+    private fun snippet(text: String, range: IntRange): String {
+        val start = (range.first - 60).coerceAtLeast(0)
+        val end = (range.last + 61).coerceAtMost(text.length)
+        return text.substring(start, end).replace(Regex("\\s+"), " ").trim().take(240)
+    }
+
+    private fun exactTermRegex(value: String) =
+        Regex("(?i)(?<![\\p{L}0-9])${Regex.escape(value)}(?![\\p{L}0-9])")
+
+    private fun digits(value: String) = value.filter(Char::isDigit)
+    private fun same(first: String, second: String) = first.trim().equals(second.trim(), ignoreCase = true)
+    private fun canonical(type: FindingType, value: String) = when (type) {
+        FindingType.Email -> value.trim().lowercase()
+        FindingType.Phone -> digits(value)
+        else -> value.trim().lowercase()
+    }
+
+    private companion object {
+        val PHONE_CONTEXT = listOf("phone", "mobile", "telephone", "tel:", "call", "contact", "whatsapp", "signal")
+        val ORG_SUFFIXES = listOf(" inc", " corp", " ltd", " llc", " university", " college", " systems", " technologies", " labs")
+        val LOCATION_SUFFIXES = listOf(" city", " state", " province", " county", " district")
+        val KNOWN_ORGS = setOf("Replit", "Google", "Microsoft", "Meta", "Amazon", "Apple", "GitHub", "GitLab", "Azul", "Azul Systems", "OpenAI", "Anthropic", "IIT Delhi", "MIT", "Stanford")
+        val KNOWN_LOCATIONS = setOf("India", "Delhi", "New Delhi", "Gurgaon", "Gurugram", "Noida", "Bangalore", "Bengaluru", "Mumbai", "Pune", "Hyderabad", "Chennai", "Kolkata", "New York", "London", "Berlin", "Paris")
     }
 }

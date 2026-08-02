@@ -1,19 +1,35 @@
 package io.dossier.app.ui.screens
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -25,39 +41,21 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.dossier.app.domain.model.DossierEdge
-import kotlin.math.cos
-import kotlin.math.sin
+import io.dossier.app.domain.evidence.ConfidenceEngine
+import io.dossier.app.domain.evidence.RelationshipConfidence
 import io.dossier.app.domain.model.DossierEntity
 import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.EntityType
-import io.dossier.app.domain.evidence.ConfidenceEngine
-import io.dossier.app.domain.evidence.RelationshipConfidence
 import io.dossier.app.ui.theme.NeuralTheme
+import kotlin.math.cos
+import kotlin.math.sin
 
-/**
- * Interactive identity-graph view (ROADMAP Milestone 8).
- *
- * Renders the [EntityGraph] as a node-link diagram on a Canvas: nodes are
- * colored by [EntityType], sized by confidence, and edges drawn at reduced
- * opacity (per UI guidance: relationship edges ~60% opacity). Tapping a node
- * highlights it and its neighbours and surfaces the evidence behind them.
- *
- * Accessibility: network graphs are poor for screen readers, so this view also
- * offers an **adjacency-list alternative** (toggle) that renders the full graph
- * as a readable, selectable text list — required for non-visual access.
- *
- * Design follows the app's calm/flat dark theme (no neon glow) while adopting
- * the skill's categorical node colors, monospace evidence text, and the
- * 60%-opacity edge convention.
- *
- * Colors are resolved once in the composable scope because Canvas drawing runs
- * inside a non-composable [androidx.compose.ui.graphics.drawscope.DrawScope].
- */
+/** A scrollable visual relationship map with a complete text alternative. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun EntityGraphView(
     graph: EntityGraph,
@@ -66,7 +64,7 @@ fun EntityGraphView(
 ) {
     if (graph.entities.isEmpty()) {
         Text(
-            text = "No entity links compiled for this scan yet.",
+            text = "No entity relationships were compiled for this scan.",
             color = NeuralTheme.TextSecondary,
             fontSize = 13.sp,
             lineHeight = 18.sp,
@@ -77,74 +75,62 @@ fun EntityGraphView(
 
     var viewMode by remember { mutableStateOf(GraphViewMode.Graph) }
     var selectedId by remember(graph) { mutableStateOf<String?>(null) }
-    val density = LocalDensity.current
 
-    val cobalt = NeuralTheme.Cobalt
-    val emerald = NeuralTheme.Emerald
-    val amber = NeuralTheme.Amber
-    val crimson = NeuralTheme.Crimson
+    val accent = NeuralTheme.Cobalt
+    val success = NeuralTheme.Emerald
+    val warning = NeuralTheme.Amber
+    val danger = NeuralTheme.Crimson
     val border = NeuralTheme.BorderColor
+    val surface = NeuralTheme.SurfaceDark
     val textPrimary = NeuralTheme.TextPrimary
     val textSecondary = NeuralTheme.TextSecondary
-
     val typeColors = mapOf(
-        EntityType.Person to cobalt,
-        EntityType.Username to emerald,
-        EntityType.Email to amber,
-        EntityType.Phone to crimson,
-        EntityType.Profile to cobalt,
-        EntityType.Organization to emerald,
-        EntityType.Location to amber,
-        EntityType.Image to crimson,
-        EntityType.Breach to crimson,
-        EntityType.Website to border
+        EntityType.Person to accent,
+        EntityType.Username to success,
+        EntityType.Email to warning,
+        EntityType.Phone to danger,
+        EntityType.Profile to accent,
+        EntityType.Organization to success,
+        EntityType.Location to warning,
+        EntityType.Image to danger,
+        EntityType.Breach to danger,
+        EntityType.Website to textSecondary
     )
-
-    val nodePositions = remember(graph) { layoutGraph(graph) }
+    val layout = remember(graph) { layoutGraph(graph) }
     val adjacency = remember(graph) { buildAdjacency(graph) }
 
-    val canvasHeight = (nodePositions.values.maxOfOrNull { it.y }?.plus(70f) ?: 320f).dp
-    val canvasWidth = (nodePositions.values.maxOfOrNull { it.x }?.plus(70f) ?: 360f).dp
-
-    Column(modifier = modifier) {
-        // View switcher: Graph (visual) <-> List (adjacency accessibility fallback)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             GraphViewTab(
-                label = "Graph",
+                label = "Visual graph",
                 selected = viewMode == GraphViewMode.Graph,
                 onClick = { viewMode = GraphViewMode.Graph },
-                cobalt = cobalt,
+                accent = accent,
                 border = border,
                 textSecondary = textSecondary
             )
             GraphViewTab(
-                label = "List",
+                label = "Accessible list",
                 selected = viewMode == GraphViewMode.List,
                 onClick = { viewMode = GraphViewMode.List },
-                cobalt = cobalt,
+                accent = accent,
                 border = border,
                 textSecondary = textSecondary
             )
         }
 
         Spacer(modifier = Modifier.height(10.dp))
-
         when (viewMode) {
             GraphViewMode.Graph -> GraphCanvas(
                 graph = graph,
-                nodePositions = nodePositions,
+                layout = layout,
                 adjacency = adjacency,
                 selectedId = selectedId,
                 onSelect = { selectedId = if (selectedId == it) null else it },
-                density = density,
-                canvasHeight = canvasHeight,
-                canvasWidth = canvasWidth,
                 typeColors = typeColors,
-                cobalt = cobalt,
+                accent = accent,
                 border = border,
+                surface = surface,
                 textPrimary = textPrimary,
                 textSecondary = textSecondary
             )
@@ -153,75 +139,68 @@ fun EntityGraphView(
                 confidenceByEdge = confidenceByEdge,
                 selectedId = selectedId,
                 onSelect = { selectedId = if (selectedId == it) null else it },
+                accent = accent,
+                border = border,
+                surface = surface,
                 textPrimary = textPrimary,
-                textSecondary = textSecondary,
-                border = border
+                textSecondary = textSecondary
             )
         }
 
         Spacer(modifier = Modifier.height(12.dp))
-        EntityGraphLegend(typeColors = typeColors, textSecondary = textSecondary)
+        EntityGraphLegend(typeColors, textSecondary)
 
-        // Shared detail panel (works in both views)
         selectedId?.let { id ->
             val entity = graph.entities.firstOrNull { it.id == id } ?: return@let
-            val connectedEdges = graph.edges.filter { it.fromId == id || it.toId == id }
+            val connected = graph.edges.filter { it.fromId == id || it.toId == id }
             Spacer(modifier = Modifier.height(12.dp))
             HorizontalDivider(color = border, thickness = 0.7.dp)
             Spacer(modifier = Modifier.height(10.dp))
             Text(
-                text = "${entity.type.name}  ·  ${entity.label}",
+                text = "${entity.type.name}: ${entity.label}",
                 color = textPrimary,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 13.sp
+                fontSize = 13.5.sp
             )
             Text(
-                text = "Confidence: ${(entity.confidence * 100).toInt()}%",
+                text = "Attribution confidence ${(entity.confidence * 100).toInt()}%",
                 color = textSecondary,
-                fontSize = 12.sp
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 2.dp)
             )
             if (entity.sourceUrls.isNotEmpty()) {
                 Text(
-                    text = "Sources: ${entity.sourceUrls.joinToString(", ")}",
+                    text = "Sources: ${entity.sourceUrls.take(4).joinToString(", ")}",
                     color = textSecondary,
                     fontSize = 11.sp,
                     lineHeight = 15.sp,
-                    modifier = Modifier.padding(top = 2.dp)
+                    modifier = Modifier.padding(top = 4.dp)
                 )
             }
-            if (connectedEdges.isNotEmpty()) {
+            connected.forEach { edge ->
+                val otherId = if (edge.fromId == id) edge.toId else edge.fromId
+                val other = graph.entities.firstOrNull { it.id == otherId }
+                val scored = confidenceByEdge[
+                    ConfidenceEngine.edgeKey(edge.fromId, edge.toId, edge.relation)
+                ]
                 Text(
-                    text = "Connections:",
-                    color = textSecondary,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                    text = buildString {
+                        append("• ${edge.relation} → ${other?.label ?: otherId}")
+                        scored?.let { append(" · ${(it.score * 100).toInt()}%") }
+                    },
+                    color = textPrimary,
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(top = 5.dp)
                 )
-                connectedEdges.forEach { edge ->
-                    val otherId = if (edge.fromId == id) edge.toId else edge.fromId
-                    val other = graph.entities.firstOrNull { it.id == otherId }
-                    val scored = confidenceByEdge[ConfidenceEngine.edgeKey(edge.fromId, edge.toId, edge.relation)]
-                    val scoreText = scored?.let { "  → conf ${(it.score * 100).toInt()}%" } ?: ""
+                edge.evidence?.takeIf(String::isNotBlank)?.let { evidence ->
                     Text(
-                        text = "• ${edge.relation} → ${other?.label ?: otherId}" +
-                            (edge.evidence?.takeIf { it.isNotBlank() }?.let { "  (${it.take(60)})" } ?: "") +
-                            scoreText,
-                        color = textPrimary,
-                        fontSize = 11.5.sp,
-                        lineHeight = 16.sp,
-                        fontFamily = FontFamily.Monospace
+                        text = evidence.take(160),
+                        color = textSecondary,
+                        fontSize = 10.5.sp,
+                        lineHeight = 14.sp,
+                        modifier = Modifier.padding(start = 12.dp, top = 1.dp)
                     )
-                    scored?.let {
-                        if (it.reasons.isNotEmpty()) {
-                            Text(
-                                text = "    why: ${it.reasons.joinToString("; ")}",
-                                color = textSecondary,
-                                fontSize = 10.5.sp,
-                                lineHeight = 14.sp,
-                                fontFamily = FontFamily.Monospace,
-                                modifier = Modifier.padding(bottom = 4.dp)
-                            )
-                        }
-                    }
                 }
             }
         }
@@ -235,23 +214,23 @@ private fun GraphViewTab(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
-    cobalt: Color,
+    accent: Color,
     border: Color,
     textSecondary: Color
 ) {
     TextButton(
         onClick = onClick,
         modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (selected) cobalt.copy(alpha = 0.14f) else Color.Transparent)
-            .border(0.6.dp, if (selected) cobalt else border, RoundedCornerShape(8.dp))
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .background(if (selected) accent.copy(alpha = 0.12f) else Color.Transparent)
+            .border(1.dp, if (selected) accent else border, RoundedCornerShape(9.dp))
     ) {
         Text(
             text = label,
-            color = if (selected) cobalt else textSecondary,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            fontFamily = FontFamily.Monospace
+            color = if (selected) accent else textSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold
         )
     }
 }
@@ -259,98 +238,101 @@ private fun GraphViewTab(
 @Composable
 private fun GraphCanvas(
     graph: EntityGraph,
-    nodePositions: Map<String, Offset>,
+    layout: GraphLayout,
     adjacency: Map<String, Set<String>>,
     selectedId: String?,
     onSelect: (String) -> Unit,
-    density: androidx.compose.ui.unit.Density,
-    canvasHeight: androidx.compose.ui.unit.Dp,
-    canvasWidth: androidx.compose.ui.unit.Dp,
     typeColors: Map<EntityType, Color>,
-    cobalt: Color,
+    accent: Color,
     border: Color,
+    surface: Color,
     textPrimary: Color,
     textSecondary: Color
 ) {
-    val semanticsText = remember(graph) {
-        "Identity graph with ${graph.entities.size} nodes and ${graph.edges.size} connections. " +
-            "Switch to List view for a text alternative."
+    val horizontal = rememberScrollState()
+    val vertical = rememberScrollState()
+    val density = LocalDensity.current.density
+    val semanticSummary = remember(graph) {
+        "Relationship graph with ${graph.entities.size} entities and ${graph.edges.size} connections. Use Accessible list for complete text navigation."
     }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(canvasHeight)
-            .verticalScroll(rememberScrollState())
-            .semantics { contentDescription = semanticsText }
+            .height(360.dp)
+            .background(surface, RoundedCornerShape(10.dp))
+            .border(1.dp, border, RoundedCornerShape(10.dp))
+            .horizontalScroll(horizontal)
+            .verticalScroll(vertical)
+            .semantics { contentDescription = semanticSummary }
     ) {
         Canvas(
             modifier = Modifier
-                .width(canvasWidth)
-                .height(canvasHeight)
-                .pointerInput(graph) {
-                    detectTapGestures { offset ->
-                        val hit = nodePositions.entries.minByOrNull { (_, p) ->
-                            (p.x - offset.x) * (p.x - offset.x) + (p.y - offset.y) * (p.y - offset.y)
+                .width(layout.width)
+                .height(layout.height)
+                .pointerInput(graph, density) {
+                    detectTapGestures { tapped ->
+                        val hit = layout.positions.minByOrNull { (_, unitPosition) ->
+                            squaredDistance(unitPosition.toPixels(density), tapped)
                         }
-                        hit?.let { (id, p) ->
-                            val within = NODE_RADIUS + 12f
-                            if ((p.x - offset.x) * (p.x - offset.x) + (p.y - offset.y) * (p.y - offset.y) <= within * within) {
+                        hit?.let { (id, unitPosition) ->
+                            val radius = (NODE_RADIUS_DP + 16f) * density
+                            if (squaredDistance(unitPosition.toPixels(density), tapped) <= radius * radius) {
                                 onSelect(id)
                             }
                         }
                     }
                 }
         ) {
-            val scale = density.density
-            val active = selectedId?.let { adjacency[it].orEmpty() + it } ?: null
-
+            val activeIds = selectedId?.let { adjacency[it].orEmpty() + it }
             graph.edges.forEach { edge ->
-                val from = nodePositions[edge.fromId] ?: return@forEach
-                val to = nodePositions[edge.toId] ?: return@forEach
-                val isActive = active == null || (edge.fromId in active && edge.toId in active)
-                // Skill guidance: relationship edges at reduced opacity (~60%).
-                val baseAlpha = if (isActive) 0.85f else 0.6f
+                val from = layout.positions[edge.fromId]?.toPixels(density) ?: return@forEach
+                val to = layout.positions[edge.toId]?.toPixels(density) ?: return@forEach
+                val active = activeIds == null || edge.fromId in activeIds || edge.toId in activeIds
                 drawLine(
-                    color = (if (isActive) cobalt else border).copy(alpha = baseAlpha),
+                    color = (if (active) accent else border)
+                        .copy(alpha = if (active) 0.75f else 0.35f),
                     start = from,
                     end = to,
-                    strokeWidth = if (edge.fromId == selectedId || edge.toId == selectedId) 2.2f else 1f
+                    strokeWidth = if (edge.fromId == selectedId || edge.toId == selectedId) {
+                        2.4f * density
+                    } else 1.2f * density
                 )
             }
 
             graph.entities.forEach { entity ->
-                val pos = nodePositions[entity.id] ?: return@forEach
-                val color = typeColors[entity.type] ?: border
-                val isDimmed = active != null && entity.id !in active
-                val radius = (NODE_RADIUS * (0.7f + entity.confidence.coerceIn(0f, 1f) * 0.6f))
+                val position = layout.positions[entity.id]?.toPixels(density) ?: return@forEach
+                val nodeColor = typeColors[entity.type] ?: textSecondary
+                val dimmed = activeIds != null && entity.id !in activeIds
+                val radius = NODE_RADIUS_DP *
+                    (0.78f + entity.confidence.coerceIn(0f, 1f) * 0.45f) * density
                 drawCircle(
-                    color = color.copy(alpha = if (isDimmed) 0.25f else 1f),
+                    color = nodeColor.copy(alpha = if (dimmed) 0.25f else 0.95f),
                     radius = radius,
-                    center = pos
+                    center = position
                 )
                 if (entity.id == selectedId) {
                     drawCircle(
                         color = textPrimary,
-                        radius = radius + 3f,
-                        center = pos,
-                        style = Stroke(width = 1.5f)
+                        radius = radius + 4f * density,
+                        center = position,
+                        style = Stroke(width = 2f * density)
                     )
                 }
-                val label = entity.label.take(18)
-                val textSize = 11f * scale
                 drawContext.canvas.nativeCanvas.drawText(
-                    label,
-                    pos.x,
-                    pos.y - radius - 4f * scale,
+                    "${entity.type.name.take(3).uppercase()} · ${entity.label.take(16)}",
+                    position.x,
+                    position.y - radius - 7f * density,
                     android.graphics.Paint().apply {
-                        this.textSize = textSize
+                        textSize = 11f * density
                         this.color = android.graphics.Color.argb(
-                            if (isDimmed) 120 else 255,
+                            if (dimmed) 110 else 255,
                             (textPrimary.red * 255).toInt(),
                             (textPrimary.green * 255).toInt(),
                             (textPrimary.blue * 255).toInt()
                         )
                         textAlign = android.graphics.Paint.Align.CENTER
+                        isAntiAlias = true
                     }
                 )
             }
@@ -364,55 +346,56 @@ private fun AdjacencyList(
     confidenceByEdge: Map<String, RelationshipConfidence>,
     selectedId: String?,
     onSelect: (String) -> Unit,
+    accent: Color,
+    border: Color,
+    surface: Color,
     textPrimary: Color,
-    textSecondary: Color,
-    border: Color
+    textSecondary: Color
 ) {
-    val byId = graph.entities.associateBy { it.id }
+    val byId = remember(graph) { graph.entities.associateBy(DossierEntity::id) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
+            .background(surface, RoundedCornerShape(10.dp))
+            .border(1.dp, border, RoundedCornerShape(10.dp))
+            .padding(6.dp)
     ) {
         graph.entities.forEach { entity ->
-            val isSelected = entity.id == selectedId
-            val outgoing = graph.edges.filter { it.fromId == entity.id }
-            val confidenceCount = outgoing.count {
-                confidenceByEdge[ConfidenceEngine.edgeKey(it.fromId, it.toId, it.relation)] != null
-            }
+            val selected = entity.id == selectedId
+            val edges = graph.edges.filter { it.fromId == entity.id || it.toId == entity.id }
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
-                    .background(if (isSelected) NeuralTheme.Cobalt.copy(alpha = 0.12f) else Color.Transparent)
+                    .background(if (selected) accent.copy(alpha = 0.12f) else Color.Transparent)
                     .clickable { onSelect(entity.id) }
-                    .padding(horizontal = 10.dp, vertical = 7.dp)
+                    .padding(horizontal = 10.dp, vertical = 10.dp)
             ) {
                 Text(
                     text = "${entity.type.name}: ${entity.label}",
                     color = textPrimary,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                    fontSize = 12.sp
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    fontSize = 12.5.sp
                 )
-                if (outgoing.isNotEmpty()) {
-                    outgoing.forEach { edge ->
-                        val other = byId[edge.toId]
-                        val scored = confidenceByEdge[ConfidenceEngine.edgeKey(edge.fromId, edge.toId, edge.relation)]
-                        val scoreText = scored?.let { "  (conf ${(it.score * 100).toInt()}%)" } ?: ""
+                if (edges.isEmpty()) {
+                    Text("No recorded connections", color = textSecondary, fontSize = 11.sp)
+                } else {
+                    edges.forEach { edge ->
+                        val otherId = if (edge.fromId == entity.id) edge.toId else edge.fromId
+                        val score = confidenceByEdge[
+                            ConfidenceEngine.edgeKey(edge.fromId, edge.toId, edge.relation)
+                        ]
                         Text(
-                            text = "   ↳ ${edge.relation} → ${other?.label ?: edge.toId}$scoreText",
+                            text = buildString {
+                                append("↳ ${edge.relation} → ${byId[otherId]?.label ?: otherId}")
+                                score?.let { append(" (${(it.score * 100).toInt()}%)") }
+                            },
                             color = textSecondary,
                             fontSize = 11.sp,
                             lineHeight = 15.sp,
-                            fontFamily = FontFamily.Monospace
+                            modifier = Modifier.padding(start = 8.dp, top = 2.dp)
                         )
                     }
-                } else {
-                    Text(
-                        text = "   (no outgoing connections)",
-                        color = textSecondary,
-                        fontSize = 10.5.sp
-                    )
                 }
             }
             HorizontalDivider(color = border, thickness = 0.5.dp)
@@ -420,79 +403,81 @@ private fun AdjacencyList(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun EntityGraphLegend(
-    typeColors: Map<EntityType, Color>,
-    textSecondary: Color
-) {
-    val items = EntityType.values().take(10)
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .wrapContentHeight(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+private fun EntityGraphLegend(typeColors: Map<EntityType, Color>, textSecondary: Color) {
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
-        items.forEach { type ->
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(end = 4.dp)
-            ) {
+        EntityType.entries.forEach { type ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
-                        .size(9.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(typeColors[type] ?: Color.Gray)
+                        .size(10.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(typeColors[type] ?: textSecondary)
                 )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = type.name,
-                    color = textSecondary,
-                    fontSize = 9.5.sp
-                )
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(type.name, color = textSecondary, fontSize = 10.5.sp)
             }
         }
     }
 }
 
-private const val NODE_RADIUS = 16f
+private data class GraphLayout(
+    val positions: Map<String, Offset>,
+    val width: Dp,
+    val height: Dp
+)
 
-/**
- * Deterministic radial layout: subject (Person) at center, all other nodes
- * placed on concentric rings so same-type nodes cluster. Not a force layout —
- * stable across recompositions and cheap to compute.
- */
-private fun layoutGraph(graph: EntityGraph): Map<String, Offset> {
+private fun layoutGraph(graph: EntityGraph): GraphLayout {
     val subject = graph.entities.firstOrNull { it.type == EntityType.Person }
-        ?: graph.entities.firstOrNull()
-        ?: return emptyMap()
-
-    val others = graph.entities.filter { it.id != subject.id }
-    val positions = mutableMapOf<String, Offset>()
-    positions[subject.id] = Offset(190f, 170f)
-
-    if (others.isEmpty()) return positions
-
-    val ringRadiusStep = 75f
+        ?: graph.entities.first()
+    val raw = mutableMapOf(subject.id to Offset.Zero)
+    val others = graph.entities.filterNot { it.id == subject.id }
     val perRing = 8
-    others.forEachIndexed { index, _ ->
-        val ring = (index / perRing) + 1
+    others.forEachIndexed { index, entity ->
+        val ring = index / perRing + 1
         val slot = index % perRing
-        val angle = (Math.PI * 2 * slot / perRing) + (ring * 0.4)
-        val radius = ringRadiusStep * ring
-        val cx = 190f + (radius * cos(angle)).toFloat()
-        val cy = 170f + (radius * sin(angle)).toFloat()
-        val entity = graph.entities.filter { it.id != subject.id }[index]
-        positions[entity.id] = Offset(cx, cy)
+        val itemsInRing = minOf(perRing, others.size - (ring - 1) * perRing)
+        val angle = Math.PI * 2.0 * slot / itemsInRing + ring * 0.35
+        val radius = 100f * ring
+        raw[entity.id] = Offset(
+            (radius * cos(angle)).toFloat(),
+            (radius * sin(angle)).toFloat()
+        )
     }
-    return positions
+
+    val minX = raw.values.minOf(Offset::x)
+    val minY = raw.values.minOf(Offset::y)
+    val maxX = raw.values.maxOf(Offset::x)
+    val maxY = raw.values.maxOf(Offset::y)
+    val padding = 85f
+    return GraphLayout(
+        positions = raw.mapValues { (_, point) ->
+            Offset(point.x - minX + padding, point.y - minY + padding)
+        },
+        width = maxOf(360f, maxX - minX + padding * 2f).dp,
+        height = maxOf(320f, maxY - minY + padding * 2f).dp
+    )
 }
 
 private fun buildAdjacency(graph: EntityGraph): Map<String, Set<String>> {
-    val adj = mutableMapOf<String, MutableSet<String>>()
-    fun add(a: String, b: String) {
-        adj.getOrPut(a) { mutableSetOf() }.add(b)
-        adj.getOrPut(b) { mutableSetOf() }.add(a)
+    val result = mutableMapOf<String, MutableSet<String>>()
+    graph.edges.forEach { edge ->
+        result.getOrPut(edge.fromId) { mutableSetOf() }.add(edge.toId)
+        result.getOrPut(edge.toId) { mutableSetOf() }.add(edge.fromId)
     }
-    graph.edges.forEach { add(it.fromId, it.toId) }
-    return adj
+    return result
 }
+
+private fun Offset.toPixels(density: Float): Offset = Offset(x * density, y * density)
+private fun squaredDistance(first: Offset, second: Offset): Float {
+    val dx = first.x - second.x
+    val dy = first.y - second.y
+    return dx * dx + dy * dy
+}
+
+private const val NODE_RADIUS_DP = 17f

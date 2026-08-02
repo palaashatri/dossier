@@ -1,5 +1,8 @@
 package io.dossier.app.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,10 +15,13 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -23,6 +29,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,93 +38,252 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.dossier.app.data.face.FaceCorrelationCalibrationStore
+import io.dossier.app.data.face.FaceCorrelationConsentStore
+import io.dossier.app.data.face.FaceCorrelationModelPack
+import io.dossier.app.data.face.FaceCorrelationSessionPolicy
+import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.LottieLoop
 import io.dossier.app.ui.components.LottieTags
 import io.dossier.app.ui.theme.NeuralTheme
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
- * Scan screen — calm, honest, real progress.
+ * Scan screen backed only by real ScanSession state.
  *
- * Replaces the prior fake terminal-log animation (a fixed list of log strings
- * printed on a timer that said "complete" before the real scan finished) with
- * the ACTUAL scan stage from ScanSession.progressText, plus a live log of real
- * verification events. Navigation to the report fires only when the real scan
- * completes (isScanning becomes false).
+ * A selfie never silently enables cross-photo biometric-derived processing.
+ * Every eligible scan explicitly chooses strong local YuNet/SFace correlation
+ * or basic near-duplicate/photo-reuse matching. The choice is process-local and
+ * is reset when the scan completes, fails, or is cancelled.
  */
 @Composable
-fun ScanScreen(onScanComplete: () -> Unit) {
+fun ScanScreen(
+    onScanComplete: () -> Unit,
+    onScanCancelled: () -> Unit,
+    onInvalidInput: () -> Unit = onScanCancelled
+) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val progressText by ScanSession.progressText.collectAsState()
     val isScanning by ScanSession.isScanning.collectAsState()
     val profileResults by ScanSession.profileScanResults.collectAsState()
 
-    // Real, live log entries — appended as actual scan milestones occur.
+    val modelPack = remember { FaceCorrelationModelPack(context) }
+    val consentStore = remember { FaceCorrelationConsentStore(context) }
+    val calibrationStore = remember { FaceCorrelationCalibrationStore(context) }
+
     val liveLogs = remember { mutableStateListOf<String>() }
     val scrollState = rememberScrollState()
+    var startError by remember { mutableStateOf<String?>(null) }
+    var hasStarted by remember { mutableStateOf(false) }
+    var navigationCompleted by remember { mutableStateOf(false) }
+    var cancelledByUser by remember { mutableStateOf(false) }
+    var pendingInput by remember { mutableStateOf<IdentityInput?>(null) }
+    var pendingDeepResearch by remember { mutableStateOf(false) }
+    var showFaceSetup by remember { mutableStateOf(false) }
+    var facePackInstalling by remember { mutableStateOf(false) }
+    var facePackProgress by remember { mutableStateOf(0f) }
+    var facePackMessage by remember { mutableStateOf<String?>(null) }
+    var faceStateRefresh by remember { mutableStateOf(0) }
 
-    // Map the real progressText codes to a friendly stage label + log entry.
+    val facePackReady = remember(faceStateRefresh) { modelPack.isReady() }
+    val activeCalibration = remember(faceStateRefresh) { calibrationStore.getThresholds() }
+    val consentActive = remember(faceStateRefresh) { consentStore.hasConsent() }
+
+    val calibrationImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            coroutineScope.launch {
+                runCatching { calibrationStore.importCalibration(uri) }
+                    .onSuccess { thresholds ->
+                        faceStateRefresh++
+                        facePackMessage =
+                            "Measured calibration imported: review >= ${"%.3f".format(thresholds.reviewThreshold)}, " +
+                                "high >= ${"%.3f".format(thresholds.highSimilarityThreshold)}; " +
+                                "${thresholds.positivePairCount} positive / " +
+                                "${thresholds.negativePairCount} negative held-out pairs."
+                    }
+                    .onFailure { error ->
+                        facePackMessage = error.localizedMessage
+                            ?: "Unable to import the YuNet/SFace calibration file."
+                    }
+            }
+        }
+    }
+
+    fun startResolvedScan(
+        input: IdentityInput,
+        deepResearch: Boolean,
+        useStrongCorrelation: Boolean,
+        visualMode: String
+    ) {
+        if (useStrongCorrelation) {
+            FaceCorrelationSessionPolicy.useStrongCorrelation()
+        } else {
+            FaceCorrelationSessionPolicy.useBasicMatching()
+        }
+        showFaceSetup = false
+        liveLogs.add(visualMode)
+        liveLogs.add("Starting scan…")
+        if (deepResearch) liveLogs.add("Deep Research enabled — following linked sites")
+        ScanSession.startScan(context, input, deepResearch = deepResearch)
+    }
+
     LaunchedEffect(progressText) {
         if (progressText.isNotBlank() && liveLogs.lastOrNull() != progressText) {
             liveLogs.add(friendlyStage(progressText))
         }
     }
 
-    // Track confirmed-profile count as a real signal.
     LaunchedEffect(profileResults.size) {
         val confirmed = profileResults.count { it.exists && it.verified }
         if (confirmed > 0) {
-            val msg = "Confirmed $confirmed profile(s) so far…"
-            if (liveLogs.lastOrNull()?.startsWith("Confirmed") != true) {
-                liveLogs.add(msg)
-            }
+            val message = "Confirmed $confirmed profile(s) so far…"
+            if (liveLogs.lastOrNull()?.startsWith("Confirmed") != true) liveLogs.add(message)
         }
     }
 
-    // Kick off the scan once.
     LaunchedEffect(Unit) {
-        val input = ScanSession.tempInput
-            ?: ScanSession.currentInput.value
-            ?: ScanSession.loadResumePoint(context)?.first
-            ?: io.dossier.app.domain.model.IdentityInput(fullName = "Demo Subject", primaryUsername = "demo_subject")
-        liveLogs.add("Starting scan…")
-        val deepResearch = ScanSession.deepResearchEnabled.value
-        if (deepResearch) liveLogs.add("Deep Research enabled — following linked sites")
-        ScanSession.startScan(context, input, deepResearch = deepResearch)
+        FaceCorrelationSessionPolicy.useBasicMatching()
+        val resume = ScanSession.loadResumePoint(context)
+        val input = ScanSession.tempInput ?: ScanSession.currentInput.value ?: resume?.first
+        if (input == null || !hasUsableIdentityInput(input)) {
+            startError = "No valid identity input was supplied. Return to Identity Setup and enter at least one name, username, email, phone number, or profile URL."
+            liveLogs.add("Scan not started: identity input is missing")
+            return@LaunchedEffect
+        }
+
+        val deepResearch = if (ScanSession.tempInput == null && ScanSession.currentInput.value == null) {
+            resume?.second ?: ScanSession.deepResearchEnabled.value
+        } else {
+            ScanSession.deepResearchEnabled.value
+        }
+
+        if (!input.selfieUri.isNullOrBlank()) {
+            pendingInput = input
+            pendingDeepResearch = deepResearch
+            showFaceSetup = true
+            liveLogs.add("Waiting for per-scan face-correlation choice")
+        } else {
+            startResolvedScan(
+                input = input,
+                deepResearch = deepResearch,
+                useStrongCorrelation = false,
+                visualMode = "No selfie supplied — face correlation skipped"
+            )
+        }
     }
 
-    // Navigate to the report when the scan actually finishes (isScanning flips
-    // false). Cancellation also flips it false, but then onScanComplete fires
-    // from the cancel path via reset, so guard against double-navigation.
-    var hasStarted by remember { mutableStateOf(isScanning) }
-    var navigationCompleted by remember { mutableStateOf(false) }
     LaunchedEffect(isScanning) {
-        android.util.Log.d("ScanScreen", "LaunchedEffect fired: isScanning=$isScanning, hasStarted=$hasStarted, navigationCompleted=$navigationCompleted")
         if (isScanning) {
             hasStarted = true
-            android.util.Log.d("ScanScreen", "Scan started")
-        } else if (hasStarted && !navigationCompleted) {
-            android.util.Log.d("ScanScreen", "SCAN FINISHED: calling onScanComplete() NOW")
-            liveLogs.add("Scan complete.")
-            navigationCompleted = true
-            delay(300)
-            try {
-                android.util.Log.d("ScanScreen", "CALLING onScanComplete callback")
+        } else if (hasStarted) {
+            FaceCorrelationSessionPolicy.useBasicMatching()
+            if (
+                !navigationCompleted &&
+                !cancelledByUser &&
+                progressText != "SCAN_CANCELLED"
+            ) {
+                liveLogs.add("Scan complete.")
+                navigationCompleted = true
+                delay(300)
                 onScanComplete()
-                android.util.Log.d("ScanScreen", "onScanComplete returned successfully")
-            } catch (e: Exception) {
-                android.util.Log.e("ScanScreen", "ERROR in onScanComplete: ${e.message}", e)
             }
         }
     }
 
-    // Auto-scroll the log to the bottom as entries arrive.
     LaunchedEffect(liveLogs.size) {
-        if (liveLogs.isNotEmpty()) {
-            scrollState.animateScrollTo(scrollState.maxValue)
-        }
+        if (liveLogs.isNotEmpty()) scrollState.animateScrollTo(scrollState.maxValue)
+    }
+
+    if (showFaceSetup) {
+        FaceCorrelationChoiceDialog(
+            facePackReady = facePackReady,
+            consentActive = consentActive,
+            measuredCalibration = activeCalibration.measured,
+            calibrationSummary = activeCalibration.summary(),
+            expectedPackBytes = modelPack.status().expectedBytes,
+            installing = facePackInstalling,
+            installProgress = facePackProgress,
+            message = facePackMessage,
+            onImportCalibration = {
+                calibrationImportLauncher.launch(
+                    arrayOf("application/json", "text/json", "text/plain", "*/*")
+                )
+            },
+            onDeleteModels = {
+                FaceCorrelationSessionPolicy.useBasicMatching()
+                modelPack.delete()
+                consentStore.revoke()
+                calibrationStore.clear()
+                facePackProgress = 0f
+                facePackMessage =
+                    "YuNet/SFace models, measured calibration and stored consent were deleted."
+                faceStateRefresh++
+            },
+            onUseBasic = {
+                pendingInput?.let { input ->
+                    startResolvedScan(
+                        input = input,
+                        deepResearch = pendingDeepResearch,
+                        useStrongCorrelation = false,
+                        visualMode =
+                            "Basic photo-reuse matching selected; cross-photo face embeddings disabled for this scan"
+                    )
+                }
+            },
+            onUseStrong = {
+                val input = pendingInput
+                if (input != null) {
+                    if (facePackReady) {
+                        consentStore.grantForInstalledPipeline()
+                        faceStateRefresh++
+                        startResolvedScan(
+                            input = input,
+                            deepResearch = pendingDeepResearch,
+                            useStrongCorrelation = true,
+                            visualMode = if (activeCalibration.measured) {
+                                "Strong on-device YuNet/SFace correlation enabled with measured calibration"
+                            } else {
+                                "Strong on-device YuNet/SFace correlation enabled with reference manual-review policy"
+                            }
+                        )
+                    } else {
+                        coroutineScope.launch {
+                            facePackInstalling = true
+                            facePackMessage = null
+                            facePackProgress = 0f
+                            try {
+                                modelPack.install { progress -> facePackProgress = progress }
+                                consentStore.grantForInstalledPipeline()
+                                faceStateRefresh++
+                                startResolvedScan(
+                                    input = input,
+                                    deepResearch = pendingDeepResearch,
+                                    useStrongCorrelation = true,
+                                    visualMode =
+                                        "Verified YuNet/SFace pack installed; strong local correlation enabled with reference manual-review policy"
+                                )
+                            } catch (cancelled: CancellationException) {
+                                FaceCorrelationSessionPolicy.useBasicMatching()
+                                throw cancelled
+                            } catch (error: Exception) {
+                                FaceCorrelationSessionPolicy.useBasicMatching()
+                                facePackMessage = error.localizedMessage
+                                    ?: "Unable to install the verified face-correlation models."
+                            } finally {
+                                facePackInstalling = false
+                            }
+                        }
+                    }
+                }
+            }
+        )
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -133,10 +299,14 @@ fun ScanScreen(onScanComplete: () -> Unit) {
         ) {
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Header
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    text = if (isScanning) "Scanning" else "Compiling report",
+                    text = when {
+                        startError != null -> "Input required"
+                        showFaceSetup -> "Face mode required"
+                        isScanning -> "Scanning"
+                        else -> "Compiling report"
+                    },
                     color = NeuralTheme.TextSecondary,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium
@@ -150,23 +320,22 @@ fun ScanScreen(onScanComplete: () -> Unit) {
                 )
             }
 
-            // Hero — calm indeterminate ring + Lottie, no layered glow/sparks.
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier.size(200.dp)
-            ) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(200.dp)) {
                 io.dossier.app.ui.components.SquigglyProgressIndicator(
                     size = 160.dp,
-                    progress = null
+                    progress = when {
+                        startError != null || showFaceSetup -> 0f
+                        isScanning -> null
+                        else -> 1f
+                    }
                 )
                 LottieLoop(
-                    tag = LottieTags.SEARCH,
+                    tag = if (startError == null) LottieTags.SEARCH else LottieTags.INVESTIGATE,
                     size = 110.dp,
                     modifier = Modifier.align(Alignment.Center)
                 )
             }
 
-            // Live status + log
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -174,53 +343,89 @@ fun ScanScreen(onScanComplete: () -> Unit) {
                 horizontalAlignment = Alignment.Start
             ) {
                 Text(
-                    text = friendlyStageLabel(progressText),
-                    color = NeuralTheme.Cobalt,
+                    text = startError?.let { "Scan cannot start" }
+                        ?: if (showFaceSetup) {
+                            "Waiting for per-scan face-correlation choice"
+                        } else {
+                            friendlyStageLabel(progressText)
+                        },
+                    color = if (startError == null) NeuralTheme.Cobalt else NeuralTheme.Crimson,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium
                 )
 
                 io.dossier.app.ui.components.LinearWavyProgressIndicator(
-                    progress = if (isScanning) null else 1f,
+                    progress = if (isScanning) null
+                    else if (startError == null && !showFaceSetup) 1f
+                    else 0f,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = 12.dp),
                     strokeWidth = 3.dp
                 )
 
-                // Live log — real entries only, no fake terminal animation.
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(130.dp)
-                        .verticalScroll(scrollState)
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        liveLogs.forEach { log ->
-                            Text(
-                                text = "· $log",
-                                color = NeuralTheme.TextSecondary,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                lineHeight = 16.sp
-                            )
+                startError?.let { message ->
+                    Text(
+                        text = message,
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    Button(
+                        onClick = {
+                            FaceCorrelationSessionPolicy.useBasicMatching()
+                            navigationCompleted = true
+                            onInvalidInput()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = NeuralTheme.Cobalt),
+                        shape = io.dossier.app.ui.theme.DossierButtonShape,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                    ) {
+                        Text("RETURN TO IDENTITY SETUP", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                }
+
+                if (startError == null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(130.dp)
+                            .verticalScroll(scrollState)
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            liveLogs.forEach { log ->
+                                Text(
+                                    text = "· $log",
+                                    color = NeuralTheme.TextSecondary,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    lineHeight = 16.sp
+                                )
+                            }
                         }
                     }
                 }
 
-                // Cancel — cooperatively abort the in-flight scan (M16).
                 if (isScanning) {
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedButton(
                         onClick = {
+                            FaceCorrelationSessionPolicy.useBasicMatching()
+                            cancelledByUser = true
+                            navigationCompleted = true
                             ScanSession.cancelScan()
-                            onScanComplete()
+                            onScanCancelled()
                         },
                         border = BorderStroke(1.2.dp, NeuralTheme.Crimson.copy(alpha = 0.8f)),
                         shape = io.dossier.app.ui.theme.DossierButtonShape,
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Crimson),
-                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
                     ) {
                         Text(
                             text = "CANCEL SCAN",
@@ -235,26 +440,184 @@ fun ScanScreen(onScanComplete: () -> Unit) {
     }
 }
 
-/** Convert the raw progressText code into a friendly line for the log. */
+@Composable
+private fun FaceCorrelationChoiceDialog(
+    facePackReady: Boolean,
+    consentActive: Boolean,
+    measuredCalibration: Boolean,
+    calibrationSummary: String,
+    expectedPackBytes: Long,
+    installing: Boolean,
+    installProgress: Float,
+    message: String?,
+    onImportCalibration: () -> Unit,
+    onDeleteModels: () -> Unit,
+    onUseBasic: () -> Unit,
+    onUseStrong: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { if (!installing) onUseBasic() },
+        title = {
+            Text(
+                text = if (facePackReady) {
+                    "Choose face-correlation mode"
+                } else {
+                    "Enable strong local face correlation?"
+                },
+                color = NeuralTheme.TextPrimary,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Strong mode compares different photographs using YuNet five-landmark alignment and SFace embeddings. This is biometric-derived processing and is optional for every scan.",
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 12.5.sp,
+                    lineHeight = 18.sp
+                )
+                Text(
+                    text = "Images, aligned crops, landmarks and embeddings stay on this device and are discarded after each comparison. Results are supporting evidence, never proof of identity.",
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 12.5.sp,
+                    lineHeight = 18.sp
+                )
+
+                if (!facePackReady) {
+                    Text(
+                        text = "The checksum-pinned OpenCV model pack is about ${formatFacePackSize(expectedPackBytes)} and is downloaded only after you select Install & Use Strong.",
+                        color = NeuralTheme.TextSecondary,
+                        fontSize = 11.5.sp,
+                        lineHeight = 16.sp
+                    )
+                } else {
+                    Text(
+                        text = if (measuredCalibration) {
+                            "Measured policy active: $calibrationSummary"
+                        } else {
+                            "Reference policy active: $calibrationSummary Scores remain manual-review evidence until a matching measured calibration is imported."
+                        },
+                        color = if (measuredCalibration) NeuralTheme.Emerald else NeuralTheme.Amber,
+                        fontSize = 11.5.sp,
+                        lineHeight = 16.sp
+                    )
+                    Text(
+                        text = if (consentActive) {
+                            "Installation consent is recorded, but this scan still requires a mode choice."
+                        } else {
+                            "The model files are installed, but installation consent is currently revoked."
+                        },
+                        color = NeuralTheme.TextSecondary,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
+                    OutlinedButton(
+                        onClick = onImportCalibration,
+                        enabled = !installing,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = if (measuredCalibration) {
+                                "REPLACE MEASURED CALIBRATION"
+                            } else {
+                                "IMPORT MEASURED CALIBRATION"
+                            },
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.5.sp
+                        )
+                    }
+                    TextButton(
+                        onClick = onDeleteModels,
+                        enabled = !installing,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "DELETE MODELS & REVOKE CONSENT",
+                            color = NeuralTheme.Crimson,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.5.sp
+                        )
+                    }
+                }
+
+                if (installing) {
+                    LinearProgressIndicator(
+                        progress = { installProgress },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text(
+                        text = "Downloading and verifying models… ${(installProgress * 100).toInt()}%",
+                        color = NeuralTheme.Cobalt,
+                        fontSize = 11.5.sp
+                    )
+                }
+
+                message?.let { value ->
+                    Text(
+                        text = value,
+                        color = if (
+                            value.contains("unable", ignoreCase = true) ||
+                            value.contains("failed", ignoreCase = true)
+                        ) NeuralTheme.Crimson else NeuralTheme.Cyan,
+                        fontSize = 11.5.sp,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onUseStrong,
+                enabled = !installing,
+                colors = ButtonDefaults.buttonColors(containerColor = NeuralTheme.Cobalt)
+            ) {
+                Text(
+                    text = if (facePackReady) "USE STRONG LOCAL" else "INSTALL & USE STRONG",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.5.sp
+                )
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onUseBasic, enabled = !installing) {
+                Text("USE BASIC MATCHING", fontWeight = FontWeight.Bold, fontSize = 10.5.sp)
+            }
+        },
+        containerColor = NeuralTheme.CardBackground
+    )
+}
+
+private fun hasUsableIdentityInput(input: IdentityInput): Boolean =
+    input.fullName.isNotBlank() ||
+        !input.primaryUsername.isNullOrBlank() ||
+        input.usernames.any { it.isNotBlank() } ||
+        input.emails.any { it.isNotBlank() } ||
+        input.phones.any { it.isNotBlank() } ||
+        input.profileUrls.any { it.isNotBlank() }
+
+private fun formatFacePackSize(bytes: Long): String =
+    "%.1f MB".format(bytes.toDouble() / (1024.0 * 1024.0))
+
 private fun friendlyStage(raw: String): String = when {
     raw.contains("DISCOVERING", ignoreCase = true) -> "Resolving name → username variants"
     raw.contains("COMPARING", ignoreCase = true) -> "Comparing selfie vs profile avatars"
     raw.contains("BREACH", ignoreCase = true) -> "Checking email breach / public exposure"
     raw.contains("ENTITY", ignoreCase = true) -> "Building entity relationship graph"
     raw.contains("COMPILING", ignoreCase = true) -> "Compiling exposure levels"
-    raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating AI analysis"
+    raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating analysis"
     raw.contains("AUDITING", ignoreCase = true) -> "Auditing place image metadata"
+    raw.contains("CANCELLED", ignoreCase = true) -> "Scan cancelled"
     else -> raw.lowercase().replace('_', ' ')
 }
 
-/** A short label for the current stage, shown above the progress bar. */
 private fun friendlyStageLabel(raw: String): String = when {
     raw.isBlank() -> "Initializing"
     raw.contains("DISCOVERING", ignoreCase = true) -> "Discovering usernames"
-    raw.contains("COMPARING", ignoreCase = true) -> "Comparing faces"
-    raw.contains("BREACH", ignoreCase = true) -> "Breach exposure"
+    raw.contains("COMPARING", ignoreCase = true) -> "Comparing visual consistency"
+    raw.contains("BREACH", ignoreCase = true) -> "Breach and exposure coverage"
     raw.contains("ENTITY", ignoreCase = true) -> "Entity graph"
     raw.contains("COMPILING", ignoreCase = true) -> "Compiling report"
-    raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating AI analysis"
+    raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating analysis"
+    raw.contains("CANCELLED", ignoreCase = true) -> "Cancelled"
     else -> raw.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
 }

@@ -1,63 +1,77 @@
 package io.dossier.app.ui.screens
 
-import android.content.Context
-import android.graphics.BitmapFactory
-import android.net.Uri
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.Tab
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.dossier.app.data.platform.PLATFORMS
+import io.dossier.app.domain.evidence.AttackPathFinder
+import io.dossier.app.domain.evidence.ExposureEngine
 import io.dossier.app.domain.model.BreachDigest
 import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
-import io.dossier.app.domain.model.Platform
 import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.domain.remediation.RemediationItem
-import io.dossier.app.domain.evidence.ExposureDimension
-import io.dossier.app.domain.evidence.ExposureEngine
-import io.dossier.app.domain.evidence.AttackPathFinder
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.export.ReportExporter
 import io.dossier.app.ui.components.AnimatedObsidianBackground
-import io.dossier.app.ui.components.GeminiSpark
-import io.dossier.app.ui.components.SquigglyProgressIndicator
+import io.dossier.app.ui.theme.DossierButtonShape
+import io.dossier.app.ui.theme.DossierCardShape
 import io.dossier.app.ui.theme.NeuralTheme
-import io.dossier.app.ui.screens.EntityGraphView
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.io.File
-import java.util.concurrent.TimeUnit
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+
+private enum class ReportView(val label: String) {
+    Overview("Overview"),
+    Evidence("Evidence"),
+    Connections("Connections"),
+    Actions("Actions")
+}
 
 @Composable
 fun ReportScreen(
@@ -80,1736 +94,858 @@ fun ReportScreen(
     val exposure by ScanSession.exposure.collectAsState()
     val attackPaths by ScanSession.attackPaths.collectAsState()
     val breachDigests by ScanSession.breachDigests.collectAsState()
+
+    var selectedViewIndex by rememberSaveable { mutableIntStateOf(0) }
+    var actionMessage by remember { mutableStateOf<String?>(null) }
+    var confirmSessionDelete by remember { mutableStateOf(false) }
+    val generatedAt by rememberSaveable {
+        mutableStateOf(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")))
+    }
+    val exporter = remember { ReportExporter(context) }
+
+    val subject = input?.fullName?.trim().orEmpty()
+        .ifBlank { input?.primaryUsername?.let { "@$it" }.orEmpty() }
+        .ifBlank { input?.emails?.firstOrNull().orEmpty() }
+        .ifBlank { "Unnamed subject" }
+    val verifiedProfiles = profileResults.count { it.exists && it.verified }
+    val reviewProfiles = profileResults.count { it.exists && !it.verified }
+    val unavailableProfiles = profileResults.count {
+        !it.exists && it.verificationStatus?.contains("unverifiable", true) == true
+    }
+    val confirmedBreaches = breachDigests.sumOf(BreachDigest::breachCount)
+    val measuredFaceMatches = faceMatches.count { match ->
+        match.warning.contains("Measured", ignoreCase = true) &&
+            (match.warning.contains("high visual similarity", true) ||
+                match.warning.contains("review-range", true))
+    }
     val entityGraphLines = remember(entityGraph, findings, profileResults) {
         formatEntityGraphFromSession(entityGraph)
             .ifEmpty { formatEntityGraphLines(findings, profileResults) }
     }
-    val breachDigestLines = remember(breachDigests, findings) {
+    val breachLines = remember(breachDigests, findings) {
         formatBreachDigestsFromSession(breachDigests)
             .ifEmpty { formatBreachDigestLines(findings) }
     }
-    var selectedTab by remember { mutableStateOf(0) }
 
-    val exporter = remember { ReportExporter(context) }
-
-    val riskColor = when (riskLevel) {
-        RiskLevel.Low -> NeuralTheme.Emerald
-        RiskLevel.Medium -> NeuralTheme.Amber
-        RiskLevel.High -> NeuralTheme.Amber
-        RiskLevel.Critical -> NeuralTheme.Crimson
+    if (confirmSessionDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmSessionDelete = false },
+            title = { Text("Delete current session data?") },
+            text = {
+                Text(
+                    "This clears the active scan, temporary image/profile caches, and in-memory report. Saved encrypted cases and exported files are not deleted."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmSessionDelete = false
+                        ScanSession.purgeSession(context)
+                        onReset()
+                    }
+                ) {
+                    Text("Delete session", color = NeuralTheme.Crimson, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmSessionDelete = false }) { Text("Cancel") }
+            },
+            containerColor = NeuralTheme.CardBackground
+        )
     }
 
-    val cardShape = io.dossier.app.ui.theme.DossierCardShape
-
     Box(modifier = Modifier.fillMaxSize()) {
-        // Shifting mesh gradient + floating diamond particles background
-        AnimatedObsidianBackground(showGrid = true)
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .safeDrawingPadding()
-                .padding(horizontal = 24.dp, vertical = 12.dp)
-                .verticalScroll(rememberScrollState())
-        ) {
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // ---- Classified dossier header (movie-style intelligence file) ----
-            val subjectName = input?.fullName?.trim()?.ifBlank { "UNKNOWN SUBJECT" } ?: "UNKNOWN SUBJECT"
-            val fileNumber = "DS-${java.time.LocalDate.now()}-${subjectName.replace(" ", "").take(6).uppercase()}"
-            val prepDate = java.time.LocalDateTime.now()
-                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
-
-            // File number + classification line
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+        AnimatedObsidianBackground(showGrid = false)
+        Column(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
+            Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
                 Text(
-                    text = "FILE NO. $fileNumber",
-                    color = NeuralTheme.TextMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Medium
+                    text = "Privacy audit report",
+                    color = NeuralTheme.TextPrimary,
+                    fontSize = 27.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
-                // Classification stamp
                 Text(
-                    text = "CONFIDENTIAL",
-                    color = NeuralTheme.Crimson,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.5.sp,
-                    modifier = Modifier
-                        .border(1.dp, NeuralTheme.Crimson.copy(alpha = 0.5f), RoundedCornerShape(2.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                    text = subject,
+                    color = NeuralTheme.Cobalt,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+                Text(
+                    text = "Generated $generatedAt · public-source evidence · manual review required",
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(top = 3.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // DOSSIER title
-            Text(
-                text = "DOSSIER",
-                color = NeuralTheme.TextPrimary,
-                fontSize = 34.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 2.sp
-            )
-
-            // SUBJECT line — the name, prominent
-            Text(
-                text = "SUBJECT: $subjectName",
-                color = NeuralTheme.Cobalt,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-
-            Text(
-                text = "Prepared $prepDate  ·  Authorized research / self-audit  ·  Public-web evidence",
-                color = NeuralTheme.TextSecondary,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
-            )
-
-            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 1.dp)
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Overall exposure risk index card — calm static border
-            Card(
-                colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, riskColor.copy(alpha = 0.5f), cardShape),
-                shape = cardShape
+            ScrollableTabRow(
+                selectedTabIndex = selectedViewIndex,
+                containerColor = NeuralTheme.CardBackground,
+                contentColor = NeuralTheme.Cobalt,
+                edgePadding = 12.dp,
+                divider = { HorizontalDivider(color = NeuralTheme.BorderColor) }
             ) {
+                ReportView.entries.forEachIndexed { index, view ->
+                    Tab(
+                        selected = selectedViewIndex == index,
+                        onClick = { selectedViewIndex = index },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                        text = {
+                            Text(
+                                view.label,
+                                fontWeight = if (selectedViewIndex == index) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                        }
+                    )
+                }
+            }
+
+            when (ReportView.entries[selectedViewIndex]) {
+                ReportView.Overview -> OverviewReport(
+                    modifier = Modifier.weight(1f),
+                    riskLevel = riskLevel,
+                    exposure = exposure,
+                    findings = findings,
+                    verifiedProfiles = verifiedProfiles,
+                    reviewProfiles = reviewProfiles,
+                    unavailableProfiles = unavailableProfiles,
+                    confirmedBreaches = confirmedBreaches,
+                    faceMatches = faceMatches,
+                    measuredFaceMatches = measuredFaceMatches,
+                    hasSelfie = !input?.selfieUri.isNullOrBlank(),
+                    memoryDropped = memoryDropped,
+                    aiSummary = aiSummary
+                )
+                ReportView.Evidence -> EvidenceReport(
+                    modifier = Modifier.weight(1f),
+                    findings = findings,
+                    profileResults = profileResults,
+                    faceMatches = faceMatches,
+                    breachDigests = breachDigests,
+                    onNavigateToBrowser = onNavigateToBrowser
+                )
+                ReportView.Connections -> ConnectionsReport(
+                    modifier = Modifier.weight(1f),
+                    entityGraph = entityGraph,
+                    relationshipConfidence = relationshipConfidence,
+                    attackPaths = attackPaths
+                )
+                ReportView.Actions -> ActionsReport(
+                    modifier = Modifier.weight(1f),
+                    remediationItems = remediationItems,
+                    remediationTips = remediationTips,
+                    actionMessage = actionMessage,
+                    onSaveCase = {
+                        actionMessage = if (ScanSession.saveCase(context) != null) {
+                            "Encrypted case saved locally."
+                        } else {
+                            "The case could not be saved. No plaintext fallback was used."
+                        }
+                    },
+                    onExport = {
+                        exporter.shareReport(
+                            findings = findings,
+                            subjectName = subject,
+                            profileSummaries = profileResults.map(::profileExportLine),
+                            aiSummary = aiSummary,
+                            faceMatches = faceMatches,
+                            entityGraphSummary = entityGraphLines.joinToString("\n"),
+                            breachDigests = breachLines,
+                            riskLevel = riskLevel.name
+                        )
+                    },
+                    onDeepResearch = onDeepResearch,
+                    onNewAudit = {
+                        ScanSession.purgeSession(context)
+                        onReset()
+                    },
+                    onDeleteSession = { confirmSessionDelete = true }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OverviewReport(
+    modifier: Modifier,
+    riskLevel: RiskLevel,
+    exposure: ExposureEngine.ExposureResult?,
+    findings: List<Finding>,
+    verifiedProfiles: Int,
+    reviewProfiles: Int,
+    unavailableProfiles: Int,
+    confirmedBreaches: Int,
+    faceMatches: List<FaceConsistencyMatch>,
+    measuredFaceMatches: Int,
+    hasSelfie: Boolean,
+    memoryDropped: Int,
+    aiSummary: String?
+) {
+    val priorityColor = riskColor(riskLevel)
+    LazyColumn(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            ReportCard(borderColor = priorityColor.copy(alpha = 0.55f)) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(20.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Exposure priority", color = NeuralTheme.TextSecondary, fontSize = 12.sp)
                         Text(
-                            text = "THREAT ASSESSMENT",
-                            color = NeuralTheme.TextSecondary,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Medium,
-                            fontSize = 11.sp,
-                            letterSpacing = 1.sp
-                        )
-                        Text(
-                            text = riskLevel.name,
-                            color = riskColor,
+                            riskLevel.name,
+                            color = priorityColor,
                             fontSize = 28.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(top = 2.dp)
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .background(NeuralTheme.SurfaceDark, RoundedCornerShape(8.dp))
-                            .border(1.dp, NeuralTheme.BorderColor, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
-                    ) {
-                        Text(
-                            text = "${findings.size} FINDINGS",
-                            color = NeuralTheme.Cyan,
-                            
-                            fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
+                        Text(
+                            riskExplanation(riskLevel),
+                            color = NeuralTheme.TextSecondary,
+                            fontSize = 11.5.sp,
+                            lineHeight = 16.sp,
+                            modifier = Modifier.padding(top = 3.dp)
+                        )
                     }
-                }
-            }
-
-            // M16: honest notice when the memory cap dropped findings.
-            if (memoryDropped > 0) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "$memoryDropped finding(s) omitted — memory limit (${io.dossier.app.domain.scanner.MemoryGuard.MAX_FINDINGS}) reached",
-                    color = NeuralTheme.Amber,
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp,
-                    modifier = Modifier.padding(horizontal = 2.dp)
-                )
-            }
-
-            // Exposure Breakdown — six-dimension sub-scores (ROADMAP M9)
-            exposure?.let { exp ->
-                Spacer(modifier = Modifier.height(16.dp))
-                ReportSectionHeader("Exposure Breakdown")
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, NeuralTheme.BorderColor, cardShape),
-                    shape = cardShape
-                ) {
-                    Column(modifier = Modifier.padding(18.dp)) {
-                        exp.dimensions.forEach { dim ->
-                            ExposureDimensionRow(dim.dimension, dim.score)
-                            Spacer(modifier = Modifier.height(8.dp))
-                        }
-                        if (exp.topFindings.isNotEmpty()) {
-                            Spacer(modifier = Modifier.height(6.dp))
-                            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
-                            Spacer(modifier = Modifier.height(8.dp))
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            findings.size.toString(),
+                            color = NeuralTheme.TextPrimary,
+                            fontSize = 25.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text("reportable findings", color = NeuralTheme.TextSecondary, fontSize = 11.sp)
+                        exposure?.let {
                             Text(
-                                text = "TOP RISK FINDINGS",
+                                "Exposure score ${it.overall}/100",
                                 color = NeuralTheme.TextSecondary,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Medium,
-                                fontSize = 10.5.sp,
-                                letterSpacing = 1.sp
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(top = 4.dp)
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            exp.topFindings.take(10).forEach { f ->
-                                val c = when (f.risk) {
-                                    RiskLevel.Low -> NeuralTheme.Emerald
-                                    RiskLevel.Medium -> NeuralTheme.Amber
-                                    RiskLevel.High -> NeuralTheme.Amber
-                                    RiskLevel.Critical -> NeuralTheme.Crimson
-                                }
-                                Text(
-                                    text = "• [${f.risk.name}] ${f.type.name}: ${f.value.take(48)}",
-                                    color = c,
-                                    fontSize = 11.sp,
-                                    lineHeight = 15.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    modifier = Modifier.padding(vertical = 2.dp)
-                                )
-                            }
                         }
                     }
                 }
             }
+        }
 
-            // Attack Paths — explainable reachability from subject to exposure (M10)
-            if (attackPaths.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(16.dp))
-                ReportSectionHeader("Attack Paths")
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, NeuralTheme.BorderColor, cardShape),
-                    shape = cardShape
-                ) {
-                    Column(modifier = Modifier.padding(18.dp)) {
-                        attackPaths.forEach { path ->
-                            Text(
-                                text = "→ ${path.endpointLabel}",
-                                color = NeuralTheme.Crimson,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 12.5.sp
-                            )
-                            path.steps.forEach { step ->
-                                val conf = step.confidence?.let { "  ${(it * 100).toInt()}%" } ?: ""
-                                Text(
-                                    text = "  ${step.fromLabel} —[${step.relation}$conf]→ ${step.toLabel}",
-                                    color = NeuralTheme.TextPrimary,
-                                    fontSize = 11.sp,
-                                    lineHeight = 15.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    modifier = Modifier.padding(vertical = 1.dp)
-                                )
-                                step.evidence?.takeIf { it.isNotBlank() }?.let {
-                                    Text(
-                                        text = "    (${it.take(60)})",
-                                        color = NeuralTheme.TextSecondary,
-                                        fontSize = 10.sp,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(10.dp))
-                        }
-                    }
-                }
-            }
-
-            if (!aiSummary.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(16.dp))
-                ReportSectionHeader("AI Analysis")
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, NeuralTheme.BorderColor, cardShape),
-                    shape = cardShape
-                ) {
-                    Text(
-                        text = aiSummary!!,
-                        color = NeuralTheme.TextPrimary,
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp,
-                        modifier = Modifier.padding(18.dp)
-                    )
-                }
-            }
-
-            // Glassmorphism tab selector
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 16.dp)
-                    .background(NeuralTheme.CardBackground.copy(alpha = 0.7f), io.dossier.app.ui.theme.DossierCardShape)
-                    .border(1.dp, NeuralTheme.BorderColor, io.dossier.app.ui.theme.DossierCardShape)
-                    .padding(4.dp)
-            ) {
-                TabButton(
-                    text = "IDENTITY DOSSIER",
-                    isSelected = selectedTab == 0,
-                    modifier = Modifier.weight(1f),
-                    onClick = { selectedTab = 0 }
+        item {
+            SectionHeading("Coverage inspected", "Coverage is bounded by public sources and provider availability.")
+            ReportCard {
+                CoverageRow("Directly verified profiles", verifiedProfiles, NeuralTheme.Emerald)
+                CoverageRow("Review-only profile candidates", reviewProfiles, NeuralTheme.Amber)
+                CoverageRow("Unverifiable profile checks", unavailableProfiles, NeuralTheme.TextSecondary)
+                CoverageRow(
+                    "Confirmed HIBP breach records",
+                    confirmedBreaches,
+                    if (confirmedBreaches > 0) NeuralTheme.Crimson else NeuralTheme.TextSecondary
                 )
-                TabButton(
-                    text = "EXPOSURE LOGS",
-                    isSelected = selectedTab == 1,
-                    modifier = Modifier.weight(1f),
-                    onClick = { selectedTab = 1 }
+                CoverageRow("Local visual comparisons", faceMatches.size, NeuralTheme.Cobalt)
+            }
+        }
+
+        exposure?.let { result ->
+            item {
+                SectionHeading("Exposure dimensions", "Scores show severity, not certainty.")
+                ReportCard {
+                    result.dimensions.forEach { dimension ->
+                        ExposureRow(dimension)
+                        Spacer(modifier = Modifier.height(9.dp))
+                    }
+                }
+            }
+        }
+
+        if (memoryDropped > 0) {
+            item {
+                NoticeCard(
+                    "$memoryDropped finding(s) were omitted after the in-memory report limit was reached. Exported conclusions should be treated as incomplete.",
+                    NeuralTheme.Amber
                 )
             }
+        }
 
-            Spacer(modifier = Modifier.height(8.dp))
+        item {
+            NoticeCard(
+                faceConsistencySummary(hasSelfie, faceMatches.size, measuredFaceMatches),
+                if (measuredFaceMatches > 0) NeuralTheme.Cobalt else NeuralTheme.TextSecondary
+            )
+        }
 
-            if (selectedTab == 0) {
-                // IDENTITY DOSSIER VIEW
-                if (input != null) {
-                    val selfieBitmap = rememberUriImageBitmap(input!!.selfieUri?.let { Uri.parse(it) })
-
-                    // Overall scan confidence (average of found profiles with high confidence)
-                    val highConfFindings = findings.filter { it.type == FindingType.PlausibleProfileMatch && it.confidence > 0.5f }
-                    val avgConfidence = if (highConfFindings.isNotEmpty())
-                        highConfFindings.map { it.confidence }.average().toFloat()
-                    else 0f
-                    val avgConfPct = (avgConfidence * 100).toInt()
-                    val avgConfColor = when {
-                        avgConfPct >= 80 -> NeuralTheme.Crimson
-                        avgConfPct >= 55 -> NeuralTheme.Amber
-                        else -> NeuralTheme.Emerald
-                    }
-
-                    // Detect name-only mode
-                    val isNameOnlyMode = input!!.primaryUsername == null && input!!.usernames.isEmpty()
-
-                    if (isNameOnlyMode) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(NeuralTheme.Cyan.copy(alpha = 0.08f), cardShape)
-                                .border(1.dp, NeuralTheme.Cyan.copy(alpha = 0.25f), cardShape)
-                                .padding(14.dp)
-                        ) {
-                            Text(
-                                text = "ℹ  Name-Only Mode — Usernames derived from name details. Scores reflect baseline search settings. Provide explicit username signals to increase discovery precision.",
-                                color = NeuralTheme.Cyan,
-                                
-                                fontSize = 12.sp,
-                                lineHeight = 18.sp
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(16.dp))
-                    }
-
-                    // Editorial User Avatar Card
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(1.dp, NeuralTheme.BorderColor, cardShape),
-                        shape = cardShape
-                    ) {
-                        Column(modifier = Modifier.padding(18.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                // Avatar with a morphing squiggly aura border!
-                                Box(
-                                    contentAlignment = Alignment.Center,
-                                    modifier = Modifier.size(88.dp)
-                                ) {
-                                    io.dossier.app.ui.components.SquigglyProgressIndicator(
-                                        size = 84.dp,
-                                        brush = NeuralTheme.GeminiGradient,
-                                        strokeWidth = 2.dp,
-                                        waveCount = 4,
-                                        amplitudePercent = 0.08f,
-                                        speedMs = 3000
-                                    )
-                                    Box(
-                                        contentAlignment = Alignment.Center,
-                                        modifier = Modifier
-                                            .size(70.dp)
-                                            .background(NeuralTheme.SurfaceDark, CircleShape)
-                                    ) {
-                                        if (selfieBitmap != null) {
-                                            Image(
-                                                bitmap = selfieBitmap,
-                                                contentDescription = "User Selfie",
-                                                modifier = Modifier
-                                                    .size(66.dp)
-                                                    .clip(CircleShape)
-                                            )
-                                        } else {
-                                            Text(
-                                                text = input!!.fullName.take(2).uppercase(),
-                                                color = NeuralTheme.Cyan,
-                                                
-                                                fontWeight = FontWeight.ExtraBold,
-                                                fontSize = 20.sp
-                                            )
-                                        }
-                                    }
-                                }
-
-                                Spacer(modifier = Modifier.width(18.dp))
-
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = input!!.fullName,
-                                        color = NeuralTheme.TextPrimary,
-                                        
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 20.sp
-                                    )
-                                    Text(
-                                        text = if (input!!.primaryUsername != null) "@${input!!.primaryUsername}" else "derived mode active",
-                                        color = NeuralTheme.TextSecondary,
-                                        
-                                        fontSize = 11.5.sp,
-                                        modifier = Modifier.padding(top = 2.dp)
-                                    )
-                                    if (input!!.aliases.isNotEmpty()) {
-                                        Text(
-                                            text = "AKA: ${input!!.aliases.joinToString(", ")}",
-                                            color = NeuralTheme.TextSecondary,
-                                            
-                                            fontSize = 11.sp,
-                                            modifier = Modifier.padding(top = 2.dp)
-                                        )
-                                    }
-                                }
-
-                                // Avg Confidence Gauge
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    modifier = Modifier.padding(start = 8.dp)
-                                ) {
-                                    Text(
-                                        text = "$avgConfPct%",
-                                        color = avgConfColor,
-                                        
-                                        fontWeight = FontWeight.ExtraBold,
-                                        fontSize = 22.sp
-                                    )
-                                    Text(
-                                        text = "CONF",
-                                        color = NeuralTheme.TextSecondary,
-                                        
-                                        fontSize = 9.sp,
-                                        letterSpacing = 1.sp
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    // Compiled PII Grid Header
-                    ReportSectionHeader("Compiled Identity Profile")
-
-                    val locations = findings.filter { it.type == FindingType.Location && it.confidence >= 0.55f }.map { it.value }.distinct()
-                    val organizations = findings.filter { it.type == FindingType.Organization && it.confidence >= 0.55f }.map { it.value }.distinct()
-                    val emails = findings.filter { it.type == FindingType.Email && it.confidence >= 0.55f }.map { it.value }.distinct()
-                    val phones = findings.filter { it.type == FindingType.Phone && it.confidence >= 0.55f }.map { it.value }.distinct()
-                    
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(1.dp, NeuralTheme.BorderColor, cardShape),
-                        shape = cardShape
-                    ) {
-                        Column(modifier = Modifier.padding(18.dp)) {
-                            DossierInfoRow(label = "FULL NAME", value = input!!.fullName)
-                            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.5.dp, modifier = Modifier.padding(vertical = 12.dp))
-                            
-                            DossierInfoRow(
-                                label = "DISCOVERED LOCATIONS", 
-                                value = locations.ifEmpty { listOf("No location leaks found") }.joinToString(", ")
-                            )
-                            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.5.dp, modifier = Modifier.padding(vertical = 12.dp))
-
-                            DossierInfoRow(
-                                label = "EMPLOYERS / ORGS", 
-                                value = organizations.ifEmpty { listOf("No organization associations leaked") }.joinToString(", ")
-                            )
-                            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.5.dp, modifier = Modifier.padding(vertical = 12.dp))
-
-                            DossierInfoRow(
-                                label = "EMAIL ADDRESSES", 
-                                value = emails.ifEmpty { listOf("No email exposures leaked") }.joinToString(", ")
-                            )
-                            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.5.dp, modifier = Modifier.padding(vertical = 12.dp))
-
-                            DossierInfoRow(
-                                label = "PHONE NUMBERS", 
-                                value = phones.ifEmpty { listOf("No public phone listings") }.joinToString(", ")
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    // Discovered Profile Directory Header
-                    ReportSectionHeader("Subject Profile Candidates")
-                    Text(
-                        text = "Rows marked verified were directly fetched or rendered. Rows marked review came from public search indexes and need manual confirmation.",
-                        color = NeuralTheme.TextSecondary,
-                        
-                        fontSize = 11.5.sp,
-                        lineHeight = 16.sp,
-                        modifier = Modifier.padding(start = 4.dp, bottom = 12.dp)
-                    )
-
-                    val profiles = findings.filter { it.type == FindingType.PlausibleProfileMatch }.map { it.value }.distinct()
-                    DiscoveredProfilesTable(
-                        profiles = profiles,
-                        faceMatches = faceMatches,
-                        findings = findings,
-                        profileResults = profileResults,
-                        onNavigateToBrowser = onNavigateToBrowser
-                    )
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    ReportSectionHeader("Visual Intelligence")
-                    val imageEvidenceResults = profileResults
-                        .filter { result ->
-                            result.exists &&
-                                result.profileImageUrl != null &&
-                                result.findings.any { it.type == FindingType.PublicImageEvidence }
-                        }
-                    val calibratedFaceMatches = faceMatches.filter {
-                        it.warning.contains("high visual similarity", ignoreCase = true) ||
-                            it.warning.contains("review-range", ignoreCase = true)
-                    }
-
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(1.dp, NeuralTheme.BorderColor, cardShape),
-                        shape = cardShape
-                    ) {
-                        Column(modifier = Modifier.padding(20.dp)) {
-                            if (imageEvidenceResults.isNotEmpty()) {
-                                Text(
-                                    text = "${imageEvidenceResults.size} public image result(s)",
-                                    color = NeuralTheme.TextPrimary,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Spacer(modifier = Modifier.height(12.dp))
-                                imageEvidenceResults.take(8).forEach { result ->
-                                    PublicImageEvidenceRow(
-                                        result = result,
-                                        onNavigateToBrowser = onNavigateToBrowser
-                                    )
-                                    Spacer(modifier = Modifier.height(10.dp))
-                                }
-                                Spacer(modifier = Modifier.height(4.dp))
-                            } else {
-                                Text(
-                                    text = "No public image results found",
-                                    color = NeuralTheme.TextPrimary,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Spacer(modifier = Modifier.height(6.dp))
-                            }
-                            Text(
-                                text = faceConsistencySummary(
-                                    hasSelfie = !input?.selfieUri.isNullOrBlank(),
-                                    faceMatchCount = faceMatches.size,
-                                    calibratedMatchCount = calibratedFaceMatches.size
-                                ),
-                                color = NeuralTheme.TextSecondary,
-                                fontSize = 12.5.sp,
-                                lineHeight = 18.sp
-                            )
-                        }
-                    }
-
-                    // Entity Graph — interactive node-link view (ROADMAP Milestone 8)
-                    Spacer(modifier = Modifier.height(24.dp))
-                    ReportSectionHeader("Identity Graph")
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(1.dp, NeuralTheme.BorderColor, cardShape),
-                        shape = cardShape
-                    ) {
-                        Column(modifier = Modifier.padding(18.dp)) {
-                            if (entityGraph.entities.isEmpty()) {
-                                Text(
-                                    text = "No entity links compiled for this scan yet.",
-                                    color = NeuralTheme.TextSecondary,
-                                    fontSize = 13.sp,
-                                    lineHeight = 18.sp
-                                )
-                            } else {
-                                EntityGraphView(
-                                    graph = entityGraph,
-                                    confidenceByEdge = relationshipConfidence
-                                )
-                            }
-                        }
-                    }
-
-                    // Breach Exposure digests (session-backed when available)
-                    Spacer(modifier = Modifier.height(24.dp))
-                    ReportSectionHeader("Breach Exposure")
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(1.dp, NeuralTheme.BorderColor, cardShape),
-                        shape = cardShape
-                    ) {
-                        Column(modifier = Modifier.padding(18.dp)) {
-                            if (breachDigestLines.isEmpty()) {
-                                Text(
-                                    text = "No email signals were scanned for breaches. Add emails on Identity " +
-                                        "to auto-check public exposure (and HIBP with an API key on the Breach tab).",
-                                    color = NeuralTheme.TextSecondary,
-                                    fontSize = 13.sp,
-                                    lineHeight = 18.sp
-                                )
-                            } else {
-                                breachDigestLines.forEach { line ->
-                                    Text(
-                                        text = line,
-                                        color = NeuralTheme.TextPrimary,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 12.sp,
-                                        lineHeight = 17.sp,
-                                        modifier = Modifier.padding(vertical = 3.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                // RAW EXPOSURE LOGS VIEW
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Profile Image Consistency Section
-                if (faceMatches.isNotEmpty()) {
-                    ReportSectionHeader("Visual Consistency Log")
-
-                    faceMatches.forEach { match ->
-                        val matchLabel = when {
-                            match.warning.contains("high visual similarity", ignoreCase = true) ->
-                                "Profile image appears visually similar"
-                            match.warning.contains("review-range", ignoreCase = true) ->
-                                "Potential reuse — verify account"
-                            match.warning.contains("low similarity", ignoreCase = true) ->
-                                "Low calibrated similarity"
-                            else -> match.warning
-                        }
-                        
-                        val consistencyColor = when {
-                            match.warning.contains("high visual similarity", ignoreCase = true) -> NeuralTheme.Crimson
-                            match.warning.contains("review-range", ignoreCase = true) -> NeuralTheme.Amber
-                            else -> NeuralTheme.Emerald
-                        }
-
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(1.dp, NeuralTheme.BorderColor, cardShape)
-                                .padding(bottom = 12.dp),
-                            shape = cardShape
-                        ) {
-                            Column(modifier = Modifier.padding(16.dp)) {
-                                Text(
-                                    text = match.profileUrl,
-                                    color = NeuralTheme.Cyan,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    textDecoration = TextDecoration.Underline,
-                                    modifier = Modifier.clickable { onNavigateToBrowser(match.profileUrl) }
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = "Similarity Index: ",
-                                        color = NeuralTheme.TextSecondary,
-                                        
-                                        fontSize = 13.sp
-                                    )
-                                    Text(
-                                        text = "%.2f".format(match.similarityScore),
-                                        color = consistencyColor,
-                                        
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                                
-                                Spacer(modifier = Modifier.height(4.dp))
-                                
-                                Text(
-                                    text = matchLabel,
-                                    color = consistencyColor,
-                                    
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(16.dp))
-                }
-
-                // Exposure Findings Section
-                ReportSectionHeader("Exposure Log")
-
-                if (findings.isEmpty()) {
-                    Text(
-                        text = "No exposure findings detected. Good privacy profile.",
-                        color = NeuralTheme.TextSecondary,
-                        
-                        fontSize = 14.sp,
-                        modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp)
-                    )
-                } else {
-                    findings.forEach { finding ->
-                        FindingItemCard(finding, onNavigateToBrowser)
-                        Spacer(modifier = Modifier.height(12.dp))
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Remediation Tips Section
-            if (remediationTips.isNotEmpty()) {
-                ReportSectionHeader("Recommended Actions")
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, NeuralTheme.BorderColor, cardShape),
-                    shape = cardShape
-                ) {
-                    Column(modifier = Modifier.padding(18.dp)) {
-                        remediationTips.forEach { tip ->
-                            Row(
-                                modifier = Modifier.padding(vertical = 6.dp),
-                                verticalAlignment = Alignment.Top
-                            ) {
-                                Box(modifier = Modifier.padding(top = 2.dp, end = 10.dp)) {
-                                    GeminiSpark(size = 11.dp, glowColor = NeuralTheme.Cyan)
-                                }
-                                Text(
-                                    text = tip,
-                                    color = NeuralTheme.TextPrimary,
-
-                                    fontSize = 13.sp,
-                                    lineHeight = 18.sp
-                                )
-                            }
-                        }
-
-                        if (remediationItems.isNotEmpty()) {
-                            Spacer(modifier = Modifier.height(14.dp))
-                            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = "STRUCTURED REMEDIATION",
-                                color = NeuralTheme.TextSecondary,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Medium,
-                                fontSize = 10.5.sp,
-                                letterSpacing = 1.sp
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            remediationItems.forEach { item ->
-                                val riskColor = when (item.risk) {
-                                    RiskLevel.Low -> NeuralTheme.Emerald
-                                    RiskLevel.Medium -> NeuralTheme.Amber
-                                    RiskLevel.High -> NeuralTheme.Amber
-                                    RiskLevel.Critical -> NeuralTheme.Crimson
-                                }
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 6.dp)
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            text = "[${item.risk.name}] ",
-                                            color = riskColor,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 11.5.sp,
-                                            fontFamily = FontFamily.Monospace
-                                        )
-                                        Text(
-                                            text = item.problem,
-                                            color = NeuralTheme.TextPrimary,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontSize = 11.5.sp
-                                        )
-                                    }
-                                    Text(
-                                        text = "evidence: ${item.evidence.take(80)}",
-                                        color = NeuralTheme.TextSecondary,
-                                        fontSize = 10.5.sp,
-                                        lineHeight = 14.sp,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                    Text(
-                                        text = "fix: ${item.suggestedFix}",
-                                        color = NeuralTheme.TextPrimary,
-                                        fontSize = 11.sp,
-                                        lineHeight = 15.sp
-                                    )
-                                    Text(
-                                        text = "impact: ${item.estimatedImpact}",
-                                        color = NeuralTheme.TextSecondary,
-                                        fontSize = 10.5.sp,
-                                        lineHeight = 14.sp
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(32.dp))
-            }
-
-            // Action Buttons
-            // Deep Research — re-scan with personal-website link-following + AI
-            // handle extraction to surface non-obvious handles (e.g. ones you only
-            // mention on a linked personal site). Shown when results feel thin.
-            val confirmedCount = profileResults.count { it.exists && it.verified }
-            if (confirmedCount <= 5) {
-                OutlinedButton(
-                    onClick = onDeepResearch,
-                    border = BorderStroke(1.2.dp, NeuralTheme.Cobalt.copy(alpha = 0.7f)),
-                    shape = io.dossier.app.ui.theme.DossierButtonShape,
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = NeuralTheme.Cobalt
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(52.dp)
-                        .padding(bottom = 12.dp)
-                ) {
-                    Text(
-                        text = "⚡ RUN DEEP RESEARCH",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
-                        letterSpacing = 1.sp
-                    )
-                }
-            }
-
-            Button(
-                onClick = {
-                    val name = input?.fullName?.trim()?.ifBlank { "UNKNOWN SUBJECT" } ?: "UNKNOWN SUBJECT"
-                    val profileSummaries = profileResults
-                        .filter { it.exists }
-                        .map { result ->
-                            val status = when {
-                                result.verified -> "verified"
-                                else -> "review"
-                            }
-                            val platform = result.candidate.platform.name
-                            val handle = result.candidate.username
-                            val url = result.candidate.url
-                            val conf = "%.0f".format(result.candidate.confidence * 100)
-                            "$platform @$handle [$status conf=$conf%] $url" +
-                                (result.provenance?.let { " ← $it" } ?: "")
-                        }
-                    exporter.shareReport(
-                        findings = findings,
-                        subjectName = name,
-                        profileSummaries = profileSummaries,
-                        aiSummary = aiSummary,
-                        faceMatches = faceMatches,
-                        entityGraphSummary = entityGraphLines
-                            .takeIf { it.isNotEmpty() }
-                            ?.joinToString("\n"),
-                        breachDigests = breachDigestLines,
-                        riskLevel = riskLevel.name
-                    )
-                },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.Transparent
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp)
-                    .background(NeuralTheme.GeminiGradient, io.dossier.app.ui.theme.DossierButtonShape)
-                    .border(1.dp, Color.White.copy(alpha = 0.2f), io.dossier.app.ui.theme.DossierButtonShape),
-                shape = io.dossier.app.ui.theme.DossierButtonShape,
-                contentPadding = PaddingValues()
-            ) {
-                Text(
-                    text = "TRANSMIT DOSSIER",
-                    
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    letterSpacing = 1.sp
+        if (findings.isEmpty()) {
+            item {
+                NoticeCard(
+                    "No reportable finding was detected in the sources inspected. This does not prove that no public exposure exists; private, blocked, deleted, and unindexed content may be absent from this report.",
+                    NeuralTheme.TextSecondary
                 )
             }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Save Case — opt-in local persistence (M13/M14). Dossier stays
-            // in-memory by default; writing a case is an explicit user action.
-            var savedCaseLabel by remember { mutableStateOf<String?>(null) }
-            OutlinedButton(
-                onClick = {
-                    val saved = ScanSession.saveCase(context)
-                    savedCaseLabel = saved?.label
-                },
-                border = BorderStroke(1.2.dp, NeuralTheme.Cobalt.copy(alpha = 0.7f)),
-                shape = io.dossier.app.ui.theme.DossierButtonShape,
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp)
-            ) {
-                Text(
-                    text = savedCaseLabel?.let { "SAVED ✓" } ?: "SAVE CASE",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    letterSpacing = 1.sp
-                )
+        } else {
+            item { SectionHeading("Highest-priority evidence", "Risk and attribution confidence are shown separately.") }
+            items(findings.sortedWith(findingOrder()).take(5)) { finding ->
+                FindingCard(finding = finding, onNavigateToBrowser = null)
             }
-            savedCaseLabel?.let {
-                Text(
-                    text = "Saved locally: $it",
-                    color = NeuralTheme.Emerald,
-                    fontSize = 11.sp,
-                    modifier = Modifier.padding(top = 6.dp, bottom = 4.dp)
-                )
-            }
+        }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            OutlinedButton(
-                onClick = {
-                    ScanSession.purgeSession(context)
-                    onReset()
-                },
-                border = BorderStroke(1.2.dp, NeuralTheme.Crimson.copy(alpha = 0.8f)),
-                shape = io.dossier.app.ui.theme.DossierButtonShape,
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = NeuralTheme.Crimson
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp)
-            ) {
-                Text(
-                    text = "PURGE FILE",
-                    
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    letterSpacing = 1.sp
-                )
+        if (!aiSummary.isNullOrBlank()) {
+            item {
+                SectionHeading("Analysis", "The text below states which engine was used and whether network analysis occurred.")
+                ReportCard {
+                    Text(aiSummary, color = NeuralTheme.TextPrimary, fontSize = 13.sp, lineHeight = 19.sp)
+                }
             }
-            
-            Spacer(modifier = Modifier.height(40.dp))
         }
     }
 }
 
 @Composable
-fun FindingItemCard(finding: Finding, onNavigateToBrowser: (String) -> Unit) {
-    val riskColor = when (finding.risk) {
-        RiskLevel.Low -> NeuralTheme.Emerald
-        RiskLevel.Medium -> NeuralTheme.Amber
-        RiskLevel.High -> NeuralTheme.Amber
-        RiskLevel.Critical -> NeuralTheme.Crimson
-    }
-    
-    val cardShape = RoundedCornerShape(topStart = 20.dp, bottomEnd = 20.dp, topEnd = 4.dp, bottomStart = 4.dp)
-
-    Card(
-        colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)),
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, NeuralTheme.BorderColor, cardShape),
-        shape = cardShape
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = finding.type.name.replace("([A-Z])".toRegex(), " $1").trim().uppercase(),
-                    color = NeuralTheme.Cyan,
-                    
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.5.sp,
-                    modifier = Modifier.weight(1f)
-                )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Confidence badge
-                    val confPct = (finding.confidence * 100).toInt()
-                    val confColor = when {
-                        confPct >= 85 -> NeuralTheme.Crimson
-                        confPct >= 60 -> NeuralTheme.Amber
-                        else -> NeuralTheme.Emerald
-                    }
-                    Box(
-                        modifier = Modifier
-                            .background(confColor.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                    ) {
-                        Text(
-                            text = "$confPct% CONF",
-                            color = confColor,
-                            
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .background(riskColor.copy(alpha = 0.15f), RoundedCornerShape(10.dp))
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = finding.risk.name,
-                            color = riskColor,
-                            
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-            
-            Text(
-                text = finding.value,
-                color = NeuralTheme.TextPrimary,
-                
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold
-            )
-
-            if (!finding.sourceUrl.isNullOrBlank()) {
-                val isClickableUrl = finding.sourceUrl.startsWith("http://", ignoreCase = true) || 
-                                     finding.sourceUrl.startsWith("https://", ignoreCase = true)
-                val modifier = if (isClickableUrl) {
-                    Modifier
-                        .clickable { onNavigateToBrowser(finding.sourceUrl) }
-                        .padding(top = 4.dp)
-                } else {
-                    Modifier.padding(top = 4.dp)
-                }
-                Text(
-                    text = "Source: ${finding.sourceUrl}",
-                    color = if (isClickableUrl) NeuralTheme.Cyan else NeuralTheme.TextSecondary,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    textDecoration = if (isClickableUrl) TextDecoration.Underline else null,
-                    modifier = modifier
-                )
-            }
-
-            if (!finding.evidenceSnippet.isNullOrBlank()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp)
-                        .background(NeuralTheme.SurfaceDark, RoundedCornerShape(8.dp))
-                        .border(1.dp, NeuralTheme.BorderColor, RoundedCornerShape(8.dp))
-                        .padding(10.dp)
-                ) {
-                    Text(
-                        text = "Evidence: \"${finding.evidenceSnippet}\"",
-                        color = NeuralTheme.TextSecondary,
-                        
-                        fontSize = 12.sp
-                    )
-                }
-            }
-            
-            Spacer(modifier = Modifier.height(10.dp))
-            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.5.dp, modifier = Modifier.padding(vertical = 4.dp))
-            
-            Text(
-                text = "Remediation: ${finding.remediation}",
-                color = NeuralTheme.TextSecondary,
-                
-                fontSize = 12.sp,
-                lineHeight = 17.sp
-            )
-        }
-    }
-}
-
-@Composable
-fun PublicImageEvidenceRow(
-    result: ProfileScanResult,
+private fun EvidenceReport(
+    modifier: Modifier,
+    findings: List<Finding>,
+    profileResults: List<ProfileScanResult>,
+    faceMatches: List<FaceConsistencyMatch>,
+    breachDigests: List<BreachDigest>,
     onNavigateToBrowser: (String) -> Unit
 ) {
-    val thumbnail = rememberRemoteImageBitmap(result.profileImageUrl)
-    val confPct = (result.candidate.confidence * 100).toInt()
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(NeuralTheme.SurfaceDark, RoundedCornerShape(8.dp))
-            .border(1.dp, NeuralTheme.BorderColor, RoundedCornerShape(8.dp))
-            .clickable { onNavigateToBrowser(result.candidate.url) }
-            .padding(10.dp),
-        verticalAlignment = Alignment.CenterVertically
+    LazyColumn(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .size(58.dp)
-                .background(NeuralTheme.CardBackground, RoundedCornerShape(8.dp))
-                .border(1.dp, NeuralTheme.BorderColor, RoundedCornerShape(8.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            if (thumbnail != null) {
-                Image(
-                    bitmap = thumbnail,
-                    contentDescription = "Public image result",
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(RoundedCornerShape(8.dp))
-                )
-            } else {
-                Text(
-                    text = "IMG",
-                    color = NeuralTheme.TextSecondary,
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold
-                )
+        item {
+            SectionHeading(
+                "Evidence",
+                "Open sources to verify them manually. Confidence measures attribution support; risk measures potential impact."
+            )
+        }
+        if (findings.isEmpty()) {
+            item { NoticeCard("No reportable evidence in the inspected source set.", NeuralTheme.TextSecondary) }
+        } else {
+            items(findings.sortedWith(findingOrder()), key = { findingKey(it) }) { finding ->
+                FindingCard(finding, onNavigateToBrowser)
             }
         }
 
-        Spacer(modifier = Modifier.width(12.dp))
-
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = result.displayName ?: result.candidate.url,
-                color = NeuralTheme.TextPrimary,
-                fontSize = 12.5.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 2
-            )
-            Text(
-                text = result.candidate.url.replace("https://", "").replace("http://", ""),
-                color = NeuralTheme.Cyan,
-                fontSize = 10.5.sp,
-                fontFamily = FontFamily.Monospace,
-                textDecoration = TextDecoration.Underline,
-                maxLines = 1,
-                modifier = Modifier.padding(top = 3.dp)
-            )
-            result.provenance?.let {
-                Text(
-                    text = it,
-                    color = NeuralTheme.TextSecondary,
-                    fontSize = 10.sp,
-                    modifier = Modifier.padding(top = 2.dp)
-                )
+        item { SectionHeading("Profiles", "Verified, review-only, unavailable, and not-found states remain distinct.") }
+        if (profileResults.isEmpty()) {
+            item { NoticeCard("No profile checks were recorded.", NeuralTheme.TextSecondary) }
+        } else {
+            items(profileResults, key = { it.candidate.url }) { result ->
+                ProfileEvidenceCard(result, onNavigateToBrowser)
             }
         }
 
-        Spacer(modifier = Modifier.width(8.dp))
+        item { SectionHeading("Local visual comparison", "A visual score is supporting evidence, never ownership proof.") }
+        if (faceMatches.isEmpty()) {
+            item { NoticeCard("No local visual comparison result was available.", NeuralTheme.TextSecondary) }
+        } else {
+            items(faceMatches, key = FaceConsistencyMatch::profileUrl) { match ->
+                ReportCard {
+                    Text(
+                        match.profileUrl,
+                        color = NeuralTheme.Cobalt,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        textDecoration = TextDecoration.Underline,
+                        modifier = Modifier.clickable { onNavigateToBrowser(match.profileUrl) }
+                    )
+                    Text(
+                        "Similarity score ${"%.3f".format(match.similarityScore)}",
+                        color = NeuralTheme.TextSecondary,
+                        fontSize = 11.5.sp,
+                        modifier = Modifier.padding(top = 5.dp)
+                    )
+                    Text(
+                        match.warning,
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 11.5.sp,
+                        lineHeight = 16.sp,
+                        modifier = Modifier.padding(top = 5.dp)
+                    )
+                }
+            }
+        }
 
+        item { SectionHeading("Breach coverage", "Authoritative records and ordinary public mentions are not interchangeable.") }
+        if (breachDigests.isEmpty()) {
+            item { NoticeCard("No email breach coverage result was recorded for this scan.", NeuralTheme.TextSecondary) }
+        } else {
+            items(breachDigests, key = BreachDigest::email) { digest ->
+                ReportCard(
+                    borderColor = if (digest.breachCount > 0) NeuralTheme.Crimson.copy(alpha = 0.5f) else NeuralTheme.BorderColor
+                ) {
+                    Text(digest.email, color = NeuralTheme.TextPrimary, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (digest.breachCount > 0) {
+                            "${digest.breachCount} authoritative breach record(s)"
+                        } else {
+                            "No authoritative breach record stored in this result"
+                        },
+                        color = if (digest.breachCount > 0) NeuralTheme.Crimson else NeuralTheme.TextSecondary,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                    if (digest.sources.isNotEmpty()) {
+                        Text(
+                            digest.sources.take(8).joinToString(", "),
+                            color = NeuralTheme.TextSecondary,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                    digest.note?.let {
+                        Text(it, color = NeuralTheme.TextSecondary, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+            }
+        }
+        item { Spacer(modifier = Modifier.height(20.dp)) }
+    }
+}
+
+@Composable
+private fun ConnectionsReport(
+    modifier: Modifier,
+    entityGraph: EntityGraph,
+    relationshipConfidence: Map<String, io.dossier.app.domain.evidence.RelationshipConfidence>,
+    attackPaths: List<AttackPathFinder.AttackPath>
+) {
+    LazyColumn(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            SectionHeading("Relationships", "Connections are evidence paths, not proof that two accounts share an owner.")
+            ReportCard {
+                EntityGraphView(graph = entityGraph, confidenceByEdge = relationshipConfidence)
+            }
+        }
+        item {
+            SectionHeading(
+                "Exposure pathways",
+                "These paths explain how recorded evidence connects the subject to a breach endpoint."
+            )
+        }
+        if (attackPaths.isEmpty()) {
+            item { NoticeCard("No breach pathway was derivable from the recorded graph.", NeuralTheme.TextSecondary) }
+        } else {
+            items(attackPaths, key = { it.endpointLabel }) { path -> ExposurePathCard(path) }
+        }
+        item { Spacer(modifier = Modifier.height(20.dp)) }
+    }
+}
+
+@Composable
+private fun ActionsReport(
+    modifier: Modifier,
+    remediationItems: List<RemediationItem>,
+    remediationTips: List<String>,
+    actionMessage: String?,
+    onSaveCase: () -> Unit,
+    onExport: () -> Unit,
+    onDeepResearch: () -> Unit,
+    onNewAudit: () -> Unit,
+    onDeleteSession: () -> Unit
+) {
+    LazyColumn(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            SectionHeading(
+                "Recommended actions",
+                "Prioritize source removal, de-indexing, credential rotation, and reduced cross-account correlation."
+            )
+        }
+        if (remediationItems.isNotEmpty()) {
+            items(remediationItems.take(20)) { item -> RemediationCard(item) }
+        } else {
+            items(remediationTips) { tip -> NoticeCard(tip, NeuralTheme.TextSecondary) }
+        }
+
+        item {
+            SectionHeading("Report controls", "Saving and exporting are explicit. Nothing is uploaded by these actions.")
+            actionMessage?.let { NoticeCard(it, NeuralTheme.Cobalt) }
+            Button(
+                onClick = onSaveCase,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = DossierButtonShape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = NeuralTheme.Cobalt,
+                    contentColor = NeuralTheme.OnAccent
+                )
+            ) { Text("Save encrypted case", fontWeight = FontWeight.SemiBold) }
+            Spacer(modifier = Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = onExport,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt)
+            ) { Text("Export PDF + evidence JSON", fontWeight = FontWeight.SemiBold) }
+            Spacer(modifier = Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = onDeepResearch,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt)
+            ) { Text("Run expanded public-link scan", fontWeight = FontWeight.SemiBold) }
+            Spacer(modifier = Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = onNewAudit,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.TextPrimary)
+            ) { Text("Start a new audit", fontWeight = FontWeight.SemiBold) }
+            Spacer(modifier = Modifier.height(10.dp))
+            TextButton(
+                onClick = onDeleteSession,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            ) {
+                Text("Delete current session data", color = NeuralTheme.Crimson, fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(modifier = Modifier.height(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun FindingCard(finding: Finding, onNavigateToBrowser: ((String) -> Unit)?) {
+    ReportCard(borderColor = riskColor(finding.risk).copy(alpha = 0.5f)) {
+        Row(verticalAlignment = Alignment.Top) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(finding.type.displayName(), color = NeuralTheme.TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    finding.value,
+                    color = NeuralTheme.TextPrimary,
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+            }
+            RiskBadge(finding.risk)
+        }
+        finding.evidenceSnippet?.takeIf(String::isNotBlank)?.let {
+            Text(it, color = NeuralTheme.TextSecondary, fontSize = 11.5.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 8.dp))
+        }
         Text(
-            text = "$confPct%",
-            color = when {
-                confPct >= 70 -> NeuralTheme.Amber
-                confPct >= 45 -> NeuralTheme.Emerald
-                else -> NeuralTheme.TextSecondary
-            },
-            fontSize = 12.sp,
-            fontWeight = FontWeight.ExtraBold
+            "Attribution confidence ${(finding.confidence * 100).toInt()}%",
+            color = NeuralTheme.TextSecondary,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        LinearProgressIndicator(
+            progress = { finding.confidence.coerceIn(0f, 1f) },
+            modifier = Modifier.fillMaxWidth().height(6.dp).padding(top = 2.dp),
+            color = NeuralTheme.Cobalt,
+            trackColor = NeuralTheme.BorderColor
+        )
+        finding.sourceUrl?.takeIf(::isHttpUrl)?.let { source ->
+            Text(
+                source,
+                color = NeuralTheme.Cobalt,
+                fontSize = 11.5.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textDecoration = TextDecoration.Underline,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = onNavigateToBrowser != null) { onNavigateToBrowser?.invoke(source) }
+                    .padding(top = 9.dp, bottom = 4.dp)
+            )
+        }
+        if (finding.remediation.isNotBlank()) {
+            Text(
+                "Suggested action: ${finding.remediation}",
+                color = NeuralTheme.TextPrimary,
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProfileEvidenceCard(result: ProfileScanResult, onNavigateToBrowser: (String) -> Unit) {
+    val statusColor = when {
+        result.exists && result.verified -> NeuralTheme.Emerald
+        result.exists -> NeuralTheme.Amber
+        result.verificationStatus?.contains("unverifiable", true) == true -> NeuralTheme.TextSecondary
+        else -> NeuralTheme.TextMuted
+    }
+    ReportCard(borderColor = statusColor.copy(alpha = 0.45f)) {
+        Row(verticalAlignment = Alignment.Top) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(result.candidate.platform.name, color = NeuralTheme.TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    result.displayName?.takeIf(String::isNotBlank) ?: result.candidate.username,
+                    color = NeuralTheme.TextPrimary,
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Text(profileStatus(result), color = statusColor, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+        }
+        Text(
+            result.candidate.url,
+            color = NeuralTheme.Cobalt,
+            fontSize = 11.5.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            textDecoration = TextDecoration.Underline,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onNavigateToBrowser(result.candidate.url) }
+                .padding(vertical = 8.dp)
+        )
+        result.verificationStatus?.let {
+            Text(it, color = NeuralTheme.TextSecondary, fontSize = 11.5.sp, lineHeight = 16.sp)
+        }
+        result.provenance?.let {
+            Text("Provenance: $it", color = NeuralTheme.TextSecondary, fontSize = 10.5.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+}
+
+@Composable
+private fun ExposurePathCard(path: AttackPathFinder.AttackPath) {
+    ReportCard(borderColor = NeuralTheme.Crimson.copy(alpha = 0.4f)) {
+        Text(path.endpointLabel, color = NeuralTheme.TextPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+        Text(path.riskHint, color = NeuralTheme.TextSecondary, fontSize = 11.sp)
+        path.steps.forEach { step ->
+            Text(
+                buildString {
+                    append("${step.fromLabel} → ${step.toLabel} · ${step.relation}")
+                    step.confidence?.let { append(" · ${(it * 100).toInt()}%") }
+                },
+                color = NeuralTheme.TextPrimary,
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(top = 7.dp)
+            )
+            step.evidence?.let {
+                Text(it.take(180), color = NeuralTheme.TextSecondary, fontSize = 10.5.sp, lineHeight = 14.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemediationCard(item: RemediationItem) {
+    ReportCard(borderColor = riskColor(item.risk).copy(alpha = 0.4f)) {
+        Row(verticalAlignment = Alignment.Top) {
+            Text(
+                item.problem,
+                color = NeuralTheme.TextPrimary,
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            RiskBadge(item.risk)
+        }
+        Text(item.suggestedFix, color = NeuralTheme.TextPrimary, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 8.dp))
+        Text(
+            "Expected impact: ${item.estimatedImpact}",
+            color = NeuralTheme.TextSecondary,
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.padding(top = 5.dp)
         )
     }
 }
+
+@Composable
+private fun ExposureRow(score: ExposureEngine.DimensionScore) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(score.dimension.name, color = NeuralTheme.TextPrimary, fontSize = 12.5.sp)
+            if (score.contributingTypes.isNotEmpty()) {
+                Text(
+                    score.contributingTypes.joinToString(", ") { it.displayName() },
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 10.5.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Text(
+            "${score.score}/100",
+            color = exposureColor(score.score),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+    LinearProgressIndicator(
+        progress = { score.score.coerceIn(0, 100) / 100f },
+        modifier = Modifier.fillMaxWidth().height(6.dp).padding(top = 3.dp),
+        color = exposureColor(score.score),
+        trackColor = NeuralTheme.BorderColor
+    )
+}
+
+@Composable
+private fun CoverageRow(label: String, value: Int, color: Color) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, color = NeuralTheme.TextSecondary, fontSize = 12.5.sp)
+        Text(value.toString(), color = color, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
+    }
+}
+
+@Composable
+private fun RiskBadge(risk: RiskLevel) {
+    val color = riskColor(risk)
+    Text(
+        risk.name,
+        color = color,
+        fontSize = 10.5.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier
+            .background(color.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
+            .border(1.dp, color.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    )
+}
+
+@Composable
+private fun SectionHeading(title: String, subtitle: String) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(title, color = NeuralTheme.TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        Text(subtitle, color = NeuralTheme.TextSecondary, fontSize = 11.5.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 2.dp))
+    }
+}
+
+@Composable
+private fun ReportCard(
+    borderColor: Color = NeuralTheme.BorderColor,
+    content: @Composable Column.() -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground),
+        shape = DossierCardShape,
+        modifier = Modifier.fillMaxWidth().border(1.dp, borderColor, DossierCardShape)
+    ) {
+        Column(modifier = Modifier.padding(16.dp), content = content)
+    }
+}
+
+@Composable
+private fun NoticeCard(text: String, color: Color) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color.copy(alpha = 0.08f), DossierCardShape)
+            .border(1.dp, color.copy(alpha = 0.28f), DossierCardShape)
+            .padding(14.dp)
+    ) {
+        Text(text, color = NeuralTheme.TextPrimary, fontSize = 12.sp, lineHeight = 17.sp)
+    }
+}
+
+@Composable
+private fun riskColor(risk: RiskLevel): Color = when (risk) {
+    RiskLevel.Low -> NeuralTheme.Emerald
+    RiskLevel.Medium -> NeuralTheme.Amber
+    RiskLevel.High, RiskLevel.Critical -> NeuralTheme.Crimson
+}
+
+@Composable
+private fun exposureColor(score: Int): Color = when {
+    score >= 80 -> NeuralTheme.Crimson
+    score >= 50 -> NeuralTheme.Amber
+    score > 0 -> NeuralTheme.Cobalt
+    else -> NeuralTheme.TextSecondary
+}
+
+private fun riskExplanation(risk: RiskLevel): String = when (risk) {
+    RiskLevel.Low -> "Lower-priority evidence was recorded. Continue reviewing coverage gaps."
+    RiskLevel.Medium -> "Some evidence may increase correlation, targeting, or account-recovery risk."
+    RiskLevel.High -> "Important exposure was recorded and should be reviewed promptly."
+    RiskLevel.Critical -> "Evidence indicates an immediate credential, account, or safety concern."
+}
+
+private fun findingOrder(): Comparator<Finding> = compareByDescending<Finding> {
+    when (it.risk) {
+        RiskLevel.Critical -> 4
+        RiskLevel.High -> 3
+        RiskLevel.Medium -> 2
+        RiskLevel.Low -> 1
+    }
+}.thenByDescending(Finding::confidence)
+
+private fun findingKey(finding: Finding): String =
+    "${finding.type}|${finding.value}|${finding.sourceUrl.orEmpty()}"
+
+private fun profileStatus(result: ProfileScanResult): String = when {
+    result.exists && result.verified -> "VERIFIED"
+    result.exists -> "REVIEW"
+    result.verificationStatus?.contains("unverifiable", true) == true -> "UNAVAILABLE"
+    else -> "NOT FOUND"
+}
+
+private fun profileExportLine(result: ProfileScanResult): String =
+    "${result.candidate.platform.name}: ${result.candidate.url} — ${profileStatus(result)} — ${result.verificationStatus.orEmpty()}"
+
+private fun FindingType.displayName(): String = name.replace(Regex("([a-z])([A-Z])"), "$1 $2")
+private fun isHttpUrl(value: String): Boolean = value.startsWith("https://", true) || value.startsWith("http://", true)
 
 internal fun faceConsistencySummary(
     hasSelfie: Boolean,
     faceMatchCount: Int,
     calibratedMatchCount: Int
 ): String = when {
-    !hasSelfie ->
-        "Image search uses public image-index results from identity terms only. " +
-            "Provide a selfie and import a face embedding model plus calibration JSON on Models " +
-            "to score visual consistency against discovered profile avatars. Face matching is " +
-            "local-only when enabled; it is not performed without a selfie and model."
-    faceMatchCount == 0 ->
-        "Selfie provided. Face consistency runs locally when a face embedding model is imported and " +
-            "profile avatars are downloadable. Calibrated thresholds are required before scores " +
-            "count as identity evidence. Public image search never uploads your selfie."
-    calibratedMatchCount > 0 ->
-        "Face consistency (on-device): $faceMatchCount comparison(s), $calibratedMatchCount calibrated " +
-            "review/high match(es). Treat scores as supporting evidence only — confirm ownership manually. " +
-            "Public image search never uploads your selfie."
-    else ->
-        "Face consistency (on-device): $faceMatchCount comparison(s). Scores are present but not treated as " +
-            "identity evidence until a matching calibration JSON is imported for the current model. " +
-            "Public image search never uploads your selfie."
+    !hasSelfie -> "No reference photo was supplied. Provide a selfie only when the subject consents and visual correlation is useful."
+    faceMatchCount == 0 -> "A reference photo was supplied, but no profile image produced a usable local comparison."
+    calibratedMatchCount == 0 -> "$faceMatchCount local visual score(s) were produced, but they are not treated as identity evidence without a matching measured calibration."
+    else -> "$calibratedMatchCount calibrated visual match(es) were recorded from $faceMatchCount comparison(s). They remain supporting evidence, not ownership proof."
 }
 
-/** Prefer the fused session graph built by EntityGraphBuilder. */
 internal fun formatEntityGraphFromSession(graph: EntityGraph): List<String> {
     if (graph.entities.isEmpty() && graph.edges.isEmpty()) return emptyList()
     val byId = graph.entities.associateBy { it.id }
-    val lines = mutableListOf<String>()
-    graph.entities
-        .sortedByDescending { it.confidence }
-        .take(18)
-        .forEach { entity ->
-            lines += "ENTITY  ${entity.type.name.uppercase()}  \"${entity.label}\"  conf=${(entity.confidence * 100).toInt()}%"
-            entity.sourceUrls.take(2).forEach { src ->
-                lines += "  SRC    $src"
-            }
-        }
-    graph.edges.take(22).forEach { edge ->
+    val entityLines = graph.entities.sortedByDescending { it.confidence }.map { entity ->
+        "${entity.type}: ${entity.label} (${(entity.confidence * 100).toInt()}%)"
+    }
+    val edgeLines = graph.edges.map { edge ->
         val from = byId[edge.fromId]?.label ?: edge.fromId
         val to = byId[edge.toId]?.label ?: edge.toId
-        val evidence = edge.evidence?.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: ""
-        lines += "  EDGE   $from —[${edge.relation}]→ $to$evidence"
+        "$from —${edge.relation}→ $to${edge.evidence?.let { " [$it]" }.orEmpty()}"
     }
-    return lines.distinct().take(40)
+    return entityLines + edgeLines
 }
 
 internal fun formatBreachDigestsFromSession(digests: List<BreachDigest>): List<String> =
     digests.map { digest ->
-        val sources = digest.sources.take(4).joinToString(", ").ifBlank { "public index / HIBP" }
-        val note = digest.note?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""
-        when {
-            digest.breachCount > 0 ->
-                "[HIGH] ${digest.email} — ${digest.breachCount} known breach(es): $sources$note"
-            digest.sources.isNotEmpty() ->
-                "[MED] ${digest.email} — public exposure hits: $sources$note"
-            else ->
-                "[INFO] ${digest.email} — no breach hits in this scan$note"
+        buildString {
+            append("${digest.email}: ${digest.breachCount} breach record(s)")
+            if (digest.sources.isNotEmpty()) append(" — ${digest.sources.joinToString(", ")}")
+            digest.note?.let { append(" — $it") }
         }
     }
 
-/**
- * Fallback entity lines when the session graph is empty (derived from findings).
- */
 internal fun formatEntityGraphLines(
     findings: List<Finding>,
-    profileResults: List<ProfileScanResult>
-): List<String> {
-    val lines = mutableListOf<String>()
-    val entityTypes = setOf(
-        FindingType.Email,
-        FindingType.Phone,
-        FindingType.Username,
-        FindingType.Organization,
-        FindingType.Location,
-        FindingType.Address,
-        FindingType.Profile,
-        FindingType.UsernameReuse
-    )
-
-    val entities = findings
-        .filter { it.type in entityTypes && it.value.isNotBlank() }
-        .distinctBy { "${it.type}:${it.value.lowercase()}" }
-        .take(16)
-
-    entities.forEach { f ->
-        lines += "ENTITY  ${f.type.name.uppercase()}  \"${f.value}\""
-        val src = f.sourceUrl
-        if (!src.isNullOrBlank()) {
-            lines += "  EDGE   extracted_from → $src"
-        }
+    profiles: List<ProfileScanResult>
+): List<String> = buildList {
+    findings.distinctBy { it.type to it.value }.forEach {
+        add("${it.type}: ${it.value} (${(it.confidence * 100).toInt()}%)")
     }
-
-    profileResults
-        .filter { it.exists }
-        .take(12)
-        .forEach { r ->
-            val label = if (r.verified) "verified" else "review"
-            lines += "ENTITY  PROFILE  ${r.candidate.platform.name} @${r.candidate.username} [$label]"
-            lines += "  EDGE   candidate_url → ${r.candidate.url}"
-            r.provenance?.takeIf { it.isNotBlank() }?.let { prov ->
-                lines += "  EDGE   provenance → $prov"
-            }
-            r.links.take(3).forEach { link ->
-                lines += "  EDGE   outbound_link → $link"
-            }
-        }
-
-    return lines.distinct().take(40)
-}
-
-/**
- * Breach digest lines for report/export. Prefer ScanSession.breachDigests when
- * published; otherwise surface any findings that look like breach-related notes.
- */
-internal fun formatBreachDigestLines(findings: List<Finding>): List<String> {
-    return findings
-        .filter { finding ->
-            val hay = listOfNotNull(
-                finding.value,
-                finding.evidenceSnippet,
-                finding.remediation
-            ).joinToString(" ").lowercase()
-            hay.contains("breach") ||
-                hay.contains("hibp") ||
-                hay.contains("pwned") ||
-                hay.contains("have i been")
-        }
-        .distinctBy { it.value + (it.sourceUrl ?: "") }
-        .take(12)
-        .map { f ->
-            val src = f.sourceUrl?.let { "  src=$it" } ?: ""
-            "[${f.risk}] ${f.value}$src"
-        }
-}
-
-@Composable
-fun TabButton(text: String, isSelected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    val bg = if (isSelected) NeuralTheme.GeminiGradient else Brush.linearGradient(colors = listOf(Color.Transparent, Color.Transparent))
-    
-    Box(
-        modifier = modifier
-            .height(40.dp)
-            .background(bg, io.dossier.app.ui.theme.DossierButtonShape)
-            .clickable { onClick() },
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = text,
-            color = if (isSelected) Color.White else NeuralTheme.TextSecondary,
-            
-            fontWeight = FontWeight.Bold,
-            fontSize = 12.sp,
-            letterSpacing = 1.sp
-        )
+    profiles.filter { it.exists }.forEach {
+        add("Profile: ${it.candidate.url} — ${profileStatus(it)}")
     }
 }
 
-@Composable
-fun DossierInfoRow(label: String, value: String) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = label,
-            color = NeuralTheme.Cyan,
-            
-            fontWeight = FontWeight.Bold,
-            fontSize = 11.sp,
-            letterSpacing = 0.5.sp
-        )
-        Text(
-            text = value,
-            color = NeuralTheme.TextPrimary,
-            
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(top = 2.dp)
-        )
-    }
-}
-
-/** Shared section header for the report — delegates to the HUD label kit. */
-@Composable
-fun ReportSectionHeader(text: String) {
-    // Intelligence-brief section label — monospace, underlined, dossier-style.
-    Column(modifier = Modifier.padding(start = 2.dp, bottom = 12.dp)) {
-        Text(
-            text = text.uppercase(),
-            color = NeuralTheme.TextPrimary,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.5.sp
-        )
-        HorizontalDivider(
-            color = NeuralTheme.Cobalt.copy(alpha = 0.4f),
-            thickness = 1.dp,
-            modifier = Modifier
-                .padding(top = 4.dp)
-                .width(40.dp)
-        )
-    }
-}
-
-@Composable
-private fun ExposureDimensionRow(dimension: ExposureDimension, score: Int) {
-    val color = when {
-        score >= 80 -> NeuralTheme.Crimson
-        score >= 50 -> NeuralTheme.Amber
-        score > 0 -> NeuralTheme.Amber
-        else -> NeuralTheme.Emerald
-    }
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = dimension.name,
-            color = NeuralTheme.TextSecondary,
-            fontSize = 11.5.sp,
-            modifier = Modifier.width(96.dp)
-        )
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .height(8.dp)
-                .background(NeuralTheme.BorderColor, RoundedCornerShape(4.dp))
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(score.toFloat() / 100f)
-                    .height(8.dp)
-                    .background(color, RoundedCornerShape(4.dp))
-            )
-        }
-        Text(
-            text = "$score",
-            color = color,
-            fontSize = 11.5.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(start = 8.dp)
-        )
-    }
-}
-
-@Composable
-fun rememberUriImageBitmap(uri: Uri?): ImageBitmap? {
-    if (uri == null) return null
-    val context = LocalContext.current
-    return remember(uri) {
-        try {
-            val bitmap = if (uri.scheme == "file") {
-                BitmapFactory.decodeFile(uri.path)
-            } else {
-                val inputStream = context.contentResolver.openInputStream(uri)
-                val bmp = BitmapFactory.decodeStream(inputStream)
-                inputStream?.close()
-                bmp
-            }
-            bitmap?.asImageBitmap()
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
-        }
-    }
-}
-
-@Composable
-fun rememberRemoteImageBitmap(url: String?): ImageBitmap? {
-    var image by remember(url) { mutableStateOf<ImageBitmap?>(null) }
-    val client = remember {
-        OkHttpClient.Builder()
-            .connectTimeout(5, TimeUnit.SECONDS)
-            .readTimeout(5, TimeUnit.SECONDS)
-            .build()
-    }
-
-    LaunchedEffect(url) {
-        image = null
-        val imageUrl = url?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
-            ?: return@LaunchedEffect
-
-        image = withContext(Dispatchers.IO) {
-            try {
-                val request = Request.Builder()
-                    .url(imageUrl)
-                    .header("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0")
-                    .build()
-                client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use null
-                    response.body?.byteStream()?.use { stream ->
-                        BitmapFactory.decodeStream(stream)?.asImageBitmap()
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                null
-            }
-        }
-    }
-
-    return image
-}
-
-@Composable
-fun rememberPlatformAvatar(context: Context, platform: Platform): ImageBitmap? {
-    return remember(platform) {
-        try {
-            val file = File(context.cacheDir, "avatar_${platform.name}.jpg")
-            if (file.exists()) {
-                val bitmap = BitmapFactory.decodeFile(file.absolutePath)
-                bitmap?.asImageBitmap()
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
-        }
-    }
-}
-
-@Composable
-fun DiscoveredProfilesTable(
-    profiles: List<String>,
-    faceMatches: List<FaceConsistencyMatch>,
-    findings: List<Finding>,
-    profileResults: List<ProfileScanResult> = emptyList(),
-    onNavigateToBrowser: (String) -> Unit
-) {
-    val cardShape = io.dossier.app.ui.theme.DossierCardShape
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, NeuralTheme.BorderColor, cardShape)
-            .background(NeuralTheme.SurfaceDark, cardShape)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(NeuralTheme.CardBackground.copy(alpha = 0.9f), RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
-                .border(1.dp, NeuralTheme.BorderColor, RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Spacer(modifier = Modifier.width(34.dp))
-            Text(
-                text = "PLATFORM",
-                color = NeuralTheme.Cyan,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                
-                modifier = Modifier.width(80.dp)
-            )
-            Text(
-                text = "STATUS",
-                color = NeuralTheme.Cyan,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                
-                modifier = Modifier.width(76.dp)
-            )
-            Text(
-                text = "CONF %",
-                color = NeuralTheme.Cyan,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                
-                modifier = Modifier.width(52.dp)
-            )
-            Text(
-                text = "PROFILE",
-                color = NeuralTheme.Cyan,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                
-                modifier = Modifier.weight(1f)
-            )
-        }
-
-        if (profiles.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "No public profile candidates discovered",
-                    color = NeuralTheme.TextSecondary,
-                    fontSize = 12.sp )
-            }
-        } else {
-            profiles.forEachIndexed { idx, url ->
-                val matchedPlatform = PLATFORMS.firstOrNull { template ->
-                    val domain = template.urlPattern
-                        .replace("https://", "")
-                        .replace("www.", "")
-                        .split("/").firstOrNull() ?: ""
-                    domain.isNotBlank() && url.contains(domain, ignoreCase = true)
-                }
-                val platformName = matchedPlatform?.platform?.name ?: "Web"
-
-                val profileResult = profileResults.firstOrNull { r -> r.candidate.url == url && r.exists }
-                    ?: profileResults.firstOrNull { r -> r.candidate.url == url }
-                val isVerified = profileResult?.verified == true
-                val isPublicSearchCandidate = profileResult?.provenance?.startsWith("public search") == true
-                val avatarBitmap = rememberRemoteImageBitmap(profileResult?.profileImageUrl)
-
-                val hasFaceMatch = faceMatches.any { it.profileUrl == url }
-                val hasPiiLeak = findings.any { it.sourceUrl == url && (it.type == FindingType.Email || it.type == FindingType.Phone) }
-
-                val confidencePct = profileResult?.candidate?.confidence?.let { c -> (c * 100).toInt() }
-                    ?: findings.firstOrNull { f -> f.sourceUrl == url && f.type == FindingType.PlausibleProfileMatch }
-                        ?.confidence?.let { c -> (c * 100).toInt() }
-                    ?: 0
-
-                val statusText = when {
-                    hasFaceMatch && hasPiiLeak -> "MATCH+LEAK"
-                    hasFaceMatch -> "FACE MATCH"
-                    hasPiiLeak -> "PII LEAK"
-                    isVerified -> "VERIFIED"
-                    isPublicSearchCandidate -> "REVIEW"
-                    else -> "FOUND"
-                }
-                val statusLevel = when {
-                    hasFaceMatch && hasPiiLeak -> io.dossier.app.ui.components.HudLevel.CRIT
-                    hasFaceMatch -> io.dossier.app.ui.components.HudLevel.WARN
-                    hasPiiLeak -> io.dossier.app.ui.components.HudLevel.WARN
-                    isPublicSearchCandidate -> io.dossier.app.ui.components.HudLevel.WARN
-                    else -> io.dossier.app.ui.components.HudLevel.OK
-                }
-                val confColor = when {
-                    confidencePct >= 85 -> NeuralTheme.Crimson
-                    confidencePct >= 65 -> NeuralTheme.Amber
-                    confidencePct >= 40 -> NeuralTheme.Emerald
-                    else -> NeuralTheme.TextSecondary
-                }
-                val verificationNote = profileResult?.verificationStatus
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onNavigateToBrowser(url) }
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier.width(34.dp),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        if (avatarBitmap != null) {
-                            Image(
-                                bitmap = avatarBitmap,
-                                contentDescription = "Public profile image",
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .clip(CircleShape)
-                                    .border(1.dp, NeuralTheme.BorderColor, CircleShape)
-                            )
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .background(NeuralTheme.CardBackground, CircleShape)
-                                    .border(1.dp, NeuralTheme.BorderColor, CircleShape)
-                            )
-                        }
-                    }
-
-                    Text(
-                        text = platformName,
-                        color = NeuralTheme.TextPrimary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        
-                        modifier = Modifier.width(80.dp)
-                    )
-
-                    Box(
-                        modifier = Modifier
-                            .width(76.dp)
-                            .padding(end = 6.dp)
-                    ) {
-                        io.dossier.app.ui.components.HudStatusPill(
-                            text = statusText,
-                            level = statusLevel
-                        )
-                    }
-
-                    Text(
-                        text = "$confidencePct%",
-                        color = confColor,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        
-                        modifier = Modifier.width(52.dp)
-                    )
-
-                    // Profile URL + in-browser verification badge
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = url.replace("https://", ""),
-                            color = NeuralTheme.Cyan,
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                            textDecoration = TextDecoration.Underline
-                        )
-                        if (isVerified) {
-                            Text(
-                                text = "✓ " + (verificationNote ?: "Verified in-browser"),
-                                color = NeuralTheme.Emerald,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
-                        } else if (!verificationNote.isNullOrBlank()) {
-                            Text(
-                                text = verificationNote,
-                                color = NeuralTheme.TextSecondary,
-                                fontSize = 9.sp,
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
-                        }
-                        // Pivot-discovery provenance: shows how a non-obvious handle
-                        // (e.g. one not derived from the name) was found.
-                        profileResult?.provenance?.let { prov ->
-                            Text(
-                                text = "↳ $prov",
-                                color = NeuralTheme.Cobalt.copy(alpha = 0.8f),
-                                fontSize = 8.5.sp,
-                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                                modifier = Modifier.padding(top = 1.dp)
-                            )
-                        }
-                    }
-                }
-
-                if (idx < profiles.lastIndex) {
-                    HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.5.dp)
-                }
-            }
-        }
-    }
-}
+internal fun formatBreachDigestLines(findings: List<Finding>): List<String> =
+    findings.filter {
+        it.evidenceSnippet?.contains("breach", ignoreCase = true) == true ||
+            it.remediation.contains("MFA", ignoreCase = true)
+    }.map { "${it.value}: ${it.evidenceSnippet.orEmpty()}" }

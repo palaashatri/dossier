@@ -8,30 +8,32 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 
 /**
- * Face embedding model storage.
+ * Optional face embedding model storage.
  *
  * Priority:
- * 1. User-imported ONNX/TFLite in app filesDir (optional override)
- * 2. Bundled FaceNet TFLite shipped in assets (`models/facenet.tflite`)
+ * 1. User-imported ONNX/TFLite in app filesDir
+ * 2. Bundled FaceNet TFLite in assets, when a licensed asset is present
+ * 3. Built-in dependency-free face appearance descriptor
  *
- * Calibrated thresholds live in [FaceEmbeddingCalibrationStore]. Replacing the
- * model clears user calibration so a mismatched sidecar is never applied.
+ * The descriptor fallback keeps visual photo-reuse comparison functional out of
+ * the box, but is intentionally not represented as biometric identity proof.
  */
 class FaceEmbeddingModelStore(private val context: Context) {
 
     /**
-     * Ensures a usable model file exists (copies the bundled asset on first use).
-     * Safe to call from IO threads; no-op when a valid model is already present.
+     * Ensures that some comparison backend is available. A real embedding model
+     * is installed when possible; otherwise the built-in appearance descriptor
+     * remains available and this method still returns true.
      */
     fun ensureModelAvailable(): Boolean {
         if (isModelReady()) return true
-        return runCatching { installBundledModel() }.isSuccess && isModelReady()
+        runCatching { installBundledModel() }
+        return isModelReady() || APPEARANCE_FALLBACK_AVAILABLE
     }
 
     fun getModelFile(): File {
-        ensureModelAvailable()
         return modelFiles().firstOrNull { it.exists() && it.length() >= MIN_MODEL_BYTES }
-            ?: File(context.filesDir, TFLITE_MODEL_FILE_NAME)
+            ?: error("No ONNX/TFLite face embedding model is installed.")
     }
 
     fun isModelImported(): Boolean = isModelReady()
@@ -47,17 +49,15 @@ class FaceEmbeddingModelStore(private val context: Context) {
     fun isUserOverride(): Boolean = isModelReady() && !isUsingBundledModel()
 
     fun importedModelSizeBytes(): Long =
-        getModelFile().takeIf { it.exists() }?.length() ?: 0L
+        modelFiles().firstOrNull { it.exists() }?.length() ?: 0L
 
     fun importedModelSha256(): String? =
-        getModelFile()
-            .takeIf { it.exists() && it.length() >= MIN_MODEL_BYTES }
-            ?.sha256()
+        modelFiles().firstOrNull { it.exists() && it.length() >= MIN_MODEL_BYTES }?.legacySha256()
 
     fun modelSourceLabel(): String = when {
-        !isModelReady() -> "None"
         isUsingBundledModel() -> "Bundled FaceNet"
-        else -> "User import"
+        isUserOverride() -> "User import"
+        else -> "Built-in appearance descriptor"
     }
 
     fun importModel(uri: Uri) {
@@ -76,33 +76,23 @@ class FaceEmbeddingModelStore(private val context: Context) {
 
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(tempFile).use { output ->
-                    input.copyTo(output)
-                }
+                FileOutputStream(tempFile).use { output -> input.copyTo(output) }
             } ?: error("Unable to read selected model file.")
 
             if (tempFile.length() < MIN_MODEL_BYTES) {
                 error("Selected face model is too small (${tempFile.length()} bytes).")
             }
 
-            if (!tempFile.renameTo(target)) {
-                error("Unable to store selected face model.")
-            }
-            modelFiles()
-                .filter { it != target && it.exists() }
-                .forEach { it.delete() }
-            // User override — clear bundled marker and any prior calibration.
+            if (!tempFile.renameTo(target)) error("Unable to store selected face model.")
+            modelFiles().filter { it != target && it.exists() }.forEach { it.delete() }
             File(context.filesDir, BUNDLED_MARKER_FILE).delete()
             FaceEmbeddingCalibrationStore(context).clearCalibration()
-        } catch (e: Exception) {
+        } catch (error: Exception) {
             if (tempFile.exists()) tempFile.delete()
-            throw e
+            throw error
         }
     }
 
-    /**
-     * Restore the shipped FaceNet model (clears a user override).
-     */
     fun restoreBundledModel() {
         modelFiles().forEach { if (it.exists()) it.delete() }
         File(context.filesDir, BUNDLED_MARKER_FILE).delete()
@@ -115,42 +105,31 @@ class FaceEmbeddingModelStore(private val context: Context) {
         val tempFile = File(context.filesDir, "${TFLITE_MODEL_FILE_NAME}.tmp")
         try {
             context.assets.open(BUNDLED_ASSET_PATH).use { input ->
-                FileOutputStream(tempFile).use { output ->
-                    input.copyTo(output)
-                }
+                FileOutputStream(tempFile).use { output -> input.copyTo(output) }
             }
-            if (tempFile.length() < MIN_MODEL_BYTES) {
-                error("Bundled face model is missing or too small.")
-            }
+            if (tempFile.length() < MIN_MODEL_BYTES) error("Bundled face model is missing or too small.")
             modelFiles().filter { it != target && it.exists() }.forEach { it.delete() }
             if (target.exists()) target.delete()
-            if (!tempFile.renameTo(target)) {
-                error("Unable to install bundled face model.")
-            }
-            val sha = target.sha256()
-            File(context.filesDir, BUNDLED_MARKER_FILE).writeText(sha)
-            // Install matching factory calibration for the bundled model.
+            if (!tempFile.renameTo(target)) error("Unable to install bundled face model.")
+            File(context.filesDir, BUNDLED_MARKER_FILE).writeText(target.legacySha256())
             FaceEmbeddingCalibrationStore(context).ensureBundledCalibration()
-        } catch (e: Exception) {
+        } catch (error: Exception) {
             if (tempFile.exists()) tempFile.delete()
-            throw e
+            throw error
         }
     }
 
     private fun isModelReady(): Boolean =
         modelFiles().any { it.exists() && it.length() >= MIN_MODEL_BYTES }
 
-    private fun displayNameFor(uri: Uri): String? =
-        runCatching {
-            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-                ?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
-                    } else {
-                        null
-                    }
-                }
-        }.getOrNull()
+    private fun displayNameFor(uri: Uri): String? = runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
+                } else null
+            }
+    }.getOrNull()
 
     companion object {
         const val TFLITE_MODEL_FILE_NAME = "face-embedding-model.tflite"
@@ -158,9 +137,9 @@ class FaceEmbeddingModelStore(private val context: Context) {
         const val MIN_MODEL_BYTES = 4096L
         const val BUNDLED_ASSET_PATH = "models/facenet.tflite"
         const val BUNDLED_MARKER_FILE = "face-embedding-model.bundled"
-        /** Documented source of the shipped weights (FaceNet TFLite). */
         const val BUNDLED_MODEL_ATTRIBUTION =
-            "Bundled FaceNet TFLite (open Android FaceNet weights used for on-device embeddings)."
+            "Optional FaceNet TFLite weights for on-device embeddings."
+        const val APPEARANCE_FALLBACK_AVAILABLE = true
 
         fun acceptsFileName(fileName: String): Boolean {
             val normalized = fileName.lowercase()
@@ -168,14 +147,13 @@ class FaceEmbeddingModelStore(private val context: Context) {
         }
     }
 
-    private fun modelFiles(): List<File> =
-        listOf(
-            File(context.filesDir, ONNX_MODEL_FILE_NAME),
-            File(context.filesDir, TFLITE_MODEL_FILE_NAME)
-        )
+    private fun modelFiles(): List<File> = listOf(
+        File(context.filesDir, ONNX_MODEL_FILE_NAME),
+        File(context.filesDir, TFLITE_MODEL_FILE_NAME)
+    )
 }
 
-private fun File.sha256(): String {
+private fun File.legacySha256(): String {
     val digest = MessageDigest.getInstance("SHA-256")
     inputStream().use { input ->
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)

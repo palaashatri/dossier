@@ -2,6 +2,7 @@ package io.dossier.app
 
 import io.dossier.app.data.breach.BreachCheckService
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BreachCheckServiceTest {
@@ -12,6 +13,12 @@ class BreachCheckServiceTest {
 
         assertEquals("5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8", hash)
         assertEquals("5BAA6", hash.take(5))
+    }
+
+    @Test
+    fun emailHashPrefix_normalizesAddressAndUsesSixCharacters() {
+        assertEquals("567159", BreachCheckService.emailHashPrefix("  TEST@example.com  "))
+        assertEquals("test@example.com", BreachCheckService.normalizeEmailForHash(" TEST@Example.COM "))
     }
 
     @Test
@@ -28,6 +35,33 @@ class BreachCheckServiceTest {
         )
 
         assertEquals(123456, count)
+    }
+
+    @Test
+    fun parseHibpEmailRange_retainsOnlyExactLocalSuffix() {
+        val body = """
+            [
+              {
+                "hashSuffix": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "websites": ["UnrelatedBreach"]
+              },
+              {
+                "hashSuffix": "D622FFBB50B11B0EFD307BE358624A26EE",
+                "websites": ["Adobe", "Gawker", "Adobe"]
+              }
+            ]
+        """.trimIndent()
+
+        val breaches = BreachCheckService.parseHibpEmailRange(
+            body,
+            "D622FFBB50B11B0EFD307BE358624A26EE"
+        )
+
+        assertEquals(listOf("Adobe", "Gawker"), breaches)
+        assertTrue(
+            BreachCheckService.parseHibpEmailRange(body, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+                .isEmpty()
+        )
     }
 
     @Test

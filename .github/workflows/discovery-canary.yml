@@ -1,0 +1,75 @@
+name: Discovery Source Canaries
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  canaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - name: Probe structured and public search sources
+        shell: python
+        run: |
+          import os
+          import urllib.error
+          import urllib.request
+
+          probes = [
+              ("GitHub found", "https://api.github.com/users/octocat", {200}),
+              ("GitHub absent", "https://api.github.com/users/dossier-canary-account-that-must-not-exist-928471", {404}),
+              ("Reddit found", "https://www.reddit.com/user/spez/about.json?raw_json=1", {200}),
+              ("Bluesky found", "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=jay.bsky.team", {200}),
+              ("Hacker News found", "https://hacker-news.firebaseio.com/v0/user/pg.json", {200}),
+              ("DEV found", "https://dev.to/api/users/by_username?url=ben", {200}),
+              ("GitLab found", "https://gitlab.com/api/v4/users?username=gitlab-bot", {200}),
+              ("Mastodon WebFinger", "https://mastodon.social/.well-known/webfinger?resource=acct:Gargron@mastodon.social", {200}),
+              ("DuckDuckGo HTML", "https://html.duckduckgo.com/html/?q=example", {200}),
+              ("Bing Search", "https://www.bing.com/search?q=example&count=10", {200}),
+              ("Yandex Search", "https://yandex.com/search/?text=example&noreask=1", {200}),
+              ("Brave Search", "https://search.brave.com/search?q=example&source=web", {200}),
+              ("Mojeek Search", "https://www.mojeek.com/search?q=example", {200}),
+              ("Qwant Search", "https://www.qwant.com/?q=example&t=web", {200}),
+              ("Yandex Images", "https://yandex.com/images/search?text=example&noreask=1", {200}),
+          ]
+
+          rows = []
+          healthy = 0
+          for name, url, expected in probes:
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "User-Agent": "Dossier discovery canary (+https://github.com/palaashatri/dossier)",
+                      "Accept": "text/html, application/json, application/activity+json, */*;q=0.5",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=15) as response:
+                      status = response.status
+              except urllib.error.HTTPError as error:
+                  status = error.code
+              except Exception as error:
+                  status = f"error: {type(error).__name__}"
+              ok = status in expected if isinstance(status, int) else False
+              healthy += int(ok)
+              rows.append((name, status, sorted(expected), ok))
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          with open(summary, "a", encoding="utf-8") as output:
+              output.write("# Dossier discovery source canaries\n\n")
+              output.write("| Source | Observed | Expected | Healthy |\n")
+              output.write("|---|---:|---:|:---:|\n")
+              for name, status, expected, ok in rows:
+                  output.write(f"| {name} | {status} | {expected} | {'yes' if ok else 'no'} |\n")
+              output.write(f"\nHealthy sources: **{healthy}/{len(probes)}**\n")
+
+          # Search engines commonly challenge cloud datacentres. Record individual
+          # drift, but fail only if a majority of all independent surfaces disappear.
+          if healthy * 2 < len(probes):
+              raise SystemExit("A majority of discovery sources are unhealthy")

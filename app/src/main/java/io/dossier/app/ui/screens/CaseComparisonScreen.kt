@@ -2,19 +2,34 @@ package io.dossier.app.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,152 +43,234 @@ import io.dossier.app.domain.case.CaseComparison
 import io.dossier.app.domain.case.CaseStore
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.NeuralTheme
 
-/**
- * Saved-case browser + comparison (ROADMAP M13 Timeline / M14 Scan Comparison).
- *
- * Lists locally-saved [DossierCase]s (opt-in saves from the Report screen),
- * lets the user pick two, and renders the explainable diff from
- * [CaseComparison]: findings added/removed/changed, profile/breach deltas, and
- * the overall risk + exposure delta. With a single case it shows that case's
- * snapshot as a simple timeline entry.
- *
- * No network, no cloud — everything is read from the local [CaseStore].
- */
+/** Explicit local saved-case selection, comparison, and deletion. */
 @Composable
 fun CaseComparisonScreen() {
     val context = LocalContext.current
+    val store = remember { CaseStore(context) }
     var cases by remember { mutableStateOf(emptyList<DossierCase>()) }
     var selectedBefore by remember { mutableStateOf<String?>(null) }
     var selectedAfter by remember { mutableStateOf<String?>(null) }
+    var pendingDelete by remember { mutableStateOf<DossierCase?>(null) }
 
-    LaunchedEffect(Unit) {
-        cases = CaseStore(context).list()
-        // Default selection: most-recent two, for an instant comparison.
-        if (cases.size >= 2) {
-            selectedAfter = cases.first().caseId
-            selectedBefore = cases[1].caseId
-        } else if (cases.size == 1) {
-            selectedAfter = cases.first().caseId
+    fun refreshCases() {
+        cases = store.list()
+        selectedBefore = selectedBefore?.takeIf { id -> cases.any { it.caseId == id } }
+        selectedAfter = selectedAfter?.takeIf { id -> cases.any { it.caseId == id } }
+        if (selectedAfter == null) selectedAfter = cases.firstOrNull()?.caseId
+        if (selectedBefore == null) {
+            selectedBefore = cases.firstOrNull { it.caseId != selectedAfter }?.caseId
         }
     }
+
+    LaunchedEffect(Unit) { refreshCases() }
 
     val beforeCase = cases.firstOrNull { it.caseId == selectedBefore }
     val afterCase = cases.firstOrNull { it.caseId == selectedAfter }
 
+    pendingDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete saved case?") },
+            text = {
+                Text(
+                    "${target.label} will be permanently removed from this device. This does not delete the source pages or any exported copies."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        store.delete(target.caseId)
+                        pendingDelete = null
+                        refreshCases()
+                    }
+                ) {
+                    Text("Delete", color = NeuralTheme.Crimson, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
+            },
+            containerColor = NeuralTheme.CardBackground
+        )
+    }
+
+    AnimatedObsidianBackground(showGrid = false)
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Transparent)
-            .padding(horizontal = 24.dp, vertical = 16.dp)
-            .verticalScroll(rememberScrollState())
+            .safeDrawingPadding()
+            .padding(horizontal = 20.dp, vertical = 16.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "INVESTIGATION TIMELINE",
-                color = NeuralTheme.Cyan,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 2.sp
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            io.dossier.app.ui.components.GeminiSpark(size = 14.dp, glowColor = NeuralTheme.Cyan)
-        }
         Text(
-            text = "Saved Cases & Delta",
+            text = "Saved cases",
             color = NeuralTheme.TextPrimary,
-            fontSize = 24.sp,
-            lineHeight = 30.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)
+            fontSize = 25.sp,
+            fontWeight = FontWeight.SemiBold
         )
         Text(
-            text = "Local only · no cloud · compare two scans to see what changed",
+            text = "Encrypted on this device. Choose an older and newer scan to compare changes.",
             color = NeuralTheme.TextSecondary,
             fontSize = 12.5.sp,
-            lineHeight = 17.sp,
-            modifier = Modifier.padding(bottom = 16.dp)
+            lineHeight = 18.sp,
+            modifier = Modifier.padding(top = 4.dp, bottom = 14.dp)
         )
 
         if (cases.isEmpty()) {
-            Text(
-                text = "No saved cases yet. Run a scan and tap SAVE CASE on the report to keep a local snapshot.",
-                color = NeuralTheme.TextSecondary,
-                fontSize = 13.sp,
-                lineHeight = 18.sp
-            )
-            return@Column
-        }
-
-        // Case picker
-        cases.forEach { c ->
-            val isBefore = selectedBefore == c.caseId
-            val isAfter = selectedAfter == c.caseId
-            val borderColor = when {
-                isBefore -> NeuralTheme.Amber
-                isAfter -> NeuralTheme.Emerald
-                else -> NeuralTheme.BorderColor
-            }
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 5.dp)
-                    .clip(DossierButtonShape)
-                    .background(NeuralTheme.CardBackground)
-                    .border(1.dp, borderColor, DossierButtonShape)
-                    .clickable {
-                        // Tap assigns to the empty / older slot; tap again clears.
-                        when {
-                            isAfter -> selectedAfter = null
-                            isBefore -> selectedBefore = null
-                            selectedAfter == null -> selectedAfter = c.caseId
-                            selectedBefore == null -> selectedBefore = c.caseId
-                            else -> { selectedAfter = c.caseId; selectedBefore = null }
-                        }
-                    }
-                    .padding(horizontal = 14.dp, vertical = 10.dp)
+            EmptyCasesState()
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                item {
                     Text(
-                        text = c.label,
+                        text = "Select comparison points",
                         color = NeuralTheme.TextPrimary,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = buildString {
-                            if (isBefore) append("BEFORE  ")
-                            if (isAfter) append("AFTER")
-                        }.trim(),
-                        color = if (isBefore) NeuralTheme.Amber else NeuralTheme.Emerald,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(bottom = 2.dp)
                     )
                 }
+
+                items(cases, key = { it.caseId }) { case ->
+                    CaseSelectionCard(
+                        case = case,
+                        isBefore = selectedBefore == case.caseId,
+                        isAfter = selectedAfter == case.caseId,
+                        onSelectBefore = {
+                            selectedBefore = if (selectedBefore == case.caseId) null else case.caseId
+                            if (selectedAfter == case.caseId) selectedAfter = null
+                        },
+                        onSelectAfter = {
+                            selectedAfter = if (selectedAfter == case.caseId) null else case.caseId
+                            if (selectedBefore == case.caseId) selectedBefore = null
+                        },
+                        onDelete = { pendingDelete = case }
+                    )
+                }
+
+                item {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    when {
+                        beforeCase != null && afterCase != null -> {
+                            val diff = remember(beforeCase.caseId, afterCase.caseId) {
+                                CaseComparison().compare(beforeCase, afterCase)
+                            }
+                            RenderDiff(beforeCase.label, afterCase.label, diff)
+                        }
+                        afterCase != null -> RenderSingleCase(afterCase)
+                        beforeCase != null -> RenderSingleCase(beforeCase)
+                        else -> Text(
+                            text = "Choose at least one saved case to view its snapshot.",
+                            color = NeuralTheme.TextSecondary,
+                            fontSize = 13.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(32.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyCasesState() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NeuralTheme.CardBackground, DossierButtonShape)
+            .border(1.dp, NeuralTheme.BorderColor, DossierButtonShape)
+            .padding(18.dp)
+    ) {
+        Text(
+            text = "No saved cases",
+            color = NeuralTheme.TextPrimary,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            text = "Run a scan and choose Save encrypted case on the report. Saving is always explicit.",
+            color = NeuralTheme.TextSecondary,
+            fontSize = 12.5.sp,
+            lineHeight = 18.sp,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+    }
+}
+
+@Composable
+private fun CaseSelectionCard(
+    case: DossierCase,
+    isBefore: Boolean,
+    isAfter: Boolean,
+    onSelectBefore: () -> Unit,
+    onSelectAfter: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val borderColor = when {
+        isAfter -> NeuralTheme.Cobalt
+        isBefore -> NeuralTheme.Amber
+        else -> NeuralTheme.BorderColor
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(DossierButtonShape)
+            .background(NeuralTheme.CardBackground)
+            .border(1.dp, borderColor, DossierButtonShape)
+            .padding(14.dp)
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "${c.findings.size} findings · ${c.riskLevel.name} risk" +
-                        (c.exposure?.let { " · exposure ${it.overall}" } ?: ""),
+                    text = case.label,
+                    color = NeuralTheme.TextPrimary,
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "${case.findings.size} findings · ${case.riskLevel.name.lowercase()} risk" +
+                        (case.exposure?.let { " · exposure ${it.overall}" } ?: ""),
                     color = NeuralTheme.TextSecondary,
-                    fontSize = 11.sp
+                    fontSize = 11.5.sp,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+            }
+            IconButton(onClick = onDelete) {
+                Icon(
+                    imageVector = Icons.Outlined.Delete,
+                    contentDescription = "Delete ${case.label}",
+                    tint = NeuralTheme.Crimson
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(20.dp))
-
-        when {
-            beforeCase != null && afterCase != null -> {
-                val diff = CaseComparison().compare(beforeCase, afterCase)
-                RenderDiff(beforeLabel = beforeCase.label, afterLabel = afterCase.label, diff = diff)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = onSelectBefore,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = if (isBefore) NeuralTheme.Amber else NeuralTheme.TextSecondary
+                )
+            ) {
+                Text(if (isBefore) "Older ✓" else "Set older", fontSize = 11.5.sp)
             }
-            afterCase != null -> {
-                RenderSingleCase(afterCase)
+            OutlinedButton(
+                onClick = onSelectAfter,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = if (isAfter) NeuralTheme.Cobalt else NeuralTheme.TextSecondary
+                )
+            ) {
+                Text(if (isAfter) "Newer ✓" else "Set newer", fontSize = 11.5.sp)
             }
         }
     }
@@ -194,69 +291,77 @@ private fun RenderDiff(
             .padding(18.dp)
     ) {
         Text(
-            text = "COMPARISON",
-            color = NeuralTheme.TextSecondary,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-            letterSpacing = 1.sp
+            text = "Changes",
+            color = NeuralTheme.TextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold
         )
         Text(
             text = "$beforeLabel  →  $afterLabel",
-            color = NeuralTheme.TextPrimary,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(bottom = 10.dp)
+            color = NeuralTheme.TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 2.dp, bottom = 10.dp)
         )
 
-        DeltaRow("Risk delta", diff.riskDelta) { it >= 0 }
-        DeltaRow("Exposure delta", diff.exposureDelta) { it >= 0 }
-        DeltaRow("Profiles", diff.profilesAdded - diff.profilesRemoved, signMatters = true)
-        DeltaRow("Breaches", diff.breachesAdded - diff.breachesRemoved, signMatters = true)
+        DeltaRow("Risk score", diff.riskDelta, positiveIsGood = false)
+        DeltaRow("Exposure score", diff.exposureDelta, positiveIsGood = false)
+        DeltaRow(
+            "Discovered profiles",
+            diff.profilesAdded - diff.profilesRemoved,
+            positiveIsGood = null
+        )
+        DeltaRow(
+            "Known breaches",
+            diff.breachesAdded - diff.breachesRemoved,
+            positiveIsGood = false
+        )
 
         Spacer(modifier = Modifier.height(10.dp))
         HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        DiffList("ADDED", diff.added.map { it.value to it.risk }, NeuralTheme.Crimson)
-        DiffList("REMOVED", diff.removed.map { it.value to it.risk }, NeuralTheme.Emerald)
+        DiffList("Added evidence", diff.added.map { it.value to it.risk }, NeuralTheme.Crimson)
+        DiffList("Removed evidence", diff.removed.map { it.value to it.risk }, NeuralTheme.Emerald)
         if (diff.changed.isNotEmpty()) {
             Text(
-                text = "CHANGED (${diff.changed.size})",
+                text = "Changed evidence (${diff.changed.size})",
                 color = NeuralTheme.Amber,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(top = 10.dp, bottom = 4.dp)
             )
             diff.changed.forEach {
                 Text(
-                    text = "• ${it.finding.value}  (${it.finding.risk.name})",
+                    text = "• ${it.finding.value} (${it.finding.risk.name.lowercase()})",
                     color = NeuralTheme.TextPrimary,
                     fontSize = 11.5.sp,
-                    lineHeight = 16.sp,
-                    fontFamily = FontFamily.Monospace
+                    lineHeight = 16.sp
                 )
             }
         }
     }
 }
 
+/** null means direction is informational rather than good/bad. */
 @Composable
-private fun DeltaRow(label: String, value: Int, signMatters: Boolean = false, positiveIsGood: (Int) -> Boolean = { true }) {
+private fun DeltaRow(label: String, value: Int, positiveIsGood: Boolean?) {
     val color = when {
         value == 0 -> NeuralTheme.TextSecondary
-        positiveIsGood(value) -> NeuralTheme.Emerald
+        positiveIsGood == null -> NeuralTheme.Cobalt
+        value > 0 && positiveIsGood -> NeuralTheme.Emerald
+        value < 0 && !positiveIsGood -> NeuralTheme.Emerald
         else -> NeuralTheme.Crimson
     }
     val sign = if (value > 0) "+" else ""
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(text = label, color = NeuralTheme.TextSecondary, fontSize = 12.sp)
+        Text(text = label, color = NeuralTheme.TextSecondary, fontSize = 12.5.sp)
         Text(
             text = "$sign$value",
             color = color,
-            fontSize = 12.sp,
+            fontSize = 12.5.sp,
             fontWeight = FontWeight.SemiBold,
             fontFamily = FontFamily.Monospace
         )
@@ -269,23 +374,22 @@ private fun DiffList(title: String, items: List<Pair<String, RiskLevel>>, color:
     Text(
         text = "$title (${items.size})",
         color = color,
-        fontFamily = FontFamily.Monospace,
-        fontSize = 11.sp,
-        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+        fontSize = 12.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(top = 9.dp, bottom = 4.dp)
     )
     items.forEach { (value, risk) ->
         Text(
-            text = "• [$risk] $value",
+            text = "• [${risk.name}] $value",
             color = NeuralTheme.TextPrimary,
             fontSize = 11.5.sp,
-            lineHeight = 16.sp,
-            fontFamily = FontFamily.Monospace
+            lineHeight = 16.sp
         )
     }
 }
 
 @Composable
-private fun RenderSingleCase(c: DossierCase) {
+private fun RenderSingleCase(case: DossierCase) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -295,27 +399,36 @@ private fun RenderSingleCase(c: DossierCase) {
             .padding(18.dp)
     ) {
         Text(
-            text = "SNAPSHOT",
-            color = NeuralTheme.TextSecondary,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-            letterSpacing = 1.sp
+            text = "Snapshot",
+            color = NeuralTheme.TextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold
         )
-        Text(c.label, color = NeuralTheme.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        Text(
+            text = case.label,
+            color = NeuralTheme.TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 2.dp)
+        )
         Spacer(modifier = Modifier.height(8.dp))
-        Text("${c.findings.size} findings · risk ${c.riskLevel.name}", color = NeuralTheme.TextSecondary, fontSize = 12.sp)
-        c.exposure?.let {
-            Text("Exposure: ${it.dimensions.joinToString(", ") { d -> "${d.dimension.name} ${d.score}" }}",
-                color = NeuralTheme.TextSecondary, fontSize = 11.sp, lineHeight = 15.sp,
-                modifier = Modifier.padding(top = 4.dp))
-        }
-        if (c.attackPaths.isNotEmpty()) {
-            Text("Attack paths: ${c.attackPaths.size}", color = NeuralTheme.Crimson, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+        Text(
+            text = "${case.findings.size} findings · ${case.riskLevel.name.lowercase()} risk",
+            color = NeuralTheme.TextPrimary,
+            fontSize = 12.5.sp
+        )
+        case.exposure?.let { exposure ->
+            Text(
+                text = "Exposure: ${exposure.dimensions.joinToString(", ") { dimension -> "${dimension.dimension.name.lowercase()} ${dimension.score}" }}",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
         }
         Text(
-            text = "Select a second case above to compare.",
+            text = "Choose another case as the other comparison point to calculate a delta.",
             color = NeuralTheme.TextMuted,
-            fontSize = 11.sp,
+            fontSize = 11.5.sp,
             modifier = Modifier.padding(top = 8.dp)
         )
     }

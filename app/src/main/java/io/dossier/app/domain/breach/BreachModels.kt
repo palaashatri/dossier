@@ -16,12 +16,26 @@ data class EmailBreach(
     val dataClasses: List<String>
 )
 
+enum class HibpCoverage {
+    ConfirmedBreaches,
+    ConfirmedNoBreaches,
+    NotConfigured,
+    CredentialsRejected,
+    RateLimited,
+    Unavailable
+}
+
 data class EmailExposureResult(
     val email: String,
     val breaches: List<EmailBreach>,
     val publicEvidence: List<PublicEmailEvidence>,
+    val hibpCoverage: HibpCoverage,
     val error: String? = null
-)
+) {
+    val hasAuthoritativeBreachCoverage: Boolean
+        get() = hibpCoverage == HibpCoverage.ConfirmedBreaches ||
+            hibpCoverage == HibpCoverage.ConfirmedNoBreaches
+}
 
 data class PublicEmailEvidence(
     val title: String,

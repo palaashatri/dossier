@@ -1,185 +1,227 @@
 package io.dossier.app.ui.screens
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.dossier.app.data.breach.BreachCheckService
 import io.dossier.app.domain.breach.EmailExposureResult
+import io.dossier.app.domain.breach.HibpCoverage
 import io.dossier.app.domain.breach.PasswordExposureResult
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.HudLevel
 import io.dossier.app.ui.components.HudStatusPill
+import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.NeuralTheme
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 
 @Composable
 fun BreachCheckScreen(onNavigateToBrowser: (String) -> Unit) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val service = remember { BreachCheckService(context) }
 
-    var emailsRaw by remember { mutableStateOf("") }
-    var passwordsRaw by remember { mutableStateOf("") }
+    var emailsRaw by rememberSaveable { mutableStateOf("") }
+    var passwordsRaw by rememberSaveable { mutableStateOf("") }
+    // API keys intentionally do not survive recreation or process restoration.
     var hibpApiKey by remember { mutableStateOf("") }
     var isChecking by remember { mutableStateOf(false) }
+    var checkJob by remember { mutableStateOf<Job?>(null) }
+    var validationMessage by remember { mutableStateOf<String?>(null) }
     var emailResults by remember { mutableStateOf<List<EmailExposureResult>>(emptyList()) }
     var passwordResults by remember { mutableStateOf<List<PasswordExposureResult>>(emptyList()) }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        AnimatedObsidianBackground(showGrid = true)
-
+        AnimatedObsidianBackground(showGrid = false)
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .safeDrawingPadding()
-                .padding(horizontal = 24.dp, vertical = 12.dp)
+                .padding(horizontal = 20.dp, vertical = 12.dp)
                 .verticalScroll(rememberScrollState())
         ) {
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "BREACH INTELLIGENCE",
-                    color = NeuralTheme.Cyan,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 2.sp
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                io.dossier.app.ui.components.GeminiSpark(size = 14.dp, glowColor = NeuralTheme.Cyan)
-            }
+            Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = "Exposure Check",
+                text = "Breach and exposure check",
                 color = NeuralTheme.TextPrimary,
-                fontSize = 24.sp,
-                lineHeight = 30.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)
+                fontSize = 25.sp,
+                fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "Passwords are checked by SHA-1 prefix only. The app does not fetch or reveal leaked passwords from dumps.",
+                text = "Authoritative HIBP results and ordinary public-web mentions are shown separately. Supported email lookups send a six-character SHA-1 prefix; password checks send a five-character prefix. Full passwords never leave this device.",
                 color = NeuralTheme.TextSecondary,
                 fontSize = 12.5.sp,
-                lineHeight = 17.sp,
-                modifier = Modifier.padding(bottom = 16.dp)
+                lineHeight = 18.sp,
+                modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
             )
 
-            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 1.dp)
+            HorizontalDivider(color = NeuralTheme.BorderColor)
             Spacer(modifier = Modifier.height(18.dp))
 
             BreachInputField(
                 value = emailsRaw,
-                onValueChange = { emailsRaw = it },
-                label = "Emails",
-                placeholder = "name@example.com, other@example.com",
+                onValueChange = {
+                    emailsRaw = it
+                    validationMessage = null
+                },
+                label = "Email addresses",
+                placeholder = "One per line, or separated by commas",
                 minLines = 2,
                 keyboardType = KeyboardType.Email
             )
-
             Spacer(modifier = Modifier.height(12.dp))
-
             BreachInputField(
                 value = hibpApiKey,
                 onValueChange = { hibpApiKey = it },
                 label = "HIBP API key",
-                placeholder = "Optional",
+                placeholder = "Optional; required for authoritative email coverage",
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardType = KeyboardType.Password
+                keyboardType = KeyboardType.Password,
+                supportingText = "Used for this screen only and not saved by this form."
             )
-
             Spacer(modifier = Modifier.height(12.dp))
-
             BreachInputField(
                 value = passwordsRaw,
-                onValueChange = { passwordsRaw = it },
-                label = "Passwords to check",
-                placeholder = "One password per line",
+                onValueChange = {
+                    passwordsRaw = it
+                    validationMessage = null
+                },
+                label = "Passwords",
+                placeholder = "One exact password per line",
                 minLines = 3,
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardType = KeyboardType.Password
+                keyboardType = KeyboardType.Password,
+                supportingText = "Leading and trailing spaces are preserved because they may be part of a password."
             )
+
+            validationMessage?.let {
+                Text(
+                    text = it,
+                    color = NeuralTheme.Crimson,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    modifier = Modifier.padding(top = 10.dp)
+                )
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Button(
-                onClick = {
-                    val emails = parseEmails(emailsRaw)
-                    val passwords = parsePasswords(passwordsRaw)
-                    coroutineScope.launch {
-                        isChecking = true
+            if (!isChecking) {
+                Button(
+                    onClick = {
+                        val parsedEmails = parseEmailInput(emailsRaw)
+                        val passwords = parsePasswordsExactly(passwordsRaw)
+                        if (parsedEmails.invalid.isNotEmpty()) {
+                            validationMessage = buildString {
+                                append("Check invalid email input: ")
+                                append(parsedEmails.invalid.take(3).joinToString(", "))
+                                if (parsedEmails.invalid.size > 3) append(" and ${parsedEmails.invalid.size - 3} more")
+                            }
+                            return@Button
+                        }
+                        if (parsedEmails.valid.isEmpty() && passwords.isEmpty()) {
+                            validationMessage = "Enter at least one valid email address or one password."
+                            return@Button
+                        }
+
+                        // Remove plaintext passwords from Compose state before any
+                        // network work begins. The local list remains only for this job.
+                        passwordsRaw = ""
+                        validationMessage = null
                         emailResults = emptyList()
                         passwordResults = emptyList()
-                        try {
-                            val emailDeferred = launch {
-                                emailResults = service.checkEmails(
-                                    emails = emails,
-                                    hibpApiKey = hibpApiKey.ifBlank { null },
-                                    deepResearch = true
-                                )
+                        checkJob = scope.launch {
+                            isChecking = true
+                            try {
+                                val emailJob = async {
+                                    service.checkEmails(
+                                        emails = parsedEmails.valid,
+                                        hibpApiKey = hibpApiKey.ifBlank { null },
+                                        deepResearch = true
+                                    )
+                                }
+                                val passwordJob = async { service.checkPasswords(passwords) }
+                                emailResults = emailJob.await()
+                                passwordResults = passwordJob.await()
+                            } catch (cancelled: CancellationException) {
+                                validationMessage = "Check cancelled. Partial results, if any, are retained."
+                                throw cancelled
+                            } catch (error: Exception) {
+                                validationMessage = error.localizedMessage
+                                    ?: "The exposure check could not complete."
+                            } finally {
+                                isChecking = false
+                                checkJob = null
                             }
-                            val passwordDeferred = launch {
-                                passwordResults = service.checkPasswords(passwords)
-                            }
-                            emailDeferred.join()
-                            passwordDeferred.join()
-                        } finally {
-                            passwordsRaw = ""
-                            isChecking = false
                         }
-                    }
-                },
-                enabled = !isChecking && (emailsRaw.isNotBlank() || passwordsRaw.isNotBlank()),
-                colors = ButtonDefaults.buttonColors(containerColor = NeuralTheme.Cobalt),
-                shape = io.dossier.app.ui.theme.DossierButtonShape,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp)
-            ) {
-                Text(
-                    text = if (isChecking) "Checking..." else "Run Exposure Check",
-                    color = androidx.compose.ui.graphics.Color.White,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            Spacer(modifier = Modifier.height(22.dp))
-
-            if (isChecking) {
+                    },
+                    enabled = emailsRaw.isNotBlank() || passwordsRaw.isNotEmpty(),
+                    colors = ButtonDefaults.buttonColors(containerColor = NeuralTheme.Cobalt),
+                    shape = DossierButtonShape,
+                    modifier = Modifier.fillMaxWidth().height(52.dp)
+                ) {
+                    Text("Run check", fontWeight = FontWeight.SemiBold)
+                }
+            } else {
                 LinearProgressIndicator(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp),
+                    modifier = Modifier.fillMaxWidth().height(4.dp),
                     color = NeuralTheme.Cobalt,
                     trackColor = NeuralTheme.BorderColor
                 )
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = { checkJob?.cancel() },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Crimson)
+                ) {
+                    Text("Cancel check", fontWeight = FontWeight.SemiBold)
+                }
             }
 
             if (emailResults.isNotEmpty()) {
-                Text(
-                    text = "Email Exposure",
-                    color = NeuralTheme.TextPrimary,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(bottom = 10.dp)
-                )
+                SectionTitle("Email results")
                 emailResults.forEach { result ->
                     EmailExposureCard(result, onNavigateToBrowser)
                     Spacer(modifier = Modifier.height(12.dp))
@@ -187,19 +229,12 @@ fun BreachCheckScreen(onNavigateToBrowser: (String) -> Unit) {
             }
 
             if (passwordResults.isNotEmpty()) {
-                Text(
-                    text = "Password Exposure",
-                    color = NeuralTheme.TextPrimary,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 10.dp)
-                )
+                SectionTitle("Password results")
                 passwordResults.forEach { result ->
                     PasswordExposureCard(result)
                     Spacer(modifier = Modifier.height(12.dp))
                 }
             }
-
             Spacer(modifier = Modifier.height(40.dp))
         }
     }
@@ -212,14 +247,18 @@ private fun BreachInputField(
     label: String,
     placeholder: String,
     minLines: Int = 1,
-    visualTransformation: androidx.compose.ui.text.input.VisualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
-    keyboardType: KeyboardType = KeyboardType.Text
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    keyboardType: KeyboardType = KeyboardType.Text,
+    supportingText: String? = null
 ) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(label) },
         placeholder = { Text(placeholder) },
+        supportingText = supportingText?.let { text ->
+            { Text(text, fontSize = 11.sp, lineHeight = 15.sp) }
+        },
         minLines = minLines,
         visualTransformation = visualTransformation,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
@@ -228,114 +267,142 @@ private fun BreachInputField(
             unfocusedBorderColor = NeuralTheme.BorderColor,
             focusedTextColor = NeuralTheme.TextPrimary,
             unfocusedTextColor = NeuralTheme.TextPrimary,
-            focusedLabelColor = NeuralTheme.Cyan,
+            focusedLabelColor = NeuralTheme.Cobalt,
             unfocusedLabelColor = NeuralTheme.TextSecondary,
             cursorColor = NeuralTheme.Cobalt,
-            focusedContainerColor = NeuralTheme.CardBackground.copy(alpha = 0.7f),
-            unfocusedContainerColor = NeuralTheme.CardBackground.copy(alpha = 0.7f)
+            focusedContainerColor = NeuralTheme.CardBackground,
+            unfocusedContainerColor = NeuralTheme.CardBackground
         ),
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth()
     )
 }
 
 @Composable
-private fun EmailExposureCard(
-    result: EmailExposureResult,
-    onNavigateToBrowser: (String) -> Unit
-) {
+private fun EmailExposureCard(result: EmailExposureResult, onNavigateToBrowser: (String) -> Unit) {
     val hasBreaches = result.breaches.isNotEmpty()
-    val hasEvidence = result.publicEvidence.isNotEmpty()
+    val hasPublicEvidence = result.publicEvidence.isNotEmpty()
     val level = when {
         hasBreaches -> HudLevel.CRIT
-        hasEvidence -> HudLevel.WARN
-        else -> HudLevel.OK
+        result.hibpCoverage == HibpCoverage.ConfirmedNoBreaches && !hasPublicEvidence -> HudLevel.OK
+        else -> HudLevel.WARN
+    }
+    val status = when {
+        hasBreaches -> "${result.breaches.size} BREACHES"
+        result.hibpCoverage == HibpCoverage.ConfirmedNoBreaches && hasPublicEvidence -> "NO HIBP / PUBLIC HITS"
+        result.hibpCoverage == HibpCoverage.ConfirmedNoBreaches -> "HIBP: NOT FOUND"
+        result.hibpCoverage == HibpCoverage.NotConfigured -> "HIBP NOT RUN"
+        result.hibpCoverage == HibpCoverage.CredentialsRejected -> "KEY REJECTED"
+        result.hibpCoverage == HibpCoverage.RateLimited -> "RATE LIMITED"
+        result.hibpCoverage == HibpCoverage.Unavailable -> "HIBP UNAVAILABLE"
+        else -> "REVIEW"
     }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(NeuralTheme.CardBackground.copy(alpha = 0.85f), io.dossier.app.ui.theme.DossierCardShape)
+            .background(NeuralTheme.CardBackground, io.dossier.app.ui.theme.DossierCardShape)
             .border(1.dp, NeuralTheme.BorderColor, io.dossier.app.ui.theme.DossierCardShape)
             .padding(16.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = result.email,
+                    result.email,
                     color = NeuralTheme.TextPrimary,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
-                result.error?.let {
-                    Text(
-                        text = it,
-                        color = NeuralTheme.TextSecondary,
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
+                Text(
+                    text = coverageDescription(result.hibpCoverage),
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
             }
-            HudStatusPill(
-                text = when {
-                    hasBreaches -> "${result.breaches.size} BREACHES"
-                    hasEvidence -> "PUBLIC HITS"
-                    else -> "CLEAR"
-                },
-                level = level
+            HudStatusPill(text = status, level = level)
+        }
+
+        result.error?.let {
+            Text(
+                it,
+                color = NeuralTheme.TextSecondary,
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(top = 8.dp)
             )
         }
 
-        if (result.breaches.isNotEmpty()) {
+        if (hasBreaches) {
             Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                "Authoritative HIBP records",
+                color = NeuralTheme.Crimson,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
             result.breaches.take(8).forEach { breach ->
                 Text(
                     text = "${breach.title} ${breach.breachDate ?: ""}".trim(),
                     color = NeuralTheme.TextPrimary,
                     fontSize = 12.5.sp,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(top = 6.dp)
                 )
                 if (breach.dataClasses.isNotEmpty()) {
                     Text(
-                        text = breach.dataClasses.take(6).joinToString(", "),
+                        breach.dataClasses.take(6).joinToString(", "),
                         color = NeuralTheme.TextSecondary,
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp,
-                        modifier = Modifier.padding(bottom = 5.dp)
+                        fontSize = 11.5.sp
                     )
                 }
             }
         }
 
-        if (result.publicEvidence.isNotEmpty()) {
+        if (hasPublicEvidence) {
             Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                "Separate public-web leads",
+                color = NeuralTheme.Cobalt,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
             result.publicEvidence.take(5).forEach { evidence ->
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { onNavigateToBrowser(evidence.url) }
-                        .padding(vertical = 5.dp)
+                        .padding(vertical = 8.dp)
                 ) {
                     Text(
                         text = evidence.title,
-                        color = NeuralTheme.Cyan,
-                        fontSize = 12.sp,
+                        color = NeuralTheme.Cobalt,
+                        fontSize = 12.5.sp,
                         fontWeight = FontWeight.SemiBold,
                         textDecoration = TextDecoration.Underline,
                         maxLines = 2
                     )
                     Text(
-                        text = evidence.source,
+                        text = "${evidence.source} · ${(evidence.confidence * 100).toInt()}% review confidence",
                         color = NeuralTheme.TextSecondary,
-                        fontSize = 10.sp,
+                        fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace
                     )
                 }
             }
         }
     }
+}
+
+private fun coverageDescription(coverage: HibpCoverage): String = when (coverage) {
+    HibpCoverage.ConfirmedBreaches -> "HIBP returned one or more authoritative breach records."
+    HibpCoverage.ConfirmedNoBreaches -> "HIBP completed and returned no breached-account record."
+    HibpCoverage.NotConfigured -> "No authoritative email breach lookup was performed."
+    HibpCoverage.CredentialsRejected -> "Authoritative lookup failed because the API key was rejected."
+    HibpCoverage.RateLimited -> "Authoritative lookup could not complete because HIBP rate-limited the request."
+    HibpCoverage.Unavailable -> "Authoritative lookup was unavailable; do not interpret this as clear."
 }
 
 @Composable
@@ -345,59 +412,78 @@ private fun PasswordExposureCard(result: PasswordExposureResult) {
         result.isPwned -> HudLevel.CRIT
         else -> HudLevel.OK
     }
-
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(NeuralTheme.CardBackground.copy(alpha = 0.85f), io.dossier.app.ui.theme.DossierCardShape)
+            .background(NeuralTheme.CardBackground, io.dossier.app.ui.theme.DossierCardShape)
             .border(1.dp, NeuralTheme.BorderColor, io.dossier.app.ui.theme.DossierCardShape)
             .padding(16.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = result.label,
+                    result.label,
                     color = NeuralTheme.TextPrimary,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "SHA-1 prefix checked: ${result.sha1Prefix}",
+                    "SHA-1 prefix checked: ${result.sha1Prefix}",
                     color = NeuralTheme.TextSecondary,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(top = 3.dp)
+                    fontSize = 11.5.sp,
+                    fontFamily = FontFamily.Monospace
                 )
             }
             HudStatusPill(
                 text = when {
-                    result.error != null -> "ERROR"
+                    result.error != null -> "UNAVAILABLE"
                     result.isPwned -> "${result.occurrenceCount} HITS"
                     else -> "NOT FOUND"
                 },
                 level = level
             )
         }
-
         result.error?.let {
-            Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = it,
+                it,
                 color = NeuralTheme.TextSecondary,
                 fontSize = 11.5.sp,
-                lineHeight = 16.sp
+                modifier = Modifier.padding(top = 8.dp)
             )
         }
     }
 }
 
-private fun parseEmails(raw: String): List<String> =
-    raw.split(",", "\n", " ")
-        .map { it.trim() }
-        .filter { it.contains("@") && it.contains(".") }
-        .distinctBy { it.lowercase() }
+@Composable
+private fun SectionTitle(text: String) {
+    Text(
+        text = text,
+        color = NeuralTheme.TextPrimary,
+        fontSize = 16.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(top = 24.dp, bottom = 10.dp)
+    )
+}
 
-private fun parsePasswords(raw: String): List<String> =
-    raw.lines()
-        .map { it.trim() }
-        .filter { it.isNotBlank() }
+private data class ParsedEmails(val valid: List<String>, val invalid: List<String>)
+
+private fun parseEmailInput(raw: String): ParsedEmails {
+    val tokens = raw.split(',', '\n', '\t', ' ')
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+    val valid = tokens.filter(::looksLikeEmail).distinctBy(String::lowercase)
+    val invalid = tokens.filterNot(::looksLikeEmail).distinct()
+    return ParsedEmails(valid, invalid)
+}
+
+private fun looksLikeEmail(value: String): Boolean {
+    val at = value.indexOf('@')
+    val dot = value.lastIndexOf('.')
+    return at > 0 && dot > at + 1 && dot < value.lastIndex && !value.any(Char::isWhitespace)
+}
+
+/** Do not trim: spaces can be intentional password characters. */
+internal fun parsePasswordsExactly(raw: String): List<String> = raw
+    .split('\n')
+    .map { it.removeSuffix("\r") }
+    .filter { it.isNotEmpty() }
