@@ -5,12 +5,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
-import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.navigation.compose.rememberNavController
@@ -23,31 +23,40 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            DossierTheme {
-                // Material3 color scheme wired to our palette so M3 components
-                // (Switch, NavigationBar, etc.) match.
+            val darkTheme = isSystemInDarkTheme()
+            DossierTheme(darkTheme = darkTheme) {
                 val colors = NeuralTheme.colors
-                val colorScheme = if (androidx.compose.foundation.isSystemInDarkTheme()) {
+                val colorScheme = if (darkTheme) {
                     darkColorScheme(
                         primary = colors.cobalt,
+                        onPrimary = colors.onAccent,
+                        primaryContainer = colors.accentSurface,
+                        onPrimaryContainer = colors.textPrimary,
                         background = colors.background,
-                        surface = colors.surface,
-                        onPrimary = Color.White,
                         onBackground = colors.textPrimary,
+                        surface = colors.surface,
                         onSurface = colors.textPrimary,
+                        surfaceVariant = colors.cardBackground,
+                        onSurfaceVariant = colors.textSecondary,
                         outline = colors.borderColor,
-                        secondary = colors.accentDim
+                        secondary = colors.accentDim,
+                        error = colors.crimson
                     )
                 } else {
                     lightColorScheme(
                         primary = colors.cobalt,
+                        onPrimary = colors.onAccent,
+                        primaryContainer = colors.accentSurface,
+                        onPrimaryContainer = colors.textPrimary,
                         background = colors.background,
-                        surface = colors.surface,
-                        onPrimary = Color.White,
                         onBackground = colors.textPrimary,
+                        surface = colors.surface,
                         onSurface = colors.textPrimary,
+                        surfaceVariant = colors.cardBackground,
+                        onSurfaceVariant = colors.textSecondary,
                         outline = colors.borderColor,
-                        secondary = colors.accentDim
+                        secondary = colors.accentDim,
+                        error = colors.crimson
                     )
                 }
                 MaterialTheme(colorScheme = colorScheme) {
