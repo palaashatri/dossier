@@ -13,6 +13,8 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -126,10 +128,12 @@ internal class ArchivePageResolver(
                 }
 
                 val body = response.body ?: return Result.Unavailable("Wayback snapshot was empty")
-                val bytes = body.source().readByteArray(MAX_BODY_BYTES + 1)
-                if (bytes.size > MAX_BODY_BYTES) {
+                val declaredLength = body.contentLength()
+                if (declaredLength > MAX_BODY_BYTES) {
                     return Result.Unavailable("Wayback snapshot exceeds verification size limit")
                 }
+                val bytes = body.byteStream().use { readBounded(it, MAX_BODY_BYTES) }
+                    ?: return Result.Unavailable("Wayback snapshot exceeds verification size limit")
                 val html = bytes.toString(Charsets.UTF_8)
                 if (html.isBlank()) return Result.Unavailable("Wayback snapshot was empty")
                 if (DiscoveryHttpPolicy.looksBlocked(html)) {
@@ -217,6 +221,21 @@ internal class ArchivePageResolver(
             timestamp.length >= 6 -> "${timestamp.substring(0, 4)}-${timestamp.substring(4, 6)}"
             timestamp.length >= 4 -> timestamp.substring(0, 4)
             else -> "unknown date"
+        }
+
+        internal fun readBounded(input: InputStream, maxBytes: Long): ByteArray? {
+            require(maxBytes > 0)
+            val output = ByteArrayOutputStream(minOf(maxBytes, 32_768L).toInt())
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            var total = 0L
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                total += read
+                if (total > maxBytes) return null
+                output.write(buffer, 0, read)
+            }
+            return output.toByteArray()
         }
 
         private fun normalizeOriginalUrl(raw: String): String? {
