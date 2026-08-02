@@ -7,6 +7,7 @@ import io.dossier.app.data.face.FaceCorrelationCalibrationStore
 import io.dossier.app.data.face.FaceCorrelationConsentStore
 import io.dossier.app.data.face.FaceCorrelationDecision
 import io.dossier.app.data.face.FaceCorrelationModelPack
+import io.dossier.app.data.face.FaceCorrelationSessionPolicy
 import io.dossier.app.data.face.FaceEmbedder
 import io.dossier.app.data.face.FaceEmbeddingCalibrationStore
 import io.dossier.app.data.face.FaceEmbeddingModelRunner
@@ -19,7 +20,7 @@ import kotlinx.coroutines.CancellationException
 /**
  * Local visual-profile consistency service.
  *
- * Preferred path, after explicit installation/consent:
+ * Preferred path, after explicit installation consent and a per-scan choice:
  * YuNet five-landmark detection -> SFace alignCrop -> SFace cosine correlation.
  *
  * A user-imported calibrated ONNX/TFLite embedding model remains supported for
@@ -58,7 +59,10 @@ class FaceEmbeddingService(context: Context) {
         profileUri: Uri,
         profileUrl: String
     ): FaceConsistencyMatch {
-        if (correlationConsent.hasConsent() && correlationPack.isReady()) {
+        val strongAllowed = FaceCorrelationSessionPolicy.isStrongCorrelationEnabled() &&
+            correlationConsent.hasConsent() &&
+            correlationPack.isReady()
+        if (strongAllowed) {
             try {
                 return correlationEngine.compare(selfieUri, profileUri, profileUrl)
             } catch (cancelled: CancellationException) {
@@ -77,7 +81,11 @@ class FaceEmbeddingService(context: Context) {
     }
 
     fun isCalibratedReviewScore(score: Float): Boolean {
-        if (correlationConsent.hasConsent() && correlationPack.isReady()) {
+        if (
+            FaceCorrelationSessionPolicy.isStrongCorrelationEnabled() &&
+            correlationConsent.hasConsent() &&
+            correlationPack.isReady()
+        ) {
             val thresholds = correlationCalibration.getThresholds()
             return thresholds.measured && thresholds.decision(score) != FaceCorrelationDecision.NO_SUPPORT
         }
@@ -86,7 +94,9 @@ class FaceEmbeddingService(context: Context) {
 
     fun strongCorrelationStatus(): String = when {
         !correlationPack.isReady() -> "YuNet/SFace model pack is not installed."
-        !correlationConsent.hasConsent() -> "YuNet/SFace is installed but cross-photo correlation consent is not active."
+        !correlationConsent.hasConsent() -> "YuNet/SFace is installed but installation consent is not active."
+        !FaceCorrelationSessionPolicy.isStrongCorrelationEnabled() ->
+            "YuNet/SFace is installed but basic matching was selected for this scan."
         correlationCalibration.hasMeasuredCalibration() ->
             "YuNet/SFace is active with a measured, hash-bound calibration."
         else -> "YuNet/SFace is active with the reference threshold policy; results remain manual-review evidence."
