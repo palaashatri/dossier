@@ -45,6 +45,7 @@ remaining reliability boundaries honestly.
 | 16 | Performance/Lifecycle | Done (core) | bounded work, cancellation routing, resume, memory guard |
 | 17 | Android UX | Done | main tabs and nested dossier workflow |
 | 18 | Evidence Export | Done (core) | PDF plus machine-readable JSON hash manifest |
+| 19 | Strong Face Correlation | Implemented; measurement pending | verified YuNet/SFace pack, five-landmark alignment, quality gates, calibration CLI |
 
 ## Post-hardening audit status
 
@@ -58,9 +59,10 @@ original functionality audit:
   profile is currently active.
 - Real local whole-image near-duplicate matching using SHA-256, pHash, dHash,
   aHash, colour histograms, and crop variants.
-- Out-of-box visual face-crop comparison through a built-in appearance
-  descriptor, while an imported calibrated model remains the stronger optional
-  backend. The fallback is not represented as biometric identity proof.
+- Strong cross-photo correlation through a pinned OpenCV YuNet/SFace pipeline,
+  while the built-in appearance descriptor remains available for basic
+  photo-reuse matching. Reference thresholds are deliberately prevented from
+  affecting formal risk until a matching measured calibration is imported.
 - Attribution-aware PII scoring: exact self-supplied identifiers may be high
   confidence; unrelated regex hits remain low-confidence review evidence.
 - No fabricated `Demo Subject`. Missing input is an explicit navigation error,
@@ -100,60 +102,99 @@ A future fallback may use Common Crawl's exact-URL index when Wayback has no
 capture. Archive.today and similar services must not become automated
 requirements without stable documented APIs and acceptable operating terms.
 
-## Calibrated face-correlation roadmap
+## Strong cross-photo face correlation
 
-The built-in appearance descriptor remains useful for detecting reuse of the
-same photo. Stronger cross-photo correlation requires a separately validated
-model pipeline and must remain supporting evidence rather than identity proof.
+The strong local pipeline is now implemented. It is separate from whole-image
+reverse search and from the basic appearance descriptor used for detecting reuse
+of the same or a near-duplicate photograph.
 
-### Proposed model stack
+### Implemented model and inference path
 
-- OpenCV Zoo YuNet ONNX detector for face boxes and five landmarks.
-- OpenCV Zoo SFace ONNX recognizer for aligned face embeddings.
-- Pin exact model versions and SHA-256 hashes.
-- Ship the corresponding MIT and Apache-2.0 notices and an SBOM entry.
-- Keep the existing appearance descriptor as a safe fallback when the model is
-  unavailable or the image fails quality gates.
+- Official OpenCV Android runtime.
+- OpenCV Zoo YuNet 2023mar detector, pinned by exact SHA-256 and byte length.
+- OpenCV Zoo SFace 2021dec recognizer, pinned by exact SHA-256 and byte length.
+- Explicit user-triggered download; no silent model fetch.
+- Temporary-file download, filesystem sync, checksum verification, and atomic
+  installation.
+- EXIF orientation correction and bounded image decoding.
+- YuNet face detection with five landmarks.
+- Rejection of ambiguous group photos and low-confidence detections.
+- Face-size, image-area, landmark-distance, roll, exposure, and blur gates.
+- OpenCV `FaceRecognizerSF.alignCrop` before SFace feature extraction.
+- Cosine comparison through the exact OpenCV recognizer API.
+- One mutex-protected detector/recognizer runtime per scan service rather than
+  reopening the 38 MB recognizer for every profile image.
+- Immediate release of image matrices, aligned crops, landmarks, and embeddings.
+- Built-in basic appearance matching retained as a non-biometric fallback.
 
-### Required preprocessing
+### Consent and user control
 
-1. Correct EXIF orientation and decode to a bounded bitmap.
-2. Detect faces and five landmarks; reject ambiguous multi-face inputs.
-3. Apply blur, exposure, size, pose, and occlusion quality gates.
-4. Reproduce the SFace reference five-landmark alignment and crop exactly.
-5. Use the model's declared channel order, dimensions, and normalization.
-6. L2-normalise embeddings and compare with cosine similarity.
-7. Record detector/model versions, hashes, quality signals, and threshold-set ID.
+- Every scan containing a selfie asks the user to choose strong local
+  correlation or basic photo-reuse matching.
+- Installation consent and per-scan execution choice are separate.
+- Strong mode cannot carry silently into a later scan; the in-memory policy is
+  reset on completion, cancellation, invalid input, and installation failure.
+- Models, imported calibration, and stored consent can be deleted together.
+- No selected image, crop, landmark, or embedding is uploaded.
+- Reports continue to describe face similarity as supporting evidence, never
+  proof of ownership or identity.
 
-### Calibration and benchmark requirements
+### Threshold policy
 
-- Split data by identity into development, calibration, and untouched test sets.
-- Include same-person pairs across age, pose, lighting, compression, screenshots,
+Dossier ships a clearly labelled reference policy so the installed pipeline can
+return manual-review information:
+
+- `MANUAL_REVIEW` begins at the OpenCV reference cosine operating point.
+- `HIGH_SIMILARITY` uses a stricter conservative reference threshold.
+- Reference-policy scores are visible but cannot produce formal risk findings.
+- Only a measured calibration bound to both exact model hashes and the exact
+  pipeline version may affect risk scoring.
+
+This prevents a copied benchmark threshold from being presented as measured
+Dossier performance.
+
+### Reproducible calibration tooling
+
+`tools/face_calibration.py` runs the same YuNet → five-landmark alignment →
+SFace pipeline over a private consented manifest. It:
+
+1. Verifies the two pinned model hashes and sizes.
+2. Applies EXIF-aware decoding and the same image-size and quality gates.
+3. Rejects identity overlap between calibration and test splits.
+4. Requires minimum positive and negative pair counts.
+5. Selects review and high thresholds only on the calibration split.
+6. Measures false-match, true-match, and false-non-match rates on untouched test
+   identities.
+7. Produces bootstrap confidence intervals.
+8. Reports demographic-group and device-class slices when supplied.
+9. Emits the hash-bound JSON accepted by the Android application.
+
+CI syntax-checks this tool and unit-tests the model pins, calibration contract,
+threshold ordering, and per-scan policy.
+
+### Remaining measurement work
+
+The implementation is complete, but a measured 9.5-level claim still requires a
+consented corpus that cannot be manufactured from the repository itself:
+
+- Identity-disjoint development, calibration, and locked test identities.
+- Same-person pairs across age, pose, lighting, compression, screenshots,
   glasses, facial hair, low-resolution avatars, and different phones.
-- Include hard negative pairs with similar appearance, relatives where consented,
-  and same-name/profile-context collisions.
-- Evaluate standard public benchmarks through download-only harnesses without
-  redistributing restricted datasets.
-- Add a consented mobile dataset with strong Indian representation and balanced
-  demographic/device strata.
-- Report ROC/DET curves, false-match rate, false-non-match rate, equal-error
-  rate, true-accept rate at fixed false-accept rates, subgroup results, and
-  bootstrap confidence intervals.
-- Establish separate `NO_SUPPORT`, `MANUAL_REVIEW`, and `HIGH_SIMILARITY` bands.
-  No threshold may produce an automatic ownership conclusion.
-- A 9.5-level claim requires a locked held-out benchmark large enough to measure
-  the chosen false-match target, real-device performance and thermal tests, and
-  independently reproducible results.
+- Hard negatives involving similar-looking unrelated people, consented relatives,
+  and profile-context collisions.
+- Strong Indian representation plus balanced demographic and device strata.
+- Enough independent negative comparisons to measure the selected high-band
+  false-match target with useful confidence.
+- Real-device latency, memory, battery, and thermal tests on multiple Android
+  devices.
+- Review of subgroup disparities before publishing a measured calibration.
 
-### Consent and retention controls
+Until such a corpus is evaluated, the correct status is:
 
-- Explicit opt-in before face comparison.
-- On-device inference by default; never upload face crops or embeddings silently.
-- Delete transient crops and embeddings after the scan unless the user explicitly
-  saves a case that includes them.
-- Never contribute query embeddings to a shared or self-hosted visual index.
-- Provide model/version disclosure, limitations, deletion controls, and a clear
-  manual-review requirement in the UI and exports.
+> **Strong YuNet/SFace implementation available; reference policy only.**
+>
+> It becomes **measured strong correlation** only after a matching held-out
+> calibration file is imported.
 
 ## Current reverse-image scope
 
