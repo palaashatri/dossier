@@ -2,10 +2,12 @@ package io.dossier.app
 
 import io.dossier.app.data.web.ArchivePageResolver
 import io.dossier.app.data.web.PublicPageVerifier
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
 
 class ArchivePageResolverTest {
 
@@ -61,8 +63,8 @@ class ArchivePageResolverTest {
 
     @Test
     fun historicalEvidenceNeverReceivesCurrentPageConfidence() {
-        assertEquals(0.78f, PublicPageVerifier.historicalConfidenceCeiling(0.99f))
-        assertEquals(0.60f, PublicPageVerifier.historicalConfidenceCeiling(0.60f))
+        assertEquals(0.78f, PublicPageVerifier.historicalConfidenceCeiling(0.99f), 0.0001f)
+        assertEquals(0.60f, PublicPageVerifier.historicalConfidenceCeiling(0.60f), 0.0001f)
         assertTrue(PublicPageVerifier.historicalConfidenceCeiling(1.0f) < 0.80f)
     }
 
@@ -71,5 +73,19 @@ class ArchivePageResolverTest {
         assertEquals("2024-01-02", ArchivePageResolver.displayTimestamp("20240102030405"))
         assertEquals("2024-01", ArchivePageResolver.displayTimestamp("202401"))
         assertEquals("2024", ArchivePageResolver.displayTimestamp("2024"))
+    }
+
+    @Test
+    fun boundedRead_returnsSmallPayloadAndRejectsOversizedPayload() {
+        val small = "archived page".toByteArray()
+        assertArrayEquals(
+            small,
+            ArchivePageResolver.readBounded(ByteArrayInputStream(small), maxBytes = 64)
+        )
+
+        val oversized = ByteArray(65) { 1 }
+        assertNull(
+            ArchivePageResolver.readBounded(ByteArrayInputStream(oversized), maxBytes = 64)
+        )
     }
 }
