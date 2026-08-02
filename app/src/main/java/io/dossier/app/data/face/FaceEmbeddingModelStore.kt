@@ -52,7 +52,7 @@ class FaceEmbeddingModelStore(private val context: Context) {
         modelFiles().firstOrNull { it.exists() }?.length() ?: 0L
 
     fun importedModelSha256(): String? =
-        modelFiles().firstOrNull { it.exists() && it.length() >= MIN_MODEL_BYTES }?.sha256()
+        modelFiles().firstOrNull { it.exists() && it.length() >= MIN_MODEL_BYTES }?.legacySha256()
 
     fun modelSourceLabel(): String = when {
         isUsingBundledModel() -> "Bundled FaceNet"
@@ -111,7 +111,7 @@ class FaceEmbeddingModelStore(private val context: Context) {
             modelFiles().filter { it != target && it.exists() }.forEach { it.delete() }
             if (target.exists()) target.delete()
             if (!tempFile.renameTo(target)) error("Unable to install bundled face model.")
-            File(context.filesDir, BUNDLED_MARKER_FILE).writeText(target.sha256())
+            File(context.filesDir, BUNDLED_MARKER_FILE).writeText(target.legacySha256())
             FaceEmbeddingCalibrationStore(context).ensureBundledCalibration()
         } catch (error: Exception) {
             if (tempFile.exists()) tempFile.delete()
@@ -153,7 +153,7 @@ class FaceEmbeddingModelStore(private val context: Context) {
     )
 }
 
-private fun File.sha256(): String {
+private fun File.legacySha256(): String {
     val digest = MessageDigest.getInstance("SHA-256")
     inputStream().use { input ->
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
