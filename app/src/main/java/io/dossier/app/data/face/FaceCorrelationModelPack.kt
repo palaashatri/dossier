@@ -24,9 +24,9 @@ import java.util.concurrent.TimeUnit
  *
  * After successful verification, an app-private marker binds the exact pipeline,
  * hashes, and sizes. Startup status checks validate that marker and file sizes
- * without rehashing the 38 MB SFace model on the Compose UI thread. Explicit
- * installation and integrity-repair paths still perform full SHA-256 checks on
- * Dispatchers.IO.
+ * without rehashing the 38 MB SFace model on the Compose UI thread. Before the
+ * first strong inference in each process, both files are fully rehashed on
+ * Dispatchers.IO; subsequent comparisons reuse that verified process state.
  */
 class FaceCorrelationModelPack(
     context: Context,
@@ -54,6 +54,9 @@ class FaceCorrelationModelPack(
     @Volatile
     private var verifiedReady: Boolean = false
 
+    @Volatile
+    private var fullyVerifiedThisProcess: Boolean = false
+
     /** Fast, UI-safe readiness check after one fully verified installation. */
     fun isReady(): Boolean {
         if (verifiedReady) return true
@@ -80,12 +83,27 @@ class FaceCorrelationModelPack(
         )
     }
 
-    /** Full hash verification for diagnostics or repair, always off the UI thread. */
-    suspend fun reverifyIntegrity(): Boolean = withContext(Dispatchers.IO) {
+    /**
+     * Full hash verification before native inference. This is cached only for the
+     * current process and never runs on the Compose UI thread.
+     */
+    suspend fun verifyForInference(): Boolean = withContext(Dispatchers.IO) {
+        if (fullyVerifiedThisProcess) return@withContext true
         val ready = MODEL_SPECS.all(::verifyInstalledModel)
-        if (ready) writeVerifiedMarker() else verifiedMarker().delete()
+        if (ready) {
+            writeVerifiedMarker()
+        } else {
+            verifiedMarker().delete()
+        }
         verifiedReady = ready
+        fullyVerifiedThisProcess = ready
         ready
+    }
+
+    /** Full hash verification for diagnostics or repair. */
+    suspend fun reverifyIntegrity(): Boolean {
+        fullyVerifiedThisProcess = false
+        return verifyForInference()
     }
 
     suspend fun install(onProgress: suspend (Float) -> Unit = {}): Status =
@@ -121,6 +139,7 @@ class FaceCorrelationModelPack(
                 writeVerifiedMarker()
                 verifiedReady = markerMatchesPinnedPack() &&
                     MODEL_SPECS.all(::installedSizeMatches)
+                fullyVerifiedThisProcess = verifiedReady
                 check(verifiedReady) {
                     "Downloaded face-correlation models failed final verification."
                 }
@@ -128,16 +147,19 @@ class FaceCorrelationModelPack(
                 status()
             } catch (cancelled: CancellationException) {
                 cleanupTemporaryFiles()
+                fullyVerifiedThisProcess = false
                 throw cancelled
             } catch (error: Exception) {
                 cleanupTemporaryFiles()
                 verifiedReady = false
+                fullyVerifiedThisProcess = false
                 throw error
             }
         }
 
     fun delete() {
         verifiedReady = false
+        fullyVerifiedThisProcess = false
         if (directory.exists()) directory.deleteRecursively()
     }
 
