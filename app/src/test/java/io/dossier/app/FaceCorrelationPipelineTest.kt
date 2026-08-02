@@ -4,6 +4,7 @@ import io.dossier.app.data.face.FaceCorrelationCalibrationStore
 import io.dossier.app.data.face.FaceCorrelationDecision
 import io.dossier.app.data.face.FaceCorrelationModelPack
 import io.dossier.app.data.face.FaceCorrelationSessionPolicy
+import io.dossier.app.data.face.FaceCorrelationThresholds
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -60,6 +61,7 @@ class FaceCorrelationPipelineTest {
         assertEquals(FaceCorrelationDecision.MANUAL_REVIEW, parsed.decision(0.50f))
         assertEquals(FaceCorrelationDecision.HIGH_SIMILARITY, parsed.decision(0.70f))
         assertTrue(parsed.summary().contains("held-out pairs"))
+        assertTrue(parsed.summary().contains("FMR"))
     }
 
     @Test
@@ -75,21 +77,43 @@ class FaceCorrelationPipelineTest {
     }
 
     @Test(expected = IllegalArgumentException::class)
-    fun measuredCalibrationRejectsLooserHighFalseMatchRate() {
-        io.dossier.app.data.face.FaceCorrelationThresholds(
-            reviewThreshold = 0.40f,
-            highSimilarityThreshold = 0.60f,
-            source = "invalid",
-            sfaceSha256 = FaceCorrelationModelPack.SFACE.sha256,
-            yunetSha256 = FaceCorrelationModelPack.YUNET.sha256,
-            pipelineVersion = FaceCorrelationModelPack.PIPELINE_VERSION,
+    fun measuredCalibrationRejectsUndersizedHeldOutCorpus() {
+        measuredThresholds(
             positivePairCount = 100,
             negativePairCount = 100,
             reviewFalseMatchRate = 0.01f,
-            highFalseMatchRate = 0.02f,
-            reviewTrueMatchRate = 0.90f,
-            highTrueMatchRate = 0.70f,
-            measured = true
+            highFalseMatchRate = 0.001f
         )
     }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun measuredCalibrationRejectsLooserHighFalseMatchRate() {
+        measuredThresholds(
+            positivePairCount = 500,
+            negativePairCount = 10_000,
+            reviewFalseMatchRate = 0.01f,
+            highFalseMatchRate = 0.02f
+        )
+    }
+
+    private fun measuredThresholds(
+        positivePairCount: Int,
+        negativePairCount: Int,
+        reviewFalseMatchRate: Float,
+        highFalseMatchRate: Float
+    ): FaceCorrelationThresholds = FaceCorrelationThresholds(
+        reviewThreshold = 0.40f,
+        highSimilarityThreshold = 0.60f,
+        source = "test",
+        sfaceSha256 = FaceCorrelationModelPack.SFACE.sha256,
+        yunetSha256 = FaceCorrelationModelPack.YUNET.sha256,
+        pipelineVersion = FaceCorrelationModelPack.PIPELINE_VERSION,
+        positivePairCount = positivePairCount,
+        negativePairCount = negativePairCount,
+        reviewFalseMatchRate = reviewFalseMatchRate,
+        highFalseMatchRate = highFalseMatchRate,
+        reviewTrueMatchRate = 0.90f,
+        highTrueMatchRate = 0.70f,
+        measured = true
+    )
 }
