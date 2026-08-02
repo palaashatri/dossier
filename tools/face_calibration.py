@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Calibrate Dossier's pinned YuNet/SFace face-correlation pipeline.
 
-The input manifest must be consented and identity-disjoint across the
-``calibration`` and ``test`` splits. No dataset is bundled with Dossier.
+The input manifest must contain consented images and identity-disjoint
+``calibration`` and ``test`` splits. No face dataset is bundled with Dossier.
 
 Required CSV columns:
     left,right,left_identity,right_identity,same_person,split
@@ -18,8 +18,8 @@ Example:
       --sface face_recognition_sface_2021dec.onnx \
       --output face-correlation-calibration.json
 
-The emitted JSON is accepted by FaceCorrelationCalibrationStore only when the
-model hashes and pipeline version match the Android implementation exactly.
+The emitted JSON is accepted by FaceCorrelationCalibrationStore only when both
+model hashes and the preprocessing pipeline version match Android exactly.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import cv2
 import numpy as np
@@ -123,18 +123,25 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_model(path: Path, expected_sha: str, expected_size: int, allow_unpinned: bool) -> str:
+def verify_model(
+    path: Path,
+    expected_sha: str,
+    expected_size: int,
+    allow_unpinned: bool,
+) -> str:
     if not path.is_file():
         raise SystemExit(f"Model not found: {path}")
     actual_sha = sha256(path)
     if not allow_unpinned:
         if path.stat().st_size != expected_size:
             raise SystemExit(
-                f"Pinned model size mismatch for {path}: expected {expected_size}, got {path.stat().st_size}"
+                f"Pinned model size mismatch for {path}: "
+                f"expected {expected_size}, got {path.stat().st_size}"
             )
         if actual_sha.lower() != expected_sha:
             raise SystemExit(
-                f"Pinned model SHA-256 mismatch for {path}: expected {expected_sha}, got {actual_sha}"
+                f"Pinned model SHA-256 mismatch for {path}: "
+                f"expected {expected_sha}, got {actual_sha}"
             )
     return actual_sha.lower()
 
@@ -189,8 +196,14 @@ def load_manifest(path: Path, root: Path) -> list[Pair]:
                         right_identity=right_identity,
                         same_person=same_person,
                         split=split,
-                        demographic_group=row.get("demographic_group", "unknown").strip() or "unknown",
-                        device_class=row.get("device_class", "unknown").strip() or "unknown",
+                        demographic_group=(
+                            row.get("demographic_group", "unknown").strip()
+                            or "unknown"
+                        ),
+                        device_class=(
+                            row.get("device_class", "unknown").strip()
+                            or "unknown"
+                        ),
                     )
                 )
             except ValueError as error:
@@ -208,13 +221,15 @@ def assert_identity_disjoint(pairs: Sequence[Pair]) -> None:
     if overlap:
         sample = ", ".join(sorted(overlap)[:10])
         raise SystemExit(
-            "Calibration and test identities overlap. Splits must be identity-disjoint. "
-            f"Examples: {sample}"
+            "Calibration and test identities overlap. Splits must be "
+            f"identity-disjoint. Examples: {sample}"
         )
 
 
 def bounded_read(path: Path) -> np.ndarray:
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+    # Modern OpenCV applies EXIF orientation unless IMREAD_IGNORE_ORIENTATION is
+    # requested. This mirrors Android's explicit ExifInterface correction.
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None or image.size == 0:
         raise FacePreparationError("image could not be decoded")
     height, width = image.shape[:2]
@@ -255,7 +270,11 @@ def select_face(faces: np.ndarray) -> np.ndarray:
     return first.reshape(1, -1)
 
 
-def quality_metrics(face: np.ndarray, aligned: np.ndarray, image: np.ndarray) -> dict[str, float]:
+def quality_metrics(
+    face: np.ndarray,
+    aligned: np.ndarray,
+    image: np.ndarray,
+) -> dict[str, float]:
     values = face.reshape(-1)
     width, height = float(values[2]), float(values[3])
     detector_score = float(values[14])
@@ -263,7 +282,9 @@ def quality_metrics(face: np.ndarray, aligned: np.ndarray, image: np.ndarray) ->
     left_eye = values[6:8].astype(np.float64)
     eye_delta = left_eye - right_eye
     eye_distance = float(np.linalg.norm(eye_delta))
-    roll = float(math.degrees(math.atan2(float(eye_delta[1]), float(eye_delta[0]))))
+    roll = float(
+        math.degrees(math.atan2(float(eye_delta[1]), float(eye_delta[0])))
+    )
     image_height, image_width = image.shape[:2]
     area_ratio = width * height / float(image_width * image_height)
     gray = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
@@ -302,7 +323,12 @@ def quality_metrics(face: np.ndarray, aligned: np.ndarray, image: np.ndarray) ->
 class Pipeline:
     def __init__(self, yunet: Path, sface: Path) -> None:
         self.detector = cv2.FaceDetectorYN.create(
-            str(yunet), "", (320, 320), DETECTION_SCORE_THRESHOLD, NMS_THRESHOLD, TOP_K
+            str(yunet),
+            "",
+            (320, 320),
+            DETECTION_SCORE_THRESHOLD,
+            NMS_THRESHOLD,
+            TOP_K,
         )
         self.recognizer = cv2.FaceRecognizerSF.create(str(sface), "")
         self.cache: dict[Path, PreparedFace | FacePreparationError] = {}
@@ -325,7 +351,10 @@ class Pipeline:
             feature = self.recognizer.feature(aligned)
             if feature is None or feature.size == 0:
                 raise FacePreparationError("SFace embedding failed")
-            prepared = PreparedFace(feature=np.asarray(feature).copy(), quality=quality)
+            prepared = PreparedFace(
+                feature=np.asarray(feature).copy(),
+                quality=quality,
+            )
             self.cache[path] = prepared
             return prepared
         except FacePreparationError as error:
@@ -335,11 +364,18 @@ class Pipeline:
     def score(self, pair: Pair) -> float:
         left = self.prepare(pair.left)
         right = self.prepare(pair.right)
-        value = self.recognizer.match(left.feature, right.feature, cv2.FaceRecognizerSF_FR_COSINE)
+        value = self.recognizer.match(
+            left.feature,
+            right.feature,
+            cv2.FaceRecognizerSF_FR_COSINE,
+        )
         return float(np.clip(value, -1.0, 1.0))
 
 
-def score_pairs(pipeline: Pipeline, pairs: Sequence[Pair]) -> tuple[list[ScoredPair], dict[str, int]]:
+def score_pairs(
+    pipeline: Pipeline,
+    pairs: Sequence[Pair],
+) -> tuple[list[ScoredPair], dict[str, int]]:
     scored: list[ScoredPair] = []
     rejections: dict[str, int] = defaultdict(int)
     for index, pair in enumerate(pairs, start=1):
@@ -348,37 +384,60 @@ def score_pairs(pipeline: Pipeline, pairs: Sequence[Pair]) -> tuple[list[ScoredP
         except FacePreparationError as error:
             rejections[str(error)] += 1
         if index % 100 == 0 or index == len(pairs):
-            print(f"Scored {index}/{len(pairs)} pairs; accepted {len(scored)}", file=sys.stderr)
+            print(
+                f"Scored {index}/{len(pairs)} pairs; accepted {len(scored)}",
+                file=sys.stderr,
+            )
     return scored, dict(sorted(rejections.items()))
 
 
 def rate(scores: Sequence[float], threshold: float) -> float:
-    return sum(score >= threshold for score in scores) / len(scores) if scores else float("nan")
+    return (
+        sum(score >= threshold for score in scores) / len(scores)
+        if scores
+        else float("nan")
+    )
 
 
-def threshold_for_max_fmr(negative_scores: Sequence[float], target: float) -> float:
+def threshold_for_max_fmr(
+    negative_scores: Sequence[float],
+    target: float,
+) -> float:
     if not 0.0 <= target <= 1.0:
         raise SystemExit("FMR targets must be between 0 and 1")
     ordered = sorted(negative_scores, reverse=True)
-    allowed = math.floor(target * len(ordered))
-    if allowed >= len(ordered):
+    allowed_false_matches = math.floor(target * len(ordered))
+    if allowed_false_matches >= len(ordered):
         return -1.0
-    boundary = ordered[allowed]
-    threshold = float(np.nextafter(np.float32(boundary), np.float32(math.inf)))
+    boundary = ordered[allowed_false_matches]
+    threshold = float(
+        np.nextafter(np.float32(boundary), np.float32(math.inf))
+    )
     if threshold > 1.0:
-        raise SystemExit("Requested FMR cannot be achieved by the calibration score distribution")
+        raise SystemExit(
+            "Requested FMR cannot be achieved by the calibration score distribution"
+        )
     return threshold
 
 
-def percentile_interval(values: Sequence[float], confidence: float = 0.95) -> list[float]:
+def percentile_interval(
+    values: Sequence[float],
+    confidence: float = 0.95,
+) -> list[float]:
     if not values:
         return [float("nan"), float("nan")]
     alpha = (1.0 - confidence) / 2.0
-    return [float(np.quantile(values, alpha)), float(np.quantile(values, 1.0 - alpha))]
+    return [
+        float(np.quantile(values, alpha)),
+        float(np.quantile(values, 1.0 - alpha)),
+    ]
 
 
 def bootstrap_rate_interval(
-    scores: Sequence[float], threshold: float, samples: int, seed: int
+    scores: Sequence[float],
+    threshold: float,
+    samples: int,
+    seed: int,
 ) -> list[float]:
     if not scores or samples <= 0:
         return [float("nan"), float("nan")]
@@ -401,24 +460,32 @@ def metric_block(
     bootstrap_samples: int,
     seed: int,
 ) -> dict[str, object]:
-    fmr = rate(negatives, threshold)
-    tmr = rate(positives, threshold)
+    false_match_rate = rate(negatives, threshold)
+    true_match_rate = rate(positives, threshold)
     return {
         "threshold": threshold,
-        "falseMatchRate": fmr,
-        "trueMatchRate": tmr,
-        "falseNonMatchRate": 1.0 - tmr,
+        "falseMatchRate": false_match_rate,
+        "trueMatchRate": true_match_rate,
+        "falseNonMatchRate": 1.0 - true_match_rate,
         "falseMatchRate95Ci": bootstrap_rate_interval(
-            negatives, threshold, bootstrap_samples, seed
+            negatives,
+            threshold,
+            bootstrap_samples,
+            seed,
         ),
         "trueMatchRate95Ci": bootstrap_rate_interval(
-            positives, threshold, bootstrap_samples, seed + 1
+            positives,
+            threshold,
+            bootstrap_samples,
+            seed + 1,
         ),
     }
 
 
 def subgroup_metrics(
-    scored: Sequence[ScoredPair], review_threshold: float, high_threshold: float
+    scored: Sequence[ScoredPair],
+    review_threshold: float,
+    high_threshold: float,
 ) -> dict[str, object]:
     result: dict[str, object] = {}
     for field in ("demographic_group", "device_class"):
@@ -433,7 +500,10 @@ def subgroup_metrics(
                 field_result[name] = {
                     "positivePairs": len(positives),
                     "negativePairs": len(negatives),
-                    "note": "Both positive and negative pairs are required for subgroup rates.",
+                    "note": (
+                        "Both positive and negative pairs are required for "
+                        "subgroup rates."
+                    ),
                 }
                 continue
             field_result[name] = {
@@ -449,14 +519,26 @@ def subgroup_metrics(
 
 
 def require_counts(
-    scored: Sequence[ScoredPair], split: str, min_positive: int, min_negative: int
+    scored: Sequence[ScoredPair],
+    split: str,
+    minimum_positive: int,
+    minimum_negative: int,
 ) -> tuple[list[float], list[float]]:
-    positives = [item.score for item in scored if item.pair.split == split and item.pair.same_person]
-    negatives = [item.score for item in scored if item.pair.split == split and not item.pair.same_person]
-    if len(positives) < min_positive or len(negatives) < min_negative:
+    positives = [
+        item.score
+        for item in scored
+        if item.pair.split == split and item.pair.same_person
+    ]
+    negatives = [
+        item.score
+        for item in scored
+        if item.pair.split == split and not item.pair.same_person
+    ]
+    if len(positives) < minimum_positive or len(negatives) < minimum_negative:
         raise SystemExit(
-            f"{split} split has {len(positives)} positive and {len(negatives)} negative accepted pairs; "
-            f"minimums are {min_positive} and {min_negative}."
+            f"{split} split has {len(positives)} positive and "
+            f"{len(negatives)} negative accepted pairs; minimums are "
+            f"{minimum_positive} and {minimum_negative}."
         )
     return positives, negatives
 
@@ -469,10 +551,16 @@ def main() -> int:
         raise SystemExit("max-rejection-rate must be in [0, 1)")
 
     yunet_sha = verify_model(
-        args.yunet, PINNED_YUNET_SHA256, YUNET_SIZE_BYTES, args.allow_unpinned_models
+        args.yunet,
+        PINNED_YUNET_SHA256,
+        YUNET_SIZE_BYTES,
+        args.allow_unpinned_models,
     )
     sface_sha = verify_model(
-        args.sface, PINNED_SFACE_SHA256, SFACE_SIZE_BYTES, args.allow_unpinned_models
+        args.sface,
+        PINNED_SFACE_SHA256,
+        SFACE_SIZE_BYTES,
+        args.allow_unpinned_models,
     )
     pairs = load_manifest(args.manifest, args.root)
     assert_identity_disjoint(pairs)
@@ -482,8 +570,9 @@ def main() -> int:
     rejection_rate = 1.0 - len(scored) / len(pairs)
     if rejection_rate > args.max_rejection_rate:
         raise SystemExit(
-            f"Quality rejection rate {rejection_rate:.2%} exceeds limit {args.max_rejection_rate:.2%}. "
-            "Improve the corpus or inspect quality gates before calibrating."
+            f"Quality rejection rate {rejection_rate:.2%} exceeds limit "
+            f"{args.max_rejection_rate:.2%}. Improve the corpus or inspect "
+            "quality gates before calibrating."
         )
 
     calibration_positive, calibration_negative = require_counts(
@@ -493,11 +582,20 @@ def main() -> int:
         args.minimum_calibration_negative,
     )
     test_positive, test_negative = require_counts(
-        scored, "test", args.minimum_test_positive, args.minimum_test_negative
+        scored,
+        "test",
+        args.minimum_test_positive,
+        args.minimum_test_negative,
     )
 
-    review_threshold = threshold_for_max_fmr(calibration_negative, args.review_max_fmr)
-    high_threshold = threshold_for_max_fmr(calibration_negative, args.high_max_fmr)
+    review_threshold = threshold_for_max_fmr(
+        calibration_negative,
+        args.review_max_fmr,
+    )
+    high_threshold = threshold_for_max_fmr(
+        calibration_negative,
+        args.high_max_fmr,
+    )
     if high_threshold < review_threshold:
         raise SystemExit("High threshold became looser than review threshold")
 
@@ -556,7 +654,11 @@ def main() -> int:
             "negativePairs": len(test_negative),
             "review": test_review,
             "high": test_high,
-            "subgroups": subgroup_metrics(test_scored, review_threshold, high_threshold),
+            "subgroups": subgroup_metrics(
+                test_scored,
+                review_threshold,
+                high_threshold,
+            ),
         },
         "quality": {
             "inputPairs": len(pairs),
@@ -571,14 +673,23 @@ def main() -> int:
         },
         "notes": [
             "Thresholds were selected only on the calibration split.",
-            "Reported operating characteristics are from identity-disjoint held-out test identities.",
-            "Face correlation remains supporting evidence and does not prove account ownership.",
+            (
+                "Reported operating characteristics are from "
+                "identity-disjoint held-out test identities."
+            ),
+            (
+                "Face correlation remains supporting evidence and does not "
+                "prove account ownership."
+            ),
         ],
     }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     os.replace(temporary, args.output)
 
     print(json.dumps(payload["heldOutTest"], indent=2, sort_keys=True))
