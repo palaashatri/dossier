@@ -1,5 +1,6 @@
 package io.dossier.app.ui.components
 
+import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -11,13 +12,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.airbnb.lottie.compose.LottieAnimation
@@ -27,18 +26,6 @@ import com.airbnb.lottie.compose.rememberLottieComposition
 import io.dossier.app.ui.theme.NeuralTheme
 import kotlinx.coroutines.delay
 
-/**
- * Lottie transition animations for the dossier UI. Four hand-authored minimal
- * amber loops tagged by intent:
- *  - compute     → processing / scan
- *  - investigate → analysis / discovery
- *  - search      → query / lookup
- *  - web         → network / report
- *
- * The JSON assets live in app/src/main/assets/. They're engineer-authored
- * geometric loops (not motion-designer illustrations) — clean, on-theme, and
- * loop seamlessly. Swap the JSON files to upgrade visuals without code changes.
- */
 object LottieTags {
     const val COMPUTE = "compute"
     const val INVESTIGATE = "investigate"
@@ -46,79 +33,77 @@ object LottieTags {
     const val WEB = "web"
 }
 
-/**
- * Plays a Lottie asset forever — for loading/analysis states.
- * @param tag one of [LottieTags]; resolves to "<tag>.json" in assets.
- */
+@Composable
+private fun animationsEnabled(): Boolean {
+    val context = LocalContext.current
+    return remember(context) {
+        Settings.Global.getFloat(
+            context.contentResolver,
+            Settings.Global.ANIMATOR_DURATION_SCALE,
+            1f
+        ) > 0f
+    }
+}
+
+/** Decorative loading animation; hidden from accessibility traversal. */
 @Composable
 fun LottieLoop(
     tag: String,
     modifier: Modifier = Modifier,
     size: Dp = 96.dp
 ) {
-    val composition by rememberLottieComposition(
-        LottieCompositionSpec.Asset("$tag.json")
-    )
+    val enabled = animationsEnabled()
+    val composition by rememberLottieComposition(LottieCompositionSpec.Asset("$tag.json"))
     LottieAnimation(
         composition = composition,
-        iterations = LottieConstants.IterateForever,
-        modifier = modifier.size(size),
-        isPlaying = true
+        iterations = if (enabled) LottieConstants.IterateForever else 1,
+        modifier = modifier.size(size).clearAndSetSemantics { },
+        isPlaying = enabled
     )
 }
 
 /**
- * A full-screen transition overlay that plays a tagged Lottie once, then fades
- * out and calls [onFinished]. Used between screen navigations. Brief (~800ms)
- * so it feels lively without slowing the user down.
- *
- * @param activeTag the tag to play, or null to show nothing.
- * @param onFinished invoked once the one-shot play + fade-out completes.
+ * Brief decorative route transition. It is skipped entirely when Android's
+ * animator scale is disabled and otherwise never blocks the task for 850ms.
  */
 @Composable
 fun LottieTransitionOverlay(
     activeTag: String?,
     onFinished: () -> Unit
 ) {
+    val enabled = animationsEnabled()
+
+    LaunchedEffect(activeTag, enabled) {
+        if (activeTag != null) {
+            if (enabled) delay(360)
+            onFinished()
+        }
+    }
+
     AnimatedVisibility(
-        visible = activeTag != null,
-        enter = fadeIn(animationSpec = tween(150)),
-        exit = fadeOut(animationSpec = tween(300))
+        visible = activeTag != null && enabled,
+        enter = fadeIn(animationSpec = tween(90)),
+        exit = fadeOut(animationSpec = tween(140))
     ) {
-        if (activeTag == null) return@AnimatedVisibility
-
-        val composition by rememberLottieComposition(
-            LottieCompositionSpec.Asset("$activeTag.json")
-        )
-        var hasPlayed by remember(activeTag) { mutableStateOf(false) }
-
+        val tag = activeTag ?: return@AnimatedVisibility
+        val composition by rememberLottieComposition(LottieCompositionSpec.Asset("$tag.json"))
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(NeuralTheme.BackgroundStart.copy(alpha = 0.92f)),
+                .background(NeuralTheme.BackgroundStart.copy(alpha = 0.9f))
+                .clearAndSetSemantics { },
             contentAlignment = Alignment.Center
         ) {
             LottieAnimation(
                 composition = composition,
                 iterations = 1,
                 isPlaying = true,
-                modifier = Modifier.size(160.dp)
+                modifier = Modifier.size(140.dp)
             )
-        }
-
-        // One-shot: after a brief play window, signal completion.
-        LaunchedEffect(activeTag) {
-            delay(850)
-            hasPlayed = true
-            onFinished()
         }
     }
 }
 
-/**
- * Picks a transition tag for a given destination route. Returns null for routes
- * that shouldn't trigger a transition overlay.
- */
 fun transitionTagForRoute(route: String?): String? = when (route) {
     "identity" -> LottieTags.SEARCH
     "username_discovery" -> LottieTags.INVESTIGATE
