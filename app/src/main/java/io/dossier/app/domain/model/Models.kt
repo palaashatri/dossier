@@ -138,13 +138,12 @@ data class PlaceScanResult(
 )
 
 /**
- * Result of a Reverse Image Lookup — estimates *where* an image was likely taken
- * using EXIF GPS, on-device vision (OCR + scene labels), and public-web search
- * of the extracted text/landmark clues.
+ * Reverse Image Lookup result.
  *
- * IMPORTANT (AGENTS.md): this is location-only. Faces trigger the safety gate —
- * identity search is skipped, but location lookup continues. Image bytes never
- * leave the device; only text/label *clues* are searched on the public web.
+ * Location signals come from EXIF, OCR, labels, and public-web clue search. In
+ * addition, Dossier can download public candidate images and perform local
+ * whole-image near-duplicate matching using perceptual fingerprints. The query
+ * image never leaves the device and no facial identification is performed.
  */
 @Serializable
 data class ReverseImageLookupResult(
@@ -155,13 +154,26 @@ data class ReverseImageLookupResult(
     val faceWarning: String?,
     val resolvedLocation: String?,
     val mapsUrl: String?,
-    val webEvidence: List<WebEvidence>
+    val webEvidence: List<WebEvidence>,
+    val visualMatches: List<VisualMatch> = emptyList(),
+    val visualSearchNote: String? = null
 ) {
     @Serializable
     data class ImageLabel(val text: String, val confidence: Float)
 
     @Serializable
     data class WebEvidence(val title: String, val snippet: String, val url: String)
+
+    @Serializable
+    data class VisualMatch(
+        val title: String,
+        val imageUrl: String,
+        val sourcePageUrl: String,
+        val source: String,
+        val similarity: Float,
+        val matchType: String,
+        val evidence: String
+    )
 }
 
 /**
