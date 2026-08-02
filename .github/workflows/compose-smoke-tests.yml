@@ -60,7 +60,8 @@ jobs:
             -noaudio
             -no-boot-anim
             -camera-back none
-          script: ./gradlew connectedDebugAndroidTest --stacktrace --no-daemon
+            -no-metrics
+          script: ./gradlew connectedUiTestAndroidTest --stacktrace --no-daemon
 
       - name: Upload instrumentation reports
         if: always()
