@@ -43,9 +43,8 @@ remaining reliability boundaries honestly.
 | 14 | Scan Comparison | Done | case diff UI |
 | 15 | Plugin SDK | Done (core) | plugin contracts and registry |
 | 16 | Performance/Lifecycle | Done (core) | bounded work, cancellation routing, resume, memory guard |
-| 17 | Android UX | Done | main tabs and nested dossier workflow |
+| 17 | Android UX | Done (core) | task-oriented navigation, responsive setup, report views, accessible semantics |
 | 18 | Evidence Export | Done (core) | PDF plus machine-readable JSON hash manifest |
-| 19 | Strong Face Correlation | Implemented; measurement pending | verified YuNet/SFace pack, five-landmark alignment, quality gates, calibration CLI |
 
 ## Post-hardening audit status
 
@@ -59,10 +58,10 @@ original functionality audit:
   profile is currently active.
 - Real local whole-image near-duplicate matching using SHA-256, pHash, dHash,
   aHash, colour histograms, and crop variants.
-- Strong cross-photo correlation through a pinned OpenCV YuNet/SFace pipeline,
-  while the built-in appearance descriptor remains available for basic
-  photo-reuse matching. Reference thresholds are deliberately prevented from
-  affecting formal risk until a matching measured calibration is imported.
+- Measured-ready YuNet/SFace cross-photo face correlation with pinned models,
+  five-landmark alignment, quality gates, explicit per-scan consent, and a
+  reproducible identity-disjoint calibration tool. Reference thresholds remain
+  manual-review evidence until a matching measured calibration is imported.
 - Attribution-aware PII scoring: exact self-supplied identifiers may be high
   confidence; unrelated regex hits remain low-confidence review evidence.
 - No fabricated `Demo Subject`. Missing input is an explicit navigation error,
@@ -85,6 +84,69 @@ archived, login-gated, absent from every index, or blocked by a source. It would
 also require a sufficiently large labelled corpus, multiple devices and regions,
 longitudinal source-health data, and calibrated performance thresholds.
 
+## UI/UX hardening status
+
+A source-level UI/UX audit was completed across onboarding, top-level navigation,
+identity setup, scanning, reports, saved cases, breach checks, evidence browsing,
+relationship graphs, shared controls, permissions, motion, and export language.
+
+Implemented improvements:
+
+- Consent now distinguishes public-network discovery, optional HIBP/remote AI,
+  local visual processing, resumable input, encrypted saved cases, and exports.
+- Consent is removed from the navigation back stack after acceptance.
+- The bottom navigation is hidden during an active scan so changing tabs cannot
+  dispose and accidentally restart the scan route.
+- Identity setup uses saveable state, narrow-screen-safe actions, multiline
+  inputs, email/URL validation, removable reference photos, and accessible step
+  semantics.
+- Deep Research is presented as an optional bounded public-link expansion with
+  explicit latency and network-request implications.
+- Breach input preserves exact password whitespace, reports invalid emails,
+  clears plaintext password state before network work, and supports cancellation.
+- Saved cases have explicit older/newer roles, correct risk-delta semantics, and
+  confirmed permanent deletion.
+- The report is divided into Overview, Evidence, Connections, and Actions. Risk
+  and attribution confidence are visually and verbally separate; empty results
+  no longer imply a clean bill of privacy.
+- The relationship graph is normalised into positive coordinates, scrollable in
+  two directions, and accompanied by a complete text-list alternative.
+- Evidence browsing defaults to a restricted WebView: HTTP(S) only, JavaScript
+  and persistent page storage off, no file/content access, no mixed content,
+  history-aware Back, and deterministic destruction.
+- Light/dark semantic colours have stronger contrast and filled accent controls
+  use an explicit foreground colour.
+- Decorative route transitions respect Android's disabled-animation setting and
+  no longer block navigation for an extended interval.
+- Broad media-library permissions were removed in favour of Android's system
+  Photo Picker. Camera cancellation cleans up temporary files.
+- A branded adaptive launcher icon replaces the generic Android application icon.
+- PDF/plain-text exports use calm privacy-audit terminology rather than
+  theatrical classifications such as “confidential threat dossier.”
+
+Remaining validation work before claiming a 9.5–10/10 UI/UX score:
+
+1. Capture rendered screenshots on the target Samsung S25 and at least one small
+   and one large Android viewport.
+2. Test 100%, 130%, 160%, and 200% font scaling and display-size settings.
+3. Run TalkBack traversal, switch access, keyboard navigation, and Android
+   automated accessibility checks on every primary flow.
+4. Measure contrast against rendered backgrounds, including disabled states.
+5. Test process death, rotation, low-memory recreation, external-browser return,
+   camera cancellation, and system Photo Picker fallback behavior.
+6. Add Compose instrumentation/screenshot regression tests for onboarding,
+   identity setup, scan consent, report tabs, breach errors, cases, and graph
+   list mode.
+7. Perform real-user usability testing for terminology, evidence interpretation,
+   and remediation comprehension.
+8. Consolidate the remaining legacy engine-management and reverse-media screens
+   into the calmer design language and remove obsolete/orphaned UI code.
+9. Move remaining user-visible strings into Android resources and add
+   localization and RTL validation.
+
+The current source architecture is substantially stronger, but source inspection
+and a successful APK build are not substitutes for rendered-device visual QA.
+
 ## Historical archive scope
 
 The shipping archive path is intentionally bounded:
@@ -102,99 +164,58 @@ A future fallback may use Common Crawl's exact-URL index when Wayback has no
 capture. Archive.today and similar services must not become automated
 requirements without stable documented APIs and acceptable operating terms.
 
-## Strong cross-photo face correlation
+## Calibrated face-correlation implementation
 
-The strong local pipeline is now implemented. It is separate from whole-image
-reverse search and from the basic appearance descriptor used for detecting reuse
-of the same or a near-duplicate photograph.
+The strong local pipeline now uses the official OpenCV Zoo YuNet detector and
+SFace recognizer through Android's OpenCV bindings.
 
-### Implemented model and inference path
+Shipping implementation:
 
-- Official OpenCV Android runtime.
-- OpenCV Zoo YuNet 2023mar detector, pinned by exact SHA-256 and byte length.
-- OpenCV Zoo SFace 2021dec recognizer, pinned by exact SHA-256 and byte length.
-- Explicit user-triggered download; no silent model fetch.
-- Temporary-file download, filesystem sync, checksum verification, and atomic
-  installation.
-- EXIF orientation correction and bounded image decoding.
-- YuNet face detection with five landmarks.
-- Rejection of ambiguous group photos and low-confidence detections.
-- Face-size, image-area, landmark-distance, roll, exposure, and blur gates.
-- OpenCV `FaceRecognizerSF.alignCrop` before SFace feature extraction.
-- Cosine comparison through the exact OpenCV recognizer API.
-- One mutex-protected detector/recognizer runtime per scan service rather than
-  reopening the 38 MB recognizer for every profile image.
-- Immediate release of image matrices, aligned crops, landmarks, and embeddings.
-- Built-in basic appearance matching retained as a non-biometric fallback.
+- checksum- and size-pinned YuNet/SFace model pack;
+- explicit install consent plus a separate per-scan execution choice;
+- OpenCV decode, EXIF correction, bounded resize, YuNet detection, ambiguity
+  rejection, quality gates, five-landmark `alignCrop`, SFace embeddings, and
+  cosine scoring;
+- full off-thread hash verification before the first strong inference in each
+  process;
+- reference thresholds that remain manual-review only;
+- imported measured calibration bound to both hashes and the pipeline version;
+- minimum held-out corpus sizes and FMR/TMR checks before measured scores may
+  influence formal findings;
+- transient matrices, crops, landmarks, and embeddings released after use;
+- a pinned Python/OpenCV calibration environment validated in CI.
 
-### Consent and user control
+The remaining gap is empirical measurement, not missing application code.
 
-- Every scan containing a selfie asks the user to choose strong local
-  correlation or basic photo-reuse matching.
-- Installation consent and per-scan execution choice are separate.
-- Strong mode cannot carry silently into a later scan; the in-memory policy is
-  reset on completion, cancellation, invalid input, and installation failure.
-- Models, imported calibration, and stored consent can be deleted together.
-- No selected image, crop, landmark, or embedding is uploaded.
-- Reports continue to describe face similarity as supporting evidence, never
-  proof of ownership or identity.
+### Calibration and benchmark requirements
 
-### Threshold policy
-
-Dossier ships a clearly labelled reference policy so the installed pipeline can
-return manual-review information:
-
-- `MANUAL_REVIEW` begins at the OpenCV reference cosine operating point.
-- `HIGH_SIMILARITY` uses a stricter conservative reference threshold.
-- Reference-policy scores are visible but cannot produce formal risk findings.
-- Only a measured calibration bound to both exact model hashes and the exact
-  pipeline version may affect risk scoring.
-
-This prevents a copied benchmark threshold from being presented as measured
-Dossier performance.
-
-### Reproducible calibration tooling
-
-`tools/face_calibration.py` runs the same YuNet → five-landmark alignment →
-SFace pipeline over a private consented manifest. It:
-
-1. Verifies the two pinned model hashes and sizes.
-2. Applies EXIF-aware decoding and the same image-size and quality gates.
-3. Rejects identity overlap between calibration and test splits.
-4. Requires minimum positive and negative pair counts.
-5. Selects review and high thresholds only on the calibration split.
-6. Measures false-match, true-match, and false-non-match rates on untouched test
-   identities.
-7. Produces bootstrap confidence intervals.
-8. Reports demographic-group and device-class slices when supplied.
-9. Emits the hash-bound JSON accepted by the Android application.
-
-CI syntax-checks this tool and unit-tests the model pins, calibration contract,
-threshold ordering, and per-scan policy.
-
-### Remaining measurement work
-
-The implementation is complete, but a measured 9.5-level claim still requires a
-consented corpus that cannot be manufactured from the repository itself:
-
-- Identity-disjoint development, calibration, and locked test identities.
-- Same-person pairs across age, pose, lighting, compression, screenshots,
+- Split data by identity into development, calibration, and untouched test sets.
+- Include same-person pairs across age, pose, lighting, compression, screenshots,
   glasses, facial hair, low-resolution avatars, and different phones.
-- Hard negatives involving similar-looking unrelated people, consented relatives,
-  and profile-context collisions.
-- Strong Indian representation plus balanced demographic and device strata.
-- Enough independent negative comparisons to measure the selected high-band
-  false-match target with useful confidence.
-- Real-device latency, memory, battery, and thermal tests on multiple Android
-  devices.
-- Review of subgroup disparities before publishing a measured calibration.
+- Include hard negative pairs with similar appearance, relatives where consented,
+  and same-name/profile-context collisions.
+- Evaluate standard public benchmarks through download-only harnesses without
+  redistributing restricted datasets.
+- Add a consented mobile dataset with strong Indian representation and balanced
+  demographic/device strata.
+- Report ROC/DET curves, false-match rate, false-non-match rate, equal-error
+  rate, true-accept rate at fixed false-accept rates, subgroup results, and
+  bootstrap confidence intervals.
+- Establish separate `NO_SUPPORT`, `MANUAL_REVIEW`, and `HIGH_SIMILARITY` bands.
+  No threshold may produce an automatic ownership conclusion.
+- A 9.5-level claim requires a locked held-out benchmark large enough to measure
+  the chosen false-match target, real-device performance and thermal tests, and
+  independently reproducible results.
 
-Until such a corpus is evaluated, the correct status is:
+### Consent and retention controls
 
-> **Strong YuNet/SFace implementation available; reference policy only.**
->
-> It becomes **measured strong correlation** only after a matching held-out
-> calibration file is imported.
+- Explicit opt-in before face comparison.
+- On-device inference by default; never upload face crops or embeddings silently.
+- Delete transient crops and embeddings after the scan unless the user explicitly
+  saves a case that includes them.
+- Never contribute query embeddings to a shared or self-hosted visual index.
+- Provide model/version disclosure, limitations, deletion controls, and a clear
+  manual-review requirement in the UI and exports.
 
 ## Current reverse-image scope
 
