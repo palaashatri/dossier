@@ -3,6 +3,7 @@ package io.dossier.app
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
@@ -103,7 +104,10 @@ class DossierComposeSmokeTest {
 
     private fun openTab(label: String) {
         composeRule
-            .onNode(hasText(label) and hasClickAction())
+            .onNode(
+                matcher = hasAnyDescendant(hasText(label)) and hasClickAction(),
+                useUnmergedTree = true
+            )
             .performClick()
     }
 
