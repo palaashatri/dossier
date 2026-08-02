@@ -11,13 +11,12 @@ permissions:
 jobs:
   canaries:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     continue-on-error: true
     steps:
-      - name: Probe structured public sources
+      - name: Probe structured and public search sources
         shell: python
         run: |
-          import json
           import os
           import urllib.error
           import urllib.request
@@ -31,6 +30,13 @@ jobs:
               ("DEV found", "https://dev.to/api/users/by_username?url=ben", {200}),
               ("GitLab found", "https://gitlab.com/api/v4/users?username=gitlab-bot", {200}),
               ("Mastodon WebFinger", "https://mastodon.social/.well-known/webfinger?resource=acct:Gargron@mastodon.social", {200}),
+              ("DuckDuckGo HTML", "https://html.duckduckgo.com/html/?q=example", {200}),
+              ("Bing Search", "https://www.bing.com/search?q=example&count=10", {200}),
+              ("Yandex Search", "https://yandex.com/search/?text=example&noreask=1", {200}),
+              ("Brave Search", "https://search.brave.com/search?q=example&source=web", {200}),
+              ("Mojeek Search", "https://www.mojeek.com/search?q=example", {200}),
+              ("Qwant Search", "https://www.qwant.com/?q=example&t=web", {200}),
+              ("Yandex Images", "https://yandex.com/images/search?text=example&noreask=1", {200}),
           ]
 
           rows = []
@@ -40,7 +46,7 @@ jobs:
                   url,
                   headers={
                       "User-Agent": "Dossier discovery canary (+https://github.com/palaashatri/dossier)",
-                      "Accept": "application/json, application/activity+json, */*;q=0.5",
+                      "Accept": "text/html, application/json, application/activity+json, */*;q=0.5",
                   },
               )
               try:
@@ -63,7 +69,7 @@ jobs:
                   output.write(f"| {name} | {status} | {expected} | {'yes' if ok else 'no'} |\n")
               output.write(f"\nHealthy sources: **{healthy}/{len(probes)}**\n")
 
-          # Alert through the workflow result only when most independent sources fail.
-          # Individual source drift is reported without making normal development flaky.
-          if healthy < 4:
-              raise SystemExit("A majority of structured discovery sources are unhealthy")
+          # Search engines commonly challenge cloud datacentres. Record individual
+          # drift, but fail only if a majority of all independent surfaces disappear.
+          if healthy * 2 < len(probes):
+              raise SystemExit("A majority of discovery sources are unhealthy")
