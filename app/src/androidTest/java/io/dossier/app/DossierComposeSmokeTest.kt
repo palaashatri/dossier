@@ -4,8 +4,8 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasClickAction
-import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -103,7 +103,7 @@ class DossierComposeSmokeTest {
 
     private fun openTab(label: String) {
         composeRule
-            .onNode(hasContentDescription(label) and hasClickAction())
+            .onNode(hasText(label) and hasClickAction())
             .performClick()
     }
 
