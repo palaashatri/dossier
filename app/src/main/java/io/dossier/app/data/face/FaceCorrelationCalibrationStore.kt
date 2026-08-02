@@ -42,8 +42,12 @@ data class FaceCorrelationThresholds(
         require(sfaceSha256.matches(Regex("[a-fA-F0-9]{64}")))
         require(yunetSha256.matches(Regex("[a-fA-F0-9]{64}")))
         if (measured) {
-            require(positivePairCount > 0)
-            require(negativePairCount > 0)
+            require(positivePairCount >= MIN_MEASURED_POSITIVE_PAIRS) {
+                "Measured calibration requires at least $MIN_MEASURED_POSITIVE_PAIRS held-out positive pairs."
+            }
+            require(negativePairCount >= MIN_MEASURED_NEGATIVE_PAIRS) {
+                "Measured calibration requires at least $MIN_MEASURED_NEGATIVE_PAIRS held-out negative pairs."
+            }
             require(reviewFalseMatchRate != null && reviewFalseMatchRate in 0f..1f)
             require(highFalseMatchRate != null && highFalseMatchRate in 0f..1f)
             require(reviewTrueMatchRate != null && reviewTrueMatchRate in 0f..1f)
@@ -61,13 +65,21 @@ data class FaceCorrelationThresholds(
 
     fun summary(): String = if (measured) {
         "Measured calibration: review >= ${format(reviewThreshold)}, high >= ${format(highSimilarityThreshold)}; " +
-            "$positivePairCount positive and $negativePairCount negative held-out pairs."
+            "$positivePairCount positive and $negativePairCount negative held-out pairs; " +
+            "high-band FMR ${formatRate(highFalseMatchRate)}."
     } else {
         "Reference policy: review >= ${format(reviewThreshold)}, high >= ${format(highSimilarityThreshold)}. " +
             "The high band is conservative but not yet Dossier-benchmarked."
     }
 
     private fun format(value: Float): String = "%.3f".format(value)
+    private fun formatRate(value: Float?): String =
+        value?.let { "%.5f%%".format(it * 100f) } ?: "unknown"
+
+    companion object {
+        const val MIN_MEASURED_POSITIVE_PAIRS = 500
+        const val MIN_MEASURED_NEGATIVE_PAIRS = 10_000
+    }
 }
 
 object FaceCorrelationDecision {
