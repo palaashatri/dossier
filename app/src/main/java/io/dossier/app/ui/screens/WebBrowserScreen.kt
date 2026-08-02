@@ -27,8 +27,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -37,6 +35,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -154,16 +153,6 @@ fun WebBrowserScreen(url: String, onBack: () -> Unit) {
             }
 
             IconButton(
-                onClick = ::copyCurrentUrl,
-                enabled = currentUrl.isNotBlank()
-            ) {
-                Icon(
-                    imageVector = Icons.Default.ContentCopy,
-                    contentDescription = "Copy evidence URL",
-                    tint = NeuralTheme.TextPrimary
-                )
-            }
-            IconButton(
                 onClick = { webViewInstance?.reload() },
                 enabled = initialUrl != null
             ) {
@@ -173,15 +162,17 @@ fun WebBrowserScreen(url: String, onBack: () -> Unit) {
                     tint = NeuralTheme.TextPrimary
                 )
             }
-            IconButton(
+            TextButton(
+                onClick = ::copyCurrentUrl,
+                enabled = currentUrl.isNotBlank()
+            ) {
+                Text("Copy", fontSize = 11.sp)
+            }
+            TextButton(
                 onClick = ::openExternally,
                 enabled = currentUrl.isNotBlank()
             ) {
-                Icon(
-                    imageVector = Icons.Default.OpenInNew,
-                    contentDescription = "Open in external browser",
-                    tint = NeuralTheme.TextPrimary
-                )
+                Text("Open", fontSize = 11.sp)
             }
         }
 
@@ -347,9 +338,10 @@ fun WebBrowserScreen(url: String, onBack: () -> Unit) {
 
 private fun isAllowedWebUrl(value: String): Boolean = runCatching {
     val parsed = Uri.parse(value)
-    parsed.scheme.equals("https", ignoreCase = true) ||
-        parsed.scheme.equals("http", ignoreCase = true)
-}.getOrDefault(false) && Uri.parse(value).host?.isNotBlank() == true
+    (parsed.scheme.equals("https", ignoreCase = true) ||
+        parsed.scheme.equals("http", ignoreCase = true)) &&
+        !parsed.host.isNullOrBlank()
+}.getOrDefault(false)
 
 private fun String.toDisplayHost(): String = runCatching {
     Uri.parse(this).host.orEmpty().removePrefix("www.")
