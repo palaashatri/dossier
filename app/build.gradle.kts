@@ -107,6 +107,10 @@ dependencies {
 
     // ML Kit & Face
     implementation("com.google.mlkit:face-detection:16.1.7")
+    implementation("androidx.exifinterface:exifinterface:1.4.2")
+    // Official OpenCV Android AAR. Used for the reference YuNet five-landmark
+    // detector and SFace alignCrop/embedding pipeline.
+    implementation("org.opencv:opencv:4.13.0")
     // On-device vision for Reverse Image Lookup: real OCR + scene labeling.
     // These ship their models via Google Play Services — genuinely offline,
     // no manual download, AGENTS.md-compliant (no cloud, no image upload).
