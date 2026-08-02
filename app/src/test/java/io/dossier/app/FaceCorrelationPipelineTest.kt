@@ -3,6 +3,7 @@ package io.dossier.app
 import io.dossier.app.data.face.FaceCorrelationCalibrationStore
 import io.dossier.app.data.face.FaceCorrelationDecision
 import io.dossier.app.data.face.FaceCorrelationModelPack
+import io.dossier.app.data.face.FaceCorrelationSessionPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -59,6 +60,18 @@ class FaceCorrelationPipelineTest {
         assertEquals(FaceCorrelationDecision.MANUAL_REVIEW, parsed.decision(0.50f))
         assertEquals(FaceCorrelationDecision.HIGH_SIMILARITY, parsed.decision(0.70f))
         assertTrue(parsed.summary().contains("held-out pairs"))
+    }
+
+    @Test
+    fun perScanPolicyDoesNotPersistStrongModeAfterReset() {
+        FaceCorrelationSessionPolicy.useBasicMatching()
+        assertFalse(FaceCorrelationSessionPolicy.isStrongCorrelationEnabled())
+
+        FaceCorrelationSessionPolicy.useStrongCorrelation()
+        assertTrue(FaceCorrelationSessionPolicy.isStrongCorrelationEnabled())
+
+        FaceCorrelationSessionPolicy.useBasicMatching()
+        assertFalse(FaceCorrelationSessionPolicy.isStrongCorrelationEnabled())
     }
 
     @Test(expected = IllegalArgumentException::class)
