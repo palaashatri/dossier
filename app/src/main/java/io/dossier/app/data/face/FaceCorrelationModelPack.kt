@@ -21,6 +21,12 @@ import java.util.concurrent.TimeUnit
  * content-pinned by its Git LFS SHA-256 OID and exact byte length, written to a
  * temporary file, fsynced, verified, and atomically promoted. A compromised or
  * changed download is rejected before OpenCV can load it.
+ *
+ * After successful verification, an app-private marker binds the exact pipeline,
+ * hashes, and sizes. Startup status checks validate that marker and file sizes
+ * without rehashing the 38 MB SFace model on the Compose UI thread. Explicit
+ * installation and integrity-repair paths still perform full SHA-256 checks on
+ * Dispatchers.IO.
  */
 class FaceCorrelationModelPack(
     context: Context,
@@ -48,15 +54,18 @@ class FaceCorrelationModelPack(
     @Volatile
     private var verifiedReady: Boolean = false
 
+    /** Fast, UI-safe readiness check after one fully verified installation. */
     fun isReady(): Boolean {
         if (verifiedReady) return true
-        val ready = MODEL_SPECS.all(::verifyInstalledModel)
+        val ready = markerMatchesPinnedPack() && MODEL_SPECS.all(::installedSizeMatches)
         verifiedReady = ready
         return ready
     }
 
     fun status(): Status {
-        val installedBytes = MODEL_SPECS.sumOf { spec -> modelFile(spec).takeIf(File::exists)?.length() ?: 0L }
+        val installedBytes = MODEL_SPECS.sumOf { spec ->
+            modelFile(spec).takeIf(File::exists)?.length() ?: 0L
+        }
         val ready = isReady()
         return Status(
             ready = ready,
@@ -71,42 +80,61 @@ class FaceCorrelationModelPack(
         )
     }
 
-    suspend fun install(onProgress: suspend (Float) -> Unit = {}): Status = withContext(Dispatchers.IO) {
-        if (isReady()) {
-            onProgress(1f)
-            return@withContext status()
-        }
-
-        directory.mkdirs()
-        require(directory.isDirectory) { "Unable to create face-correlation model directory." }
-
-        var completedBytes = 0L
-        try {
-            for (spec in MODEL_SPECS) {
-                currentCoroutineContext().ensureActive()
-                val target = modelFile(spec)
-                if (verifyInstalledModel(spec)) {
-                    completedBytes += spec.sizeBytes
-                    onProgress(completedBytes.toFloat() / EXPECTED_PACK_BYTES.toFloat())
-                    continue
-                }
-                downloadAndVerify(spec, target, completedBytes, onProgress)
-                completedBytes += spec.sizeBytes
-            }
-            writeVerifiedMarker()
-            verifiedReady = MODEL_SPECS.all(::verifyInstalledModel)
-            check(verifiedReady) { "Downloaded face-correlation models failed final verification." }
-            onProgress(1f)
-            status()
-        } catch (cancelled: CancellationException) {
-            cleanupTemporaryFiles()
-            throw cancelled
-        } catch (error: Exception) {
-            cleanupTemporaryFiles()
-            verifiedReady = false
-            throw error
-        }
+    /** Full hash verification for diagnostics or repair, always off the UI thread. */
+    suspend fun reverifyIntegrity(): Boolean = withContext(Dispatchers.IO) {
+        val ready = MODEL_SPECS.all(::verifyInstalledModel)
+        if (ready) writeVerifiedMarker() else verifiedMarker().delete()
+        verifiedReady = ready
+        ready
     }
+
+    suspend fun install(onProgress: suspend (Float) -> Unit = {}): Status =
+        withContext(Dispatchers.IO) {
+            if (isReady()) {
+                onProgress(1f)
+                return@withContext status()
+            }
+
+            directory.mkdirs()
+            require(directory.isDirectory) {
+                "Unable to create face-correlation model directory."
+            }
+
+            var completedBytes = 0L
+            try {
+                for (spec in MODEL_SPECS) {
+                    currentCoroutineContext().ensureActive()
+                    val target = modelFile(spec)
+                    if (verifyInstalledModel(spec)) {
+                        completedBytes += spec.sizeBytes
+                        onProgress(
+                            completedBytes.toFloat() / EXPECTED_PACK_BYTES.toFloat()
+                        )
+                        continue
+                    }
+                    downloadAndVerify(spec, target, completedBytes, onProgress)
+                    completedBytes += spec.sizeBytes
+                }
+
+                // Every file was hash-verified either immediately above or while
+                // downloading. Persist the exact verified pack identity.
+                writeVerifiedMarker()
+                verifiedReady = markerMatchesPinnedPack() &&
+                    MODEL_SPECS.all(::installedSizeMatches)
+                check(verifiedReady) {
+                    "Downloaded face-correlation models failed final verification."
+                }
+                onProgress(1f)
+                status()
+            } catch (cancelled: CancellationException) {
+                cleanupTemporaryFiles()
+                throw cancelled
+            } catch (error: Exception) {
+                cleanupTemporaryFiles()
+                verifiedReady = false
+                throw error
+            }
+        }
 
     fun delete() {
         verifiedReady = false
@@ -118,7 +146,9 @@ class FaceCorrelationModelPack(
     fun sfaceModelFile(): File = requireModel(SFACE)
 
     private fun requireModel(spec: ModelSpec): File {
-        check(isReady()) { "YuNet/SFace model pack is not installed or failed integrity verification." }
+        check(isReady()) {
+            "YuNet/SFace model pack is not installed or failed integrity verification."
+        }
         return modelFile(spec)
     }
 
@@ -141,7 +171,8 @@ class FaceCorrelationModelPack(
                 check(response.isSuccessful) {
                     "${spec.id} download failed with HTTP ${response.code}."
                 }
-                val body = response.body ?: error("${spec.id} download returned an empty body.")
+                val body = response.body
+                    ?: error("${spec.id} download returned an empty body.")
                 val advertisedLength = body.contentLength()
                 if (advertisedLength >= 0L) {
                     check(advertisedLength == spec.sizeBytes) {
@@ -169,7 +200,8 @@ class FaceCorrelationModelPack(
                             if (written - lastProgressBytes >= PROGRESS_STEP_BYTES) {
                                 lastProgressBytes = written
                                 onProgress(
-                                    ((completedBytes + written).toDouble() / EXPECTED_PACK_BYTES.toDouble())
+                                    ((completedBytes + written).toDouble() /
+                                        EXPECTED_PACK_BYTES.toDouble())
                                         .toFloat()
                                         .coerceIn(0f, 1f)
                                 )
@@ -199,32 +231,56 @@ class FaceCorrelationModelPack(
         }
     }
 
+    private fun installedSizeMatches(spec: ModelSpec): Boolean {
+        val file = modelFile(spec)
+        return file.isFile && file.length() == spec.sizeBytes
+    }
+
     private fun verifyInstalledModel(spec: ModelSpec): Boolean {
         val file = modelFile(spec)
-        if (!file.isFile || file.length() != spec.sizeBytes) return false
-        return runCatching { file.sha256().equals(spec.sha256, ignoreCase = true) }.getOrDefault(false)
+        if (!installedSizeMatches(spec)) return false
+        return runCatching {
+            file.sha256().equals(spec.sha256, ignoreCase = true)
+        }.getOrDefault(false)
     }
 
     private fun modelFile(spec: ModelSpec): File = File(directory, spec.fileName)
 
-    private fun writeVerifiedMarker() {
-        val marker = File(directory, VERIFIED_MARKER_FILE)
-        val temp = File(directory, "$VERIFIED_MARKER_FILE.tmp")
-        val content = buildString {
-            appendLine(PIPELINE_VERSION)
-            MODEL_SPECS.forEach { appendLine("${it.id}:${it.sha256}:${it.sizeBytes}") }
+    private fun verifiedMarker(): File = File(directory, VERIFIED_MARKER_FILE)
+
+    private fun markerMatchesPinnedPack(): Boolean {
+        val marker = verifiedMarker()
+        if (!marker.isFile) return false
+        return runCatching {
+            marker.readText(Charsets.UTF_8) == verifiedMarkerContent()
+        }.getOrDefault(false)
+    }
+
+    private fun verifiedMarkerContent(): String = buildString {
+        appendLine(PIPELINE_VERSION)
+        MODEL_SPECS.forEach {
+            appendLine("${it.id}:${it.sha256}:${it.sizeBytes}")
         }
+    }
+
+    private fun writeVerifiedMarker() {
+        val marker = verifiedMarker()
+        val temp = File(directory, "$VERIFIED_MARKER_FILE.tmp")
         FileOutputStream(temp).use { output ->
-            output.write(content.toByteArray(Charsets.UTF_8))
+            output.write(verifiedMarkerContent().toByteArray(Charsets.UTF_8))
             output.fd.sync()
         }
         if (marker.exists()) marker.delete()
-        check(temp.renameTo(marker)) { "Unable to store face-model verification marker." }
+        check(temp.renameTo(marker)) {
+            "Unable to store face-model verification marker."
+        }
     }
 
     private fun cleanupTemporaryFiles() {
         directory.listFiles()
-            ?.filter { it.name.endsWith(".download") || it.name.endsWith(".tmp") }
+            ?.filter {
+                it.name.endsWith(".download") || it.name.endsWith(".tmp")
+            }
             ?.forEach(File::delete)
     }
 
@@ -285,4 +341,5 @@ internal fun File.sha256(): String {
     return digest.digest().toHex()
 }
 
-private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte) }
+private fun ByteArray.toHex(): String =
+    joinToString("") { byte -> "%02x".format(byte) }
