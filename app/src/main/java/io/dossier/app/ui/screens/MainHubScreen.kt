@@ -1,5 +1,6 @@
 package io.dossier.app.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -36,17 +38,22 @@ import io.dossier.app.ui.theme.NeuralTheme
 
 private enum class HubTab(val label: String) {
     DOSSIER("Dossier"),
-    IMAGE_LOOKUP("Image Lookup"),
-    BREACH("Breach"),
+    IMAGE_LOOKUP("Images"),
+    BREACH("Breaches"),
     CASES("Cases"),
-    MODELS("Models")
+    MODELS("Engines")
 }
 
 @Composable
 fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
     var selectedTab by rememberSaveable { mutableStateOf(HubTab.DOSSIER) }
+    val stateHolder = rememberSaveableStateHolder()
     val dossierNavController: NavHostController = rememberNavController()
-    val currentDossierRoute = dossierNavController.currentBackStackEntryAsState().value?.destination?.route
+    val currentDossierRoute = dossierNavController
+        .currentBackStackEntryAsState()
+        .value
+        ?.destination
+        ?.route
 
     LaunchedEffect(currentDossierRoute) {
         if (currentDossierRoute in listOf("identity", "username_discovery", "scan", "report")) {
@@ -54,56 +61,71 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
         }
     }
 
+    // Bottom-navigation destinations behave as top-level destinations. Back from
+    // a utility tab returns to the dossier instead of unexpectedly closing the app.
+    BackHandler(enabled = selectedTab != HubTab.DOSSIER) {
+        selectedTab = HubTab.DOSSIER
+    }
+
     var transitionTag by remember { mutableStateOf<String?>(null) }
-    val currentRoute = dossierNavController.currentBackStackEntryAsState().value?.destination?.route
-    LaunchedEffect(currentRoute) {
-        val tag = io.dossier.app.ui.components.transitionTagForRoute(currentRoute)
-        if (tag != null && transitionTag == null) transitionTag = tag
+    var initialRouteObserved by remember { mutableStateOf(false) }
+    LaunchedEffect(currentDossierRoute) {
+        if (!initialRouteObserved) {
+            initialRouteObserved = true
+        } else {
+            transitionTag = io.dossier.app.ui.components.transitionTagForRoute(currentDossierRoute)
+        }
     }
     io.dossier.app.ui.components.LottieTransitionOverlay(
         activeTag = transitionTag,
         onFinished = { transitionTag = null }
     )
 
+    val scanInForeground = selectedTab == HubTab.DOSSIER && currentDossierRoute == "scan"
+
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
-            NavigationBar(containerColor = NeuralTheme.CardBackground) {
-                HubTab.entries.forEach { tab ->
-                    val selected = selectedTab == tab
-                    NavigationBarItem(
-                        selected = selected,
-                        onClick = { selectedTab = tab },
-                        icon = {
-                            Icon(
-                                imageVector = when (tab) {
-                                    HubTab.DOSSIER -> Icons.Default.AccountBox
-                                    HubTab.IMAGE_LOOKUP -> Icons.Default.Search
-                                    HubTab.BREACH -> Icons.Default.Lock
-                                    HubTab.CASES -> Icons.Default.DateRange
-                                    HubTab.MODELS -> Icons.Default.Settings
-                                },
-                                contentDescription = tab.label
+            // Leaving the scan route disposes ScanScreen and previously caused a
+            // completed or in-flight scan to restart when the user returned.
+            if (!scanInForeground) {
+                NavigationBar(containerColor = NeuralTheme.CardBackground) {
+                    HubTab.entries.forEach { tab ->
+                        val selected = selectedTab == tab
+                        NavigationBarItem(
+                            selected = selected,
+                            onClick = { selectedTab = tab },
+                            icon = {
+                                Icon(
+                                    imageVector = when (tab) {
+                                        HubTab.DOSSIER -> Icons.Default.AccountBox
+                                        HubTab.IMAGE_LOOKUP -> Icons.Default.Search
+                                        HubTab.BREACH -> Icons.Default.Lock
+                                        HubTab.CASES -> Icons.Default.DateRange
+                                        HubTab.MODELS -> Icons.Default.Settings
+                                    },
+                                    contentDescription = tab.label
+                                )
+                            },
+                            label = {
+                                Text(
+                                    tab.label,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                                )
+                            },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = NeuralTheme.BackgroundStart,
+                                selectedTextColor = NeuralTheme.Cobalt,
+                                unselectedIconColor = NeuralTheme.TextSecondary,
+                                unselectedTextColor = NeuralTheme.TextSecondary,
+                                indicatorColor = NeuralTheme.Cobalt
                             )
-                        },
-                        label = {
-                            Text(
-                                tab.label,
-                                fontSize = 10.sp,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
-                            )
-                        },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = NeuralTheme.BackgroundStart,
-                            selectedTextColor = NeuralTheme.Cobalt,
-                            unselectedIconColor = NeuralTheme.TextSecondary,
-                            unselectedTextColor = NeuralTheme.TextSecondary,
-                            indicatorColor = NeuralTheme.Cobalt
                         )
-                    )
+                    }
                 }
             }
         }
@@ -114,15 +136,21 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
                 .background(Color.Transparent)
                 .padding(innerPadding)
         ) {
-            when (selectedTab) {
-                HubTab.DOSSIER -> DossierNavGraph(
-                    navController = dossierNavController,
-                    onNavigateToBrowser = onNavigateToBrowser
-                )
-                HubTab.IMAGE_LOOKUP -> ReverseImageLookupScreen(onNavigateToBrowser = onNavigateToBrowser)
-                HubTab.BREACH -> BreachCheckScreen(onNavigateToBrowser = onNavigateToBrowser)
-                HubTab.CASES -> CaseComparisonScreen()
-                HubTab.MODELS -> ModelsScreen()
+            stateHolder.SaveableStateProvider(selectedTab.name) {
+                when (selectedTab) {
+                    HubTab.DOSSIER -> DossierNavGraph(
+                        navController = dossierNavController,
+                        onNavigateToBrowser = onNavigateToBrowser
+                    )
+                    HubTab.IMAGE_LOOKUP -> ReverseImageLookupScreen(
+                        onNavigateToBrowser = onNavigateToBrowser
+                    )
+                    HubTab.BREACH -> BreachCheckScreen(
+                        onNavigateToBrowser = onNavigateToBrowser
+                    )
+                    HubTab.CASES -> CaseComparisonScreen()
+                    HubTab.MODELS -> ModelsScreen()
+                }
             }
         }
     }
