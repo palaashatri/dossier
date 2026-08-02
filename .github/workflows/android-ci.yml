@@ -9,6 +9,31 @@ permissions:
   contents: read
 
 jobs:
+  calibration-tool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tools/requirements-face-calibration.txt
+      - name: Install pinned calibration dependencies
+        run: python -m pip install --disable-pip-version-check -r tools/requirements-face-calibration.txt
+      - name: Validate calibration script and OpenCV APIs
+        run: |
+          python -m py_compile tools/face_calibration.py
+          python - <<'PY'
+          import cv2
+          import numpy
+          assert cv2.__version__ == "4.13.0"
+          assert hasattr(cv2, "FaceDetectorYN")
+          assert hasattr(cv2, "FaceRecognizerSF")
+          assert hasattr(cv2, "FaceRecognizerSF_FR_COSINE")
+          print("OpenCV", cv2.__version__, "NumPy", numpy.__version__)
+          PY
+
   test-and-build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -20,8 +45,6 @@ jobs:
           java-version: '21'
           cache: gradle
       - uses: gradle/actions/setup-gradle@v4
-      - name: Validate face calibration tool
-        run: python3 -m py_compile tools/face_calibration.py
       - name: Unit tests
         run: ./gradlew :app:testDebugUnitTest --stacktrace
       - name: Assemble debug APK
