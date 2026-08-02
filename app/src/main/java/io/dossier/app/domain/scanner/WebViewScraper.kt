@@ -10,18 +10,15 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import io.dossier.app.data.web.StableProfileApiResolver
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Renders a candidate URL and returns stable DOM text for profile verification.
- *
- * Before invoking a browser, supported profile URLs are resolved through stable,
- * unauthenticated public endpoints. Browser scraping remains the fallback for
- * platforms that expose no structured public endpoint.
- */
+/** Renders a candidate URL and returns stable DOM text for profile verification. */
 class WebViewScraper(private val context: android.content.Context) {
 
     sealed class Result {
@@ -34,6 +31,7 @@ class WebViewScraper(private val context: android.content.Context) {
     private val stableResolver = StableProfileApiResolver()
 
     suspend fun scrape(url: String): Result {
+        currentCoroutineContext().ensureActive()
         when (val structured = stableResolver.resolve(url)) {
             is StableProfileApiResolver.Resolution.Found ->
                 return Result.Rendered(structured.html, structured.text)
@@ -45,11 +43,13 @@ class WebViewScraper(private val context: android.content.Context) {
             StableProfileApiResolver.Resolution.Unsupported,
             is StableProfileApiResolver.Resolution.Unavailable -> Unit
         }
+        currentCoroutineContext().ensureActive()
         return scrapeWithBrowser(url)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun scrapeWithBrowser(url: String): Result = withContext(Dispatchers.Main) {
+        currentCoroutineContext().ensureActive()
         val rendered = CompletableDeferred<Pair<String, String>>()
         var failureReason: String? = null
         val settleStarted = AtomicBoolean(false)
@@ -75,9 +75,7 @@ class WebViewScraper(private val context: android.content.Context) {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 mainFrameFinished.set(true)
-                if (settleStarted.compareAndSet(false, true)) {
-                    launchSettleLoop(webView, rendered)
-                }
+                if (settleStarted.compareAndSet(false, true)) launchSettleLoop(webView, rendered)
             }
 
             override fun onReceivedError(
@@ -108,9 +106,7 @@ class WebViewScraper(private val context: android.content.Context) {
                 error: SslError?
             ) {
                 handler?.cancel()
-                if (!rendered.isCompleted) {
-                    failureReason = "TLS error while loading profile"
-                }
+                if (!rendered.isCompleted) failureReason = "TLS error while loading profile"
             }
         }
 
@@ -119,15 +115,16 @@ class WebViewScraper(private val context: android.content.Context) {
         try {
             kotlinx.coroutines.withTimeoutOrNull(RENDER_TIMEOUT_MS) {
                 rendered.await()
-            }?.let { (html, text) ->
-                classifyRendered(html, text)
-            } ?: when {
+            }?.let { (html, text) -> classifyRendered(html, text) } ?: when {
                 failureReason != null -> Result.Failed(failureReason!!)
                 else -> Result.TimedOut()
             }
-        } catch (e: Exception) {
-            Result.Failed("Render failed: ${e.localizedMessage}")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.Failed("Render failed: ${error.localizedMessage}")
         } finally {
+            if (!rendered.isCompleted) rendered.cancel()
             webView.stopLoading()
             webView.loadUrl("about:blank")
             webView.clearHistory()
@@ -140,9 +137,7 @@ class WebViewScraper(private val context: android.content.Context) {
         webView: WebView,
         rendered: CompletableDeferred<Pair<String, String>>
     ) {
-        webView.postDelayed({
-            pollForStableBody(webView, rendered, attempts = 0, lastSignature = null)
-        }, INITIAL_SETTLE_DELAY_MS)
+        webView.postDelayed({ pollForStableBody(webView, rendered, attempts = 0, lastSignature = null) }, INITIAL_SETTLE_DELAY_MS)
     }
 
     private fun pollForStableBody(
@@ -159,8 +154,7 @@ class WebViewScraper(private val context: android.content.Context) {
 
         webView.evaluateJavascript(BODY_SIGNATURE_SCRIPT) { rawSignature ->
             val signature = unescapeJsonString(rawSignature.orEmpty())
-            val isStable = signature.isNotBlank() && signature == lastSignature
-            if (isStable) {
+            if (signature.isNotBlank() && signature == lastSignature) {
                 snapshot(webView, rendered)
             } else {
                 webView.postDelayed({
@@ -176,8 +170,7 @@ class WebViewScraper(private val context: android.content.Context) {
             webView.evaluateJavascript("document.body ? document.body.innerText : ''") { textResult ->
                 if (!rendered.isCompleted) {
                     rendered.complete(
-                        unescapeJsonString(htmlResult.orEmpty()) to
-                            unescapeJsonString(textResult.orEmpty())
+                        unescapeJsonString(htmlResult.orEmpty()) to unescapeJsonString(textResult.orEmpty())
                     )
                 }
             }
@@ -185,12 +178,8 @@ class WebViewScraper(private val context: android.content.Context) {
     }
 
     private fun classifyRendered(html: String, text: String): Result {
-        if (isChallenge(html, text)) {
-            return Result.ChallengeDetected("Bot-check / login wall detected")
-        }
-        if (html.isBlank() && text.isBlank()) {
-            return Result.Failed("Browser produced an empty document")
-        }
+        if (isChallenge(html, text)) return Result.ChallengeDetected("Bot-check / login wall detected")
+        if (html.isBlank() && text.isBlank()) return Result.Failed("Browser produced an empty document")
         return Result.Rendered(html, text)
     }
 
@@ -198,17 +187,9 @@ class WebViewScraper(private val context: android.content.Context) {
         val lowerHtml = html.lowercase()
         val lowerText = text.lowercase()
         val challengeMarkers = listOf(
-            "just a moment",
-            "checking your browser",
-            "verify you are human",
-            "unusual traffic",
-            "cloudflare",
-            "ddos protection",
-            "attention required",
-            "cf-challenge",
-            "recaptcha",
-            "are you a robot",
-            "access denied"
+            "just a moment", "checking your browser", "verify you are human", "unusual traffic",
+            "cloudflare", "ddos protection", "attention required", "cf-challenge", "recaptcha",
+            "are you a robot", "access denied"
         )
         if (challengeMarkers.any { lowerHtml.contains(it) || lowerText.contains(it) }) return true
 
