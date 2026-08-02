@@ -3,25 +3,45 @@ package io.dossier.app.domain.face
 import android.content.Context
 import android.net.Uri
 import io.dossier.app.data.face.FaceAppearanceDescriptor
+import io.dossier.app.data.face.FaceCorrelationCalibrationStore
+import io.dossier.app.data.face.FaceCorrelationConsentStore
+import io.dossier.app.data.face.FaceCorrelationDecision
+import io.dossier.app.data.face.FaceCorrelationModelPack
 import io.dossier.app.data.face.FaceEmbedder
 import io.dossier.app.data.face.FaceEmbeddingCalibrationStore
 import io.dossier.app.data.face.FaceEmbeddingModelRunner
 import io.dossier.app.data.face.FaceEmbeddingModelStore
 import io.dossier.app.data.face.FaceEmbeddingThresholds
+import io.dossier.app.data.face.YuNetSFaceCorrelationEngine
 import io.dossier.app.domain.model.FaceConsistencyMatch
+import kotlinx.coroutines.CancellationException
 
 /**
- * Local face-crop consistency service.
+ * Local visual-profile consistency service.
  *
- * A calibrated ONNX/TFLite embedding model is preferred when installed. When no
- * model is available, Dossier falls back to a built-in appearance descriptor so
- * the feature remains functional out of the box for reused or near-identical
- * profile photos. The fallback is explicitly not biometric identity recognition.
+ * Preferred path, after explicit installation/consent:
+ * YuNet five-landmark detection -> SFace alignCrop -> SFace cosine correlation.
+ *
+ * A user-imported calibrated ONNX/TFLite embedding model remains supported for
+ * research. The dependency-free appearance descriptor remains the final
+ * fallback for reused or near-identical profile photos. No path uploads images,
+ * crops, landmarks, or embeddings.
  */
 class FaceEmbeddingService(context: Context) {
-    private val faceEmbedder = FaceEmbedder(context)
-    private val modelStore = FaceEmbeddingModelStore(context).also { it.ensureModelAvailable() }
-    private val calibrationStore = FaceEmbeddingCalibrationStore(context)
+    private val appContext = context.applicationContext
+    private val faceEmbedder = FaceEmbedder(appContext)
+    private val modelStore = FaceEmbeddingModelStore(appContext).also { it.ensureModelAvailable() }
+    private val calibrationStore = FaceEmbeddingCalibrationStore(appContext)
+    private val correlationPack = FaceCorrelationModelPack(appContext)
+    private val correlationConsent = FaceCorrelationConsentStore(appContext)
+    private val correlationCalibration = FaceCorrelationCalibrationStore(appContext)
+    private val correlationEngine by lazy {
+        YuNetSFaceCorrelationEngine(
+            context = appContext,
+            modelPack = correlationPack,
+            calibrationStore = correlationCalibration
+        )
+    }
 
     suspend fun extractAndCompare(
         selfieUri: Uri,
@@ -34,6 +54,45 @@ class FaceEmbeddingService(context: Context) {
         )
 
     suspend fun compareFaces(
+        selfieUri: Uri,
+        profileUri: Uri,
+        profileUrl: String
+    ): FaceConsistencyMatch {
+        if (correlationConsent.hasConsent() && correlationPack.isReady()) {
+            try {
+                return correlationEngine.compare(selfieUri, profileUri, profileUrl)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                // A native/model failure must not silently disable the entire
+                // scan. Fall back, but disclose the failed strong pipeline.
+                val fallback = compareWithLegacyBackends(selfieUri, profileUri, profileUrl)
+                return fallback.copy(
+                    warning = "${fallback.warning} Verified YuNet/SFace correlation could not run: " +
+                        (error.localizedMessage ?: error.javaClass.simpleName)
+                )
+            }
+        }
+        return compareWithLegacyBackends(selfieUri, profileUri, profileUrl)
+    }
+
+    fun isCalibratedReviewScore(score: Float): Boolean {
+        if (correlationConsent.hasConsent() && correlationPack.isReady()) {
+            val thresholds = correlationCalibration.getThresholds()
+            return thresholds.measured && thresholds.decision(score) != FaceCorrelationDecision.NO_SUPPORT
+        }
+        return calibrationStore.getThresholds()?.isReviewScore(score) == true
+    }
+
+    fun strongCorrelationStatus(): String = when {
+        !correlationPack.isReady() -> "YuNet/SFace model pack is not installed."
+        !correlationConsent.hasConsent() -> "YuNet/SFace is installed but cross-photo correlation consent is not active."
+        correlationCalibration.hasMeasuredCalibration() ->
+            "YuNet/SFace is active with a measured, hash-bound calibration."
+        else -> "YuNet/SFace is active with the reference threshold policy; results remain manual-review evidence."
+    }
+
+    private suspend fun compareWithLegacyBackends(
         selfieUri: Uri,
         profileUri: Uri,
         profileUrl: String
@@ -68,9 +127,6 @@ class FaceEmbeddingService(context: Context) {
             profileFace.recycle()
         }
     }
-
-    fun isCalibratedReviewScore(score: Float): Boolean =
-        calibrationStore.getThresholds()?.isReviewScore(score) == true
 
     private fun runModelComparison(
         selfieFace: android.graphics.Bitmap,
@@ -109,7 +165,7 @@ class FaceEmbeddingService(context: Context) {
         val warning = when {
             score >= 0.90f ->
                 "Built-in local appearance descriptor reports high visual similarity for the face crops. " +
-                    "This usually indicates the same or a near-duplicate photo; it is not biometric identity proof."
+                    "This usually indicates the same or a near-duplicate photo; it is not cross-photo biometric identity proof."
             score >= 0.74f ->
                 "Built-in local appearance descriptor reports a review-range visual similarity. " +
                     "Treat this only as supporting evidence for possible photo reuse."
