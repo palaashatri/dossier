@@ -4,6 +4,7 @@ import android.content.Context
 import io.dossier.app.data.web.PublicSearchDiscoveryService
 import io.dossier.app.domain.breach.EmailBreach
 import io.dossier.app.domain.breach.EmailExposureResult
+import io.dossier.app.domain.breach.HibpCoverage
 import io.dossier.app.domain.breach.PasswordExposureResult
 import io.dossier.app.domain.breach.PublicEmailEvidence
 import io.dossier.app.domain.model.IdentityInput
@@ -24,33 +25,28 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
- * Safe breach checks.
+ * Safe breach and public-exposure checks.
  *
- * - Passwords: HIBP Pwned Passwords k-anonymity API. Only the first five SHA-1
- *   hex chars leave the device; plaintext is never sent or stored in results.
- * - Emails: optional HIBP breached-account API when the user provides an API
- *   key. Without a key, the app still searches public indexes for the email
- *   address, but never recovers leaked passwords from dumps.
+ * HIBP account coverage and ordinary web exposure are always represented as
+ * separate channels. A missing API key can never be mistaken for a confirmed
+ * zero-breach result.
  */
 class BreachCheckService(private val context: Context) {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(20, TimeUnit.SECONDS)
         .build()
-
-    private val json = Json { ignoreUnknownKeys = true }
 
     suspend fun checkPasswords(passwords: List<String>): List<PasswordExposureResult> =
         withContext(Dispatchers.IO) {
             coroutineScope {
-                passwords
-                    .mapIndexedNotNull { index, password ->
-                        password.takeIf { it.isNotBlank() }?.let {
-                            async { checkPassword(it, "Password ${index + 1}") }
-                        }
+                passwords.mapIndexedNotNull { index, password ->
+                    password.takeIf { it.isNotBlank() }?.let {
+                        async { checkPassword(it, "Password ${index + 1}") }
                     }
-                    .awaitAll()
+                }.awaitAll()
             }
         }
 
@@ -59,7 +55,6 @@ class BreachCheckService(private val context: Context) {
             val sha1 = sha1Hex(password)
             val prefix = sha1.take(5)
             val suffix = sha1.drop(5)
-
             try {
                 val request = Request.Builder()
                     .url("https://api.pwnedpasswords.com/range/$prefix")
@@ -69,29 +64,17 @@ class BreachCheckService(private val context: Context) {
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         return@withContext PasswordExposureResult(
-                            label = label,
-                            isPwned = false,
-                            occurrenceCount = 0,
-                            sha1Prefix = prefix,
-                            error = "Pwned Passwords lookup failed: HTTP ${response.code}"
+                            label, false, 0, prefix,
+                            "Pwned Passwords lookup failed: HTTP ${response.code}"
                         )
                     }
-                    val body = response.body?.string().orEmpty()
-                    val count = parsePwnedPasswordRange(body, suffix)
-                    PasswordExposureResult(
-                        label = label,
-                        isPwned = count > 0,
-                        occurrenceCount = count,
-                        sha1Prefix = prefix
-                    )
+                    val count = parsePwnedPasswordRange(response.body?.string().orEmpty(), suffix)
+                    PasswordExposureResult(label, count > 0, count, prefix)
                 }
-            } catch (e: Exception) {
+            } catch (error: Exception) {
                 PasswordExposureResult(
-                    label = label,
-                    isPwned = false,
-                    occurrenceCount = 0,
-                    sha1Prefix = prefix,
-                    error = "Pwned Passwords lookup failed: ${e.localizedMessage ?: e.javaClass.simpleName}"
+                    label, false, 0, prefix,
+                    "Pwned Passwords lookup failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
                 )
             }
         }
@@ -102,13 +85,10 @@ class BreachCheckService(private val context: Context) {
         deepResearch: Boolean = false
     ): List<EmailExposureResult> = withContext(Dispatchers.IO) {
         coroutineScope {
-            emails
-                .map { it.trim() }
+            emails.map { it.trim() }
                 .filter { it.isNotBlank() }
                 .distinctBy { it.lowercase() }
-                .map { email ->
-                    async { checkEmail(email, hibpApiKey, deepResearch) }
-                }
+                .map { email -> async { checkEmail(email, hibpApiKey, deepResearch) } }
                 .awaitAll()
         }
     }
@@ -118,23 +98,24 @@ class BreachCheckService(private val context: Context) {
         hibpApiKey: String? = null,
         deepResearch: Boolean = false
     ): EmailExposureResult = withContext(Dispatchers.IO) {
-        val breachesResult = fetchHibpBreaches(email, hibpApiKey)
+        val hibp = fetchHibpBreaches(email, hibpApiKey)
         val publicEvidence = fetchPublicEmailEvidence(email, deepResearch)
-
         EmailExposureResult(
             email = email,
-            breaches = breachesResult.breaches,
+            breaches = hibp.breaches,
             publicEvidence = publicEvidence,
-            error = breachesResult.error
+            hibpCoverage = hibp.coverage,
+            error = hibp.error
         )
     }
 
-    private suspend fun fetchHibpBreaches(email: String, hibpApiKey: String?): HibpFetchResult {
+    private fun fetchHibpBreaches(email: String, hibpApiKey: String?): HibpFetchResult {
         val key = hibpApiKey?.trim().orEmpty()
         if (key.isBlank()) {
             return HibpFetchResult(
                 breaches = emptyList(),
-                error = "HIBP email breach metadata requires an API key; public email search still ran."
+                coverage = HibpCoverage.NotConfigured,
+                error = "HIBP account coverage was not run because no API key is configured. Public web exposure search ran separately."
             )
         }
 
@@ -147,19 +128,36 @@ class BreachCheckService(private val context: Context) {
             client.newCall(request).execute().use { response ->
                 when (response.code) {
                     200 -> {
-                        val body = response.body?.string().orEmpty()
-                        HibpFetchResult(parseHibpBreaches(body), null)
+                        val breaches = parseHibpBreaches(response.body?.string().orEmpty())
+                        HibpFetchResult(
+                            breaches,
+                            if (breaches.isEmpty()) HibpCoverage.ConfirmedNoBreaches else HibpCoverage.ConfirmedBreaches,
+                            null
+                        )
                     }
-                    404 -> HibpFetchResult(emptyList(), null)
-                    401, 403 -> HibpFetchResult(emptyList(), "HIBP API key was rejected.")
-                    429 -> HibpFetchResult(emptyList(), "HIBP rate limit reached. Try again later.")
-                    else -> HibpFetchResult(emptyList(), "HIBP lookup failed: HTTP ${response.code}")
+                    404 -> HibpFetchResult(emptyList(), HibpCoverage.ConfirmedNoBreaches, null)
+                    401, 403 -> HibpFetchResult(
+                        emptyList(),
+                        HibpCoverage.CredentialsRejected,
+                        "HIBP API credentials were rejected."
+                    )
+                    429 -> HibpFetchResult(
+                        emptyList(),
+                        HibpCoverage.RateLimited,
+                        "HIBP rate limit reached. Try again later."
+                    )
+                    else -> HibpFetchResult(
+                        emptyList(),
+                        HibpCoverage.Unavailable,
+                        "HIBP lookup failed: HTTP ${response.code}"
+                    )
                 }
             }
-        } catch (e: Exception) {
+        } catch (error: Exception) {
             HibpFetchResult(
-                breaches = emptyList(),
-                error = "HIBP lookup failed: ${e.localizedMessage ?: e.javaClass.simpleName}"
+                emptyList(),
+                HibpCoverage.Unavailable,
+                "HIBP lookup failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
             )
         }
     }
@@ -185,12 +183,12 @@ class BreachCheckService(private val context: Context) {
 
     private data class HibpFetchResult(
         val breaches: List<EmailBreach>,
+        val coverage: HibpCoverage,
         val error: String?
     )
 
     companion object {
-        private const val USER_AGENT =
-            "Dossier Android self-audit app (contact: local-user)"
+        private const val USER_AGENT = "Dossier Android self-audit app"
 
         fun sha1Hex(input: String): String {
             val digest = MessageDigest.getInstance("SHA-1").digest(input.toByteArray(Charsets.UTF_8))
@@ -225,8 +223,7 @@ class BreachCheckService(private val context: Context) {
                 }
         }
 
-        private fun urlEncode(value: String): String =
-            URLEncoder.encode(value, "UTF-8")
+        private fun urlEncode(value: String): String = URLEncoder.encode(value, "UTF-8")
     }
 }
 
