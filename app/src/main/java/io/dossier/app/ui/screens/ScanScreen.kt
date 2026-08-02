@@ -1,10 +1,11 @@
 package io.dossier.app.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,6 +21,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -36,6 +38,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.dossier.app.data.face.FaceCorrelationCalibrationStore
 import io.dossier.app.data.face.FaceCorrelationConsentStore
 import io.dossier.app.data.face.FaceCorrelationModelPack
 import io.dossier.app.domain.model.IdentityInput
@@ -51,12 +54,10 @@ import kotlinx.coroutines.launch
 /**
  * Scan screen backed only by real ScanSession state.
  *
- * Missing navigation/session input is a visible recoverable error. Dossier must
- * never fabricate a subject and generate a plausible-looking report for it.
- *
- * A selfie does not silently enable cross-photo biometric-derived correlation.
- * The first eligible scan presents an explicit install/consent decision. The
- * user may continue with basic near-duplicate/photo-reuse matching instead.
+ * Missing navigation/session input is a visible recoverable error. A selfie
+ * never silently enables cross-photo biometric-derived processing: every
+ * eligible scan chooses strong local YuNet/SFace correlation or basic
+ * near-duplicate/photo-reuse matching.
  */
 @Composable
 fun ScanScreen(
@@ -72,6 +73,7 @@ fun ScanScreen(
 
     val modelPack = remember { FaceCorrelationModelPack(context) }
     val consentStore = remember { FaceCorrelationConsentStore(context) }
+    val calibrationStore = remember { FaceCorrelationCalibrationStore(context) }
     val liveLogs = remember { mutableStateListOf<String>() }
     val scrollState = rememberScrollState()
     var startError by remember { mutableStateOf<String?>(null) }
@@ -83,7 +85,33 @@ fun ScanScreen(
     var showFaceSetup by remember { mutableStateOf(false) }
     var facePackInstalling by remember { mutableStateOf(false) }
     var facePackProgress by remember { mutableStateOf(0f) }
-    var facePackError by remember { mutableStateOf<String?>(null) }
+    var facePackMessage by remember { mutableStateOf<String?>(null) }
+    var faceStateRefresh by remember { mutableStateOf(0) }
+
+    val facePackReady = remember(faceStateRefresh) { modelPack.isReady() }
+    val activeCalibration = remember(faceStateRefresh) { calibrationStore.getThresholds() }
+    val consentActive = remember(faceStateRefresh) { consentStore.hasConsent() }
+
+    val calibrationImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            coroutineScope.launch {
+                runCatching { calibrationStore.importCalibration(uri) }
+                    .onSuccess { thresholds ->
+                        faceStateRefresh++
+                        facePackMessage =
+                            "Measured calibration imported: review >= ${"%.3f".format(thresholds.reviewThreshold)}, " +
+                                "high >= ${"%.3f".format(thresholds.highSimilarityThreshold)}; " +
+                                "${thresholds.positivePairCount} positive / ${thresholds.negativePairCount} negative held-out pairs."
+                    }
+                    .onFailure { error ->
+                        facePackMessage = error.localizedMessage
+                            ?: "Unable to import the YuNet/SFace calibration file."
+                    }
+            }
+        }
+    }
 
     fun startResolvedScan(input: IdentityInput, deepResearch: Boolean, visualMode: String) {
         showFaceSetup = false
@@ -121,23 +149,13 @@ fun ScanScreen(
         } else {
             ScanSession.deepResearchEnabled.value
         }
-        val selfiePresent = !input.selfieUri.isNullOrBlank()
-        val strongCorrelationReady = modelPack.isReady() && consentStore.hasConsent()
-        if (selfiePresent && !strongCorrelationReady) {
+        if (!input.selfieUri.isNullOrBlank()) {
             pendingInput = input
             pendingDeepResearch = deepResearch
             showFaceSetup = true
-            liveLogs.add("Waiting for local face-correlation choice")
+            liveLogs.add("Waiting for per-scan face-correlation choice")
         } else {
-            startResolvedScan(
-                input,
-                deepResearch,
-                if (selfiePresent) {
-                    "Strong on-device YuNet/SFace correlation enabled"
-                } else {
-                    "No selfie supplied — face correlation skipped"
-                }
-            )
+            startResolvedScan(input, deepResearch, "No selfie supplied — face correlation skipped")
         }
     }
 
@@ -169,14 +187,14 @@ fun ScanScreen(
                         startResolvedScan(
                             input,
                             pendingDeepResearch,
-                            "Strong face correlation declined — using basic photo-reuse matching"
+                            "Strong face correlation not selected — using basic photo-reuse matching"
                         )
                     }
                 }
             },
             title = {
                 Text(
-                    text = "Enable strong local face correlation?",
+                    text = if (facePackReady) "Choose face-correlation mode" else "Enable strong local face correlation?",
                     color = NeuralTheme.TextPrimary,
                     fontWeight = FontWeight.Bold
                 )
@@ -184,17 +202,82 @@ fun ScanScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "Dossier can compare different photos using YuNet five-landmark alignment and SFace embeddings. This is biometric-derived processing and requires explicit consent.",
+                        text = "Strong mode compares different photographs using YuNet five-landmark alignment and SFace embeddings. This is biometric-derived processing and is optional for every scan.",
                         color = NeuralTheme.TextSecondary,
                         fontSize = 12.5.sp,
                         lineHeight = 18.sp
                     )
                     Text(
-                        text = "The verified model pack is about ${formatFacePackSize(modelPack.status().expectedBytes)}. Images, aligned crops, landmarks and embeddings stay on this device and are discarded after each comparison. Results remain supporting evidence, never proof of identity.",
+                        text = "Images, aligned crops, landmarks and embeddings stay on this device and are discarded after each comparison. Results are supporting evidence, never proof of identity.",
                         color = NeuralTheme.TextSecondary,
                         fontSize = 12.5.sp,
                         lineHeight = 18.sp
                     )
+
+                    if (!facePackReady) {
+                        Text(
+                            text = "The checksum-pinned OpenCV model pack is about ${formatFacePackSize(modelPack.status().expectedBytes)} and is downloaded only after you select Install & Use Strong.",
+                            color = NeuralTheme.TextSecondary,
+                            fontSize = 11.5.sp,
+                            lineHeight = 16.sp
+                        )
+                    } else {
+                        Text(
+                            text = if (activeCalibration.measured) {
+                                "Measured policy active: ${activeCalibration.summary()}"
+                            } else {
+                                "Reference policy active: ${activeCalibration.summary()} Scores remain manual-review evidence until a matching measured calibration is imported."
+                            },
+                            color = if (activeCalibration.measured) NeuralTheme.Emerald else NeuralTheme.Amber,
+                            fontSize = 11.5.sp,
+                            lineHeight = 16.sp
+                        )
+                        Text(
+                            text = if (consentActive) {
+                                "General installation consent is recorded, but this scan still requires a mode choice."
+                            } else {
+                                "The model files are installed, but correlation consent is currently revoked."
+                            },
+                            color = NeuralTheme.TextSecondary,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                calibrationImportLauncher.launch(
+                                    arrayOf("application/json", "text/json", "text/plain", "*/*")
+                                )
+                            },
+                            enabled = !facePackInstalling,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                if (activeCalibration.measured) "REPLACE MEASURED CALIBRATION" else "IMPORT MEASURED CALIBRATION",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.5.sp
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                modelPack.delete()
+                                consentStore.revoke()
+                                calibrationStore.clear()
+                                facePackProgress = 0f
+                                facePackMessage = "YuNet/SFace models, measured calibration and stored consent were deleted."
+                                faceStateRefresh++
+                            },
+                            enabled = !facePackInstalling,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "DELETE MODELS & REVOKE CONSENT",
+                                color = NeuralTheme.Crimson,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.5.sp
+                            )
+                        }
+                    }
+
                     if (facePackInstalling) {
                         LinearProgressIndicator(
                             progress = { facePackProgress },
@@ -206,10 +289,12 @@ fun ScanScreen(
                             fontSize = 11.5.sp
                         )
                     }
-                    facePackError?.let { error ->
+                    facePackMessage?.let { message ->
                         Text(
-                            text = error,
-                            color = NeuralTheme.Crimson,
+                            text = message,
+                            color = if (message.contains("unable", true) || message.contains("failed", true)) {
+                                NeuralTheme.Crimson
+                            } else NeuralTheme.Cyan,
                             fontSize = 11.5.sp,
                             lineHeight = 16.sp
                         )
@@ -220,30 +305,36 @@ fun ScanScreen(
                 Button(
                     onClick = {
                         val input = pendingInput ?: return@Button
-                        if (modelPack.isReady()) {
+                        if (facePackReady) {
                             consentStore.grantForInstalledPipeline()
+                            faceStateRefresh++
                             startResolvedScan(
                                 input,
                                 pendingDeepResearch,
-                                "Explicit consent recorded — strong on-device YuNet/SFace correlation enabled"
+                                if (activeCalibration.measured) {
+                                    "Strong on-device YuNet/SFace correlation enabled with measured calibration"
+                                } else {
+                                    "Strong on-device YuNet/SFace correlation enabled with reference manual-review policy"
+                                }
                             )
                         } else {
                             coroutineScope.launch {
                                 facePackInstalling = true
-                                facePackError = null
+                                facePackMessage = null
                                 facePackProgress = 0f
                                 try {
                                     modelPack.install { progress -> facePackProgress = progress }
                                     consentStore.grantForInstalledPipeline()
+                                    faceStateRefresh++
                                     startResolvedScan(
                                         input,
                                         pendingDeepResearch,
-                                        "Verified YuNet/SFace pack installed; explicit local-correlation consent recorded"
+                                        "Verified YuNet/SFace pack installed; strong local correlation enabled with reference manual-review policy"
                                     )
                                 } catch (cancelled: CancellationException) {
                                     throw cancelled
                                 } catch (error: Exception) {
-                                    facePackError = error.localizedMessage
+                                    facePackMessage = error.localizedMessage
                                         ?: "Unable to install the verified face-correlation models."
                                 } finally {
                                     facePackInstalling = false
@@ -255,9 +346,9 @@ fun ScanScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = NeuralTheme.Cobalt)
                 ) {
                     Text(
-                        if (modelPack.isReady()) "ENABLE LOCALLY" else "INSTALL & ENABLE",
+                        if (facePackReady) "USE STRONG LOCAL" else "INSTALL & USE STRONG",
                         fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp
+                        fontSize = 10.5.sp
                     )
                 }
             },
@@ -268,13 +359,13 @@ fun ScanScreen(
                             startResolvedScan(
                                 input,
                                 pendingDeepResearch,
-                                "Strong face correlation declined — using basic photo-reuse matching"
+                                "Basic photo-reuse matching selected; cross-photo face embeddings disabled for this scan"
                             )
                         }
                     },
                     enabled = !facePackInstalling
                 ) {
-                    Text("USE BASIC MATCHING", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                    Text("USE BASIC MATCHING", fontWeight = FontWeight.Bold, fontSize = 10.5.sp)
                 }
             },
             containerColor = NeuralTheme.CardBackground
@@ -298,7 +389,7 @@ fun ScanScreen(
                 Text(
                     text = when {
                         startError != null -> "Input required"
-                        showFaceSetup -> "Consent required"
+                        showFaceSetup -> "Face mode required"
                         isScanning -> "Scanning"
                         else -> "Compiling report"
                     },
@@ -337,7 +428,7 @@ fun ScanScreen(
             ) {
                 Text(
                     text = startError?.let { "Scan cannot start" }
-                        ?: if (showFaceSetup) "Waiting for face-correlation choice" else friendlyStageLabel(progressText),
+                        ?: if (showFaceSetup) "Waiting for per-scan face-correlation choice" else friendlyStageLabel(progressText),
                     color = if (startError == null) NeuralTheme.Cobalt else NeuralTheme.Crimson,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
