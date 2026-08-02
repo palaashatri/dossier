@@ -6,9 +6,9 @@ It collects public evidence, preserves provenance, separates verification from r
 
 ## Current status
 
-The current development branch contains the reliability, privacy, evidence-integrity, local face-correlation, and UI/UX hardening work tracked in pull request #2.
+Active development includes reliability, privacy, evidence-integrity, local face-correlation, and UI/UX hardening.
 
-The exact branch head is expected to pass:
+The expected build gates are:
 
 ```sh
 ./gradlew :app:testDebugUnitTest
