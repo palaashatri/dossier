@@ -1,193 +1,140 @@
 # Dossier Roadmap — Code Mapping
 
-This file maps the product roadmap (identity/attack-surface management) to the
-actual Android implementation in this repo. The repo has progressed well beyond
-the idealized greenfield design; this keeps the two in sync.
+This file maps the product roadmap to the Android implementation and records the
+remaining reliability boundaries honestly.
 
-## The four questions Dossier must answer
+## Product questions
 
-1. **What public information about me exists?** → Scanners (username, public
-   profile, public search, public image, reverse media, breach) + PII extraction.
-2. **How do those pieces connect?** → `EntityGraphBuilder` + interactive
-   `EntityGraphView` (Milestone 8 UI).
-3. **How likely is each connection?** → `Finding.confidence`, risk engine, and
-   the new `ConfidenceContributor` contracts (Milestone 7, in progress).
-4. **How do I reduce my exposure?** → `RemediationProvider` + AI remediation
-   advice + plain-text/JSON report export.
+1. **What public information about me exists?** → username, profile, public web,
+   public image, reverse media, breach, and PII scanners.
+2. **How do those pieces connect?** → `EntityGraphBuilder` and
+   `EntityGraphView`.
+3. **How likely is each connection?** → calibrated findings, evidence signals,
+   and `ConfidenceEngine` contributors.
+4. **How do I reduce exposure?** → `RemediationProvider`, deterministic/optional
+   AI analysis, encrypted cases, and evidence-package export.
 
-## Principles → implementation
+## Principles
 
-- **Everything is evidence.** `Evidence` model (`domain/evidence/Evidence.kt`)
-  exists in parallel with the legacy `Finding`; bidirectional adapter keeps both
-  interchangeable. Scanners remain the producers.
-- **Everything becomes a graph.** `EntityGraph` (`DossierEntity`/`DossierEdge`)
-  is the universal fusion output, rendered by `EntityGraphView`.
-- **Every conclusion must be explainable.** Findings carry `evidenceSnippet` and
-  (for Evidence) `signals`; the graph UI shows per-node evidence on tap.
-- **Everything is temporary.** `ScanSession` is in-memory; `purgeSession`
-  clears all state. No cloud storage, no accounts, no telemetry.
+- **Everything is evidence.** Scanner outputs preserve source and confidence.
+- **Everything becomes a graph.** `EntityGraph` is the common fusion output.
+- **Every conclusion must be explainable.** Verified, review-only, unavailable,
+  and not-found states remain distinct.
+- **Everything is temporary by default.** Session state is in memory. Saved
+  cases are explicit, local, versioned, and encrypted.
 
-## Milestone → code
+## Milestone status
 
 | # | Milestone | Status | Where |
 |---|---|---|---|
-| 1 | Identity Engine | Done | `domain/model/Models.kt`, `domain/graph/EntityGraphBuilder.kt`, `ui/screens/EntityGraphView.kt` |
-| 2 | Scanner Framework | Done | `domain/scanner/ProfileScanner.kt`, `domain/pii/PiiExtractor.kt`, `domain/evidence/ScannerPlugin.kt` |
-| 3 | Reverse Image Pipeline | Done | `data/place/ReverseImageLookupService.kt`, `PlaceImageScanner.kt` |
-| 4 | Username Correlation | Done | `domain/username/UsernameVariantGenerator.kt` |
-| 5 | Public Page Intelligence | Done | `domain/pii/PiiExtractor.kt` |
-| 6 | Evidence Correlation Engine | Done | `EntityGraphBuilder` fuses `Evidence` natively (kind→entity + `EvidenceRelationship` seeding) alongside `Finding`; confidence engine consumes `Evidence` |
-| 7 | Confidence Engine | Done (core) | `domain/evidence/` — `ConfidenceEngine` + `UsernameSimilarityContributor`, `EmailDomainContributor`, `SharedIdentifierContributor`, `SharedDomainContributor`; per-edge explainable confidence |
-| 8 | Identity Graph | Done | `ui/screens/EntityGraphView.kt` (interactive, type-colored, Graph+List a11y) |
-| 9 | Exposure Engine | Done | `domain/evidence/ExposureEngine.kt` — 6 sub-scores + Top-10 findings, shown in report "Exposure Breakdown" |
-| 10 | Attack Paths | Done | `domain/evidence/AttackPathFinder.kt` — BFS subject→breach, explainable steps, shown in report |
-| 11 | Remediation Engine | Done | `domain/remediation/RemediationProvider.kt` — `getStructuredTips()` returns Problem/Evidence/Risk/Fix/Impact, shown in report |
-| 12 | AI Layer | Done | `data/ai/AiInsightService.kt`, local Gemma + remote providers |
-| 13 | Timeline | Done | `CaseComparisonScreen` (CASES tab) lists saved local cases, single-case snapshot, auto-selects most-recent two |
-| 14 | Scan Comparison | Done | `CaseComparisonScreen` renders CaseDiff: added/removed/changed findings, profiles/breaches delta, risk + exposure delta |
-| 15 | Plugin SDK | Done (core) | `domain/evidence/ScannerPlugin.kt` interfaces + `PluginRegistry` + `runPlugins` + `SeedEvidencePlugin` example |
-| 16 | Performance | Done | Cancellable scan scope + `cancelScan()` + progress streaming; `MemoryGuard` caps retained findings (honest "N omitted" notice); `ScanResumeStore` persists a local resume point surfaced as "Resume last scan" |
-| 17 | Android UX | Done | `ui/screens/*`, `MainHubScreen`, bottom-nav tabs |
+| 1 | Identity Engine | Done | `domain/model/Models.kt`, graph builder |
+| 2 | Scanner Framework | Done | `domain/scanner/ProfileScanner.kt`, scanner plugins |
+| 3 | Reverse Image Pipeline | Done (local corpus) | perceptual matching, image candidate search, reverse-media UI |
+| 4 | Username Correlation | Done | `UsernameVariantGenerator.kt` |
+| 5 | Public Page Intelligence | Done | direct verification and attribution-aware `PiiExtractor` |
+| 6 | Evidence Correlation | Done | native Evidence output + graph fusion |
+| 7 | Confidence Engine | Done (core) | contributors and calibrated ceilings |
+| 8 | Identity Graph | Done | interactive graph and accessible list |
+| 9 | Exposure Engine | Done | exposure sub-scores and report UI |
+| 10 | Attack Paths | Done | explainable relationship paths |
+| 11 | Remediation Engine | Done | structured and global remediation |
+| 12 | AI Layer | Done (optional) | deterministic fallback, local Gemma, remote providers, explicit provenance |
+| 13 | Timeline | Done | encrypted saved cases |
+| 14 | Scan Comparison | Done | case diff UI |
+| 15 | Plugin SDK | Done (core) | plugin contracts and registry |
+| 16 | Performance/Lifecycle | Done (core) | bounded work, cancellation routing, resume, memory guard |
+| 17 | Android UX | Done | main tabs and nested dossier workflow |
+| 18 | Evidence Export | Done (core) | PDF plus machine-readable JSON hash manifest |
 
-## Next high-value work
+## Post-hardening audit status
 
-1. ~~Wire `Evidence` as the scanner output type (extend `ProfileScanner` to also
-   return `EvidenceCollection`); keep `Finding` via adapter.~~ DONE — `ProfileScanner.toEvidenceCollection` / `scanIdentityEvidence` emit native `EvidenceCollection` (profile + PII + asserted relationships), consumed by the graph/confidence engine; `Finding` adapter retained for backward compat.
-2. Add more `ConfidenceContributor`s (same-email, same-domain, shared-avatar)
-   and fold them into the `ConfidenceEngine` (completes M7).
-3. Add Exposure sub-scores (M9) and a visual attack-path view (M10).
-4. Implement Timeline (M13) + Scan Comparison (M14) on a saved-report model.
+The August 2026 reliability pass fixed the major controllable defects from the
+original functionality audit:
+
+- Six general search surfaces plus structured profile APIs, direct page
+  verification, caches, circuit breakers, retries, and scheduled canaries.
+- Real local whole-image near-duplicate matching using SHA-256, pHash, dHash,
+  aHash, colour histograms, and crop variants.
+- Out-of-box visual face-crop comparison through a built-in appearance
+  descriptor, while an imported calibrated model remains the stronger optional
+  backend. The fallback is not represented as biometric identity proof.
+- Attribution-aware PII scoring: exact self-supplied identifiers may be high
+  confidence; unrelated regex hits remain low-confidence review evidence.
+- No fabricated `Demo Subject`. Missing input is an explicit navigation error,
+  and cancellation no longer navigates to a valid-looking report.
+- HIBP authoritative coverage is separate from public-web exposure. Missing
+  credentials, rejected credentials, rate limits, and confirmed no-result states
+  are no longer collapsed into a green “clear” result.
+- AI output states the engine and whether network analysis was used. Evidence is
+  bounded and treated as untrusted data to reduce prompt-injection risk.
+- Saved cases use Android Keystore-backed AES-256-GCM envelopes with schema
+  versioning, atomic writes, integrity checks, and migration from legacy JSON.
+- Report export produces a PDF and a JSON evidence package containing section
+  hashes, a manifest hash, timestamps, source data, and analysis provenance.
+
+The implementation now has strong engineering controls, but no honest audit may
+assign 10/10 real-world discovery without external measurement. A 10/10 claim
+would require near-perfect coverage of content that may be private, deleted,
+login-gated, absent from every index, or blocked by a source. It would also
+require a sufficiently large labelled corpus, multiple devices and regions,
+longitudinal source-health data, and calibrated performance thresholds.
 
 ## Current reverse-image scope
 
-The current release remains phone-first and does not require a Dossier-operated
-server. It should continue improving what can be delivered directly in the
-Android application:
+The shipping path is phone-first and does not require a Dossier-operated server:
 
-1. Gather public candidates from multiple independent web and image indexes.
-2. Extract original images, `srcset`, OpenGraph images, JSON-LD images, public
-   profile avatars, and bounded recursive source-page pivots.
-3. Compare candidates locally with exact hashes, perceptual hashes, crop-aware
-   variants, and colour histograms.
-4. Maintain a bounded local cache/index of public images already encountered by
-   the user, with expiry, source provenance, and a user-configurable quota.
-5. Report candidate coverage honestly: no result means no match was found in the
-   sources inspected, not proof that the image has never appeared online.
-6. Keep provider health monitoring, timeouts, circuit breakers, and local
-   precision/recall benchmark fixtures in the normal development loop.
+1. Gather public candidates from multiple web and image indexes.
+2. Extract originals, thumbnails, profile avatars, and source-page images.
+3. Compare candidates locally using exact and perceptual fingerprints.
+4. Preserve provider provenance and bounded resource use.
+5. Report “not found in inspected candidates,” never “never appeared online.”
 
-A global visual corpus is explicitly outside the phone-only scope. The Android
-app must remain useful without one.
+A global visual corpus remains outside the phone-only scope.
 
 ## Planned future enhancement — optional self-hosted Visual Index
 
-A broader Visual Index is deferred until after the current local discovery and
-matching pipeline is mature. Dossier will not provide or assume access to a
-project-operated, employer-operated, or third-party server.
+A broader Visual Index is deferred. Dossier will not assume project-operated,
+employer-operated, or mandatory third-party infrastructure.
 
-When implemented, the app should present a clear choice:
+Future modes:
 
-- **Local-only search:** no server configuration; lower candidate coverage;
-  indexing and final matching remain on the phone.
-- **Enhanced self-hosted search:** the user explicitly connects Dossier to a
-  Visual Index running on hardware or infrastructure they control.
+- **Local-only:** no server configuration; lower candidate coverage.
+- **Enhanced self-hosted:** the user connects Dossier to a Visual Index running
+  on a desktop, home server, NAS, VPS, or personally authorised cloud machine.
 
-The future server component should be distributed as a versioned Docker image
-and a small Docker Compose configuration. Documentation should eventually let a
-user deploy it on a desktop, home server, NAS, VPS, or personally authorised
-cloud machine with a workflow similar to:
-
-```bash
-mkdir dossier-visual-index && cd dossier-visual-index
-curl -O https://example.invalid/dossier/docker-compose.yml
-# Set a long random API token and storage path in .env
-docker compose up -d
-```
-
-The URL above is intentionally non-functional until the server project exists.
-No Docker image, package name, registry path, or compatibility promise should be
-published before there is a built, tested, signed release.
+When implemented, the server should be delivered as signed multi-architecture
+Docker images and a small Docker Compose deployment. No image name, registry,
+or installation command should be advertised until a real tested release exists.
 
 ### Planned server responsibilities
 
 - Crawl and revalidate public image/source URLs within configured limits.
-- Compute and store SHA-256, pHash, dHash, aHash, crop fingerprints, dimensions,
-  and source provenance.
-- Build an approximate fingerprint index for candidate retrieval.
-- Import optional public datasets or targeted crawl jobs selected by the user.
-- Return bounded candidate fingerprints and public URLs to the Android client.
-- Expose health, storage, crawl-budget, retention, and deletion controls.
-- Support authenticated HTTPS and safe operation behind a reverse proxy or VPN.
+- Store exact and perceptual fingerprints plus source provenance.
+- Retrieve approximate candidate fingerprints for local verification.
+- Import only datasets and crawl jobs explicitly enabled by the operator.
+- Expose health, storage, retention, deletion, and crawl-budget controls.
+- Require authenticated HTTPS or operation behind a trusted VPN/reverse proxy.
 
 ### Planned Android integration
 
-- Setup screen for server URL, certificate trust, and API token.
-- Explicit connection test and server-capability negotiation.
-- Per-scan choice between local-only and enhanced self-hosted search.
-- Clear disclosure of what is transmitted before the first enhanced lookup.
-- Local final verification of every server candidate.
-- Graceful automatic fallback to local-only mode when the server is unavailable.
-- One-tap removal of server credentials and deletion of local server-derived data.
+- Server URL, certificate trust, and API-token setup.
+- Capability/version negotiation and explicit connection test.
+- Per-scan local-only or enhanced-self-hosted choice.
+- Clear disclosure of transmitted image-derived fingerprints.
+- Local verification of every server-returned candidate.
+- Automatic local-only fallback and one-tap credential removal.
 
-### Privacy boundary
+### Acceptance criteria
 
-The preferred protocol should avoid sending the original image whenever
-possible. The phone should compute query fingerprints locally and transmit only
-the minimum approximate-search representation needed to retrieve candidates.
-This still reveals image-derived identifying metadata and must therefore require
-explicit informed consent.
+The enhancement remains documentation-only until there is:
 
-The server must never:
-
-- receive private gallery images by default;
-- index authenticated/private pages;
-- bypass login gates, CAPTCHAs, robots controls, or access restrictions;
-- claim that an absent index result proves an image does not exist online;
-- accept public internet traffic with default credentials;
-- silently contribute a user's query image or fingerprints to a shared corpus.
-
-### Future acceptance criteria
-
-This enhancement may move from roadmap to implementation only when all of the
-following are defined:
-
-1. Stable, documented client/server protocol with version negotiation.
-2. Threat model covering fingerprint leakage, server compromise, SSRF, malicious
-   candidate URLs, poisoning, denial of service, and deletion requests.
-3. Signed multi-architecture Docker images and reproducible builds.
-4. Docker Compose deployment with persistent storage, health checks, upgrades,
-   backup/restore, authentication, and TLS guidance.
-5. Corpus provenance, retention, revalidation, exclusion, and removal policies.
-6. Resource limits suitable for a home server as well as a VPS.
-7. End-to-end tests proving local-only operation remains the default and fallback.
-8. A labelled benchmark demonstrating a material coverage gain over the local
-   pipeline without unacceptable false positives.
-
-Until those criteria are met, the Visual Index remains documentation-only and
-must not expand the scope of the current Android implementation.
-
-## Identity Graph UI — design decisions (ui-ux-pro-max)
-
-The interactive graph (`ui/screens/EntityGraphView.kt`, M8) was reviewed against
-the ui-ux-pro-max skill. Deliberate choices:
-
-- **Style deviation (intentional).** The skill's top pick for a
-  privacy/security/intelligence app is *Cyberpunk UI* (neon glow, scanlines,
-  terminal fonts). We **rejected** it: the repo's `NeuralTheme` explicitly
-  forbids "glow/cyberpunk" (calm, flat, warm-coral on dark), and the skill itself
-  rates Cyberpunk accessibility "⚠ Limited (dark+neon)". We kept the app's
-  flat dark aesthetic and adopted only the compatible parts.
-- **Adopted from the skill:** categorical node colors (one hue per `EntityType`);
-  monospace for evidence/labels (Fira Code vibe); relationship **edges at ~60%
-  opacity** (skill's network-graph color guidance `#90A4AE 60%`); a **Graph ↔
-  List view switcher** providing an **adjacency-list alternative** (skill: network
-  graphs are "Very Poor" accessible — must supply a text alternative).
-- **Accessibility:** `semantics { contentDescription }` on the canvas; the List
-  view is fully selectable/readable; tap targets are full-width rows; color is
-  never the only signal (labels + relation text always present).
-- **Motion:** no infinite/looping animations; selection is an instant
-  color/border change (150–300ms feel via static styling), respecting
-  `prefers-reduced-motion` intent. No layout-shifting hover/scale.
-
-See `STATUS.md` for what builds today and `ENHANCEMENTS.md` for the prioritized
-sprint list.
+1. A stable versioned client/server protocol.
+2. A threat model covering fingerprint leakage, SSRF, malicious URLs, poisoning,
+   denial of service, server compromise, and deletion requests.
+3. Signed reproducible Docker images.
+4. Backup, restore, upgrade, health-check, TLS, and authentication guidance.
+5. Corpus provenance, retention, exclusion, revalidation, and removal policies.
+6. Resource limits suitable for home machines and VPS deployments.
+7. End-to-end tests preserving local-only default and fallback behaviour.
+8. A labelled benchmark proving meaningful recall gain without unacceptable
+   false positives.
