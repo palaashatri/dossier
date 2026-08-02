@@ -1,6 +1,7 @@
 package io.dossier.app.data.web
 
 import io.dossier.app.domain.model.IdentityInput
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -14,9 +15,15 @@ import java.util.concurrent.TimeUnit
  * Search snippets are useful leads, but they are stale, truncated, and occasionally
  * associated with the wrong URL. This verifier confirms that the source still exists
  * and that an identity signal is present on the actual page.
+ *
+ * When a live page is definitively deleted or replaced, the verifier performs one
+ * exact-URL Wayback lookup. A matching archive capture is retained as explicitly
+ * historical evidence with a lower confidence ceiling; it is never treated as proof
+ * that the profile or page is currently active.
  */
 internal class PublicPageVerifier(
-    private val client: OkHttpClient = defaultClient()
+    private val client: OkHttpClient = defaultClient(),
+    private val archiveResolver: ArchivePageResolver = ArchivePageResolver()
 ) {
     sealed class Outcome {
         data class Verified(
@@ -51,7 +58,13 @@ internal class PublicPageVerifier(
             client.newCall(request).execute().use { response ->
                 when {
                     response.code == 404 || response.code == 410 ->
-                        return@withContext Outcome.Rejected("Source page no longer exists")
+                        return@withContext verifyArchivedVersion(
+                            input = input,
+                            originalUrl = url,
+                            indexedTitle = indexedTitle,
+                            indexedSnippet = indexedSnippet,
+                            noArchiveReason = "Source page no longer exists"
+                        )
                     response.code == 401 || response.code == 403 || response.code == 429 ->
                         return@withContext Outcome.Unavailable("Source requires authentication or rate-limited access")
                     !response.isSuccessful ->
@@ -80,13 +93,22 @@ internal class PublicPageVerifier(
                     ?.trim()
                     .orEmpty()
                 val text = document.body()?.text()?.trim().orEmpty().take(MAX_TEXT_CHARS)
-                val combined = listOf(title, description, text, indexedTitle, indexedSnippet)
+                val directContent = listOf(title, description, text)
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n")
+                val combined = listOf(directContent, indexedTitle, indexedSnippet)
                     .filter { it.isNotBlank() }
                     .joinToString("\n")
 
                 val assessment = assessIdentitySignals(input, finalUrl, combined)
                 if (assessment.directScore <= 0f) {
-                    return@withContext Outcome.Rejected("Direct source contains no matching identity signal")
+                    return@withContext verifyArchivedVersion(
+                        input = input,
+                        originalUrl = url,
+                        indexedTitle = indexedTitle,
+                        indexedSnippet = indexedSnippet,
+                        noArchiveReason = "Direct source contains no matching identity signal"
+                    )
                 }
 
                 val snippet = description.ifBlank { text.take(360) }.ifBlank { indexedSnippet }.take(360)
@@ -99,9 +121,53 @@ internal class PublicPageVerifier(
                     signals = assessment.signals
                 )
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             Outcome.Unavailable(e.localizedMessage ?: e.javaClass.simpleName)
         }
+    }
+
+    private suspend fun verifyArchivedVersion(
+        input: IdentityInput,
+        originalUrl: String,
+        indexedTitle: String,
+        indexedSnippet: String,
+        noArchiveReason: String
+    ): Outcome = when (val archive = archiveResolver.resolveExactUrl(originalUrl)) {
+        is ArchivePageResolver.Result.Found -> {
+            // Do not use the search snippet to establish attribution: the archive
+            // capture itself must independently expose an identity signal.
+            val archiveContent = listOf(archive.title, archive.description, archive.text)
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+            val assessment = assessIdentitySignals(input, archive.originalUrl, archiveContent)
+            if (assessment.directScore <= 0f) {
+                Outcome.Rejected("$noArchiveReason; archived capture contained no matching identity signal")
+            } else {
+                val date = ArchivePageResolver.displayTimestamp(archive.timestamp)
+                val archiveSnippet = archive.description
+                    .ifBlank { archive.text.take(300) }
+                    .ifBlank { indexedSnippet }
+                    .take(320)
+                Outcome.Verified(
+                    finalUrl = archive.snapshotUrl,
+                    title = archive.title.ifBlank { indexedTitle }.take(180),
+                    snippet = "Historical capture ($date): $archiveSnippet".take(360),
+                    directScore = (assessment.directScore * HISTORICAL_SCORE_FACTOR).coerceIn(0f, 1f),
+                    confidenceCeiling = historicalConfidenceCeiling(assessment.confidenceCeiling),
+                    signals = listOf(
+                        "Historical evidence only — live page is deleted, unavailable, or replaced",
+                        "Verified against ${archive.provider} capture dated $date",
+                        "Original URL: ${archive.originalUrl}"
+                    ) + assessment.signals
+                )
+            }
+        }
+        ArchivePageResolver.Result.NotFound ->
+            Outcome.Rejected("$noArchiveReason; no accessible Wayback capture was found")
+        is ArchivePageResolver.Result.Unavailable ->
+            Outcome.Unavailable("$noArchiveReason; archive lookup unavailable: ${archive.reason}")
     }
 
     data class IdentityAssessment(
@@ -115,6 +181,11 @@ internal class PublicPageVerifier(
         private const val MAX_TEXT_CHARS = 8_000
         private const val USER_AGENT =
             "Dossier/0.1 public-self-audit (+https://github.com/palaashatri/dossier)"
+        private const val HISTORICAL_CONFIDENCE_CEILING = 0.78f
+        private const val HISTORICAL_SCORE_FACTOR = 0.90f
+
+        internal fun historicalConfidenceCeiling(directCeiling: Float): Float =
+            directCeiling.coerceAtMost(HISTORICAL_CONFIDENCE_CEILING)
 
         /** Pure scoring function so identity-attribution behaviour is regression-testable. */
         fun assessIdentitySignals(
