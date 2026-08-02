@@ -10,103 +10,103 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
-/**
- * Calm, warm, restrained palette — inspired by Claude.ai's inviting minimalism.
- * Warm coral accent on warm-neutral bases. Two modes (light + dark). No glow,
- * no scanline, no cyberpunk — just serene, functional warmth.
- *
- * NOTE: [NeuralTheme] (the old object) is kept as a compatibility shim that
- * reads these colors, so the 172 existing call sites keep working while the
- * palette is now theme-aware.
- */
+/** Calm, restrained warm palette with explicit foreground roles. */
 data class DossierColors(
-    // Bases
     val background: Color,
     val surface: Color,
     val cardBackground: Color,
     val accentSurface: Color,
-    // Accent — warm coral (the single brand color, used sparingly)
-    val cobalt: Color,        // == accent (legacy alias name kept)
+    val cobalt: Color,
+    val onAccent: Color,
     val accentDim: Color,
-    // Text
     val textPrimary: Color,
     val textSecondary: Color,
     val textMuted: Color,
-    // Borders
     val borderColor: Color,
-    // Status (muted, not saturated)
     val emerald: Color,
     val amber: Color,
     val crimson: Color,
-    // Legacy aliases (resolve to accent/warm tones)
     val violet: Color,
     val magenta: Color,
     val cyan: Color,
     val lavender: Color,
     val subtleGlow: Color,
     val borderGlow: Color,
-    // Gradients
     val accentGradient: Brush,
     val backgroundGradient: Brush,
     val threatGradient: Brush
 )
 
+// Text/status colors in the light palette are deliberately darker than the
+// original coral set so normal-size labels remain legible on warm cream cards.
 private val LightColors = DossierColors(
-    background = Color(0xFFFAF9F5),     // warm cream
+    background = Color(0xFFFAF9F5),
     surface = Color(0xFFFFFFFF),
-    cardBackground = Color(0xFFF5F4EE),  // soft warm card
+    cardBackground = Color(0xFFF5F4EE),
     accentSurface = Color(0xFFFDF8F5),
-    cobalt = Color(0xFFD97757),          // coral
-    accentDim = Color(0xFFC26B4D),
+    cobalt = Color(0xFFA94E35),
+    onAccent = Color.White,
+    accentDim = Color(0xFF8F3F2E),
     textPrimary = Color(0xFF1A1A18),
     textSecondary = Color(0xFF6B6B65),
-    textMuted = Color(0xFF9A9A92),
-    borderColor = Color(0xFFE8E6DF),
-    emerald = Color(0xFF4A8B6F),
-    amber = Color(0xFFB8843A),
-    crimson = Color(0xFFC25555),
-    violet = Color(0xFFC26B4D),
-    magenta = Color(0xFFD97757),
-    cyan = Color(0xFFD97757),
-    lavender = Color(0xFF8A8278),
+    textMuted = Color(0xFF6F6F69),
+    borderColor = Color(0xFFE0DED6),
+    emerald = Color(0xFF34765B),
+    amber = Color(0xFF8F5F20),
+    crimson = Color(0xFFA23F3F),
+    violet = Color(0xFF8F3F2E),
+    magenta = Color(0xFFA94E35),
+    cyan = Color(0xFFA94E35),
+    lavender = Color(0xFF6F6F69),
     subtleGlow = Color(0xFFF5E6DE),
-    borderGlow = Color(0xFFD97757),
-    accentGradient = Brush.horizontalGradient(listOf(Color(0xFFD97757), Color(0xFFC26B4D))),
-    backgroundGradient = Brush.verticalGradient(listOf(Color(0xFFFAF9F5), Color(0xFFF5F4EE))),
-    threatGradient = Brush.horizontalGradient(listOf(Color(0xFFC25555), Color(0xFF9A3D3D)))
+    borderGlow = Color(0xFFA94E35),
+    accentGradient = Brush.horizontalGradient(
+        listOf(Color(0xFFA94E35), Color(0xFF8F3F2E))
+    ),
+    backgroundGradient = Brush.verticalGradient(
+        listOf(Color(0xFFFAF9F5), Color(0xFFF5F4EE))
+    ),
+    threatGradient = Brush.horizontalGradient(
+        listOf(Color(0xFFA23F3F), Color(0xFF7D3030))
+    )
 )
 
 private val DarkColors = DossierColors(
-    background = Color(0xFF1C1C1A),     // warm charcoal
+    background = Color(0xFF1C1C1A),
     surface = Color(0xFF262624),
     cardBackground = Color(0xFF2A2A27),
     accentSurface = Color(0xFF2E2724),
-    cobalt = Color(0xFFD97757),          // coral (works on dark)
+    cobalt = Color(0xFFD97757),
+    // Filled coral surfaces need a dark foreground; white on this coral does
+    // not provide enough contrast for normal-size button labels.
+    onAccent = Color(0xFF1A1A18),
     accentDim = Color(0xFFB85F42),
     textPrimary = Color(0xFFF5F4EE),
     textSecondary = Color(0xFFA0A09A),
-    textMuted = Color(0xFF6E6E68),
-    borderColor = Color(0xFF3A3A36),
-    emerald = Color(0xFF6BAF8E),
-    amber = Color(0xFFD9A856),
-    crimson = Color(0xFFE07070),
-    violet = Color(0xFFB85F42),
+    textMuted = Color(0xFF85857E),
+    borderColor = Color(0xFF454540),
+    emerald = Color(0xFF79BE9D),
+    amber = Color(0xFFE0B467),
+    crimson = Color(0xFFF08080),
+    violet = Color(0xFFCC8064),
     magenta = Color(0xFFD97757),
     cyan = Color(0xFFD97757),
-    lavender = Color(0xFFA0A09A),
+    lavender = Color(0xFFB2B2AA),
     subtleGlow = Color(0xFF3A2A24),
     borderGlow = Color(0xFFD97757),
-    accentGradient = Brush.horizontalGradient(listOf(Color(0xFFD97757), Color(0xFFB85F42))),
-    backgroundGradient = Brush.verticalGradient(listOf(Color(0xFF1C1C1A), Color(0xFF222220))),
-    threatGradient = Brush.horizontalGradient(listOf(Color(0xFFE07070), Color(0xFF8A3838)))
+    accentGradient = Brush.horizontalGradient(
+        listOf(Color(0xFFD97757), Color(0xFFB85F42))
+    ),
+    backgroundGradient = Brush.verticalGradient(
+        listOf(Color(0xFF1C1C1A), Color(0xFF222220))
+    ),
+    threatGradient = Brush.horizontalGradient(
+        listOf(Color(0xFFF08080), Color(0xFFA74343))
+    )
 )
 
 val LocalDossierColors = staticCompositionLocalOf { LightColors }
 
-/**
- * Root theme wrapper. Provides the correct palette based on system dark-mode
- * setting. Wrap the entire app in this.
- */
 @Composable
 fun DossierTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -116,21 +116,14 @@ fun DossierTheme(
     CompositionLocalProvider(LocalDossierColors provides colors, content = content)
 }
 
-/** Unified card shape used across the app — calm, consistent 14dp corners. */
 val DossierCardShape = RoundedCornerShape(14.dp)
 val DossierButtonShape = RoundedCornerShape(12.dp)
 
-/**
- * Compatibility shim — the old `NeuralTheme` object. Every property now reads
- * from [LocalDossierColors] so existing call sites (172 refs) stay valid while
- * becoming theme-aware. Legacy glow/scanline properties resolve to accent/border
- * (they're no longer used by the stripped-down components).
- */
+/** Compatibility shim while legacy call sites move to semantic Material roles. */
 object NeuralTheme {
     val colors: DossierColors
         @Composable @ReadOnlyComposable get() = LocalDossierColors.current
 
-    // ---- Bases (delegate to current theme colors) ----
     val BackgroundStart: Color @Composable get() = colors.background
     val BackgroundMid: Color @Composable get() = colors.surface
     val BackgroundEnd: Color @Composable get() = colors.background
@@ -138,11 +131,10 @@ object NeuralTheme {
     val SurfaceDark: Color @Composable get() = colors.surface
     val AccentSurface: Color @Composable get() = colors.accentSurface
 
-    // ---- Accent ----
     val Cobalt: Color @Composable get() = colors.cobalt
+    val OnAccent: Color @Composable get() = colors.onAccent
     val AccentDim: Color @Composable get() = colors.accentDim
 
-    // ---- Legacy aliases ----
     val Violet: Color @Composable get() = colors.violet
     val Magenta: Color @Composable get() = colors.magenta
     val Cyan: Color @Composable get() = colors.cyan
@@ -150,29 +142,22 @@ object NeuralTheme {
     val SubtleGlow: Color @Composable get() = colors.subtleGlow
     val BorderGlow: Color @Composable get() = colors.borderGlow
 
-    // ---- Status ----
     val Emerald: Color @Composable get() = colors.emerald
     val Amber: Color @Composable get() = colors.amber
     val Crimson: Color @Composable get() = colors.crimson
 
-    // ---- Text ----
     val TextPrimary: Color @Composable get() = colors.textPrimary
     val TextSecondary: Color @Composable get() = colors.textSecondary
     val TextMuted: Color @Composable get() = colors.textMuted
-
-    // ---- Borders ----
     val BorderColor: Color @Composable get() = colors.borderColor
 
-    // ---- HUD helpers — repointed to accent/border (the glow aesthetic is gone) ----
     val HudGlow: Color @Composable get() = colors.cobalt
     val HudGlowDim: Color @Composable get() = colors.accentDim
     val ScanlineColor: Color @Composable get() = colors.borderColor
     val CornerBracketColor: Color @Composable get() = colors.borderColor
     val ReadoutColor: Color @Composable get() = colors.cobalt
-
     val HudCardShape = DossierCardShape
 
-    // ---- Gradients ----
     val GeminiGradient: Brush @Composable get() = colors.accentGradient
     val GeminiSweep: Brush @Composable get() = colors.accentGradient
     val HudGradient: Brush @Composable get() = colors.accentGradient
