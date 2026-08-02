@@ -173,10 +173,15 @@ class BreachCheckService(private val context: Context) {
                             )
                         }
                     }
-                    401, 403 -> HibpFetchResult(
+                    401 -> HibpFetchResult(
                         emptyList(),
                         HibpCoverage.CredentialsRejected,
                         "HIBP API credentials were rejected."
+                    )
+                    403 -> HibpFetchResult(
+                        emptyList(),
+                        HibpCoverage.Unavailable,
+                        "HIBP denied the privacy-preserving email range lookup. The configured subscription may not include this endpoint. Dossier did not fall back to sending the complete email address."
                     )
                     429 -> HibpFetchResult(
                         emptyList(),
