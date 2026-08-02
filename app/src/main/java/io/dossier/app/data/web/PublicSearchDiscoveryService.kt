@@ -25,12 +25,10 @@ import java.util.concurrent.TimeUnit
 /**
  * Bounded public-search discovery for consented self-audits.
  *
- * Reliability policy:
- *  - rotate a primary provider per query and fail over only when needed;
- *  - retry transient failures with backoff and respect Retry-After;
- *  - open a short circuit after repeated provider failures;
- *  - use provider-specific parsers before a conservative generic fallback;
- *  - cache successful query/provider results for the current process.
+ * Search indexes are treated as lead generators, not evidence authorities. High-ranked
+ * results are fetched directly and must expose at least one identity signal before they
+ * can receive meaningful confidence. Unreachable index-only results remain review leads
+ * with a strict confidence ceiling.
  */
 class PublicSearchDiscoveryService(private val context: Context) {
 
@@ -41,13 +39,21 @@ class PublicSearchDiscoveryService(private val context: Context) {
         .retryOnConnectionFailure(true)
         .build()
 
+    private val pageVerifier = PublicPageVerifier()
+    private val cache = ConcurrentHashMap<String, CachedResults>()
+    private val breaker = ProviderCircuitBreaker()
+    private val browserSemaphore = Semaphore(1)
+
     data class PublicSearchResult(
         val title: String,
         val snippet: String,
         val url: String,
         val query: String,
         val source: String,
-        val score: Float = 0f
+        val score: Float = 0f,
+        val providerCount: Int = 1,
+        val directlyVerified: Boolean = false,
+        val verificationNote: String? = null
     )
 
     private data class SearchProvider(
@@ -61,10 +67,6 @@ class PublicSearchDiscoveryService(private val context: Context) {
         val results: List<PublicSearchResult>
     )
 
-    private val cache = ConcurrentHashMap<String, CachedResults>()
-    private val breaker = ProviderCircuitBreaker()
-    private val browserSemaphore = Semaphore(1)
-
     suspend fun discover(input: IdentityInput, deepResearch: Boolean = false): List<PublicSearchResult> =
         withContext(Dispatchers.IO) {
             val queryLimit = if (deepResearch) MAX_DEEP_QUERIES else MAX_DEFAULT_QUERIES
@@ -72,25 +74,77 @@ class PublicSearchDiscoveryService(private val context: Context) {
             if (queries.isEmpty()) return@withContext emptyList()
 
             val providers = defaultProviders()
-            val semaphore = Semaphore(MAX_PARALLEL_SEARCH_QUERIES)
-
-            val rawResults = coroutineScope {
+            val querySemaphore = Semaphore(MAX_PARALLEL_SEARCH_QUERIES)
+            val raw = coroutineScope {
                 queries.mapIndexed { index, query ->
                     async(Dispatchers.IO) {
-                        semaphore.withPermit {
-                            searchWithFailover(query, providers, startIndex = index % providers.size)
+                        querySemaphore.withPermit {
+                            searchWithFailover(query, providers, index % providers.size)
                         }
                     }
                 }.awaitAll().flatten()
             }
 
-            rawResults
-                .map { result -> result.copy(score = scoreResult(input, result)) }
+            val scored = mergeProviderEvidence(raw)
+                .map { it.copy(score = scoreResult(input, it)) }
+                .filter { it.score >= MIN_INDEX_SCORE }
+                .sortedByDescending { it.score }
+                .take(MAX_PRE_VERIFICATION_RESULTS)
+
+            val verificationKeys = scored
+                .take(MAX_DIRECT_VERIFICATIONS)
+                .map { canonicalUrlKey(it.url) }
+                .toSet()
+            val verifySemaphore = Semaphore(MAX_PARALLEL_DIRECT_VERIFICATIONS)
+
+            coroutineScope {
+                scored.map { result ->
+                    async(Dispatchers.IO) {
+                        if (canonicalUrlKey(result.url) !in verificationKeys) {
+                            return@async result.copy(
+                                score = result.score.coerceAtMost(INDEX_ONLY_CONFIDENCE_CEILING),
+                                verificationNote = "Indexed lead; source page not re-fetched due to scan budget"
+                            )
+                        }
+
+                        verifySemaphore.withPermit {
+                            when (val verification = pageVerifier.verify(
+                                input = input,
+                                url = result.url,
+                                indexedTitle = result.title,
+                                indexedSnippet = result.snippet
+                            )) {
+                                is PublicPageVerifier.Outcome.Verified -> {
+                                    val blended = (
+                                        result.score * INDEX_WEIGHT +
+                                            verification.directScore * DIRECT_PAGE_WEIGHT +
+                                            if (result.providerCount >= 2) PROVIDER_CONSENSUS_BONUS else 0f
+                                        ).coerceIn(0f, verification.confidenceCeiling)
+                                    result.copy(
+                                        title = verification.title.ifBlank { result.title },
+                                        snippet = verification.snippet.ifBlank { result.snippet },
+                                        url = verification.finalUrl,
+                                        score = blended,
+                                        directlyVerified = true,
+                                        verificationNote = verification.signals.joinToString("; ")
+                                    )
+                                }
+                                is PublicPageVerifier.Outcome.Rejected -> null
+                                is PublicPageVerifier.Outcome.Unavailable -> result.copy(
+                                    score = result.score.coerceAtMost(INDEX_ONLY_CONFIDENCE_CEILING),
+                                    verificationNote = "Indexed lead only: ${verification.reason}"
+                                )
+                            }
+                        }
+                    }
+                }.awaitAll().filterNotNull()
+            }
                 .filter { it.score >= MIN_PUBLIC_SEARCH_SCORE }
                 .distinctBy { canonicalUrlKey(it.url) }
                 .sortedWith(
-                    compareByDescending<PublicSearchResult> { it.score }
-                        .thenBy { it.source }
+                    compareByDescending<PublicSearchResult> { it.directlyVerified }
+                        .thenByDescending { it.score }
+                        .thenByDescending { it.providerCount }
                         .thenBy { it.title }
                 )
                 .take(MAX_PUBLIC_SEARCH_RESULTS)
@@ -103,16 +157,24 @@ class PublicSearchDiscoveryService(private val context: Context) {
     ): List<PublicSearchResult> {
         val ordered = providers.indices.map { providers[(startIndex + it) % providers.size] }
         val merged = mutableListOf<PublicSearchResult>()
+        var attemptedProviders = 0
+        val requireConsensus = isHighSignalQuery(query)
 
         for (provider in ordered) {
             if (!breaker.canAttempt(provider.name)) continue
+            attemptedProviders++
             merged += fetchProviderResults(provider, query)
-            if (merged.distinctBy { canonicalUrlKey(it.url) }.size >= MIN_RESULTS_BEFORE_STOP) break
+            val uniqueCount = merged.distinctBy { canonicalUrlKey(it.url) }.size
+            if (requireConsensus) {
+                if (attemptedProviders >= MIN_PROVIDERS_FOR_HIGH_SIGNAL_QUERY) break
+            } else if (uniqueCount >= MIN_RESULTS_BEFORE_STOP) {
+                break
+            }
         }
 
         return merged
-            .distinctBy { canonicalUrlKey(it.url) }
-            .take(MAX_RESULTS_PER_QUERY)
+            .distinctBy { "${it.source}|${canonicalUrlKey(it.url)}" }
+            .take(MAX_RESULTS_PER_QUERY * providers.size)
     }
 
     private suspend fun fetchProviderResults(
@@ -130,7 +192,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
         val searchUrl = provider.searchUrl(query)
         var lastHtml: String? = null
         var providerHealthy = false
-        var stopTrying = false
+        var blocked = false
 
         for (attempt in 0 until MAX_HTTP_ATTEMPTS) {
             try {
@@ -145,7 +207,6 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 client.newCall(request).execute().use { response ->
                     val body = response.body?.string().orEmpty()
                     lastHtml = body
-
                     when {
                         response.isSuccessful &&
                             body.length >= MIN_SEARCH_HTML_BYTES &&
@@ -160,20 +221,14 @@ class PublicSearchDiscoveryService(private val context: Context) {
                         }
                         DiscoveryHttpPolicy.isTransientHttpStatus(response.code) -> {
                             if (attempt < MAX_HTTP_ATTEMPTS - 1) {
-                                delay(
-                                    DiscoveryHttpPolicy.retryDelayMillis(
-                                        attempt,
-                                        response.header("Retry-After")
-                                    )
-                                )
+                                delay(DiscoveryHttpPolicy.retryDelayMillis(attempt, response.header("Retry-After")))
                             }
                         }
-                        else -> {
-                            if (DiscoveryHttpPolicy.looksBlocked(body)) stopTrying = true
-                        }
+                        DiscoveryHttpPolicy.looksBlocked(body) -> blocked = true
+                        else -> Unit
                     }
                 }
-                if (stopTrying) break
+                if (blocked) break
             } catch (_: Exception) {
                 if (attempt < MAX_HTTP_ATTEMPTS - 1) {
                     delay(DiscoveryHttpPolicy.retryDelayMillis(attempt, null))
@@ -182,20 +237,18 @@ class PublicSearchDiscoveryService(private val context: Context) {
         }
 
         if (provider.allowBrowserFallback &&
-            (lastHtml.isNullOrBlank() ||
-                DiscoveryHttpPolicy.looksBlocked(lastHtml.orEmpty()) ||
-                (providerHealthy && !looksLikeNoResults(lastHtml.orEmpty())))) {
-            val renderedResults = browserSemaphore.withPermit {
-                when (val render = io.dossier.app.domain.scanner.WebViewScraper(context).scrape(searchUrl)) {
+            (lastHtml.isNullOrBlank() || blocked || (providerHealthy && !looksLikeNoResults(lastHtml.orEmpty())))) {
+            val rendered = browserSemaphore.withPermit {
+                when (val result = io.dossier.app.domain.scanner.WebViewScraper(context).scrape(searchUrl)) {
                     is io.dossier.app.domain.scanner.WebViewScraper.Result.Rendered ->
-                        parseSearchResults(provider.name, query, render.html)
+                        parseSearchResults(provider.name, query, result.html)
                     else -> emptyList()
                 }
             }
-            if (renderedResults.isNotEmpty()) {
+            if (rendered.isNotEmpty()) {
                 breaker.recordSuccess(provider.name)
-                cache[cacheKey] = CachedResults(System.currentTimeMillis(), renderedResults)
-                return renderedResults
+                cache[cacheKey] = CachedResults(System.currentTimeMillis(), rendered)
+                return rendered
             }
         }
 
@@ -214,16 +267,25 @@ class PublicSearchDiscoveryService(private val context: Context) {
     )
 
     companion object {
-        private const val MAX_DEFAULT_QUERIES = 18
-        private const val MAX_DEEP_QUERIES = 32
+        private const val MAX_DEFAULT_QUERIES = 24
+        private const val MAX_DEEP_QUERIES = 40
         private const val MAX_PARALLEL_SEARCH_QUERIES = 3
+        private const val MAX_PARALLEL_DIRECT_VERIFICATIONS = 3
+        private const val MAX_DIRECT_VERIFICATIONS = 24
+        private const val MAX_PRE_VERIFICATION_RESULTS = 48
         private const val MAX_PUBLIC_SEARCH_RESULTS = 30
         private const val MAX_RESULTS_PER_QUERY = 8
-        private const val MIN_RESULTS_BEFORE_STOP = 3
+        private const val MIN_RESULTS_BEFORE_STOP = 4
+        private const val MIN_PROVIDERS_FOR_HIGH_SIGNAL_QUERY = 2
+        private const val MIN_INDEX_SCORE = 0.22f
         private const val MIN_PUBLIC_SEARCH_SCORE = 0.30f
         private const val MIN_SEARCH_HTML_BYTES = 500
         private const val MAX_HTTP_ATTEMPTS = 3
         private const val CACHE_TTL_MS = 15 * 60 * 1_000L
+        private const val INDEX_ONLY_CONFIDENCE_CEILING = 0.58f
+        private const val INDEX_WEIGHT = 0.42f
+        private const val DIRECT_PAGE_WEIGHT = 0.68f
+        private const val PROVIDER_CONSENSUS_BONUS = 0.06f
 
         private val USER_AGENTS = listOf(
             "Mozilla/5.0 (Linux; Android 14; SM-S931B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36",
@@ -243,7 +305,18 @@ class PublicSearchDiscoveryService(private val context: Context) {
             "gitlab.com",
             "medium.com",
             "dev.to",
-            "bsky.app/profile"
+            "bsky.app/profile",
+            "mastodon.social"
+        )
+
+        private val RELIABLE_PROFILE_QUERY_SITES = listOf(
+            "github.com",
+            "reddit.com/user",
+            "youtube.com",
+            "gitlab.com",
+            "dev.to",
+            "bsky.app/profile",
+            "news.ycombinator.com/user"
         )
 
         private val PUBLIC_FORUM_QUERY_SITES = listOf(
@@ -253,11 +326,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
         )
 
         private val SEARCH_ENGINE_HOST_FRAGMENTS = setOf(
-            "duckduckgo.com",
-            "google.com",
-            "bing.com",
-            "yandex.com",
-            "yandex.ru"
+            "duckduckgo.com", "google.com", "bing.com", "yandex.com", "yandex.ru"
         )
 
         private val TRACKING_QUERY_PARAMS = setOf(
@@ -265,60 +334,62 @@ class PublicSearchDiscoveryService(private val context: Context) {
             "gclid", "fbclid", "msclkid", "ref", "ref_src", "ved", "source"
         )
 
+        /** High-entropy identifiers are deliberately placed before broad name queries. */
         fun buildSearchQueries(input: IdentityInput, deepResearch: Boolean = false): List<String> {
             val queries = linkedSetOf<String>()
             val name = input.fullName.trim()
             val handles = buildHandleTerms(input)
-            val aliases = input.aliases.mapNotNull { cleanTerm(it) }
-            val emails = input.emails.mapNotNull { cleanTerm(it) }
-
-            if (name.isNotBlank()) {
-                val quotedName = quote(name)
-                queries.add(quotedName)
-                queries.add("$quotedName github linkedin x twitter reddit twitch instagram youtube")
-                PROFILE_QUERY_SITES.forEach { site -> queries.add("$quotedName site:$site") }
-                PUBLIC_FORUM_QUERY_SITES.forEach { site -> queries.add("$quotedName site:$site") }
-            }
+            val aliases = input.aliases.mapNotNull(::cleanTerm)
+            val emails = input.emails.mapNotNull(::cleanTerm)
+            val organizations = input.organizations.mapNotNull(::cleanTerm)
+            val locations = input.locations.mapNotNull(::cleanTerm)
 
             emails.take(if (deepResearch) 4 else 2).forEach { email ->
-                queries.add(quote(email))
-                val local = email.substringBefore("@").trim().removePrefix("+")
-                if (local.length >= 3) queries.add(quote(local))
+                queries += quote(email)
+                val local = email.substringBefore('@').trim().removePrefix("+")
+                if (local.length >= 3) queries += quote(local)
+                queries += "${quote(email)} site:github.com"
                 if (deepResearch) {
-                    queries.add("${quote(email)} site:pastebin.com")
-                    queries.add("${quote(email)} site:github.com")
+                    queries += "${quote(email)} site:pastebin.com"
+                    queries += "${quote(email)} site:gitlab.com"
                 }
             }
 
             input.phones
-                .map { value -> value.filter { ch -> ch.isDigit() } }
+                .map { value -> value.filter(Char::isDigit) }
                 .filter { it.length >= 8 }
                 .distinct()
                 .take(if (deepResearch) 3 else 2)
                 .forEach { digits ->
-                    queries.add(quote(digits))
-                    if (digits.length >= 10) {
-                        val last10 = digits.takeLast(10)
-                        if (last10 != digits) queries.add(quote(last10))
-                    }
+                    queries += quote(digits)
+                    if (digits.length >= 10) queries += quote(digits.takeLast(10))
                 }
 
-            handles.take(if (deepResearch) 8 else 4).forEach { handle ->
+            handles.take(if (deepResearch) 8 else 5).forEach { handle ->
                 val quotedHandle = quote(handle)
-                queries.add(quotedHandle)
-                queries.add("$quotedHandle github linkedin x twitter reddit twitch instagram youtube")
-                PROFILE_QUERY_SITES.take(if (deepResearch) PROFILE_QUERY_SITES.size else 8)
-                    .forEach { site -> queries.add("$quotedHandle site:$site") }
-                PUBLIC_FORUM_QUERY_SITES.forEach { site -> queries.add("$quotedHandle site:$site") }
+                queries += quotedHandle
+                RELIABLE_PROFILE_QUERY_SITES.forEach { site -> queries += "$quotedHandle site:$site" }
+                queries += "$quotedHandle github reddit gitlab dev.to bluesky youtube"
+            }
+
+            if (name.isNotBlank()) {
+                val quotedName = quote(name)
+                organizations.take(2).forEach { org -> queries += "$quotedName ${quote(org)}" }
+                locations.take(2).forEach { location -> queries += "$quotedName ${quote(location)}" }
+                handles.take(2).forEach { handle -> queries += "$quotedName ${quote(handle)}" }
+                queries += quotedName
+                queries += "$quotedName github linkedin x twitter reddit twitch instagram youtube"
+                PROFILE_QUERY_SITES.forEach { site -> queries += "$quotedName site:$site" }
+                PUBLIC_FORUM_QUERY_SITES.forEach { site -> queries += "$quotedName site:$site" }
             }
 
             aliases.take(if (deepResearch) 6 else 3).forEach { alias ->
                 val quotedAlias = quote(alias)
-                queries.add(quotedAlias)
-                queries.add("$quotedAlias site:reddit.com")
+                queries += quotedAlias
+                queries += "$quotedAlias site:reddit.com"
                 if (deepResearch) {
-                    queries.add("$quotedAlias site:4chan.org")
-                    queries.add("$quotedAlias site:boards.4chan.org")
+                    queries += "$quotedAlias site:4chan.org"
+                    queries += "$quotedAlias site:boards.4chan.org"
                 }
             }
 
@@ -327,12 +398,11 @@ class PublicSearchDiscoveryService(private val context: Context) {
 
         fun parseSearchResults(source: String, query: String, html: String): List<PublicSearchResult> {
             if (html.isBlank() || DiscoveryHttpPolicy.looksBlocked(html)) return emptyList()
-            val doc = Jsoup.parse(html)
-            val sourceLower = source.lowercase()
+            val root = Jsoup.parse(html).body()
             val results = when {
-                sourceLower.contains("duck") -> parseDuckDuckGo(doc.body(), source, query)
-                sourceLower.contains("bing") -> parseBing(doc.body(), source, query)
-                else -> parseGeneric(doc.body(), source, query)
+                source.contains("duck", true) -> parseDuckDuckGo(root, source, query)
+                source.contains("bing", true) -> parseBing(root, source, query)
+                else -> parseGeneric(root, source, query)
             }
             return results.distinctBy { canonicalUrlKey(it.url) }.take(10)
         }
@@ -372,7 +442,6 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     )
                 }
             }
-
             return root.select("a[href]").mapNotNull { anchor ->
                 val url = normalizeSearchUrl(anchor.attr("href")) ?: return@mapNotNull null
                 if (isNoisyResultUrl(url)) return@mapNotNull null
@@ -391,7 +460,6 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val linkElement = block.select(linkSelector).firstOrNull() ?: return null
             val url = normalizeSearchUrl(linkElement.attr("href")) ?: return null
             if (isNoisyResultUrl(url)) return null
-
             val title = linkElement.text().trim().ifBlank {
                 block.select("h2, h3, .result__title, .organic__url-text").text().trim()
             }
@@ -399,7 +467,6 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 block.text().removePrefix(title).trim()
             }
             if (title.isBlank() && snippet.isBlank()) return null
-
             return PublicSearchResult(
                 title = title.ifBlank { "Untitled result" }.take(160),
                 snippet = snippet.take(320),
@@ -419,11 +486,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 score += 0.30f
                 directIdentitySignals++
             }
-
-            val nameParts = name.lowercase()
-                .split("\\s+".toRegex())
-                .filter { it.length >= 3 }
-            if (nameParts.size >= 2 && nameParts.all { combined.contains(it) }) {
+            val nameParts = name.lowercase().split("\\s+".toRegex()).filter { it.length >= 3 }
+            if (nameParts.size >= 2 && nameParts.all(combined::contains)) {
                 score += 0.18f
                 directIdentitySignals++
             }
@@ -444,16 +508,13 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     directIdentitySignals++
                 }
             }
-            input.phones
-                .map { value -> value.filter { ch -> ch.isDigit() } }
-                .filter { it.length >= 8 }
-                .forEach { phone ->
-                    if (combined.filter { ch -> ch.isDigit() }.contains(phone)) {
-                        score += 0.20f
-                        directIdentitySignals++
-                    }
+            input.phones.map { it.filter(Char::isDigit) }.filter { it.length >= 8 }.forEach { phone ->
+                if (combined.filter(Char::isDigit).contains(phone)) {
+                    score += 0.20f
+                    directIdentitySignals++
                 }
-            input.aliases.mapNotNull { cleanTerm(it) }.forEach { alias ->
+            }
+            input.aliases.mapNotNull(::cleanTerm).forEach { alias ->
                 if (combined.contains(alias.lowercase())) {
                     score += 0.10f
                     directIdentitySignals++
@@ -462,26 +523,23 @@ class PublicSearchDiscoveryService(private val context: Context) {
 
             if (resolveProfileUrl(result.url) != null) score += 0.14f
             if (isKnownExposureHost(result.url)) score += 0.05f
-            if (result.query.contains("site:", ignoreCase = true)) score += 0.03f
+            if (result.query.contains("site:", true)) score += 0.03f
+            if (result.providerCount >= 2) score += PROVIDER_CONSENSUS_BONUS
             if (directIdentitySignals == 0) score -= 0.20f
-
             return score.coerceIn(0f, 0.95f)
         }
 
         fun normalizeSearchUrl(rawHref: String): String? {
             val trimmed = rawHref.trim()
-            if (trimmed.isBlank() || trimmed.startsWith("#")) return null
-
-            val decodedOnce = safeDecode(trimmed)
-            val redirectParam = extractRedirectParam(decodedOnce, "uddg")
-                ?: extractRedirectParam(decodedOnce, "q")
-                ?: extractRedirectParam(decodedOnce, "url")
-                ?: extractRedirectParam(decodedOnce, "u")
-
-            val candidate = redirectParam ?: decodedOnce
+            if (trimmed.isBlank() || trimmed.startsWith('#')) return null
+            val decoded = safeDecode(trimmed)
+            val redirect = extractRedirectParam(decoded, "uddg")
+                ?: extractRedirectParam(decoded, "q")
+                ?: extractRedirectParam(decoded, "url")
+                ?: extractRedirectParam(decoded, "u")
+            val candidate = redirect ?: decoded
             if (!candidate.startsWith("http://", true) && !candidate.startsWith("https://", true)) return null
-
-            val withoutFragment = candidate.substringBefore("#")
+            val withoutFragment = candidate.substringBefore('#')
             val uri = runCatching { URI(withoutFragment) }.getOrNull() ?: return null
             if (uri.host.isNullOrBlank()) return null
             return withoutFragment
@@ -492,18 +550,35 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val builder = parsed.newBuilder().fragment(null)
             parsed.queryParameterNames
                 .filter { it.lowercase() in TRACKING_QUERY_PARAMS }
-                .forEach { builder.removeAllQueryParameters(it) }
+                .forEach(builder::removeAllQueryParameters)
             return builder.build().toString().removeSuffix("/").lowercase()
+        }
+
+        private fun mergeProviderEvidence(results: List<PublicSearchResult>): List<PublicSearchResult> =
+            results.groupBy { canonicalUrlKey(it.url) }.values.map { group ->
+                val best = group.maxByOrNull { it.title.length + it.snippet.length } ?: group.first()
+                val sources = group.map { it.source }.distinct()
+                best.copy(
+                    source = sources.joinToString("+"),
+                    providerCount = sources.size
+                )
+            }
+
+        private fun isHighSignalQuery(query: String): Boolean {
+            val unquoted = query.replace("\"", "")
+            val digits = unquoted.count(Char::isDigit)
+            return unquoted.contains('@') || digits >= 8 ||
+                (!query.contains("site:", true) && query.startsWith('"') && query.endsWith('"'))
         }
 
         private fun handleAppearsInProfilePath(url: String, handle: String): Boolean {
             val uri = runCatching { URI(url) }.getOrNull() ?: return false
-            val cleanHandle = handle.trim().removePrefix("@").lowercase()
-            if (cleanHandle.isBlank()) return false
+            val clean = handle.trim().removePrefix("@").lowercase()
+            if (clean.isBlank()) return false
             val segments = uri.path.orEmpty().trim('/').split('/').map { it.removePrefix("@").lowercase() }
-            if (segments.any { it == cleanHandle }) return true
-            val query = uri.rawQuery.orEmpty().lowercase()
-            return query.split('&').any { it.substringAfter('=', "") == cleanHandle }
+            if (segments.any { it == clean }) return true
+            return uri.rawQuery.orEmpty().lowercase().split('&')
+                .any { it.substringAfter('=', "") == clean }
         }
 
         private fun duckDuckGoUrl(query: String): String =
@@ -513,44 +588,32 @@ class PublicSearchDiscoveryService(private val context: Context) {
             "https://www.bing.com/search?q=${urlEncode(query)}&count=10"
 
         private fun userAgentFor(attempt: Int): String = USER_AGENTS[attempt % USER_AGENTS.size]
-
-        private fun quote(term: String): String =
-            "\"${term.replace("\"", " ").trim().take(90)}\""
-
-        private fun cleanTerm(term: String): String? =
-            term.trim().removePrefix("@").takeIf { it.isNotBlank() }
+        private fun quote(term: String): String = "\"${term.replace("\"", " ").trim().take(90)}\""
+        private fun cleanTerm(term: String): String? = term.trim().removePrefix("@").takeIf { it.isNotBlank() }
 
         private fun buildHandleTerms(input: IdentityInput): List<String> =
             (listOfNotNull(input.primaryUsername) + input.usernames + input.aliases)
-                .mapNotNull { cleanTerm(it) }
+                .mapNotNull(::cleanTerm)
                 .filter { it.length in 2..40 }
                 .distinctBy { it.lowercase() }
 
-        private fun urlEncode(s: String): String = URLEncoder.encode(s, "UTF-8")
-
-        private fun safeDecode(value: String): String = try {
-            URLDecoder.decode(value, "UTF-8")
-        } catch (_: Exception) {
-            value
-        }
+        private fun urlEncode(value: String): String = URLEncoder.encode(value, "UTF-8")
+        private fun safeDecode(value: String): String = runCatching { URLDecoder.decode(value, "UTF-8") }.getOrDefault(value)
 
         private fun extractRedirectParam(value: String, param: String): String? {
             val marker = "$param="
-            val idx = value.indexOf(marker)
-            if (idx < 0) return null
-            return safeDecode(value.substring(idx + marker.length).substringBefore("&"))
+            val index = value.indexOf(marker)
+            if (index < 0) return null
+            return safeDecode(value.substring(index + marker.length).substringBefore('&'))
                 .takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
         }
 
         private fun looksLikeNoResults(html: String): Boolean {
             val lower = Jsoup.parse(html).text().lowercase()
             return listOf(
-                "no results found",
-                "there are no results for",
-                "we did not find results",
-                "no results containing all your search terms",
-                "try different keywords"
-            ).any { lower.contains(it) }
+                "no results found", "there are no results for", "we did not find results",
+                "no results containing all your search terms", "try different keywords"
+            ).any(lower::contains)
         }
 
         private fun isNoisyResultUrl(url: String): Boolean {
@@ -559,7 +622,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
             if (SEARCH_ENGINE_HOST_FRAGMENTS.any { host == it || host.endsWith(".$it") }) return true
             val path = uri.path.orEmpty().lowercase()
             return listOf(".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico")
-                .any { suffix -> path.endsWith(suffix) }
+                .any(path::endsWith)
         }
 
         private fun isKnownExposureHost(url: String): Boolean {
@@ -568,7 +631,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
             return listOf(
                 "github.com", "linkedin.com", "x.com", "twitter.com", "reddit.com",
                 "twitch.tv", "instagram.com", "youtube.com", "4chan.org",
-                "boards.4chan.org", "medium.com", "dev.to", "gitlab.com", "bsky.app"
+                "boards.4chan.org", "medium.com", "dev.to", "gitlab.com",
+                "bsky.app", "mastodon.social", "news.ycombinator.com"
             ).any { host == it || host.endsWith(".$it") }
         }
     }
