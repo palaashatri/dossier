@@ -1,5 +1,6 @@
 package io.dossier.app.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,7 +13,7 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -39,85 +40,80 @@ import io.dossier.app.ui.theme.NeuralTheme
 import kotlinx.coroutines.delay
 
 /**
- * Scan screen — calm, honest, real progress.
+ * Scan screen backed only by real ScanSession state.
  *
- * Replaces the prior fake terminal-log animation (a fixed list of log strings
- * printed on a timer that said "complete" before the real scan finished) with
- * the ACTUAL scan stage from ScanSession.progressText, plus a live log of real
- * verification events. Navigation to the report fires only when the real scan
- * completes (isScanning becomes false).
+ * Missing navigation/session input is a visible recoverable error. Dossier must
+ * never fabricate a subject and generate a plausible-looking report for it.
  */
 @Composable
-fun ScanScreen(onScanComplete: () -> Unit) {
+fun ScanScreen(
+    onScanComplete: () -> Unit,
+    onScanCancelled: () -> Unit,
+    onInvalidInput: () -> Unit = onScanCancelled
+) {
     val context = LocalContext.current
     val progressText by ScanSession.progressText.collectAsState()
     val isScanning by ScanSession.isScanning.collectAsState()
     val profileResults by ScanSession.profileScanResults.collectAsState()
 
-    // Real, live log entries — appended as actual scan milestones occur.
     val liveLogs = remember { mutableStateListOf<String>() }
     val scrollState = rememberScrollState()
+    var startError by remember { mutableStateOf<String?>(null) }
+    var hasStarted by remember { mutableStateOf(false) }
+    var navigationCompleted by remember { mutableStateOf(false) }
+    var cancelledByUser by remember { mutableStateOf(false) }
 
-    // Map the real progressText codes to a friendly stage label + log entry.
     LaunchedEffect(progressText) {
         if (progressText.isNotBlank() && liveLogs.lastOrNull() != progressText) {
             liveLogs.add(friendlyStage(progressText))
         }
     }
 
-    // Track confirmed-profile count as a real signal.
     LaunchedEffect(profileResults.size) {
         val confirmed = profileResults.count { it.exists && it.verified }
         if (confirmed > 0) {
-            val msg = "Confirmed $confirmed profile(s) so far…"
-            if (liveLogs.lastOrNull()?.startsWith("Confirmed") != true) {
-                liveLogs.add(msg)
-            }
+            val message = "Confirmed $confirmed profile(s) so far…"
+            if (liveLogs.lastOrNull()?.startsWith("Confirmed") != true) liveLogs.add(message)
         }
     }
 
-    // Kick off the scan once.
     LaunchedEffect(Unit) {
-        val input = ScanSession.tempInput
-            ?: ScanSession.currentInput.value
-            ?: ScanSession.loadResumePoint(context)?.first
-            ?: io.dossier.app.domain.model.IdentityInput(fullName = "Demo Subject", primaryUsername = "demo_subject")
+        val resume = ScanSession.loadResumePoint(context)
+        val input = ScanSession.tempInput ?: ScanSession.currentInput.value ?: resume?.first
+        if (input == null || !hasUsableIdentityInput(input)) {
+            startError = "No valid identity input was supplied. Return to Identity Setup and enter at least one name, username, email, phone number, or profile URL."
+            liveLogs.add("Scan not started: identity input is missing")
+            return@LaunchedEffect
+        }
+
         liveLogs.add("Starting scan…")
-        val deepResearch = ScanSession.deepResearchEnabled.value
+        val deepResearch = if (ScanSession.tempInput == null && ScanSession.currentInput.value == null) {
+            resume?.second ?: ScanSession.deepResearchEnabled.value
+        } else {
+            ScanSession.deepResearchEnabled.value
+        }
         if (deepResearch) liveLogs.add("Deep Research enabled — following linked sites")
         ScanSession.startScan(context, input, deepResearch = deepResearch)
     }
 
-    // Navigate to the report when the scan actually finishes (isScanning flips
-    // false). Cancellation also flips it false, but then onScanComplete fires
-    // from the cancel path via reset, so guard against double-navigation.
-    var hasStarted by remember { mutableStateOf(isScanning) }
-    var navigationCompleted by remember { mutableStateOf(false) }
     LaunchedEffect(isScanning) {
-        android.util.Log.d("ScanScreen", "LaunchedEffect fired: isScanning=$isScanning, hasStarted=$hasStarted, navigationCompleted=$navigationCompleted")
         if (isScanning) {
             hasStarted = true
-            android.util.Log.d("ScanScreen", "Scan started")
-        } else if (hasStarted && !navigationCompleted) {
-            android.util.Log.d("ScanScreen", "SCAN FINISHED: calling onScanComplete() NOW")
+        } else if (
+            hasStarted &&
+            !navigationCompleted &&
+            !cancelledByUser &&
+            progressText != "SCAN_CANCELLED"
+        ) {
             liveLogs.add("Scan complete.")
             navigationCompleted = true
             delay(300)
-            try {
-                android.util.Log.d("ScanScreen", "CALLING onScanComplete callback")
-                onScanComplete()
-                android.util.Log.d("ScanScreen", "onScanComplete returned successfully")
-            } catch (e: Exception) {
-                android.util.Log.e("ScanScreen", "ERROR in onScanComplete: ${e.message}", e)
-            }
+            onScanComplete()
         }
     }
 
-    // Auto-scroll the log to the bottom as entries arrive.
     LaunchedEffect(liveLogs.size) {
-        if (liveLogs.isNotEmpty()) {
-            scrollState.animateScrollTo(scrollState.maxValue)
-        }
+        if (liveLogs.isNotEmpty()) scrollState.animateScrollTo(scrollState.maxValue)
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -133,10 +129,13 @@ fun ScanScreen(onScanComplete: () -> Unit) {
         ) {
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Header
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    text = if (isScanning) "Scanning" else "Compiling report",
+                    text = when {
+                        startError != null -> "Input required"
+                        isScanning -> "Scanning"
+                        else -> "Compiling report"
+                    },
                     color = NeuralTheme.TextSecondary,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium
@@ -150,72 +149,87 @@ fun ScanScreen(onScanComplete: () -> Unit) {
                 )
             }
 
-            // Hero — calm indeterminate ring + Lottie, no layered glow/sparks.
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier.size(200.dp)
-            ) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(200.dp)) {
                 io.dossier.app.ui.components.SquigglyProgressIndicator(
                     size = 160.dp,
-                    progress = null
+                    progress = when {
+                        startError != null -> 0f
+                        isScanning -> null
+                        else -> 1f
+                    }
                 )
                 LottieLoop(
-                    tag = LottieTags.SEARCH,
+                    tag = if (startError == null) LottieTags.SEARCH else LottieTags.INVESTIGATE,
                     size = 110.dp,
                     modifier = Modifier.align(Alignment.Center)
                 )
             }
 
-            // Live status + log
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 16.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
                 horizontalAlignment = Alignment.Start
             ) {
                 Text(
-                    text = friendlyStageLabel(progressText),
-                    color = NeuralTheme.Cobalt,
+                    text = startError?.let { "Scan cannot start" } ?: friendlyStageLabel(progressText),
+                    color = if (startError == null) NeuralTheme.Cobalt else NeuralTheme.Crimson,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium
                 )
 
                 io.dossier.app.ui.components.LinearWavyProgressIndicator(
-                    progress = if (isScanning) null else 1f,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 12.dp),
+                    progress = if (isScanning) null else if (startError == null) 1f else 0f,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
                     strokeWidth = 3.dp
                 )
 
-                // Live log — real entries only, no fake terminal animation.
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(130.dp)
-                        .verticalScroll(scrollState)
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        liveLogs.forEach { log ->
-                            Text(
-                                text = "· $log",
-                                color = NeuralTheme.TextSecondary,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                lineHeight = 16.sp
-                            )
+                startError?.let { message ->
+                    Text(
+                        text = message,
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    Button(
+                        onClick = {
+                            navigationCompleted = true
+                            onInvalidInput()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = NeuralTheme.Cobalt),
+                        shape = io.dossier.app.ui.theme.DossierButtonShape,
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) {
+                        Text("RETURN TO IDENTITY SETUP", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                }
+
+                if (startError == null) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(130.dp).verticalScroll(scrollState)
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            liveLogs.forEach { log ->
+                                Text(
+                                    text = "· $log",
+                                    color = NeuralTheme.TextSecondary,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    lineHeight = 16.sp
+                                )
+                            }
                         }
                     }
                 }
 
-                // Cancel — cooperatively abort the in-flight scan (M16).
                 if (isScanning) {
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedButton(
                         onClick = {
+                            cancelledByUser = true
+                            navigationCompleted = true
                             ScanSession.cancelScan()
-                            onScanComplete()
+                            onScanCancelled()
                         },
                         border = BorderStroke(1.2.dp, NeuralTheme.Crimson.copy(alpha = 0.8f)),
                         shape = io.dossier.app.ui.theme.DossierButtonShape,
@@ -235,26 +249,34 @@ fun ScanScreen(onScanComplete: () -> Unit) {
     }
 }
 
-/** Convert the raw progressText code into a friendly line for the log. */
+private fun hasUsableIdentityInput(input: io.dossier.app.domain.model.IdentityInput): Boolean =
+    input.fullName.isNotBlank() ||
+        !input.primaryUsername.isNullOrBlank() ||
+        input.usernames.any { it.isNotBlank() } ||
+        input.emails.any { it.isNotBlank() } ||
+        input.phones.any { it.isNotBlank() } ||
+        input.profileUrls.any { it.isNotBlank() }
+
 private fun friendlyStage(raw: String): String = when {
     raw.contains("DISCOVERING", ignoreCase = true) -> "Resolving name → username variants"
     raw.contains("COMPARING", ignoreCase = true) -> "Comparing selfie vs profile avatars"
     raw.contains("BREACH", ignoreCase = true) -> "Checking email breach / public exposure"
     raw.contains("ENTITY", ignoreCase = true) -> "Building entity relationship graph"
     raw.contains("COMPILING", ignoreCase = true) -> "Compiling exposure levels"
-    raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating AI analysis"
+    raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating analysis"
     raw.contains("AUDITING", ignoreCase = true) -> "Auditing place image metadata"
+    raw.contains("CANCELLED", ignoreCase = true) -> "Scan cancelled"
     else -> raw.lowercase().replace('_', ' ')
 }
 
-/** A short label for the current stage, shown above the progress bar. */
 private fun friendlyStageLabel(raw: String): String = when {
     raw.isBlank() -> "Initializing"
     raw.contains("DISCOVERING", ignoreCase = true) -> "Discovering usernames"
-    raw.contains("COMPARING", ignoreCase = true) -> "Comparing faces"
-    raw.contains("BREACH", ignoreCase = true) -> "Breach exposure"
+    raw.contains("COMPARING", ignoreCase = true) -> "Comparing visual consistency"
+    raw.contains("BREACH", ignoreCase = true) -> "Breach and exposure coverage"
     raw.contains("ENTITY", ignoreCase = true) -> "Entity graph"
     raw.contains("COMPILING", ignoreCase = true) -> "Compiling report"
-    raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating AI analysis"
+    raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating analysis"
+    raw.contains("CANCELLED", ignoreCase = true) -> "Cancelled"
     else -> raw.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
 }
