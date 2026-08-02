@@ -49,7 +49,9 @@ android {
                 "proguard-rules.pro"
             )
             ndk {
-                abiFilters.addAll(listOf("arm64-v8a"))
+                // Keep the physical-device target while allowing the x86_64
+                // emulator used by Compose instrumentation tests in CI.
+                abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
             }
         }
         release {
