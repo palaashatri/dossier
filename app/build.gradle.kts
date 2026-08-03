@@ -30,6 +30,10 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Instrumentation runs against an isolated, non-minified app variant.
+    // The normal debug/release shrinker validation remains unchanged.
+    testBuildType = "uiTest"
+
     signingConfigs {
         create("release") {
             if (releaseSigningConfigured) {
@@ -50,6 +54,16 @@ android {
             )
             ndk {
                 abiFilters.addAll(listOf("arm64-v8a"))
+            }
+        }
+        create("uiTest") {
+            initWith(getByName("debug"))
+            isDebuggable = true
+            isMinifyEnabled = false
+            matchingFallbacks += listOf("debug")
+            ndk {
+                abiFilters.clear()
+                abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
             }
         }
         release {
@@ -127,4 +141,6 @@ dependencies {
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+    add("uiTestImplementation", "androidx.compose.ui:ui-tooling")
+    add("uiTestImplementation", "androidx.compose.ui:ui-test-manifest")
 }
