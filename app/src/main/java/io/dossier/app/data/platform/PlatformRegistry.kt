@@ -1,18 +1,18 @@
 package io.dossier.app.data.platform
 
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.QueryCapability
 import io.dossier.app.domain.model.Platform
 import io.dossier.app.domain.model.PlatformProfileTemplate
 
-/**
- * Compatibility view consumed by the existing ProfileScanner and HandleExtractor.
- *
- * Discovery Fabric v2 is authoritative for provider metadata. Keeping this
- * adapter lets the current verified scanner immediately consume new declarative
- * definitions without duplicating provider lists or rewriting its mature
- * verification path in the same milestone.
- */
-val PLATFORMS: List<PlatformProfileTemplate> = ProviderCatalogV2.definitions
+private data class LegacyProviderEntry(
+    val providerId: String,
+    val platform: Platform,
+    val urlPattern: String,
+    val requiresLoginUsually: Boolean
+)
+
+private val LEGACY_PROVIDER_ENTRIES: List<LegacyProviderEntry> = ProviderCatalogV2.definitions
     .asSequence()
     .filter { definition ->
         definition.profileUrlTemplate != null &&
@@ -20,17 +20,46 @@ val PLATFORMS: List<PlatformProfileTemplate> = ProviderCatalogV2.definitions
             definition.legacyTemplateCompatible
     }
     .map { definition ->
-        val platform = definition.legacyPlatformName
-            ?.let { name -> runCatching { Platform.valueOf(name) }.getOrNull() }
-            ?: Platform.Website
-        PlatformProfileTemplate(
-            platform = platform,
+        LegacyProviderEntry(
+            providerId = definition.id,
+            platform = definition.legacyPlatformName
+                ?.let { name -> runCatching { Platform.valueOf(name) }.getOrNull() }
+                ?: Platform.Website,
             urlPattern = requireNotNull(definition.profileUrlTemplate),
-            requiresLoginUsually = "authentication-often-required" in definition.tags,
-            shouldFetchByDefault = definition.enabled
+            requiresLoginUsually = "authentication-often-required" in definition.tags
         )
     }
     .toList()
+
+/**
+ * Compatibility view consumed by the existing ProfileScanner and HandleExtractor.
+ *
+ * Discovery Fabric v2 is authoritative for provider metadata. The list keeps
+ * all resolvable templates available for explicit URLs, while
+ * shouldFetchByDefault is computed from the currently selected real scan plan.
+ * This lets Quick/Standard/Deep/Exhaustive alter actual provider fan-out without
+ * duplicating the legacy scanner or faking progress totals.
+ */
+val PLATFORMS: List<PlatformProfileTemplate> = object : AbstractList<PlatformProfileTemplate>() {
+    override val size: Int
+        get() = LEGACY_PROVIDER_ENTRIES.size
+
+    override fun get(index: Int): PlatformProfileTemplate {
+        val entry = LEGACY_PROVIDER_ENTRIES[index]
+        val plannedIds = ProviderCatalogV2
+            .plan(DiscoveryScanPreferences.selectedMode.value)
+            .providers
+            .asSequence()
+            .map { it.id }
+            .toSet()
+        return PlatformProfileTemplate(
+            platform = entry.platform,
+            urlPattern = entry.urlPattern,
+            requiresLoginUsually = entry.requiresLoginUsually,
+            shouldFetchByDefault = entry.providerId in plannedIds
+        )
+    }
+}
 
 data class ResolvedProfile(val platform: Platform, val username: String, val url: String)
 
