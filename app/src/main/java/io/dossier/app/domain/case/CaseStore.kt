@@ -3,6 +3,7 @@ package io.dossier.app.domain.case
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import io.dossier.app.domain.discovery.ScanHistoryRuntime
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -30,11 +31,28 @@ class CaseStore(private val context: Context) {
     private val dir: File
         get() = File(context.filesDir, CASE_DIRECTORY).also { it.mkdirs() }
 
-    fun save(case: DossierCase): Boolean = runCatching {
-        val normalized = if (case.schemaVersion == DossierCase.CURRENT_SCHEMA_VERSION) {
-            case
+    /**
+     * Initial explicit save. If the coordinator has a terminal lifecycle record
+     * for the same normalized identity seed set, attach it to the new encrypted
+     * case. Later case updates never auto-attach a newer scan implicitly.
+     */
+    fun save(case: DossierCase): Boolean = saveInternal(case, attachLatestScanHistory = true)
+
+    private fun saveInternal(
+        case: DossierCase,
+        attachLatestScanHistory: Boolean
+    ): Boolean = runCatching {
+        val withHistory = if (attachLatestScanHistory && case.scanHistory.isEmpty()) {
+            ScanHistoryRuntime.latestFor(case.input)?.let { entry ->
+                case.copy(scanHistory = listOf(entry))
+            } ?: case
         } else {
-            case.copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION)
+            case
+        }
+        val normalized = if (withHistory.schemaVersion == DossierCase.CURRENT_SCHEMA_VERSION) {
+            withHistory
+        } else {
+            withHistory.copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION)
         }
         val plaintext = json.encodeToString(normalized).toByteArray(Charsets.UTF_8)
         val envelope = encrypt(plaintext)
@@ -61,7 +79,7 @@ class CaseStore(private val context: Context) {
             json.decodeFromString<DossierCase>(legacy.readText())
         }.getOrNull() ?: return null
         val normalized = migrated.copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION)
-        return if (save(normalized)) normalized else migrated
+        return if (saveInternal(normalized, attachLatestScanHistory = false)) normalized else migrated
     }
 
     fun list(): List<DossierCase> = runCatching {
@@ -111,7 +129,10 @@ class CaseStore(private val context: Context) {
 
     private fun update(caseId: String, transform: (DossierCase) -> DossierCase): Boolean {
         val current = load(caseId) ?: return false
-        return save(transform(current).copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION))
+        return saveInternal(
+            transform(current).copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION),
+            attachLatestScanHistory = false
+        )
     }
 
     private fun encrypt(plaintext: ByteArray): EncryptedCaseEnvelope {
