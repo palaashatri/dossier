@@ -69,28 +69,16 @@ class ConfidenceEngine(
 }
 
 private fun EntityType.toEvidenceKind(): EvidenceKind = when (this) {
-    EntityType.Person,
-    EntityType.Subject,
-    EntityType.Account,
-    EntityType.DisplayName -> EvidenceKind.Username
-
+    EntityType.Person -> EvidenceKind.Username
     EntityType.Username -> EvidenceKind.Username
     EntityType.Email -> EvidenceKind.Email
     EntityType.Phone -> EvidenceKind.Phone
-    EntityType.Domain,
-    EntityType.URL,
-    EntityType.Website -> EvidenceKind.PublicSearchEvidence
-
     EntityType.Profile -> EvidenceKind.Profile
     EntityType.Organization -> EvidenceKind.Organization
     EntityType.Location -> EvidenceKind.Location
-    EntityType.Occupation -> EvidenceKind.Organization
     EntityType.Image -> EvidenceKind.ImageConsistency
-    EntityType.Document,
-    EntityType.ArchiveSnapshot,
-    EntityType.EvidenceArtifact -> EvidenceKind.SensitiveSnippet
-
     EntityType.Breach -> EvidenceKind.SensitiveSnippet
+    EntityType.Website -> EvidenceKind.PublicSearchEvidence
 }
 
 private fun io.dossier.app.domain.model.GraphNodeState.toEvidenceState(): EvidenceState = when (this) {
