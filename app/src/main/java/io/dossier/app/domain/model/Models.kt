@@ -13,7 +13,7 @@ data class IdentityInput(
     val usernames: List<String> = emptyList(),
     val primaryUsername: String? = null,
     val profileUrls: List<String> = emptyList(),
-    val selfieUri: String? = null // Local URI (file://)
+    val selfieUri: String? = null
 )
 
 @Serializable
@@ -75,16 +75,8 @@ data class ProfileScanResult(
     val extractedText: String,
     val findings: List<Finding>,
     val confidenceSignals: List<String>,
-    // True only when existence and attribution were confirmed by a direct page
-    // fetch/render. Public search hits can still be surfaced with verified=false
-    // so the user can review plausible candidates without treating them as proof.
     val verified: Boolean = false,
-    // Human-readable explanation of how existence was decided, e.g.
-    // "✓ Verified in-browser", "HTTP 404 — not found",
-    // "Unverifiable — challenge page", "Offline".
     val verificationStatus: String? = null,
-    // For pivot-discovered profiles: which confirmed profile surfaced this one
-    // (e.g. "discovered via GitHub profile"). Null for directly-sourced candidates.
     val provenance: String? = null
 )
 
@@ -122,7 +114,7 @@ enum class Platform {
 
 data class PlatformProfileTemplate(
     val platform: Platform,
-    val urlPattern: String, // e.g., "https://github.com/{username}"
+    val urlPattern: String,
     val requiresLoginUsually: Boolean,
     val shouldFetchByDefault: Boolean
 )
@@ -137,14 +129,6 @@ data class PlaceScanResult(
     val detectedLandmarks: List<String> = emptyList()
 )
 
-/**
- * Reverse Image Lookup result.
- *
- * Location signals come from EXIF, OCR, labels, and public-web clue search. In
- * addition, Dossier can download public candidate images and perform local
- * whole-image near-duplicate matching using perceptual fingerprints. The query
- * image never leaves the device and no facial identification is performed.
- */
 @Serializable
 data class ReverseImageLookupResult(
     val gps: String?,
@@ -176,11 +160,6 @@ data class ReverseImageLookupResult(
     )
 }
 
-/**
- * Result of a Reverse Video Lookup. Video bytes stay local: the app samples a
- * small number of frames, extracts OCR/scene labels on-device, and searches only
- * those text clues. Faces are safety-gated exactly like still images.
- */
 @Serializable
 data class ReverseVideoLookupResult(
     val durationMs: Long?,
@@ -203,20 +182,85 @@ data class ReverseVideoLookupResult(
     )
 }
 
-// ---- Entity graph (dossier fusion) ------------------------------------------
+// ---- Identity graph v2 ------------------------------------------------------
 
+/**
+ * Graph node types. Legacy names remain for saved-case/source compatibility;
+ * newer producers should prefer Subject/Account/URL where those meanings are
+ * known rather than overloading Person/Profile/Website.
+ */
 @Serializable
 enum class EntityType {
     Person,
+    Subject,
+    Account,
     Username,
+    DisplayName,
     Email,
     Phone,
+    Domain,
+    URL,
     Profile,
     Organization,
     Location,
+    Occupation,
     Image,
+    Document,
+    ArchiveSnapshot,
     Breach,
-    Website
+    Website,
+    EvidenceArtifact
+}
+
+@Serializable
+enum class GraphNodeState {
+    Confirmed,
+    High,
+    Medium,
+    Low,
+    Unresolved,
+    Conflicting
+}
+
+@Serializable
+enum class RelationshipType {
+    HAS_USERNAME,
+    HAS_EMAIL,
+    HAS_PHONE,
+    USES_ACCOUNT,
+    USES_AVATAR,
+    LINKS_TO,
+    MENTIONS,
+    OWNS_DOMAIN,
+    AFFILIATED_WITH,
+    LOCATED_IN,
+    APPEARED_IN_BREACH,
+    ARCHIVED_AS,
+    SAME_IMAGE_AS,
+    SIMILAR_IMAGE_TO,
+    VISUALLY_SIMILAR_TO,
+    REDIRECTS_TO,
+    CLAIMS_IDENTITY,
+    CROSS_LINKS_ACCOUNT,
+    DERIVED_FROM,
+    OTHER;
+
+    companion object {
+        fun fromLegacy(value: String): RelationshipType = when (value.lowercase()) {
+            "has_email" -> HAS_EMAIL
+            "has_phone" -> HAS_PHONE
+            "uses_username", "username_on_profile" -> HAS_USERNAME
+            "has_profile", "owns_profile", "possible_profile", "candidate_profile", "related_profile" -> USES_ACCOUNT
+            "affiliated_with" -> AFFILIATED_WITH
+            "associated_with_location" -> LOCATED_IN
+            "linked_website" -> LINKS_TO
+            "mentions" -> MENTIONS
+            "related_image", "image_of_profile" -> USES_AVATAR
+            "face_similar_to" -> VISUALLY_SIMILAR_TO
+            "exposed_in", "has_breach_exposure" -> APPEARED_IN_BREACH
+            else -> OTHER
+        }
+    }
 }
 
 @Serializable
@@ -225,7 +269,12 @@ data class DossierEntity(
     val type: EntityType,
     val label: String,
     val confidence: Float = 0.5f,
-    val sourceUrls: List<String> = emptyList()
+    val sourceUrls: List<String> = emptyList(),
+    val state: GraphNodeState = GraphNodeState.Unresolved,
+    val evidenceIds: List<String> = emptyList(),
+    val historical: Boolean = false,
+    val firstObservedAtEpochMillis: Long? = null,
+    val lastObservedAtEpochMillis: Long? = null
 )
 
 @Serializable
@@ -233,14 +282,36 @@ data class DossierEdge(
     val fromId: String,
     val toId: String,
     val relation: String,
-    val evidence: String? = null
+    val evidence: String? = null,
+    val relationType: RelationshipType = RelationshipType.fromLegacy(relation),
+    val evidenceIds: List<String> = emptyList(),
+    val contradictingEvidenceIds: List<String> = emptyList(),
+    val confidence: Float? = null,
+    val historical: Boolean = false
 )
 
 @Serializable
 data class EntityGraph(
     val entities: List<DossierEntity> = emptyList(),
-    val edges: List<DossierEdge> = emptyList()
-)
+    val edges: List<DossierEdge> = emptyList(),
+    val schemaVersion: Int = 2
+) {
+    fun entity(id: String): DossierEntity? = entities.firstOrNull { it.id == id }
+
+    fun outgoing(id: String): List<DossierEdge> = edges.filter { it.fromId == id }
+
+    fun incoming(id: String): List<DossierEdge> = edges.filter { it.toId == id }
+
+    fun relationshipsFor(id: String): List<DossierEdge> = edges.filter {
+        it.fromId == id || it.toId == id
+    }
+
+    fun historicalEntities(): List<DossierEntity> = entities.filter(DossierEntity::historical)
+
+    fun conflictingEntities(): List<DossierEntity> = entities.filter {
+        it.state == GraphNodeState.Conflicting
+    }
+}
 
 @Serializable
 data class BreachDigest(
