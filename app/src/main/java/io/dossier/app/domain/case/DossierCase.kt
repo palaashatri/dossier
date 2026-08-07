@@ -116,6 +116,7 @@ data class DossierCase(
         "${finding.type.name}|${finding.value}|${finding.sourceUrl.orEmpty()}"
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 3
+        /** v4 replaces raw-value evidence IDs with deterministic hashed IDs. */
+        const val CURRENT_SCHEMA_VERSION = 4
     }
 }
