@@ -1,237 +1,217 @@
 # Dossier — Implementation Truth
 
-This is the single authoritative status, audit, roadmap, and limitation document for Dossier. Update this file whenever implementation reality changes. Do not create additional audit or status Markdown files.
+This is the sole live implementation/readiness record for Dossier. `AGENTS.md` defines the target; this file describes reality.
 
-## Snapshot
+## Current snapshot
 
-Dossier is an Android privacy-audit application for self-audits, consenting subjects, and other legitimate authorized use. It combines public-source acquisition, local evidence processing, attribution-aware correlation, remediation, encrypted case storage, and evidence export.
+- **Strict product readiness score:** **48/100**
+- **Milestone state:** M0 baseline audit complete; M1 Discovery Fabric v2 in progress
+- **Last fully validated main commit before this branch:** `71813b08febc3fa2192ef48bbbc46542be86937c`
+- **Current implementation branch:** `feat/product-contract-discovery-v2`
+- **Last validated devices:** API 35 x86_64 emulator for Compose smoke tests; no real-device production validation recorded
+- **Declarative provider definitions on this branch:** 78 authored
+- **Registry-wide live provider validation:** not yet established
+- **Production readiness:** not established
 
-Current engineering assessment:
+Passing compilation or emulator tests does not justify a production-readiness claim.
 
-| Area | Status |
-|---|---|
-| Public discovery architecture | Strong, multi-provider, bounded, still externally dependent |
-| Reverse-image verification | Implemented locally; candidate recall remains index-bounded |
-| Cross-photo face correlation | YuNet/SFace implementation present and calibration-ready |
-| Attribution and false-positive controls | Stronger, evidence-aware, still needs corpus measurement |
-| Scan lifecycle | Major navigation/cancellation defects corrected |
-| Breach semantics | Authoritative and public-web channels separated |
-| AI provenance and prompt safety | Implemented with deterministic fallback |
-| Saved cases | Versioned and encrypted with no new plaintext fallback |
-| PDF/JSON reporting | Implemented with hash manifest |
-| Core UI/UX architecture | Reworked around evidence and actions |
-| Production/release readiness | Not yet established by real-device and longitudinal testing |
+## Strict 100-point rubric
 
-No literal 10/10 claim is justified.
+| Area | Score | Truth |
+|---|---:|---|
+| Discovery breadth and reliability | **8/15** | Existing multi-provider/search/API discovery works; v2 declarative catalog now exists with 78 definitions, but registry-wide live validation and the 1,000+ target are not met. |
+| Recursive orchestration | **3/10** | Existing scanner performs bounded two-hop pivots and resumable input, but there is no central Scan Coordinator, typed event bus, pause/resume execution state, or general frontier. |
+| Evidence/provenance | **5/10** | Evidence objects, source URLs, verification state, archive labeling and export integrity exist; stable typed evidence records with complete timestamps/hash/parser/source-reliability fields are not universal. |
+| Entity resolution | **3/10** | Confidence contributors exist, but no calibrated resolver with contradiction-aware merge decisions and benchmarked precision/recall exists. |
+| Identity graph | **4/8** | Entity graph and relationship confidence are functional and visible; schema is not yet the full typed v2 model and not every subsystem uses it as the sole truth source. |
+| Image acquisition/correlation | **5/8** | Public image candidates, exact/perceptual hashing, crops and local comparison exist. Provenance/clustering are incomplete as first-class graph objects. |
+| Face-correlation validation | **3/6** | YuNet/SFace model integrity, preprocessing, alignment, quality gates and calibration tooling exist. Representative measured FAR/FRR results and real-device validation do not. |
+| Historical evidence | **2/6** | Exact-URL Wayback recovery exists. Full historical extraction, timeline construction and historical graph queries are not implemented. |
+| Breach intelligence | **3/5** | HIBP authoritative coverage is separated from public web exposure and uses privacy-preserving range flows where supported. Timeline/case integration and persistent credential workflow remain incomplete. |
+| AI analyst | **2/5** | Deterministic fallback and provenance/network disclosure exist. AI is not yet graph-native with structured evidence-ID validation and contradiction-aware output enforcement. |
+| UX/UI | **5/8** | Core report/navigation were reworked and six Compose smoke tests pass on API 35 emulator. Streaming scan events, evidence corrections, timeline/image-cluster UX and full accessibility validation remain incomplete. |
+| Security/privacy | **3/4** | Encrypted cases, Keystore-backed secrets, restricted WebView, explicit face mode and minimal permissions are implemented. Full security test matrix and export redaction controls remain incomplete. |
+| Testing/device validation | **2/5** | Unit/build/calibration CI and Compose emulator smoke tests exist. Samsung/Pixel/lower-memory real-device, battery, process-death, font-scale and accessibility gates are not complete. |
+| **Total** | **48/100** | Production contract is substantially broader than the previous architecture audit. |
 
-## Implemented reliability controls
+## M0 — Baseline audit
 
-### Public discovery
+### Architecture inventory
 
-- General search rotates across multiple public providers with bounded budgets.
-- Supported profile services use structured resolution where available.
-- Provider-specific parsers, retries, `Retry-After`, caches, circuit breakers, and scheduled canaries are present.
-- Direct source-page verification is required before strong confidence.
-- Independent-provider corroboration can strengthen a lead.
-- Verified, historical, review-only, unavailable, not-found, and index-only states remain distinct.
-- Exact-URL Wayback availability and snapshot retrieval can recover some deleted or replaced pages.
-- Archive evidence must independently contain an identity signal and remains capped below current-page evidence.
-- Dossier does not automatically submit pages to an archive.
+Current production structure remains primarily:
 
-### Reverse-image verification
+```text
+app/src/main/java/io/dossier/app/
+  data/       network services, providers, local models, persistence
+  domain/     models, scanner, evidence, graph, risk, remediation
+  export/     PDF + JSON evidence export
+  ui/         Compose screens/navigation/components/theme
+```
 
-The selected reference image stays local. Dossier acquires public candidate images and compares them on-device using:
+Working systems were preserved rather than reorganized for style.
 
-- SHA-256.
-- pHash.
-- dHash.
-- aHash.
-- Colour-histogram intersection.
-- Full-image, centre-crop, and square-crop variants.
+### Discovery inventory before M1
 
-Outputs distinguish exact copies, near-identical images, resized/recompressed reposts, and probable visual duplicates. Recall is limited by candidate sources.
+The previous direct profile registry contained 21 platform templates. The scanner also had:
 
-### Cross-photo face correlation
+- structured resolvers for selected public services;
+- multiple general public search providers;
+- public image-index candidate discovery;
+- direct source verification;
+- retries, bounded budgets and circuit-breaker behavior;
+- soft-existence and attribution controls;
+- two bounded pivot hops;
+- optional linked-personal-site following;
+- exact-URL Wayback recovery.
 
-The strong local path uses official OpenCV Zoo YuNet and SFace models.
+The main architectural problem was that provider metadata and scan planning were not represented by a scalable typed registry.
 
-Implemented controls:
+### Graph inventory
 
-- Exact model SHA-256 and expected-size pins.
-- Explicit user-triggered installation.
-- Temporary download files, bounded streaming, filesystem sync, verification, and atomic promotion.
-- Full hash verification before first strong inference in each process.
-- Bounded decode and orientation handling.
-- YuNet detection and five facial landmarks.
-- Ambiguous-group rejection.
-- Face-size, image-area, eye-distance, roll, exposure, blur, and compression gates.
-- `FaceRecognizerSF.alignCrop` and SFace feature extraction.
-- Cosine scoring.
-- Immediate release of transient source matrices, aligned crops, landmarks, and embeddings.
-- Explicit per-scan choice between strong local correlation and basic appearance matching.
-- Process-local strong-mode state reset after completion, cancellation, invalid input, or installation failure.
-- Conservative basic descriptor fallback for near-identical/reused-image appearance.
+Current graph types are still the earlier model:
 
-Reference-policy scores remain manual-review evidence. They do not justify a biometric identity claim.
+```text
+Person, Username, Email, Phone, Profile,
+Organization, Location, Image, Breach, Website
+```
 
-The calibration utility mirrors the Android YuNet/alignment/SFace pipeline and supports:
+Edges are string relations with optional evidence text. This is functional but below the v2 typed-node/typed-relation/evidence-record contract.
 
-- Identity-disjoint calibration and test splits.
-- Untouched held-out evaluation.
-- FMR, TMR, FNMR, ROC/DET-oriented output, and bootstrap confidence intervals.
-- Optional demographic and device slices.
-- Quality-rejection counts and reasons.
-- Hash- and pipeline-bound calibration JSON.
+### Image/face inventory
 
-A high-confidence operating claim still requires a sufficiently large, consented, representative corpus and independently reproducible real-device results.
+Implemented:
 
-### Attribution and PII
+- public image candidate discovery;
+- SHA-256, pHash, dHash, aHash and histogram comparison;
+- full/centre/square crop variants;
+- local YuNet detection and SFace embeddings;
+- five-landmark alignment;
+- model SHA-256/size pins and atomic installation;
+- quality rejection and ambiguous-face handling;
+- explicit per-scan strong/basic mode;
+- calibration utility with identity-disjoint split support and held-out metrics.
 
-- Exact user-supplied email and phone matches may receive high confidence.
-- Generic emails remain review evidence unless independent identity signals connect the page to the subject.
-- Generic phone candidates require phone context and remain low confidence without attribution.
-- Dates, counters, and repeated-digit noise are rejected.
-- Name, alias, location, and organization evidence considers URL handles and independent corroboration.
-- Evidence snippets identify exact, corroborated, or unconfirmed attribution.
+Unvalidated:
+
+- representative production thresholds;
+- published FAR/FRR/ROC results on an adequate consented/legal corpus;
+- Samsung/Pixel/lower-memory device inference, thermal and battery results.
+
+### Historical/breach inventory
+
+Historical support is currently exact-URL Wayback availability/snapshot recovery with historical labeling. It is not yet a general identity timeline.
+
+HIBP account and password flows are implemented with explicit unavailable/configuration states and are kept distinct from ordinary public search evidence.
+
+### UI inventory
+
+Core investigation output is organized as Overview, Evidence, Connections and Actions. Navigation/onboarding/case/breach/browser/graph semantics were hardened in the prior milestone.
+
+Merged PR #3 added six deterministic Compose instrumentation smoke tests covering consent, identity validation, wizard completion and main utility navigation on an API 35 emulator.
+
+## M1 — Discovery Fabric v2 status
+
+### Implemented on this branch
+
+- Typed `ProviderDefinition` model.
+- Provider categories and query capabilities.
+- Source-reliability classes.
+- Declarative existence/extraction/request-policy rules.
+- Safe provider-definition validator.
+- Duplicate-ID, template, priority, status-rule and request-policy validation.
+- Quick / Standard / Deep / Exhaustive scan-plan model with actual scheduled counts.
+- Process-local provider-health tracker with classified outcomes and median latency.
+- Deterministic response classifier for present, not found, soft-not-found, authentication-required, automation-challenged, external redirect and unexpected response states.
+- 78 authored declarative provider/service definitions across profile, package/code, creative/media, archive, breach and search categories.
+- Compatibility adapter: the existing `ProfileScanner` now consumes v2 profile definitions instead of maintaining a second provider list.
+- Contract tests for registry validity, scan-plan counts, disabled-provider exclusion, compatibility adaptation, response classification and provider-health metrics.
+
+### Important M1 limitations
+
+M1 is **not complete**.
+
+- 78 definitions is not the 1,000+ long-term target.
+- A schema-valid definition is not a live-validated provider.
+- The current compatibility scanner can execute only username templates compatible with its existing URL model; subdomain-style templates remain catalogued but are not sprayed by the legacy scanner.
+- Scan modes are modeled but not yet exposed as the authoritative runtime scan configuration.
+- Provider health is process-local and not yet wired into every live request path.
+- Existing scanner concurrency is bounded, but per-provider request spacing from v2 policies is not yet the universal scheduler.
+- Generic response classification exists, but mature custom/legacy verification paths have not all been migrated to it.
+- Provider maintenance/import tooling is not yet sufficient for safely maintaining 1,000+ definitions.
+- Registry-wide sampled live health checks have not been run.
+
+## Existing implemented controls preserved
 
 ### Scan lifecycle
 
-- Fabricated fallback identities were removed.
-- Missing or unusable input shows a recovery state.
-- Cancellation routes away from report completion.
-- Completion navigation is guarded against double navigation and cancellation races.
-- Bottom navigation is hidden while the scan route is active to prevent route disposal/restart.
-- Consent is removed from the Back stack after acceptance.
-- WebView-backed acquisition tears down deterministically and propagates coroutine cancellation.
+- No fabricated fallback identity.
+- Missing identity input returns a recovery state.
+- Cancellation avoids completed-report navigation.
+- Bottom navigation is hidden during the active scan route.
+- Resume input is local.
+- WebView-backed acquisition tears down on cancellation.
 
-Some synchronous network calls remain bounded primarily by timeouts rather than being fully asynchronous/cancellation-aware. Migrating all remaining calls is still desirable.
+Some remaining synchronous HTTP calls still rely primarily on bounded timeouts rather than fully cancellable async execution.
 
-### Breach checks
+### Evidence and attribution
 
-- Authoritative HIBP account coverage and ordinary public-web exposure are separate.
-- Password checks use the five-character Pwned Passwords SHA-1 range flow.
-- Email account range checks use the supported six-character flow when compatible user credentials are provided.
-- Complete passwords are not sent.
-- The UI preserves exact password whitespace and clears plaintext field state before network work.
-- Not configured, rejected, rate-limited, and unavailable states do not become “clear.”
-
-Authoritative email coverage still requires user-provided supported credentials.
-
-### AI
-
-- Deterministic local analysis is the guaranteed fallback.
-- Local model and remote-provider paths are optional.
-- Every result identifies the engine and whether network analysis occurred.
-- Evidence is bounded, sanitized, and enclosed as untrusted content.
-- Remote endpoints require HTTPS except explicitly configured local/private Ollama use.
-- Remote provider keys are encrypted with Android Keystore-backed AES-GCM.
+- Search candidates are not automatically verified accounts.
+- Direct verification and identity evidence are required for stronger attribution.
+- Generic PII extraction is confidence-capped unless corroborated.
+- Current/historical, verified/review/unavailable/not-found states remain distinct.
+- Risk and confidence are separate concepts in UI/reporting.
 
 ### Persistence and export
 
-Saved cases use:
+Saved cases use Android Keystore-backed AES-256-GCM, versioned schema, atomic writes and no plaintext fallback for new saves.
 
-- Android Keystore-backed AES-256-GCM.
-- Random IVs.
-- Versioned schema.
-- Atomic temporary writes and filesystem sync.
-- Plaintext integrity verification.
-- Legacy plaintext migration.
-- No plaintext fallback for new saves.
+Exports provide PDF and JSON evidence packages with section hashes and a manifest hash. These hashes are integrity metadata, not independent attestation.
 
-Exports include:
+### Privacy and security
 
-- Paginated PDF.
-- Machine-readable JSON evidence package.
-- UTC generation metadata.
-- Section SHA-256 hashes.
-- Canonical manifest hash.
-- Findings, sources, confidence, profiles, visual results, analysis provenance, graph summary, and breach summary.
+- Reference images remain local for visual processing.
+- Strong face correlation requires explicit per-scan choice.
+- Evidence WebView defaults to JavaScript/storage/file-access disabled.
+- Broad media-library permissions are not required for the system Photo Picker.
+- Remote AI remains optional and network use is disclosed.
 
-The manifest is not digitally signed and is not independent third-party attestation.
+## Validation gates
 
-## UI/UX truth
-
-Implemented source-level improvements:
-
-- Accurate network/local/persistence consent disclosure.
-- Saveable, responsive identity setup with visible validation.
-- Multiline identity-signal input and removable reference photo.
-- Explicit bounded public-link expansion disclosure.
-- Correct older/newer saved-case roles and risk-delta colors.
-- Confirmed case deletion.
-- Report split into Overview, Evidence, Connections, and Actions.
-- Risk and attribution confidence shown separately.
-- Empty results no longer imply a clean privacy profile.
-- Restricted evidence WebView with JavaScript/storage/file access disabled by default.
-- History-aware Back, copy, reload, and external-open controls.
-- Relationship graph coordinate normalization, two-axis scrolling, wrapping legend, and text alternative.
-- Stronger semantic light/dark colors.
-- Reduced-motion-aware route animation.
-- System Photo Picker instead of broad media permissions.
-- Branded adaptive launcher icon.
-- Calmer terminology in UI and exports.
-
-Current source-level UX assessment is roughly 8/10, not a formal usability score.
-
-Before a 9.5–10/10 UI/UX claim:
-
-1. Capture and review rendered screens on the target Samsung device plus small and large Android viewports.
-2. Test 100%, 130%, 160%, and 200% font/display scaling.
-3. Run TalkBack, switch access, keyboard navigation, and automated accessibility checks.
-4. Measure rendered contrast, including disabled states.
-5. Test process death, rotation, low-memory recreation, camera cancellation, picker fallback, and external-browser return.
-6. Add Compose instrumentation and screenshot regression tests for primary flows.
-7. Conduct real-user comprehension testing for evidence states, confidence, risk, and remediation.
-8. Consolidate the remaining legacy engine-management and reverse-media utility visual language.
-9. Move remaining user-visible strings into Android resources and test localization/RTL.
-
-## Verification
-
-Expected CI gates for the current hardening branch:
-
-- Pinned Python/OpenCV calibration runtime validation.
-- Kotlin/JVM unit tests.
-- Android/Kotlin compilation.
-- Minified debug APK assembly with R8.
-
-Local commands:
+Expected core commands:
 
 ```sh
 ./gradlew :app:testDebugUnitTest
 ./gradlew :app:assembleDebug
+./gradlew connectedUiTestAndroidTest
 ```
 
-Passing these gates proves compilation and covered behavior; it does not prove provider availability, real-device inference quality, usability, accessibility, battery behavior, or complete discovery coverage.
+CI also validates the pinned face-calibration Python/OpenCV runtime.
 
-## Remaining roadmap
+The current branch must not be considered validated until its own CI passes.
 
-Priority order:
+## Production blockers
 
-1. Run full real-device QA on the target Samsung device.
-2. Add Compose accessibility and screenshot instrumentation tests.
-3. Migrate remaining blocking HTTP calls to coroutine-cancellable asynchronous execution.
-4. Build a consented, identity-disjoint visual-correlation benchmark and publish hash-bound calibration results.
-5. Add ECDSA signing for evidence manifests if independently verifiable exports are required.
-6. Add explicit encrypted HIBP credential storage only if integrated scans need persistent authoritative coverage.
-7. Measure provider health and recall longitudinally across regions.
-8. Finish localization, RTL, and design-language consolidation.
-
-A future optional user-hosted visual index may broaden candidate acquisition, but it must remain optional, authenticated, resource-bounded, documented, and local-only by default. It is not implemented by the current branch.
+1. Finish M1 with live provider validation, maintenance tooling and runtime scan-mode/policy integration.
+2. M2 central Scan Coordinator and typed live event bus.
+3. M3 general bounded recursive frontier with explicit pivot admission/rejection.
+4. M4 typed Identity Graph v2 and migrations.
+5. M5 calibrated contradiction-aware entity resolver benchmark.
+6. Representative face benchmark and real-device thresholds.
+7. Historical extraction + timeline.
+8. Graph-native evidence-ID-validated AI output.
+9. User evidence corrections and remediation lifecycle/rescan verification.
+10. Real-device Samsung/Pixel/lower-memory validation, accessibility, process death, battery/network profiling and release packaging.
 
 ## Non-negotiable limitations
 
-- Private or authenticated content cannot be universally discovered.
-- Never-indexed and never-archived content cannot be recovered by public search.
-- Search providers can omit, delay, challenge, or remove content.
-- Image comparison cannot evaluate candidates no acquisition source exposes.
-- Historical captures may be unavailable or legally/operationally inaccessible.
-- Face-correlation accuracy cannot be inferred from architecture alone.
-- HIBP authoritative email coverage is credential-dependent.
-- Hashes do not create legal authenticity or third-party attestation.
-- CI cannot replace real-device, accessibility, usability, or longitudinal testing.
+- Dossier cannot guarantee discovery of private, authenticated, never-indexed or never-archived content.
+- Provider availability and indexing are externally controlled.
+- Search results and visual similarity remain evidence leads until corroborated.
+- Historical snapshots may be missing or stale.
+- Face architecture alone does not establish real-world accuracy.
+- Authoritative HIBP email coverage depends on compatible user-supplied access.
+- Emulator CI cannot substitute for real-device testing.
 
-## Documentation history policy
+## Documentation policy
 
-Old QA reports, milestone notes, status files, device-testing guides, and duplicate roadmaps were intentionally removed. Relevant current conclusions are consolidated here.
-
-Do not reintroduce those files. Update this document with dated, evidence-backed changes and remove superseded statements rather than accumulating contradictory reports.
+Do not add separate roadmap, audit, status or handoff Markdown files. Update this document after meaningful milestones and remove superseded claims instead of accumulating contradictory records.
