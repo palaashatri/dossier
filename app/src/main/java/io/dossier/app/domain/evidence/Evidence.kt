@@ -6,24 +6,41 @@ import io.dossier.app.domain.model.RiskLevel
 import kotlinx.serialization.Serializable
 
 /**
- * The universal language of Dossier (see ROADMAP: "Evidence is the universal
- * language"). A scanner never emits a Finding or a conclusion directly; it emits
- * [Evidence]. Findings, the entity graph, risk, and remediation are all derived
- * from Evidence downstream.
+ * Stable evidence state. This describes the observation itself, not whether an
+ * inferred identity relationship is ultimately accepted.
+ */
+@Serializable
+enum class EvidenceState {
+    Observed,
+    Verified,
+    Probable,
+    Candidate,
+    Conflicting,
+    Rejected,
+    Unavailable
+}
+
+/** Source-quality class used by deterministic analysis and UI explanation. */
+@Serializable
+enum class EvidenceReliability {
+    AuthoritativeApi,
+    DirectPublicProfile,
+    DirectPersonalWebsite,
+    ArchiveSnapshot,
+    SearchEngineCandidate,
+    ThirdPartyAggregation,
+    LocalDerived,
+    UserSupplied,
+    Unknown
+}
+
+/**
+ * The universal evidence record used across Dossier.
  *
- * This type is introduced in parallel with the legacy [Finding] type. The
- * [toFinding] / [Finding.toEvidence] adapters keep both representations
- * interchangeable so existing scanners and consumers keep working while new code
- * can target Evidence directly.
- *
- * @param id Stable identity for de-duplication and graph correlation.
- * @param kind What kind of observation this is (matches [FindingType]).
- * @param value The observed value (email, phone, username, URL, snippet...).
- * @param sourceUrl Where the evidence was observed, if any.
- * @param snippet Human-readable supporting text for explainability.
- * @param confidence 0..1 model/extraction confidence in the observation itself.
- * @param risk Inherent exposure risk of this evidence if it belongs to the subject.
- * @param signals Named reasons backing the observation (explainability per ROADMAP Principle 3).
+ * New provenance fields are optional/defaulted so existing scanners remain
+ * source-compatible while migrations populate richer metadata incrementally.
+ * Missing metadata is represented as missing; Dossier does not fabricate a
+ * retrieval time, provider, parser version, or hash merely to fill a schema.
  */
 @Serializable
 data class Evidence(
@@ -34,14 +51,20 @@ data class Evidence(
     val snippet: String? = null,
     val confidence: Float = 0.5f,
     val risk: RiskLevel = RiskLevel.Low,
-    val signals: List<String> = emptyList()
+    val signals: List<String> = emptyList(),
+    val providerId: String? = null,
+    val retrievedAtEpochMillis: Long? = null,
+    val observedAtEpochMillis: Long? = null,
+    val state: EvidenceState = EvidenceState.Observed,
+    val reliability: EvidenceReliability = EvidenceReliability.Unknown,
+    val contentHashSha256: String? = null,
+    val parserVersion: String? = null,
+    val historical: Boolean = false
 )
 
-/**
- * Discriminates evidence the same way [FindingType] does, so the two can be
- * mapped losslessly. Kept as a separate enum to avoid coupling Evidence to the
- * UI-facing Finding contract.
- */
+/** Product-contract name for the stable evidence representation. */
+typealias EvidenceRecord = Evidence
+
 @Serializable
 enum class EvidenceKind {
     Email,
@@ -60,8 +83,8 @@ enum class EvidenceKind {
 }
 
 /**
- * A scanner's output: a batch of evidence plus optional raw relationships it was
- * able to assert directly (e.g. "this username appears on this profile").
+ * A scanner's output: a batch of evidence plus relationships it can directly
+ * assert from the same public observation.
  */
 @Serializable
 data class EvidenceCollection(
@@ -70,8 +93,10 @@ data class EvidenceCollection(
 )
 
 /**
- * A relationship asserted directly by a scanner between two observed values,
- * before the correlation engine generalizes it. Used to seed the identity graph.
+ * Relationship asserted directly by a scanner before entity resolution
+ * generalizes it. Evidence text is retained for backward compatibility; newer
+ * producers should additionally keep the supporting Evidence IDs in their
+ * higher-level relationship model as that migration lands.
  */
 @Serializable
 data class EvidenceRelationship(
@@ -81,7 +106,7 @@ data class EvidenceRelationship(
     val evidence: String? = null
 )
 
-/** Adapter: Evidence -> legacy Finding (lossless on the shared fields). */
+/** Adapter: Evidence -> legacy Finding (lossless on shared legacy fields). */
 fun Evidence.toFinding(): Finding = Finding(
     type = when (kind) {
         EvidenceKind.Email -> FindingType.Email
@@ -106,7 +131,10 @@ fun Evidence.toFinding(): Finding = Finding(
     remediation = signals.joinToString("; ")
 )
 
-/** Adapter: legacy Finding -> Evidence (lossless on the shared fields). */
+/**
+ * Adapter for legacy findings. Metadata that the legacy Finding contract cannot
+ * prove remains explicitly Unknown/null rather than being invented.
+ */
 fun Finding.toEvidence(): Evidence = Evidence(
     id = "ev:${type.name}:${value}:${sourceUrl ?: ""}",
     kind = when (type) {
@@ -129,5 +157,16 @@ fun Finding.toEvidence(): Evidence = Evidence(
     snippet = evidenceSnippet,
     confidence = confidence,
     risk = risk,
-    signals = if (remediation.isBlank()) emptyList() else listOf(remediation)
+    signals = if (remediation.isBlank()) emptyList() else listOf(remediation),
+    state = when {
+        confidence >= 0.9f -> EvidenceState.Verified
+        confidence >= 0.7f -> EvidenceState.Probable
+        else -> EvidenceState.Candidate
+    },
+    reliability = when (type) {
+        FindingType.PublicSearchEvidence,
+        FindingType.PublicImageEvidence -> EvidenceReliability.SearchEngineCandidate
+        FindingType.ImageConsistency -> EvidenceReliability.LocalDerived
+        else -> EvidenceReliability.Unknown
+    }
 )
