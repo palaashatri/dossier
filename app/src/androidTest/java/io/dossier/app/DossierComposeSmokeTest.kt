@@ -13,6 +13,10 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.dossier.app.data.platform.ProviderCatalogV2
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ScanMode
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -22,6 +26,11 @@ class DossierComposeSmokeTest {
 
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
+
+    @After
+    fun resetDiscoveryPreferences() {
+        DiscoveryScanPreferences.reset()
+    }
 
     @Test
     fun appLaunchesAtConsentGate() {
@@ -62,19 +71,34 @@ class DossierComposeSmokeTest {
 
     @Test
     fun validUsernameCompletesIdentityWizardAndOpensUsernameReview() {
-        acceptConsent()
-
-        identityField(index = 2).performTextInput("dossier_compose_test")
-        composeRule.onNodeWithText("Continue").assertIsEnabled().performClick()
-
-        waitForText("2. Add corroborating signals")
-        composeRule.onNodeWithText("Continue").performClick()
-
-        waitForText("3. Add direct sources")
-        composeRule.onNodeWithText("Review usernames").performClick()
-
-        waitForText("Username Discovery")
+        navigateToUsernameReview()
         composeRule.onNodeWithText("Username Discovery").assertIsDisplayed()
+    }
+
+    @Test
+    fun scanDepthUsesReviewedProviderPlanAndCanSelectDeep() {
+        navigateToUsernameReview()
+
+        val standardProfileCount = ProviderCatalogV2
+            .legacyProfileDefinitions(ScanMode.Standard)
+            .size
+        val deepProfileCount = ProviderCatalogV2
+            .legacyProfileDefinitions(ScanMode.Deep)
+            .size
+
+        composeRule.onNodeWithText("Standard").assertIsDisplayed()
+        composeRule
+            .onNodeWithText("$standardProfileCount profile providers")
+            .assertIsDisplayed()
+
+        composeRule.onNodeWithText("Deep").performClick()
+        composeRule
+            .onNodeWithText("$deepProfileCount profile providers")
+            .assertIsDisplayed()
+
+        composeRule.runOnIdle {
+            check(DiscoveryScanPreferences.selectedMode.value == ScanMode.Deep)
+        }
     }
 
     @Test
@@ -92,6 +116,21 @@ class DossierComposeSmokeTest {
         openTab("Engines")
         waitForText("AI Engine Configuration")
         composeRule.onNodeWithText("AI Engine Configuration").assertIsDisplayed()
+    }
+
+    private fun navigateToUsernameReview() {
+        acceptConsent()
+
+        identityField(index = 2).performTextInput("dossier_compose_test")
+        composeRule.onNodeWithText("Continue").assertIsEnabled().performClick()
+
+        waitForText("2. Add corroborating signals")
+        composeRule.onNodeWithText("Continue").performClick()
+
+        waitForText("3. Add direct sources")
+        composeRule.onNodeWithText("Review usernames").performClick()
+
+        waitForText("Username Discovery")
     }
 
     private fun acceptConsent() {
