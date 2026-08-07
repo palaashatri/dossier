@@ -163,6 +163,7 @@ object ScanCoordinatorRuntime {
                     val directProviders = ProviderCatalogV2.legacyProfileDefinitions(mode).size
                     val previous = _snapshot.value
                     if (previous.state != ScanRunState.Running || previous.scanId != id) {
+                        val startedAt = Instant.now()
                         _snapshot.value = LiveScanSnapshot(
                             scanId = id,
                             state = ScanRunState.Running,
@@ -170,10 +171,17 @@ object ScanCoordinatorRuntime {
                             directProfileProviders = directProviders,
                             stage = ScanSession.progressText.value
                         )
+                        ScanHistoryRuntime.scanStarted(
+                            scanId = id,
+                            input = ScanSession.currentInput.value,
+                            mode = mode,
+                            directProfileProviderCount = directProviders,
+                            occurredAt = startedAt
+                        )
                         emit(
                             ScanEvent.ScanStarted(
                                 scanId = id,
-                                occurredAt = Instant.now(),
+                                occurredAt = startedAt,
                                 mode = mode,
                                 directProfileProviders = directProviders,
                                 extendedDiscovery = ScanSession.deepResearchEnabled.value
@@ -184,27 +192,45 @@ object ScanCoordinatorRuntime {
                     val id = activeScanId ?: return@collect
                     val cancelled = ScanSession.progressText.value == "SCAN_CANCELLED"
                     val terminal = if (cancelled) ScanRunState.Cancelled else ScanRunState.Completed
+                    val finishedAt = Instant.now()
+                    val profileCount = ScanSession.profileScanResults.value.size
+                    val findingCount = ScanSession.findings.value.size
+                    val breachRecordCount = ScanSession.breachDigests.value.sumOf { it.breachCount }
+                    val graph = ScanSession.entityGraph.value
                     _snapshot.value = _snapshot.value.copy(
                         state = terminal,
-                        profileCount = ScanSession.profileScanResults.value.size,
-                        findingCount = ScanSession.findings.value.size
+                        profileCount = profileCount,
+                        findingCount = findingCount,
+                        breachRecordCount = breachRecordCount,
+                        entityCount = graph.entities.size,
+                        relationshipCount = graph.edges.size
+                    )
+                    ScanHistoryRuntime.scanFinished(
+                        scanId = id,
+                        occurredAt = finishedAt,
+                        cancelled = cancelled,
+                        profileResultCount = profileCount,
+                        findingCount = findingCount,
+                        breachRecordCount = breachRecordCount,
+                        graphEntityCount = graph.entities.size,
+                        graphRelationshipCount = graph.edges.size
                     )
                     if (cancelled) {
                         emit(
                             ScanEvent.ScanCancelled(
                                 scanId = id,
-                                occurredAt = Instant.now(),
-                                profileCount = ScanSession.profileScanResults.value.size,
-                                findingCount = ScanSession.findings.value.size
+                                occurredAt = finishedAt,
+                                profileCount = profileCount,
+                                findingCount = findingCount
                             )
                         )
                     } else {
                         emit(
                             ScanEvent.ScanCompleted(
                                 scanId = id,
-                                occurredAt = Instant.now(),
-                                profileCount = ScanSession.profileScanResults.value.size,
-                                findingCount = ScanSession.findings.value.size
+                                occurredAt = finishedAt,
+                                profileCount = profileCount,
+                                findingCount = findingCount
                             )
                         )
                     }
@@ -353,6 +379,7 @@ object ScanCoordinatorRuntime {
             requestedScanId = null
         }
         _snapshot.value = LiveScanSnapshot()
+        ScanHistoryRuntime.resetForTests()
     }
 
     private fun emit(event: ScanEvent) {
