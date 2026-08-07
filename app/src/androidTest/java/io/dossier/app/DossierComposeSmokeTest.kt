@@ -16,6 +16,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.dossier.app.domain.case.CaseStore
 import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.case.RemediationRecord
 import io.dossier.app.domain.case.RemediationStatus
 import io.dossier.app.domain.case.UserCorrectionDecision
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
@@ -207,6 +208,64 @@ class DossierComposeSmokeTest {
                     loaded.scanHistory.single().scanId == "case-scan-one"
             } == true
         }
+    }
+
+    @Test
+    fun caseComparisonShowsNonOverclaimingRemediationRecheck() {
+        val store = CaseStore(composeRule.activity)
+        val input = IdentityInput(fullName = "Jane Example")
+        val finding = Finding(
+            type = FindingType.Email,
+            value = "visible@example.test",
+            sourceUrl = "https://example.test/contact",
+            evidenceSnippet = "Public contact page",
+            confidence = 0.9f,
+            risk = RiskLevel.High,
+            remediation = "Request removal of the public contact detail."
+        )
+        val findingKey = "${finding.type.name}|${finding.value}|${finding.sourceUrl.orEmpty()}"
+        val completed = RemediationRecord(
+            remediationId = "remediation-one",
+            findingKey = findingKey,
+            sourceUrl = finding.sourceUrl,
+            action = finding.remediation,
+            status = RemediationStatus.Completed,
+            createdAtUtc = "2026-08-08T00:10:00Z",
+            updatedAtUtc = "2026-08-08T00:10:00Z"
+        )
+        val older = DossierCase(
+            caseId = "older-remediation-case",
+            createdAt = "2026-08-08 00:10",
+            subjectName = "Jane Example",
+            input = input,
+            findings = listOf(finding),
+            remediationRecords = listOf(completed),
+            riskLevel = RiskLevel.High
+        )
+        val newer = DossierCase(
+            caseId = "newer-remediation-case",
+            createdAt = "2026-08-08 01:10",
+            subjectName = "Jane Example",
+            input = input,
+            findings = emptyList(),
+            riskLevel = RiskLevel.Low
+        )
+        check(store.save(older))
+        check(store.save(newer))
+
+        acceptConsent()
+        openTab("Cases")
+        waitForText("Remediation recheck")
+
+        composeRule.onNodeWithText("Remediation recheck").performScrollTo().assertIsDisplayed()
+        composeRule
+            .onNodeWithText("Not observed in latest scan")
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule
+            .onNodeWithText("not proof of global deletion", substring = true, ignoreCase = true)
+            .performScrollTo()
+            .assertIsDisplayed()
     }
 
     private fun navigateToUsernameReview() {
