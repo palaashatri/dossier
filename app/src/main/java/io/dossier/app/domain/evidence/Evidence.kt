@@ -4,6 +4,7 @@ import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.RiskLevel
 import kotlinx.serialization.Serializable
+import java.security.MessageDigest
 
 /**
  * Stable evidence state. This describes the observation itself, not whether an
@@ -106,6 +107,43 @@ data class EvidenceRelationship(
     val evidence: String? = null
 )
 
+/**
+ * Evidence-ID policy.
+ *
+ * Legacy `Finding.toEvidence()` IDs embedded raw finding values and source URLs.
+ * That was useful while prototyping but is inappropriate for remote-AI citation,
+ * logs, diagnostics, or other metadata surfaces. Current IDs hash the complete
+ * legacy identifier so they remain deterministic while revealing no raw value.
+ *
+ * The transformation is deliberately defined from the old identifier string so
+ * encrypted-case migrations can convert a persisted v3 correction/edge ID without
+ * needing to reconstruct the original Finding object.
+ */
+object EvidenceIdPolicy {
+    private const val CURRENT_PREFIX = "ev2:"
+    private const val LEGACY_PREFIX = "ev:"
+
+    fun legacyFindingId(finding: Finding): String =
+        "$LEGACY_PREFIX${finding.type.name}:${finding.value}:${finding.sourceUrl ?: ""}"
+
+    fun findingId(finding: Finding): String = fromLegacyId(legacyFindingId(finding))
+
+    fun migrate(id: String): String = when {
+        id.startsWith(CURRENT_PREFIX) -> id
+        id.startsWith(LEGACY_PREFIX) -> fromLegacyId(id)
+        else -> id
+    }
+
+    fun isCurrentFindingId(id: String): Boolean = id.startsWith(CURRENT_PREFIX)
+
+    internal fun fromLegacyId(legacyId: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(legacyId.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        return "$CURRENT_PREFIX${digest.take(32)}"
+    }
+}
+
 /** Adapter: Evidence -> legacy Finding (lossless on shared legacy fields). */
 fun Evidence.toFinding(): Finding = Finding(
     type = when (kind) {
@@ -137,7 +175,7 @@ fun Evidence.toFinding(): Finding = Finding(
  * particular, numeric confidence is never promoted into a verification state.
  */
 fun Finding.toEvidence(): Evidence = Evidence(
-    id = "ev:${type.name}:${value}:${sourceUrl ?: ""}",
+    id = EvidenceIdPolicy.findingId(this),
     kind = when (type) {
         FindingType.Email -> EvidenceKind.Email
         FindingType.Phone -> EvidenceKind.Phone
