@@ -11,6 +11,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.dossier.app.data.platform.ProviderCatalogV2
@@ -86,14 +87,16 @@ class DossierComposeSmokeTest {
             .legacyProfileDefinitions(ScanMode.Deep)
             .size
 
-        composeRule.onNodeWithText("Standard").assertIsDisplayed()
+        composeRule.onNodeWithText("Standard").performScrollTo().assertIsDisplayed()
         composeRule
             .onNodeWithText("$standardProfileCount profile providers")
+            .performScrollTo()
             .assertIsDisplayed()
 
-        composeRule.onNodeWithText("Deep").performClick()
+        composeRule.onNodeWithText("Deep").performScrollTo().performClick()
         composeRule
             .onNodeWithText("$deepProfileCount profile providers")
+            .performScrollTo()
             .assertIsDisplayed()
 
         composeRule.runOnIdle {
