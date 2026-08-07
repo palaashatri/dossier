@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import io.dossier.app.domain.discovery.ScanHistoryRuntime
+import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -49,11 +50,7 @@ class CaseStore(private val context: Context) {
         } else {
             case
         }
-        val normalized = if (withHistory.schemaVersion == DossierCase.CURRENT_SCHEMA_VERSION) {
-            withHistory
-        } else {
-            withHistory.copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION)
-        }
+        val normalized = normalizeCase(withHistory)
         val plaintext = json.encodeToString(normalized).toByteArray(Charsets.UTF_8)
         val envelope = encrypt(plaintext)
         atomicWrite(encryptedFile(case.caseId), json.encodeToString(envelope))
@@ -67,9 +64,7 @@ class CaseStore(private val context: Context) {
             return runCatching {
                 val envelope = json.decodeFromString<EncryptedCaseEnvelope>(encrypted.readText())
                 val plaintext = decrypt(envelope)
-                val decoded = json.decodeFromString<DossierCase>(plaintext.toString(Charsets.UTF_8))
-                if (decoded.schemaVersion == DossierCase.CURRENT_SCHEMA_VERSION) decoded
-                else decoded.copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION)
+                normalizeCase(json.decodeFromString<DossierCase>(plaintext.toString(Charsets.UTF_8)))
             }.getOrNull()
         }
 
@@ -78,7 +73,7 @@ class CaseStore(private val context: Context) {
         val migrated = runCatching {
             json.decodeFromString<DossierCase>(legacy.readText())
         }.getOrNull() ?: return null
-        val normalized = migrated.copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION)
+        val normalized = normalizeCase(migrated)
         return if (saveInternal(normalized, attachLatestScanHistory = false)) normalized else migrated
     }
 
@@ -92,12 +87,15 @@ class CaseStore(private val context: Context) {
 
     /** Persist a user decision without deleting the underlying raw evidence. */
     fun recordCorrection(caseId: String, correction: UserCorrection): Boolean = update(caseId) { current ->
+        val normalizedCorrection = correction.copy(
+            evidenceId = correction.evidenceId?.let(EvidenceIdPolicy::migrate)
+        )
         val retained = current.userCorrections.filterNot { existing ->
-            existing.correctionId == correction.correctionId ||
-                (existing.evidenceId != null && existing.evidenceId == correction.evidenceId) ||
-                (existing.entityId != null && existing.entityId == correction.entityId)
+            existing.correctionId == normalizedCorrection.correctionId ||
+                (existing.evidenceId != null && existing.evidenceId == normalizedCorrection.evidenceId) ||
+                (existing.entityId != null && existing.entityId == normalizedCorrection.entityId)
         }
-        current.copy(userCorrections = retained + correction)
+        current.copy(userCorrections = retained + normalizedCorrection)
     }
 
     fun upsertRemediation(caseId: String, remediation: RemediationRecord): Boolean = update(caseId) { current ->
@@ -130,8 +128,38 @@ class CaseStore(private val context: Context) {
     private fun update(caseId: String, transform: (DossierCase) -> DossierCase): Boolean {
         val current = load(caseId) ?: return false
         return saveInternal(
-            transform(current).copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION),
+            transform(current),
             attachLatestScanHistory = false
+        )
+    }
+
+    /**
+     * Migrates privacy-sensitive metadata without changing the underlying finding
+     * values themselves. v3 correction/graph evidence IDs can contain raw values;
+     * v4 stores only deterministic `ev2:` hashes for those IDs.
+     */
+    internal fun normalizeCase(case: DossierCase): DossierCase {
+        val migratedCorrections = case.userCorrections.map { correction ->
+            correction.copy(evidenceId = correction.evidenceId?.let(EvidenceIdPolicy::migrate))
+        }
+        val migratedEntities = case.entityGraph.entities.map { entity ->
+            entity.copy(evidenceIds = entity.evidenceIds.map(EvidenceIdPolicy::migrate).distinct())
+        }
+        val migratedEdges = case.entityGraph.edges.map { edge ->
+            edge.copy(
+                evidenceIds = edge.evidenceIds.map(EvidenceIdPolicy::migrate).distinct(),
+                contradictingEvidenceIds = edge.contradictingEvidenceIds
+                    .map(EvidenceIdPolicy::migrate)
+                    .distinct()
+            )
+        }
+        return case.copy(
+            schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION,
+            userCorrections = migratedCorrections,
+            entityGraph = case.entityGraph.copy(
+                entities = migratedEntities,
+                edges = migratedEdges
+            )
         )
     }
 
