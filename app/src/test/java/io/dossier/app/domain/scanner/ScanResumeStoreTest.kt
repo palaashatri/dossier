@@ -1,8 +1,12 @@
 package io.dossier.app.domain.scanner
 
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
+import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.io.File
@@ -46,12 +50,17 @@ class MemoryGuardTest {
 
 class ScanResumeStoreTest {
 
+    @After
+    fun resetMode() {
+        DiscoveryScanPreferences.reset()
+    }
+
     @Test
-    fun saveLoadRoundTripsInputAndFlag() {
+    fun saveLoadRoundTripsInputFlagAndScanMode() {
         val dir = File.createTempFile("resume", "").also { it.delete(); it.mkdirs() }
         try {
             val store = ScanResumeStore(dir)
-            val input = io.dossier.app.domain.model.IdentityInput(
+            val input = IdentityInput(
                 fullName = "Jane Doe",
                 primaryUsername = "janedoe",
                 usernames = listOf("janedoe", "jane_d"),
@@ -61,11 +70,30 @@ class ScanResumeStoreTest {
                 locations = listOf("Berlin"),
                 profileUrls = listOf("https://github.com/janedoe")
             )
+            DiscoveryScanPreferences.setMode(ScanMode.Deep)
             assert(store.save(input, deepResearch = true))
 
+            DiscoveryScanPreferences.reset()
             val loaded = store.load()
             assertEquals(input, loaded?.first)
             assertEquals(true, loaded?.second)
+            assertEquals(ScanMode.Deep, DiscoveryScanPreferences.selectedMode.value)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun oldResumeMarkerDefaultsToStandardMode() {
+        val dir = File.createTempFile("resume-old", "").also { it.delete(); it.mkdirs() }
+        try {
+            File(dir, "dossier_resume.json").writeText(
+                """{"fullName":"Legacy User","primaryUsername":"legacy","usernames":[],"emails":[],"phones":[],"organizations":[],"locations":[],"profileUrls":[],"deepResearch":false}"""
+            )
+            DiscoveryScanPreferences.setMode(ScanMode.Exhaustive)
+            val loaded = ScanResumeStore(dir).load()
+            assertEquals("Legacy User", loaded?.first?.fullName)
+            assertEquals(ScanMode.Standard, DiscoveryScanPreferences.selectedMode.value)
         } finally {
             dir.deleteRecursively()
         }
@@ -86,10 +114,7 @@ class ScanResumeStoreTest {
         val dir = File.createTempFile("resume3", "").also { it.delete(); it.mkdirs() }
         try {
             val store = ScanResumeStore(dir)
-            store.save(
-                io.dossier.app.domain.model.IdentityInput(fullName = "X"),
-                deepResearch = false
-            )
+            store.save(IdentityInput(fullName = "X"), deepResearch = false)
             assertEquals(true, store.load() != null)
             store.clear()
             assertEquals(null, store.load())
