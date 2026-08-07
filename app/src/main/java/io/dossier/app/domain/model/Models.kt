@@ -182,16 +182,30 @@ data class ReverseVideoLookupResult(
     )
 }
 
-// ---- Identity graph v2 ------------------------------------------------------
+// ---- Identity graph v2 migration -------------------------------------------
 
-/**
- * Graph node types. Legacy names remain for saved-case/source compatibility;
- * newer producers should prefer Subject/Account/URL where those meanings are
- * known rather than overloading Person/Profile/Website.
- */
+/** Stable legacy storage/rendering type. Do not expand destructively. */
 @Serializable
 enum class EntityType {
     Person,
+    Username,
+    Email,
+    Phone,
+    Profile,
+    Organization,
+    Location,
+    Image,
+    Breach,
+    Website
+}
+
+/**
+ * Full semantic node taxonomy required by the v2 graph. It is carried alongside
+ * the stable legacy [EntityType] while producers migrate, avoiding a destructive
+ * saved-case/schema flag day.
+ */
+@Serializable
+enum class GraphEntityKind {
     Subject,
     Account,
     Username,
@@ -200,11 +214,10 @@ enum class EntityType {
     Phone,
     Domain,
     URL,
-    Profile,
+    Image,
     Organization,
     Location,
     Occupation,
-    Image,
     Document,
     ArchiveSnapshot,
     Breach,
@@ -270,6 +283,7 @@ data class DossierEntity(
     val label: String,
     val confidence: Float = 0.5f,
     val sourceUrls: List<String> = emptyList(),
+    val kind: GraphEntityKind? = null,
     val state: GraphNodeState = GraphNodeState.Unresolved,
     val evidenceIds: List<String> = emptyList(),
     val historical: Boolean = false,
@@ -297,20 +311,11 @@ data class EntityGraph(
     val schemaVersion: Int = 2
 ) {
     fun entity(id: String): DossierEntity? = entities.firstOrNull { it.id == id }
-
     fun outgoing(id: String): List<DossierEdge> = edges.filter { it.fromId == id }
-
     fun incoming(id: String): List<DossierEdge> = edges.filter { it.toId == id }
-
-    fun relationshipsFor(id: String): List<DossierEdge> = edges.filter {
-        it.fromId == id || it.toId == id
-    }
-
+    fun relationshipsFor(id: String): List<DossierEdge> = edges.filter { it.fromId == id || it.toId == id }
     fun historicalEntities(): List<DossierEntity> = entities.filter(DossierEntity::historical)
-
-    fun conflictingEntities(): List<DossierEntity> = entities.filter {
-        it.state == GraphNodeState.Conflicting
-    }
+    fun conflictingEntities(): List<DossierEntity> = entities.filter { it.state == GraphNodeState.Conflicting }
 }
 
 @Serializable
