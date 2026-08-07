@@ -30,7 +30,13 @@ SERVICE_RE = re.compile(
     r'service\("(?P<id>[a-z0-9-]+)",\s*"(?P<name>[^"]+)",\s*ProviderCategory\.(?P<category>[A-Za-z]+),\s*setOf\([^)]*\),\s*(?P<priority>\d+),\s*SourceReliability\.[A-Za-z]+\)',
     re.MULTILINE,
 )
-TRUTH_COUNT_RE = re.compile(r"Declarative provider definitions on this branch:\*\*\s*(\d+)")
+# Accept the canonical Markdown label whether it is bolded or not and whether
+# older docs included "on this branch". Stop at the current line so a missing
+# inventory field cannot accidentally match a later unrelated number.
+TRUTH_COUNT_RE = re.compile(
+    r"Declarative provider definitions(?: on this branch)?[^\n0-9]*(\d+)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
