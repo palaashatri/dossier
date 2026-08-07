@@ -853,6 +853,7 @@ private fun UserCorrectionDecision.displayLabel(): String = when (this) {
     UserCorrectionDecision.IgnoreEvidence -> "Ignored in analysis"
 }
 
+@Composable
 private fun correctionColor(decision: UserCorrectionDecision?): Color = when (decision) {
     UserCorrectionDecision.ThisIsMe -> NeuralTheme.Emerald
     UserCorrectionDecision.ThisIsNotMe -> NeuralTheme.Crimson
@@ -871,6 +872,7 @@ private fun RemediationStatus.displayLabel(): String = when (this) {
     RemediationStatus.NeedsManualAction -> "Manual action"
 }
 
+@Composable
 private fun remediationColor(status: RemediationStatus): Color = when (status) {
     RemediationStatus.Completed -> NeuralTheme.Emerald
     RemediationStatus.Rejected -> NeuralTheme.Crimson
