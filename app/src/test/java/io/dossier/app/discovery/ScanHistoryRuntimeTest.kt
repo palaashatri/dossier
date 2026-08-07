@@ -1,4 +1,4 @@
-package io.dossier.app.discovery
+package io.dossier.app.domain.discovery
 
 import io.dossier.app.domain.model.IdentityInput
 import org.junit.After
