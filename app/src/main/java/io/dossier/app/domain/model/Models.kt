@@ -199,11 +199,7 @@ enum class EntityType {
     Website
 }
 
-/**
- * Full semantic node taxonomy required by the v2 graph. It is carried alongside
- * the stable legacy [EntityType] while producers migrate, avoiding a destructive
- * saved-case/schema flag day.
- */
+/** Full semantic node taxonomy required by the v2 graph. */
 @Serializable
 enum class GraphEntityKind {
     Subject,
@@ -223,6 +219,19 @@ enum class GraphEntityKind {
     Breach,
     Website,
     EvidenceArtifact
+}
+
+fun EntityType.toGraphEntityKind(): GraphEntityKind = when (this) {
+    EntityType.Person -> GraphEntityKind.Subject
+    EntityType.Username -> GraphEntityKind.Username
+    EntityType.Email -> GraphEntityKind.Email
+    EntityType.Phone -> GraphEntityKind.Phone
+    EntityType.Profile -> GraphEntityKind.Account
+    EntityType.Organization -> GraphEntityKind.Organization
+    EntityType.Location -> GraphEntityKind.Location
+    EntityType.Image -> GraphEntityKind.Image
+    EntityType.Breach -> GraphEntityKind.Breach
+    EntityType.Website -> GraphEntityKind.Website
 }
 
 @Serializable
@@ -283,7 +292,7 @@ data class DossierEntity(
     val label: String,
     val confidence: Float = 0.5f,
     val sourceUrls: List<String> = emptyList(),
-    val kind: GraphEntityKind? = null,
+    val kind: GraphEntityKind = type.toGraphEntityKind(),
     val state: GraphNodeState = GraphNodeState.Unresolved,
     val evidenceIds: List<String> = emptyList(),
     val historical: Boolean = false,
