@@ -86,7 +86,7 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
                     modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
                 )
                 Text(
-                    text = "Choose the username variants and public-source budget for this authorized audit.",
+                    text = "Choose username variants and the public-source budget for this authorized audit.",
                     color = NeuralTheme.TextSecondary,
                     fontSize = 12.5.sp,
                     lineHeight = 18.sp,
@@ -246,7 +246,7 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "Counts below come from the provider plan that will actually be scheduled. They are not fixed marketing totals.",
+                    text = "Provider counts below are the direct profile definitions the current scanner can actually fan out to. Search, breach, image and archive operations are reported separately as they run.",
                     color = NeuralTheme.TextSecondary,
                     fontSize = 11.5.sp,
                     lineHeight = 16.sp,
@@ -257,14 +257,21 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
                     ScanModeOption(
                         mode = mode,
                         selected = selectedScanMode == mode,
-                        onSelect = { DiscoveryScanPreferences.setMode(mode) }
+                        onSelect = {
+                            DiscoveryScanPreferences.setMode(mode)
+                            if (mode.includeExtendedDiscovery) {
+                                // Deep/Exhaustive activate the existing bounded
+                                // linked-site/search/archive expansion path too.
+                                ScanSession.setDeepResearch(true)
+                            }
+                        }
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                 }
 
                 if (selectedScanMode == ScanMode.Exhaustive) {
                     Text(
-                        text = "Exhaustive uses every currently enabled provider in the reviewed catalog. Prefer Wi-Fi and external power for long mobile scans. You can cancel at any time.",
+                        text = "Exhaustive enables every currently compatible public profile provider in the reviewed catalog and the extended discovery path. Prefer Wi-Fi and external power for longer mobile scans. You can cancel at any time.",
                         color = NeuralTheme.Amber,
                         fontSize = 11.5.sp,
                         lineHeight = 16.sp,
@@ -344,7 +351,9 @@ private fun ScanModeOption(
     selected: Boolean,
     onSelect: () -> Unit
 ) {
-    val plan = remember(mode) { ProviderCatalogV2.plan(mode) }
+    val profileProviderCount = remember(mode) {
+        ProviderCatalogV2.legacyProfileDefinitions(mode).size
+    }
     val border = if (selected) NeuralTheme.Cobalt else NeuralTheme.BorderColor
     val background = if (selected) {
         NeuralTheme.Cobalt.copy(alpha = 0.10f)
@@ -380,7 +389,7 @@ private fun ScanModeOption(
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "${plan.scheduledProviderCount} scheduled",
+                    text = "$profileProviderCount profile providers",
                     color = if (selected) NeuralTheme.Cobalt else NeuralTheme.TextSecondary,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium
@@ -398,8 +407,8 @@ private fun ScanModeOption(
 }
 
 private fun scanModeDescription(mode: ScanMode): String = when (mode) {
-    ScanMode.Quick -> "Highest-priority providers for a shorter mobile audit."
-    ScanMode.Standard -> "Balanced public-source coverage; recommended default."
-    ScanMode.Deep -> "Broader provider plan including historical-source operations."
-    ScanMode.Exhaustive -> "Every currently enabled provider definition in the reviewed catalog."
+    ScanMode.Quick -> "Highest-priority direct profile providers for a shorter mobile audit."
+    ScanMode.Standard -> "Balanced direct-profile coverage; recommended default."
+    ScanMode.Deep -> "Broader direct-profile fan-out plus bounded extended and historical discovery."
+    ScanMode.Exhaustive -> "All compatible enabled profile definitions plus bounded extended discovery."
 }
