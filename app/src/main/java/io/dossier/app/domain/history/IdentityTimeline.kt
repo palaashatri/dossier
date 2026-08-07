@@ -41,8 +41,8 @@ object IdentityTimelineBuilder {
     ): List<IdentityTimelineEvent> {
         val events = mutableListOf<IdentityTimelineEvent>()
 
-        evidence.forEach { item ->
-            val timestamp = item.observedAtEpochMillis ?: item.retrievedAtEpochMillis ?: return@forEach
+        evidence.forEach evidenceLoop@{ item ->
+            val timestamp = item.observedAtEpochMillis ?: item.retrievedAtEpochMillis ?: return@evidenceLoop
             events += IdentityTimelineEvent(
                 id = "timeline:evidence:${item.id}",
                 timestampEpochMillis = timestamp,
@@ -56,9 +56,9 @@ object IdentityTimelineBuilder {
             )
         }
 
-        breachResults.forEach { result ->
-            result.breaches.forEach { breach ->
-                val timestamp = parseDateToEpochMillis(breach.breachDate) ?: return@forEach
+        breachResults.forEach breachResultLoop@{ result ->
+            result.breaches.forEach breachLoop@{ breach ->
+                val timestamp = parseDateToEpochMillis(breach.breachDate) ?: return@breachLoop
                 events += IdentityTimelineEvent(
                     id = "timeline:breach:${result.email}:${breach.name}",
                     timestampEpochMillis = timestamp,
