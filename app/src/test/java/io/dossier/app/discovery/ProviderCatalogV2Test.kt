@@ -2,6 +2,7 @@ package io.dossier.app.discovery
 
 import io.dossier.app.data.platform.PLATFORMS
 import io.dossier.app.data.platform.ProviderCatalogV2
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ExistenceRules
 import io.dossier.app.domain.discovery.ProviderCategory
 import io.dossier.app.domain.discovery.ProviderDefinition
@@ -11,6 +12,7 @@ import io.dossier.app.domain.discovery.ProviderOutcome
 import io.dossier.app.domain.discovery.ProviderRequestPolicy
 import io.dossier.app.domain.discovery.QueryCapability
 import io.dossier.app.domain.discovery.ScanMode
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -18,18 +20,26 @@ import org.junit.Test
 
 class ProviderCatalogV2Test {
 
+    @After
+    fun resetScanMode() {
+        DiscoveryScanPreferences.reset()
+    }
+
     @Test
     fun catalogIsSchemaValidAndLargeEnoughToProveScalablePath() {
         assertTrue(
             "Provider catalog issues: ${ProviderCatalogV2.schemaIssues.joinToString { it.message }}",
             ProviderCatalogV2.schemaIssues.isEmpty()
         )
-        assertTrue("Do not regress the declarative catalog back to a tiny hand-written list", ProviderCatalogV2.definitions.size >= 70)
+        assertTrue(
+            "Do not regress the declarative catalog back to a tiny hand-written list",
+            ProviderCatalogV2.definitions.size >= 70
+        )
         assertEquals(ProviderCatalogV2.definitions.size, ProviderCatalogV2.schemaValidCount())
     }
 
     @Test
-    fun scanModesUseActualScheduledProviderCounts() {
+    fun scanModesUseTheirRealPlanSizes() {
         val quick = ProviderCatalogV2.plan(ScanMode.Quick)
         val standard = ProviderCatalogV2.plan(ScanMode.Standard)
         val deep = ProviderCatalogV2.plan(ScanMode.Deep)
@@ -70,6 +80,30 @@ class ProviderCatalogV2Test {
     }
 
     @Test
+    fun selectedScanModeChangesActualLegacyProfileFanout() {
+        DiscoveryScanPreferences.setMode(ScanMode.Quick)
+        val quickEnabled = PLATFORMS.count { it.shouldFetchByDefault }
+
+        DiscoveryScanPreferences.setMode(ScanMode.Standard)
+        val standardEnabled = PLATFORMS.count { it.shouldFetchByDefault }
+
+        DiscoveryScanPreferences.setMode(ScanMode.Exhaustive)
+        val exhaustiveEnabled = PLATFORMS.count { it.shouldFetchByDefault }
+
+        assertTrue(quickEnabled > 0)
+        assertTrue(standardEnabled >= quickEnabled)
+        assertTrue(exhaustiveEnabled >= standardEnabled)
+        assertEquals(
+            ProviderCatalogV2.legacyProfileDefinitions(ScanMode.Quick).size,
+            quickEnabled
+        )
+        assertEquals(
+            ProviderCatalogV2.legacyProfileDefinitions(ScanMode.Exhaustive).size,
+            exhaustiveEnabled
+        )
+    }
+
+    @Test
     fun registryValidatorRejectsUnsafeOrContradictoryDefinitions() {
         val invalid = ProviderDefinition(
             id = "Bad Provider",
@@ -77,7 +111,10 @@ class ProviderCatalogV2Test {
             category = ProviderCategory.Social,
             profileUrlTemplate = "http://example.test/profile",
             queryCapabilities = setOf(QueryCapability.Username),
-            existenceRules = ExistenceRules(requiredStatus = setOf(200, 404), notFoundStatus = setOf(404)),
+            existenceRules = ExistenceRules(
+                requiredStatus = setOf(200, 404),
+                notFoundStatus = setOf(404)
+            ),
             priority = 101,
             requestPolicy = ProviderRequestPolicy(maxConcurrency = 0, timeoutMs = 10)
         )
