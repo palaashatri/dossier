@@ -34,6 +34,15 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
     }
     val emails = input?.emails.orEmpty()
     val selectedScanMode by DiscoveryScanPreferences.selectedMode.collectAsState()
+    val legacyDeepResearch by ScanSession.deepResearchEnabled.collectAsState()
+
+    // Migrate the pre-v2 Deep Research choice into the new authoritative scan
+    // depth without silently losing the user's earlier intent.
+    LaunchedEffect(Unit) {
+        if (legacyDeepResearch && DiscoveryScanPreferences.selectedMode.value == ScanMode.Standard) {
+            DiscoveryScanPreferences.setMode(ScanMode.Deep)
+        }
+    }
 
     val generator = remember { UsernameVariantGenerator() }
     val initialVariants = remember(primaryUsername, fullName, originalUsernames, emails) {
@@ -259,11 +268,10 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
                         selected = selectedScanMode == mode,
                         onSelect = {
                             DiscoveryScanPreferences.setMode(mode)
-                            if (mode.includeExtendedDiscovery) {
-                                // Deep/Exhaustive activate the existing bounded
-                                // linked-site/search/archive expansion path too.
-                                ScanSession.setDeepResearch(true)
-                            }
+                            // The v2 mode is authoritative once the user touches
+                            // it; keep the legacy flag synchronized for the
+                            // existing scanner until ScanCoordinator replaces it.
+                            ScanSession.setDeepResearch(mode.includeExtendedDiscovery)
                         }
                     )
                     Spacer(modifier = Modifier.height(8.dp))
