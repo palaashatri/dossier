@@ -140,6 +140,8 @@ data class ReverseImageLookupResult(
     val mapsUrl: String?,
     val webEvidence: List<WebEvidence>,
     val visualMatches: List<VisualMatch> = emptyList(),
+    val visualCandidates: List<ImageCandidateProvenance> = emptyList(),
+    val visualClusters: List<ImageCluster> = emptyList(),
     val visualSearchNote: String? = null
 ) {
     @Serializable
@@ -149,6 +151,51 @@ data class ReverseImageLookupResult(
     data class WebEvidence(val title: String, val snippet: String, val url: String)
 
     @Serializable
+    enum class ImageCandidateState {
+        Indexed,
+        DownloadUnavailable,
+        DecodeFailed,
+        ComparedNoMatch,
+        Matched
+    }
+
+    @Serializable
+    enum class ImageClusterType {
+        ExactContent,
+        PerceptualNearDuplicate
+    }
+
+    @Serializable
+    data class ImageCandidateProvenance(
+        val id: String,
+        val title: String,
+        val imageUrl: String,
+        val sourcePageUrl: String,
+        val source: String,
+        val acquisitionQuery: String,
+        val comparedImageUrl: String? = null,
+        val retrievedAtEpochMillis: Long? = null,
+        val contentSha256: String? = null,
+        val width: Int? = null,
+        val height: Int? = null,
+        val averageHashHex: String? = null,
+        val differenceHashHex: String? = null,
+        val perceptualHashHex: String? = null,
+        val comparisonScore: Float? = null,
+        val exactBytes: Boolean = false,
+        val state: ImageCandidateState = ImageCandidateState.Indexed,
+        val clusterId: String? = null
+    )
+
+    @Serializable
+    data class ImageCluster(
+        val id: String,
+        val type: ImageClusterType,
+        val representativeCandidateId: String,
+        val memberCandidateIds: List<String>
+    )
+
+    @Serializable
     data class VisualMatch(
         val title: String,
         val imageUrl: String,
@@ -156,7 +203,9 @@ data class ReverseImageLookupResult(
         val source: String,
         val similarity: Float,
         val matchType: String,
-        val evidence: String
+        val evidence: String,
+        val candidateId: String? = null,
+        val clusterId: String? = null
     )
 }
 
