@@ -34,6 +34,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.theme.NeuralTheme
 
 private enum class HubTab(val label: String) {
@@ -61,8 +64,6 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
         }
     }
 
-    // Bottom-navigation destinations behave as top-level destinations. Back from
-    // a utility tab returns to the dossier instead of unexpectedly closing the app.
     BackHandler(enabled = selectedTab != HubTab.DOSSIER) {
         selectedTab = HubTab.DOSSIER
     }
@@ -86,8 +87,6 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
-            // Leaving the scan route disposes ScanScreen and previously caused a
-            // completed or in-flight scan to restart when the user returned.
             if (!scanInForeground) {
                 NavigationBar(containerColor = NeuralTheme.CardBackground) {
                     HubTab.entries.forEach { tab ->
@@ -172,7 +171,7 @@ private fun DossierNavGraph(
             )
         }
         composable("scan") {
-            ScanScreen(
+            CoordinatedScanScreen(
                 onScanComplete = {
                     navController.navigate("report") {
                         popUpTo("scan") { inclusive = true }
@@ -205,7 +204,8 @@ private fun DossierNavGraph(
                 },
                 onNavigateToBrowser = onNavigateToBrowser,
                 onDeepResearch = {
-                    io.dossier.app.domain.scanner.ScanSession.setDeepResearch(true)
+                    DiscoveryScanPreferences.setMode(ScanMode.Deep)
+                    ScanSession.setDeepResearch(true)
                     navController.navigate("scan") {
                         popUpTo("scan") { inclusive = true }
                     }
