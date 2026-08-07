@@ -310,6 +310,15 @@ private fun CaseSelectionCard(
                         modifier = Modifier.padding(top = 2.dp)
                     )
                 }
+                case.scanHistory.lastOrNull()?.let { scan ->
+                    Text(
+                        text = "${scan.mode.displayName} scan · ${scan.profileResultCount} profiles · ${scan.findingCount} findings" +
+                            if (scan.cancelled) " · cancelled" else "",
+                        color = NeuralTheme.TextMuted,
+                        fontSize = 10.5.sp,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
             }
             IconButton(onClick = onDelete) {
                 Icon(
@@ -393,6 +402,28 @@ private fun RenderDiff(
                 )
             }
         }
+
+        if (diff.remediationVerification.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(12.dp))
+            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "Remediation recheck",
+                color = NeuralTheme.TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "Verification compares only these two authorized case snapshots. A result disappearing from the newer scan is not proof that search indexes, caches, archives, or every live copy are gone.",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 10.5.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 3.dp, bottom = 5.dp)
+            )
+            diff.remediationVerification.forEach { verification ->
+                RemediationVerificationRow(verification)
+            }
+        }
     }
 }
 
@@ -442,6 +473,42 @@ private fun DiffList(title: String, items: List<Pair<String, RiskLevel>>, color:
 }
 
 @Composable
+private fun RemediationVerificationRow(
+    verification: CaseComparison.RemediationVerification
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            Text(
+                text = verification.state.displayLabel(),
+                color = remediationVerificationColor(verification.state),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = buildString {
+                    append(verification.beforeStatus.displayLabel())
+                    verification.afterStatus?.let { append(" → ${it.displayLabel()}") }
+                },
+                color = NeuralTheme.TextMuted,
+                fontSize = 9.5.sp
+            )
+        }
+        Text(
+            text = verification.explanation,
+            color = NeuralTheme.TextSecondary,
+            fontSize = 10.5.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.padding(top = 2.dp)
+        )
+    }
+}
+
+@Composable
 private fun RenderSingleCase(case: DossierCase) {
     Column(
         modifier = Modifier
@@ -471,6 +538,16 @@ private fun RenderSingleCase(case: DossierCase) {
                 fontSize = 11.5.sp,
                 lineHeight = 16.sp,
                 modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+        case.scanHistory.lastOrNull()?.let { scan ->
+            Text(
+                text = "Last scan: ${scan.mode.displayName} · ${scan.profileResultCount} profiles · ${scan.findingCount} findings" +
+                    if (scan.cancelled) " · cancelled" else "",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 5.dp)
             )
         }
         Text(
@@ -845,6 +922,23 @@ private fun RemediationStatus.displayLabel(): String = when (this) {
     RemediationStatus.Completed -> "Completed — verify"
     RemediationStatus.Rejected -> "Rejected"
     RemediationStatus.NeedsManualAction -> "Manual action"
+}
+
+private fun CaseComparison.RemediationVerificationState.displayLabel(): String = when (this) {
+    CaseComparison.RemediationVerificationState.NotRechecked -> "Not rechecked"
+    CaseComparison.RemediationVerificationState.StillObserved -> "Still observed"
+    CaseComparison.RemediationVerificationState.NotObservedInLatestScan -> "Not observed in latest scan"
+    CaseComparison.RemediationVerificationState.StatusChanged -> "Workflow status changed"
+}
+
+@Composable
+private fun remediationVerificationColor(
+    state: CaseComparison.RemediationVerificationState
+): Color = when (state) {
+    CaseComparison.RemediationVerificationState.StillObserved -> NeuralTheme.Crimson
+    CaseComparison.RemediationVerificationState.NotObservedInLatestScan -> NeuralTheme.Emerald
+    CaseComparison.RemediationVerificationState.StatusChanged -> NeuralTheme.Cobalt
+    CaseComparison.RemediationVerificationState.NotRechecked -> NeuralTheme.TextMuted
 }
 
 @Composable
