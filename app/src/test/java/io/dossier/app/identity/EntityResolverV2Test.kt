@@ -1,0 +1,115 @@
+package io.dossier.app.identity
+
+import io.dossier.app.domain.identity.CorrelationFeature
+import io.dossier.app.domain.identity.EntityResolverV2
+import io.dossier.app.domain.identity.ResolutionBand
+import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.Platform
+import io.dossier.app.domain.model.ProfileScanResult
+import io.dossier.app.domain.model.UsernameCandidate
+import io.dossier.app.domain.model.UsernameMatchType
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class EntityResolverV2Test {
+    private fun profile(
+        username: String,
+        url: String,
+        verified: Boolean,
+        displayName: String? = null,
+        bio: String? = null,
+        links: List<String> = emptyList()
+    ) = ProfileScanResult(
+        candidate = UsernameCandidate(
+            username = username,
+            platform = Platform.GitHub,
+            url = url,
+            matchType = UsernameMatchType.Exact,
+            confidence = if (verified) 0.9f else 0.5f
+        ),
+        exists = true,
+        httpStatus = 200,
+        displayName = displayName,
+        bio = bio,
+        links = links,
+        extractedText = listOfNotNull(displayName, bio).joinToString(" "),
+        findings = emptyList(),
+        confidenceSignals = emptyList(),
+        verified = verified,
+        verificationStatus = if (verified) "verified" else "review"
+    )
+
+    @Test
+    fun exactUsernameAloneNeverConfirmsIdentity() {
+        val input = IdentityInput(fullName = "", primaryUsername = "common_handle")
+        val result = EntityResolverV2.resolve(
+            input,
+            profile("common_handle", "https://github.com/common_handle", verified = false)
+        )
+
+        assertTrue(result.band == ResolutionBand.Low || result.band == ResolutionBand.Unresolved)
+        assertTrue(result.supporting.any { it.feature == CorrelationFeature.ExactSuppliedUsername })
+    }
+
+    @Test
+    fun userSuppliedExactProfileIsConfirmed() {
+        val url = "https://github.com/sample_user"
+        val input = IdentityInput(
+            fullName = "Sample User",
+            primaryUsername = "sample_user",
+            profileUrls = listOf(url)
+        )
+        val result = EntityResolverV2.resolve(
+            input,
+            profile("sample_user", url, verified = true, displayName = "Sample User")
+        )
+
+        assertEquals(ResolutionBand.Confirmed, result.band)
+        assertTrue(result.supporting.any { it.feature == CorrelationFeature.UserSuppliedProfile })
+    }
+
+    @Test
+    fun independentSignalsCanProduceHighConfidenceBand() {
+        val input = IdentityInput(
+            fullName = "Sample User",
+            primaryUsername = "rare_handle_7281",
+            organizations = listOf("Example Labs"),
+            profileUrls = listOf("https://sample.example.test/about")
+        )
+        val result = EntityResolverV2.resolve(
+            input,
+            profile(
+                username = "rare_handle_7281",
+                url = "https://github.com/rare_handle_7281",
+                verified = true,
+                displayName = "Sample User",
+                bio = "Engineer at Example Labs",
+                links = listOf("https://sample.example.test/about")
+            )
+        )
+
+        assertEquals(ResolutionBand.High, result.band)
+        assertTrue(result.supporting.size >= 3)
+    }
+
+    @Test
+    fun strongNameContradictionPreventsHighMergeWhenSupportIsWeak() {
+        val input = IdentityInput(
+            fullName = "Alice Example",
+            primaryUsername = "shared_handle"
+        )
+        val result = EntityResolverV2.resolve(
+            input,
+            profile(
+                username = "shared_handle",
+                url = "https://github.com/shared_handle",
+                verified = false,
+                displayName = "Robert Different"
+            )
+        )
+
+        assertEquals(ResolutionBand.Conflicting, result.band)
+        assertTrue(result.contradicting.any { it.feature == CorrelationFeature.ConflictingDisplayName })
+    }
+}
