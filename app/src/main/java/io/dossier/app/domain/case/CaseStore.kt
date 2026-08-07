@@ -17,14 +17,7 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/**
- * Encrypted, versioned, local-only case store.
- *
- * New cases are written as AES-256-GCM envelopes using an Android Keystore key.
- * Legacy plaintext JSON remains readable solely for one-time migration and is
- * deleted after a successful encrypted rewrite. Saving never falls back to
- * plaintext when the keystore is unavailable.
- */
+/** Encrypted, versioned, local-only case store. */
 class CaseStore(private val context: Context) {
 
     private val json = Json {
@@ -56,7 +49,9 @@ class CaseStore(private val context: Context) {
             return runCatching {
                 val envelope = json.decodeFromString<EncryptedCaseEnvelope>(encrypted.readText())
                 val plaintext = decrypt(envelope)
-                json.decodeFromString<DossierCase>(plaintext.toString(Charsets.UTF_8))
+                val decoded = json.decodeFromString<DossierCase>(plaintext.toString(Charsets.UTF_8))
+                if (decoded.schemaVersion == DossierCase.CURRENT_SCHEMA_VERSION) decoded
+                else decoded.copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION)
             }.getOrNull()
         }
 
@@ -65,7 +60,8 @@ class CaseStore(private val context: Context) {
         val migrated = runCatching {
             json.decodeFromString<DossierCase>(legacy.readText())
         }.getOrNull() ?: return null
-        return if (save(migrated)) migrated.copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION) else migrated
+        val normalized = migrated.copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION)
+        return if (save(normalized)) normalized else migrated
     }
 
     fun list(): List<DossierCase> = runCatching {
@@ -75,6 +71,30 @@ class CaseStore(private val context: Context) {
             .distinct()
         caseIds.mapNotNull(::load).sortedByDescending { it.createdAt }
     }.getOrElse { emptyList() }
+
+    /** Persist a user decision without deleting the underlying raw evidence. */
+    fun recordCorrection(caseId: String, correction: UserCorrection): Boolean = update(caseId) { current ->
+        val retained = current.userCorrections.filterNot { existing ->
+            existing.correctionId == correction.correctionId ||
+                (existing.evidenceId != null && existing.evidenceId == correction.evidenceId) ||
+                (existing.entityId != null && existing.entityId == correction.entityId)
+        }
+        current.copy(userCorrections = retained + correction)
+    }
+
+    fun upsertRemediation(caseId: String, remediation: RemediationRecord): Boolean = update(caseId) { current ->
+        val retained = current.remediationRecords.filterNot { it.remediationId == remediation.remediationId }
+        current.copy(remediationRecords = retained + remediation)
+    }
+
+    fun appendScanHistory(caseId: String, entry: CaseScanHistoryEntry): Boolean = update(caseId) { current ->
+        val retained = current.scanHistory.filterNot { it.scanId == entry.scanId }
+        current.copy(scanHistory = (retained + entry).sortedBy { it.startedAtUtc })
+    }
+
+    fun recordExport(caseId: String, export: CaseExportRecord): Boolean = update(caseId) { current ->
+        current.copy(exports = (current.exports + export).distinctBy(CaseExportRecord::exportId))
+    }
 
     fun delete(caseId: String): Boolean = runCatching {
         val encryptedDeleted = !encryptedFile(caseId).exists() || encryptedFile(caseId).delete()
@@ -88,6 +108,11 @@ class CaseStore(private val context: Context) {
         }
         true
     }.getOrDefault(false)
+
+    private fun update(caseId: String, transform: (DossierCase) -> DossierCase): Boolean {
+        val current = load(caseId) ?: return false
+        return save(transform(current).copy(schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION))
+    }
 
     private fun encrypt(plaintext: ByteArray): EncryptedCaseEnvelope {
         val cipher = Cipher.getInstance(TRANSFORMATION)
