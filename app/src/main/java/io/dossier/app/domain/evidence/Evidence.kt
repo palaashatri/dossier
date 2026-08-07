@@ -133,7 +133,8 @@ fun Evidence.toFinding(): Finding = Finding(
 
 /**
  * Adapter for legacy findings. Metadata that the legacy Finding contract cannot
- * prove remains explicitly Unknown/null rather than being invented.
+ * prove remains explicitly Unknown/null rather than being invented. In
+ * particular, numeric confidence is never promoted into a verification state.
  */
 fun Finding.toEvidence(): Evidence = Evidence(
     id = "ev:${type.name}:${value}:${sourceUrl ?: ""}",
@@ -158,10 +159,11 @@ fun Finding.toEvidence(): Evidence = Evidence(
     confidence = confidence,
     risk = risk,
     signals = if (remediation.isBlank()) emptyList() else listOf(remediation),
-    state = when {
-        confidence >= 0.9f -> EvidenceState.Verified
-        confidence >= 0.7f -> EvidenceState.Probable
-        else -> EvidenceState.Candidate
+    state = when (type) {
+        FindingType.PlausibleProfileMatch,
+        FindingType.PublicSearchEvidence,
+        FindingType.PublicImageEvidence -> EvidenceState.Candidate
+        else -> EvidenceState.Observed
     },
     reliability = when (type) {
         FindingType.PublicSearchEvidence,
