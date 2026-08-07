@@ -2,178 +2,215 @@
 
 Dossier is a consent-first Android application for auditing a subject's public digital footprint when the subject owns the information, has consented, or the operator has another legitimate authorization.
 
-It collects public evidence, preserves provenance, separates verification from review-only leads, and produces remediation-oriented reports. Dossier is not a guarantee of complete internet coverage and does not treat search results, visual similarity, or graph connections as proof of identity or account ownership.
+It collects public evidence, preserves provenance, separates verification from review-only leads, correlates findings conservatively, and helps track remediation. Dossier does not treat search results, shared usernames, image/face similarity, AI output, or graph connections as proof of identity or account ownership.
 
 ## Current status
 
-Active development includes reliability, privacy, evidence-integrity, local face-correlation, and UI/UX hardening.
+The current implementation branch is **63/100 under the strict production rubric**.
 
-The expected build gates are:
+Validated implementation commit:
 
-```sh
-./gradlew :app:testDebugUnitTest
-./gradlew :app:assembleDebug
+```text
+ead2e9806914ee0bd525a2c9d0a548c17348f5fa
 ```
 
-The calibration utility is validated separately in CI with its pinned Python/OpenCV environment.
+That exact implementation passed:
 
-See `TRUTH.md` for the authoritative implementation status, measured limitations, and remaining release gates. See `AGENTS.md` for repository engineering rules.
+```text
+Provider registry audit       PASS
+Face calibration runtime      PASS
+JVM unit tests                PASS
+Debug APK assembly            PASS
+API 35 Compose tests (9/9)    PASS
+```
 
-## Capabilities
+This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, historical/case-integrated image workflows, and representative physical-device/accessibility/performance validation remain release gates.
 
-### Public discovery
+See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the target product contract.
 
-- Structured checks for supported public profile services.
-- General public-search acquisition across multiple providers with bounded budgets.
-- Direct source-page verification before assigning strong confidence.
-- Provider retries, `Retry-After` handling, caches, circuit breakers, and source canaries.
-- One-hop identity pivots from handles and links disclosed by confirmed sources.
-- Optional bounded public-link expansion.
-- Exact-URL Internet Archive recovery for some deleted or replaced pages.
-- Explicit verified, historical, review-only, unavailable, not-found, and index-only states.
+## Discovery Fabric
 
-### Identity and evidence correlation
+- Typed declarative provider registry with **78 authored provider/service definitions**.
+- Developer, social, forum, gaming, creative, publishing, professional, media, commerce, education, code/package, personal-site, archive, breach and search categories.
+- Quick, Standard, Deep and Exhaustive scan modes backed by real provider plans rather than fake totals.
+- Provider query capabilities, source-reliability classes, existence/extraction rules and request policies.
+- Registry validation for duplicates, malformed templates, parser drift and inventory drift.
+- Deterministic response states for present, not-found, soft-404, authentication-required, challenged, redirect, unexpected and invalid responses.
+- Multiple bounded public-search sources, direct source verification, retries, `Retry-After`, caches and circuit breakers.
+- Bounded two-hop pivots with admission rules: weak name/location/occupation/face-only signals do not recursively expand by themselves.
+- Exact-URL Internet Archive recovery for some deleted/replaced pages.
 
-- Names, usernames, aliases, emails, phone numbers, locations, organizations, and explicit profile URLs.
-- Attribution-aware PII extraction that does not elevate unrelated regex matches into strong identity claims.
-- Evidence graph construction with explainable relationships and confidence contributors.
-- Exposure dimensions, evidence pathways, risk prioritization, and remediation guidance.
+The long-term contract calls for 1,000+ useful reviewed definitions. The current 78 definitions are not presented as registry-wide live validated.
 
-### Reverse-image and visual checks
+## Scan orchestration and history
 
-The selected reference image remains on-device. Public candidate images may be downloaded for local comparison.
+- `ScanCoordinatorRuntime` wraps the mature vertical scan pipeline.
+- Structured scan IDs, requests, run states and events.
+- Live UI state derives from real scan-stage/profile/face/breach/graph/analysis observations.
+- Cancellation is supported; Dossier does not invent provider-level completion events while the underlying scheduler lacks callbacks.
+- Scan mode survives the resumable-input marker.
+- Terminal scan lifecycle stores actual start/end time, mode, plan size, result counts and cancellation state.
+- A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
+- Later case edits cannot silently attach a newer scan to an older case.
 
-- SHA-256 exact matching.
-- pHash, dHash, and aHash.
-- Colour-histogram comparison.
-- Full-image, centre-crop, and square-crop variants.
-- Classification of exact copies, near-identical images, resized/recompressed reposts, and probable visual duplicates.
-- Optional local YuNet/SFace cross-photo correlation using pinned OpenCV Zoo models.
-- Explicit per-scan choice between strong local correlation and conservative basic appearance matching.
-- Five-landmark alignment, ambiguity rejection, quality gates, cosine scoring, and transient-memory cleanup.
-- Reference-policy scores remain manual-review evidence unless a matching measured calibration is imported.
+True suspended pause/resume, provider-level queue/start/completion events, persisted frontier checkpoints and sole coordinator ownership remain incomplete.
 
-Candidate coverage is limited to images exposed by the queried public sources. A missing result does not prove that an image never appeared online.
+## Evidence, graph and entity resolution
 
-### Breach checks
+- Identity seeds: names, usernames, aliases, emails, phone numbers, locations, organizations and explicit profile URLs.
+- Attribution-aware PII extraction.
+- Evidence records can retain provider ID, URL, retrieval/observation timestamps, verification state, reliability, SHA-256, parser version and historical/current state.
+- Numeric confidence is separate from verification state.
+- Graph v2 provides semantic node kinds, typed relationships, evidence IDs, contradiction IDs, history fields and verification/conflict state while retaining saved-case compatibility.
+- Multi-signal account resolution is integrated into the production graph.
+- **A shared username alone is not sufficient to confirm identity.**
+- Contradictory evidence is preserved.
+
+Entity-resolution weights remain engineering values until a representative benchmark establishes precision, recall, false-positive/false-negative behavior and calibration.
+
+## Reverse-image and visual checks
+
+The selected reference image stays on-device. Dossier may search text/identity clues, download public candidate images, and compare those public images locally.
+
+Implemented whole-image duplicate/repost analysis:
+
+- SHA-256 exact matching;
+- pHash, dHash and aHash;
+- colour-histogram comparison;
+- full-image, centre-crop and square-crop variants;
+- exact-copy, near-identical, resized/recompressed and modest-crop detection;
+- stable candidate IDs;
+- per-candidate provenance containing source, source page, acquisition query, compared URL, retrieval timestamp, content/perceptual hashes, dimensions, comparison score and outcome;
+- truthful candidate states for unavailable download, decode failure, compared/no-match and match;
+- deterministic exact-content and perceptual-near-duplicate clusters with stable IDs;
+- Reverse Media UI for candidate-state totals, cluster summaries, hash/dimension details and source drill-down.
+
+Whole-image clusters mean **duplicate/reposted image content**. They do not mean two different photos depict the same person.
+
+Optional local cross-photo face support uses pinned YuNet/SFace models with exact size/SHA-256 verification, deterministic preprocessing, five-landmark alignment, ambiguity/quality rejection and cosine scoring. Face similarity remains supporting evidence; release thresholds are not advertised as measured identity probabilities until a representative benchmark exists.
+
+Image candidate/cluster objects are not yet persisted into encrypted cases or the primary identity graph across the normal investigation workflow.
+
+## Historical evidence
+
+- Bounded exact-URL Wayback lookup and snapshot verification.
+- Historical evidence is labeled separately from current evidence.
+- Historical confidence is capped.
+- Timeline construction uses only real evidence timestamps or provider breach dates.
+- Untimestamped observations are omitted rather than assigned fabricated dates.
+
+Broad historical extraction and production timeline UI remain incomplete.
+
+## Breach checks
 
 - Pwned Passwords five-character SHA-1 range lookup; the full password is not transmitted.
-- HIBP email account range lookup when the user supplies supported credentials.
-- Authoritative HIBP coverage remains separate from ordinary public-web mentions.
-- Unconfigured, rejected, rate-limited, and unavailable states are not presented as a clean result.
+- HIBP account range lookup when user-supplied supported access is available.
+- No silent fallback to sending a complete email address when the privacy-preserving account-range flow is unavailable.
+- Authoritative breach coverage remains distinct from general public-web exposure.
+- Not-configured, rejected, rate-limited and unavailable states are explicit.
+- Breach dates, provider/retrieval metadata and data classes are retained.
+- Dossier does not bundle or distribute stolen credential databases or leaked passwords.
 
-### AI analysis
+## Evidence-grounded AI
 
-- Deterministic local analysis is always available as a fallback.
-- Optional local Gemma and supported device AI engines.
-- Optional user-configured remote providers.
-- Every analysis identifies its engine and whether network analysis was used.
-- Retrieved page content is treated as untrusted evidence rather than instructions.
-- Remote API keys are encrypted with Android Keystore-backed AES-GCM.
+- Deterministic local analysis is always available as fallback.
+- Optional local/device and user-configured remote engines.
+- Retrieved content is treated as untrusted evidence, not instructions.
+- Generated factual claims must use structured output and cite existing evidence IDs.
+- Claims referring to nonexistent evidence IDs or making uncited factual assertions are rejected.
+- Contradiction can downgrade a generated high-confidence claim.
+- Malformed/unsupported generated output falls back to deterministic analysis instead of being displayed raw.
+- Remote processing remains opt-in and disclosed.
 
-### Persistence and reporting
+A production AI evaluation corpus and fully corrected-graph/remediation-native model inputs remain incomplete.
+
+## Encrypted cases, corrections and remediation
 
 - Active scan state is temporary by default.
-- Explicitly saved cases use Android Keystore-backed AES-256-GCM.
-- Versioned case schema, atomic writes, filesystem sync, and integrity verification.
-- Migration of legacy plaintext cases without a plaintext fallback for new saves.
-- Paginated PDF report plus machine-readable JSON evidence package.
-- Per-section SHA-256 hashes and a canonical manifest hash.
-- Saved-case comparison with explicit older/newer roles and deletion controls.
+- Explicit saves use Android Keystore-backed AES-256-GCM.
+- Versioned case schema, atomic writes and integrity verification.
+- Legacy plaintext migration without a plaintext fallback for new saves.
+- Case schema v3 supports authorized scope, scan history, user corrections, remediation records and export records.
+- Saved-case comparison uses explicit older/newer roles.
+- Evidence decisions: **Mine / Not mine / Unsure / Ignore**.
+- Account decisions: **This is me / Not me / Unsure**.
+- Corrections affect effective analysis/graph membership without deleting raw encrypted evidence.
+- Remediation states: Not started, In progress, Submitted, Awaiting response, Completed, Rejected and Needs manual action.
+- Differential comparison classifies added, removed, changed and unchanged findings.
+- Recheck UI distinguishes **Still observed**, **Not observed in latest scan**, **Workflow status changed** and **Not rechecked**.
+- `Not observed in latest scan` explicitly does **not** mean verified deletion from every live page, search index, cache or archive.
 
-## User experience
+## Reports and share-safe export
 
-The main report is organized into four views:
-
-1. **Overview** — exposure priority, inspected coverage, dimensions, and highest-priority evidence.
-2. **Evidence** — findings, profiles, visual comparisons, breach coverage, and source links.
-3. **Connections** — relationship graph, text-list alternative, and evidence pathways.
-4. **Actions** — remediation, encrypted saving, export, expanded scanning, and session deletion.
-
-The app uses Android's system Photo Picker, requests camera access only for optional capture, and does not request broad media-library permissions.
+- Paginated PDF plus machine-readable JSON evidence package.
+- Per-section SHA-256 hashes and canonical manifest hash.
+- Explicit `ShareSafe` mode from saved Cases.
+- Redaction happens **before export files are written**.
+- Share-safe mode removes/generalizes direct subject values, source URLs, snippets, profile details, graph labels/details, breach identifiers, visual source URLs and generated analysis that may reproduce identifying evidence.
+- JSON records redaction mode.
+- UI warns that redaction reduces disclosure but cannot guarantee anonymity; generated files should be reviewed before sharing.
 
 ## Privacy and network behavior
 
 Dossier has no required project-operated backend and does not include analytics telemetry. It is not fully offline.
 
-Network operations can include:
+Network-dependent operations can include public profile/source checks, search/image-index acquisition, archive retrieval, public candidate-image/model downloads, HIBP range queries and optional remote AI.
 
-- Public profile and source-page checks.
-- Search and image-index acquisition.
-- Archive availability and snapshot retrieval.
-- Downloading public candidate images and optional local model packs.
-- HIBP range queries.
-- Optional remote AI providers.
+Local operations include reference-image processing, exact/perceptual image comparison, YuNet/SFace inference, PII parsing, graph/risk analysis, encrypted case state, report generation and share-safe redaction.
 
-Local-only operations include:
+The reverse-image matcher identifies itself generically as Dossier rather than impersonating a consumer browser/device. Challenge pages and source restrictions are reported rather than bypassed.
 
-- Reference-image processing.
-- Exact and perceptual image comparison.
-- YuNet/SFace detection, alignment, embeddings, and scoring.
-- PII parsing, graph construction, risk scoring, deterministic analysis, case encryption, and report generation.
-
-No selected reference image, aligned face crop, landmark set, or face embedding is intentionally uploaded by the visual-correlation pipeline.
-
-## Build
+## Build and validation
 
 Requirements:
 
-- JDK 21.
-- Android SDK 35.
-- Android Studio or the Gradle wrapper.
-- Android 8.0 or newer; the debug build currently targets `arm64-v8a`.
+- JDK 21
+- Android SDK 35
+- Android Studio or Gradle wrapper
+- Android 8.0+
 
-Commands:
+Core checks:
 
 ```sh
+python3 tools/provider_registry_audit.py
 ./gradlew :app:testDebugUnitTest
 ./gradlew :app:assembleDebug
-./gradlew :app:installDebug
+./gradlew connectedUiTestAndroidTest
 ```
 
-A release build requires private signing properties to produce a signed distributable artifact:
+CI separately validates the pinned Python/OpenCV face-calibration environment.
+
+A release build requires private signing properties:
 
 ```sh
 ./gradlew :app:assembleRelease
 ```
 
-Do not commit `local.properties`, keystores, credentials, API keys, personal test identities, device paths, or real-user screenshots.
-
-## Repository layout
-
-```text
-app/src/main/java/io/dossier/app/
-  data/      Network, AI, breach, visual-model, and storage adapters
-  domain/    Evidence, scanning, correlation, risk, remediation, and case logic
-  export/    PDF and JSON evidence-package generation
-  ui/        Compose navigation, screens, components, and theme
-
-app/src/test/java/io/dossier/app/
-  JVM regression tests
-
-tools/
-  Face-calibration and reproducibility utilities
-```
+Do not commit `local.properties`, keystores, credentials, API keys, personal test identities, developer-specific paths or real-user screenshots.
 
 ## Known limitations
 
-- Private, authenticated, blocked, never-indexed, and never-archived content cannot be discovered reliably.
-- Public providers can change markup, challenge requests, rate-limit, or omit content.
-- Candidate-based image comparison cannot evaluate images no source exposed.
-- Cross-photo face correlation still requires a sufficiently large consented, identity-disjoint calibration and test corpus before a high-confidence operating claim is justified.
-- HIBP email coverage requires user-provided supported credentials.
-- Hash manifests provide integrity metadata but are not independent digital signatures or third-party attestations.
-- Real-device visual, accessibility, font-scale, thermal, battery, and longitudinal provider testing remain release gates.
+- 78 declarative definitions is not the 1,000+ reviewed/live-validated provider target.
+- Private, authenticated, blocked, never-indexed and never-archived content cannot be discovered reliably.
+- Providers can change markup, challenge requests, rate-limit or omit content.
+- Provider-level live events, true pause/resume and persisted recursive-frontier recovery are incomplete.
+- Entity resolution still needs a calibrated representative benchmark.
+- Image provenance/clusters are not yet persisted into encrypted cases/identity graph for cross-account or cross-scan investigation.
+- Cross-photo face correlation still requires measured ROC/FAR/FRR and representative physical-device validation.
+- Historical extraction and timeline UX are incomplete.
+- HIBP email coverage depends on user-supplied supported access and provider availability.
+- Share-safe redaction reduces disclosure but cannot guarantee anonymity.
+- Emulator CI cannot replace Samsung/Pixel/lower-memory, accessibility, font-scale, process-death, thermal, battery and large-case validation.
 
 ## Documentation policy
 
 The repository intentionally keeps only three Markdown documents:
 
-- `README.md` — public product and build documentation.
-- `AGENTS.md` — instructions for coding agents and maintainers.
-- `TRUTH.md` — authoritative current status, audit conclusions, and remaining work.
+- `README.md` — public product/build documentation.
+- `AGENTS.md` — authoritative product/engineering contract.
+- `TRUTH.md` — authoritative current status, validation record and remaining work.
 
-Do not add separate status, roadmap, audit, handoff, findings, or completion Markdown files. Update `TRUTH.md` instead.
+Do not add separate status, roadmap, audit, handoff, findings or completion Markdown files. Update `TRUTH.md` instead.
 
 ## License
 

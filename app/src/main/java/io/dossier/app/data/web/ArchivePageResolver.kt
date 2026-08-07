@@ -19,17 +19,7 @@ import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
-/**
- * Bounded historical-page resolver for exact URLs.
- *
- * This is intentionally not a broad archive crawler. It asks the Internet
- * Archive Wayback Availability API for the closest accessible capture of one
- * exact URL, downloads that capture under strict limits, and returns text that
- * Dossier can run through its normal identity-attribution logic.
- *
- * Historical evidence must never be interpreted as proof that an account or
- * page is currently active.
- */
+/** Bounded historical-page resolver for exact public URLs. */
 internal class ArchivePageResolver(
     private val client: OkHttpClient = defaultClient()
 ) {
@@ -183,8 +173,7 @@ internal class ArchivePageResolver(
     companion object {
         private const val AVAILABILITY_ENDPOINT = "https://archive.org/wayback/available"
         private const val PROVIDER_NAME = "Internet Archive Wayback Machine"
-        private const val USER_AGENT =
-            "Dossier/0.1 authorized-public-self-audit (+https://github.com/palaashatri/dossier)"
+        private const val USER_AGENT = "Dossier/0.1 authorized-public-self-audit"
         private const val MAX_BODY_BYTES = 2_000_000L
         private const val MAX_TEXT_CHARS = 10_000
         private const val CACHE_TTL_MS = 6 * 60 * 60 * 1_000L

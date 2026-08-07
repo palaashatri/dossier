@@ -14,22 +14,36 @@ jobs:
     timeout-minutes: 10
     continue-on-error: true
     steps:
-      - name: Probe structured and public search sources
+      - name: Probe structured and sampled public sources
         shell: python
         run: |
           import os
           import urllib.error
           import urllib.request
 
+          # These are low-frequency health probes, not attribution fixtures. A
+          # healthy HTTP response proves only that a public provider surface is
+          # reachable from this runner. Deterministic parsing/soft-error behavior
+          # remains covered by JVM fixtures.
           probes = [
-              ("GitHub found", "https://api.github.com/users/octocat", {200}),
-              ("GitHub absent", "https://api.github.com/users/dossier-canary-account-that-must-not-exist-928471", {404}),
-              ("Reddit found", "https://www.reddit.com/user/spez/about.json?raw_json=1", {200}),
-              ("Bluesky found", "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=jay.bsky.team", {200}),
-              ("Hacker News found", "https://hacker-news.firebaseio.com/v0/user/pg.json", {200}),
-              ("DEV found", "https://dev.to/api/users/by_username?url=ben", {200}),
-              ("GitLab found", "https://gitlab.com/api/v4/users?username=gitlab-bot", {200}),
+              ("GitHub API found", "https://api.github.com/users/octocat", {200}),
+              ("GitHub API absent", "https://api.github.com/users/dossier-canary-account-that-must-not-exist-928471", {404}),
+              ("Reddit public API", "https://www.reddit.com/user/spez/about.json?raw_json=1", {200}),
+              ("Bluesky public API", "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=jay.bsky.team", {200}),
+              ("Hacker News API", "https://hacker-news.firebaseio.com/v0/user/pg.json", {200}),
+              ("DEV public API", "https://dev.to/api/users/by_username?url=ben", {200}),
+              ("GitLab public API", "https://gitlab.com/api/v4/users?username=gitlab-bot", {200}),
               ("Mastodon WebFinger", "https://mastodon.social/.well-known/webfinger?resource=acct:Gargron@mastodon.social", {200}),
+              ("Codeberg public profile", "https://codeberg.org/Codeberg", {200}),
+              ("npm public profile", "https://www.npmjs.com/~npm", {200}),
+              ("PyPI public profile", "https://pypi.org/user/pypa/", {200, 404}),
+              ("Keybase public profile", "https://keybase.io/max", {200}),
+              ("Hugging Face public profile", "https://huggingface.co/huggingface", {200}),
+              ("Lichess public profile", "https://lichess.org/@/DrNykterstein", {200}),
+              ("Chess.com public profile", "https://www.chess.com/member/hikaru", {200}),
+              ("SoundCloud public profile", "https://soundcloud.com/soundcloud", {200}),
+              ("Letterboxd public profile", "https://letterboxd.com/jack/", {200}),
+              ("Wayback availability", "https://archive.org/wayback/available?url=example.com", {200}),
               ("DuckDuckGo HTML", "https://html.duckduckgo.com/html/?q=example", {200}),
               ("Bing Search", "https://www.bing.com/search?q=example&count=10", {200}),
               ("Yandex Search", "https://yandex.com/search/?text=example&noreask=1", {200}),
@@ -45,7 +59,7 @@ jobs:
               request = urllib.request.Request(
                   url,
                   headers={
-                      "User-Agent": "Dossier discovery canary (+https://github.com/palaashatri/dossier)",
+                      "User-Agent": "Dossier/0.1 authorized-public-self-audit",
                       "Accept": "text/html, application/json, application/activity+json, */*;q=0.5",
                   },
               )
@@ -63,13 +77,16 @@ jobs:
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           with open(summary, "a", encoding="utf-8") as output:
               output.write("# Dossier discovery source canaries\n\n")
-              output.write("| Source | Observed | Expected | Healthy |\n")
+              output.write("Reachability only; this is not an attribution or accuracy score.\n\n")
+              output.write("| Source | Observed | Expected | Reachable |\n")
               output.write("|---|---:|---:|:---:|\n")
               for name, status, expected, ok in rows:
                   output.write(f"| {name} | {status} | {expected} | {'yes' if ok else 'no'} |\n")
-              output.write(f"\nHealthy sources: **{healthy}/{len(probes)}**\n")
+              output.write(f"\nReachable sampled surfaces: **{healthy}/{len(probes)}**\n")
 
-          # Search engines commonly challenge cloud datacentres. Record individual
-          # drift, but fail only if a majority of all independent surfaces disappear.
+          # Search/profile sites commonly challenge cloud datacentres. Record
+          # drift but fail this advisory job only if a majority of all independent
+          # surfaces disappear. The job itself remains continue-on-error so a
+          # third-party outage cannot block unrelated development.
           if healthy * 2 < len(probes):
-              raise SystemExit("A majority of discovery sources are unhealthy")
+              raise SystemExit("A majority of sampled discovery surfaces are unreachable")

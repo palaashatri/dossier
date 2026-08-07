@@ -27,6 +27,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -307,6 +308,15 @@ private fun RenderLookupResult(
                         lineHeight = 15.sp,
                         modifier = Modifier.padding(top = 4.dp)
                     )
+                    match.clusterId?.let { clusterId ->
+                        Text(
+                            "Cluster ${clusterId.substringAfter(':').take(10)}",
+                            color = NeuralTheme.TextMuted,
+                            fontSize = 9.5.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(top = 3.dp)
+                        )
+                    }
                     val target = match.sourcePageUrl.takeIf { it.startsWith("http") } ?: match.imageUrl
                     Text(
                         "Open source page →",
@@ -319,6 +329,11 @@ private fun RenderLookupResult(
                 }
             }
         }
+    }
+
+    if (result.visualCandidates.isNotEmpty()) {
+        Spacer(Modifier.height(20.dp))
+        RenderVisualProvenance(result, cardShape, onNavigateToBrowser)
     }
 
     Spacer(Modifier.height(20.dp))
@@ -435,6 +450,139 @@ private fun RenderLookupResult(
 }
 
 @Composable
+private fun RenderVisualProvenance(
+    result: ReverseImageLookupResult,
+    cardShape: RoundedCornerShape,
+    onNavigateToBrowser: (String) -> Unit
+) {
+    var expanded by remember(result.visualCandidates) { mutableStateOf(false) }
+    val candidates = result.visualCandidates
+    val shown = if (expanded) candidates else candidates.take(PROVENANCE_PREVIEW_COUNT)
+    val stateCounts = candidates.groupingBy { it.state }.eachCount()
+
+    SectionHeader("Image candidate provenance")
+    Text(
+        text = buildString {
+            append("${candidates.size} public candidate(s) recorded")
+            append(" · ${stateCounts[ReverseImageLookupResult.ImageCandidateState.Matched] ?: 0} matched")
+            append(" · ${stateCounts[ReverseImageLookupResult.ImageCandidateState.ComparedNoMatch] ?: 0} compared/no match")
+            val unavailable = (stateCounts[ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable] ?: 0) +
+                (stateCounts[ReverseImageLookupResult.ImageCandidateState.DecodeFailed] ?: 0)
+            if (unavailable > 0) append(" · $unavailable unavailable")
+        },
+        color = NeuralTheme.TextSecondary,
+        fontSize = 11.5.sp,
+        lineHeight = 16.sp,
+        modifier = Modifier.padding(bottom = 8.dp)
+    )
+    Text(
+        "Candidate provenance describes where public images came from and how whole-image comparison behaved. Hash similarity indicates duplicate/repost content, not a person's identity.",
+        color = NeuralTheme.TextMuted,
+        fontSize = 10.5.sp,
+        lineHeight = 15.sp,
+        modifier = Modifier.padding(bottom = 9.dp)
+    )
+
+    if (result.visualClusters.isNotEmpty()) {
+        Text(
+            "Duplicate/repost clusters",
+            color = NeuralTheme.TextPrimary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 5.dp)
+        )
+        result.visualClusters.forEach { cluster ->
+            Text(
+                text = "• ${cluster.type.displayLabel()} · ${cluster.memberCandidateIds.size} public candidates · ${cluster.id.substringAfter(':').take(10)}",
+                color = if (cluster.type == ReverseImageLookupResult.ImageClusterType.ExactContent) NeuralTheme.Emerald else NeuralTheme.Cobalt,
+                fontSize = 10.5.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.padding(bottom = 3.dp)
+            )
+        }
+        Spacer(Modifier.height(7.dp))
+    }
+
+    shown.forEach { candidate ->
+        Card(
+            colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.82f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 7.dp)
+                .border(1.dp, candidate.state.accent().copy(alpha = 0.30f), cardShape),
+            shape = cardShape
+        ) {
+            Column(Modifier.padding(13.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text(
+                        candidate.title,
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        candidate.state.displayLabel(),
+                        color = candidate.state.accent(),
+                        fontSize = 9.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+                Text(
+                    "${candidate.source} · query: ${candidate.acquisitionQuery}",
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 9.5.sp,
+                    lineHeight = 14.sp,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+                val technical = buildList {
+                    if (candidate.width != null && candidate.height != null) add("${candidate.width}×${candidate.height}")
+                    candidate.comparisonScore?.let { add("score ${(it * 100).toInt()}%") }
+                    candidate.contentSha256?.let { add("sha256 ${it.take(10)}…") }
+                    candidate.perceptualHashHex?.let { add("pHash ${it.take(10)}…") }
+                    candidate.clusterId?.let { add("cluster ${it.substringAfter(':').take(8)}") }
+                }
+                if (technical.isNotEmpty()) {
+                    Text(
+                        technical.joinToString(" · "),
+                        color = NeuralTheme.TextMuted,
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 13.sp,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+                if (candidate.sourcePageUrl.startsWith("http")) {
+                    Text(
+                        "Open candidate source →",
+                        color = NeuralTheme.Cyan,
+                        fontSize = 10.5.sp,
+                        textDecoration = TextDecoration.Underline,
+                        modifier = Modifier.padding(top = 5.dp).clickable {
+                            onNavigateToBrowser(candidate.sourcePageUrl)
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    if (candidates.size > PROVENANCE_PREVIEW_COUNT) {
+        TextButton(onClick = { expanded = !expanded }) {
+            Text(
+                if (expanded) "Show fewer candidates" else "Inspect all ${candidates.size} candidates",
+                color = NeuralTheme.Cyan
+            )
+        }
+    }
+}
+
+@Composable
 private fun RenderVideoLookupResult(
     result: ReverseVideoLookupResult,
     cardShape: RoundedCornerShape,
@@ -504,6 +652,28 @@ private fun ReverseVideoLookupResult.asImageResult(): ReverseImageLookupResult =
         webEvidence = webEvidence
     )
 
+private fun ReverseImageLookupResult.ImageCandidateState.displayLabel(): String = when (this) {
+    ReverseImageLookupResult.ImageCandidateState.Indexed -> "Indexed"
+    ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable -> "Unavailable"
+    ReverseImageLookupResult.ImageCandidateState.DecodeFailed -> "Decode failed"
+    ReverseImageLookupResult.ImageCandidateState.ComparedNoMatch -> "Compared"
+    ReverseImageLookupResult.ImageCandidateState.Matched -> "Matched"
+}
+
+@Composable
+private fun ReverseImageLookupResult.ImageCandidateState.accent(): Color = when (this) {
+    ReverseImageLookupResult.ImageCandidateState.Matched -> NeuralTheme.Emerald
+    ReverseImageLookupResult.ImageCandidateState.ComparedNoMatch -> NeuralTheme.Cobalt
+    ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable,
+    ReverseImageLookupResult.ImageCandidateState.DecodeFailed -> NeuralTheme.Amber
+    ReverseImageLookupResult.ImageCandidateState.Indexed -> NeuralTheme.TextMuted
+}
+
+private fun ReverseImageLookupResult.ImageClusterType.displayLabel(): String = when (this) {
+    ReverseImageLookupResult.ImageClusterType.ExactContent -> "Exact-content cluster"
+    ReverseImageLookupResult.ImageClusterType.PerceptualNearDuplicate -> "Perceptual repost cluster"
+}
+
 private fun formatDuration(durationMs: Long?): String {
     if (durationMs == null) return "unknown"
     val seconds = durationMs / 1_000L
@@ -519,3 +689,5 @@ private fun SectionHeader(text: String) {
         dotLevel = io.dossier.app.ui.components.HudLevel.INFO
     )
 }
+
+private const val PROVENANCE_PREVIEW_COUNT = 6

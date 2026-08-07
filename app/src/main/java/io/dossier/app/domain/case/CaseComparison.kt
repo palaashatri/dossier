@@ -1,20 +1,9 @@
 package io.dossier.app.domain.case
 
 import io.dossier.app.domain.model.Finding
-import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.RiskLevel
 
-/**
- * Diffs two [DossierCase]s (ROADMAP M14 Scan Comparison, and M13 Timeline).
- *
- * Produces an explainable delta: findings added/removed/changed, profile and
- * breach changes, and the overall risk delta. Pure and Android-free so it is
- * unit-testable; the UI only renders the result.
- *
- * Findings are matched on (type + value + sourceUrl) — the same key
- * [io.dossier.app.domain.scanner.ScanSession] uses for de-duplication, so the
- * comparison is consistent with the scan pipeline.
- */
+/** Pure before/after comparison for encrypted saved cases. */
 class CaseComparison {
 
     data class FindingChange(
@@ -23,32 +12,61 @@ class CaseComparison {
         val riskChanged: Boolean = false
     )
 
-    enum class ChangeKind { ADDED, REMOVED, CHANGED }
+    enum class ChangeKind { ADDED, REMOVED, CHANGED, UNCHANGED }
+
+    enum class RemediationVerificationState {
+        NotRechecked,
+        StillObserved,
+        NotObservedInLatestScan,
+        StatusChanged
+    }
+
+    data class RemediationVerification(
+        val remediationId: String,
+        val findingKey: String,
+        val beforeStatus: RemediationStatus,
+        val afterStatus: RemediationStatus?,
+        val state: RemediationVerificationState,
+        val explanation: String
+    )
 
     data class CaseDiff(
         val added: List<Finding>,
         val removed: List<Finding>,
         val changed: List<FindingChange>,
+        val unchanged: List<Finding>,
         val profilesAdded: Int,
         val profilesRemoved: Int,
         val breachesAdded: Int,
         val breachesRemoved: Int,
-        val riskDelta: Int,            // new overall risk weight - old
-        val exposureDelta: Int         // new exposure.overall - old (0 if absent)
+        val riskDelta: Int,
+        val exposureDelta: Int,
+        val remediationVerification: List<RemediationVerification> = emptyList()
     )
 
     fun compare(before: DossierCase, after: DossierCase): CaseDiff {
-        val beforeMap = before.findings.associateBy { key(it) }
-        val afterMap = after.findings.associateBy { key(it) }
+        val beforeMap = before.findings.associateBy(::key)
+        val afterMap = after.findings.associateBy(::key)
 
         val added = after.findings.filter { key(it) !in beforeMap }
         val removed = before.findings.filter { key(it) !in afterMap }
 
         val changed = mutableListOf<FindingChange>()
-        afterMap.forEach { (k, aft) ->
-            val bef = beforeMap[k]
-            if (bef != null && (bef.risk != aft.risk || bef.confidence != aft.confidence)) {
-                changed.add(FindingChange(aft, ChangeKind.CHANGED, riskChanged = bef.risk != aft.risk))
+        val unchanged = mutableListOf<Finding>()
+        afterMap.forEach { (findingKey, current) ->
+            val previous = beforeMap[findingKey] ?: return@forEach
+            if (
+                previous.risk != current.risk ||
+                previous.confidence != current.confidence ||
+                previous.evidenceSnippet != current.evidenceSnippet
+            ) {
+                changed += FindingChange(
+                    finding = current,
+                    change = ChangeKind.CHANGED,
+                    riskChanged = previous.risk != current.risk
+                )
+            } else {
+                unchanged += current
             }
         }
 
@@ -64,18 +82,57 @@ class CaseComparison {
             added = added,
             removed = removed,
             changed = changed,
+            unchanged = unchanged,
             profilesAdded = (afterProfiles - beforeProfiles).size,
             profilesRemoved = (beforeProfiles - afterProfiles).size,
             breachesAdded = (afterBreaches - beforeBreaches).size,
             breachesRemoved = (beforeBreaches - afterBreaches).size,
             riskDelta = riskDelta,
-            exposureDelta = exposureDelta
+            exposureDelta = exposureDelta,
+            remediationVerification = verifyRemediation(before, after, afterMap.keys)
         )
     }
 
-    private fun key(f: Finding): String = "${f.type.name}|${f.value}|${f.sourceUrl ?: ""}"
+    private fun verifyRemediation(
+        before: DossierCase,
+        after: DossierCase,
+        latestFindingKeys: Set<String>
+    ): List<RemediationVerification> {
+        val afterById = after.remediationRecords.associateBy(RemediationRecord::remediationId)
+        return before.remediationRecords.map { previous ->
+            val current = afterById[previous.remediationId]
+            val stillObserved = previous.findingKey in latestFindingKeys
+            val state = when {
+                current != null && current.status != previous.status -> RemediationVerificationState.StatusChanged
+                previous.status == RemediationStatus.Completed && stillObserved -> RemediationVerificationState.StillObserved
+                previous.status == RemediationStatus.Completed && !stillObserved -> RemediationVerificationState.NotObservedInLatestScan
+                else -> RemediationVerificationState.NotRechecked
+            }
+            val explanation = when (state) {
+                RemediationVerificationState.StatusChanged ->
+                    "Remediation status changed from ${previous.status} to ${current?.status}."
+                RemediationVerificationState.StillObserved ->
+                    "The current authorized scan still observed evidence matching this finding; remediation is not verified."
+                RemediationVerificationState.NotObservedInLatestScan ->
+                    "The latest authorized scan did not observe this finding. This is not proof of global deletion; indexes, caches or archives may still retain it."
+                RemediationVerificationState.NotRechecked ->
+                    "No conclusive before/after verification is available for this remediation record."
+            }
+            RemediationVerification(
+                remediationId = previous.remediationId,
+                findingKey = previous.findingKey,
+                beforeStatus = previous.status,
+                afterStatus = current?.status,
+                state = state,
+                explanation = explanation
+            )
+        }
+    }
 
-    private fun riskWeight(r: RiskLevel): Int = when (r) {
+    private fun key(finding: Finding): String =
+        "${finding.type.name}|${finding.value}|${finding.sourceUrl.orEmpty()}"
+
+    private fun riskWeight(risk: RiskLevel): Int = when (risk) {
         RiskLevel.Low -> 25
         RiskLevel.Medium -> 50
         RiskLevel.High -> 80

@@ -91,6 +91,8 @@ class ReverseImageLookupService(private val context: Context) {
                     mapsUrl = mapsUrl,
                     webEvidence = webResult?.evidence.orEmpty(),
                     visualMatches = visual.matches,
+                    visualCandidates = visual.candidates,
+                    visualClusters = visual.clusters,
                     visualSearchNote = visual.note
                 )
             }

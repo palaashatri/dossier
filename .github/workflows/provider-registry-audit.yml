@@ -1,0 +1,26 @@
+name: Provider registry audit
+
+on:
+  pull_request:
+    paths:
+      - "app/src/main/java/io/dossier/app/data/platform/ProviderCatalogV2.kt"
+      - "app/src/main/java/io/dossier/app/domain/discovery/**"
+      - "tools/provider_registry_audit.py"
+      - "TRUTH.md"
+      - ".github/workflows/provider-registry-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provider-registry-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Audit declarative provider registry
+        run: python tools/provider_registry_audit.py --json
