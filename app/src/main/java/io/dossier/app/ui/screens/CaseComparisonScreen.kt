@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
@@ -50,6 +49,8 @@ import io.dossier.app.domain.evidence.toEvidence
 import io.dossier.app.domain.model.EntityType
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.export.ExportRedactionMode
+import io.dossier.app.export.ReportExporter
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.NeuralTheme
@@ -67,6 +68,7 @@ import java.time.Instant
 fun CaseComparisonScreen() {
     val context = LocalContext.current
     val store = remember { CaseStore(context) }
+    val exporter = remember { ReportExporter(context) }
     var cases by remember { mutableStateOf(emptyList<DossierCase>()) }
     var selectedBefore by remember { mutableStateOf<String?>(null) }
     var selectedAfter by remember { mutableStateOf<String?>(null) }
@@ -204,6 +206,26 @@ fun CaseComparisonScreen() {
                         CaseReviewPanel(
                             case = reviewCase,
                             store = store,
+                            onShareRedacted = {
+                                exporter.shareReport(
+                                    findings = reviewCase.findings,
+                                    subjectName = reviewCase.subjectName,
+                                    profileSummaries = reviewCase.profileResults.map { result ->
+                                        "${result.candidate.platform.name}: ${result.candidate.url} · exists=${result.exists} · verified=${result.verified}"
+                                    },
+                                    aiSummary = reviewCase.aiSummary,
+                                    faceMatches = reviewCase.faceMatches,
+                                    entityGraphSummary = reviewCase.entityGraph.entities.joinToString("\n") { entity ->
+                                        "${entity.type}: ${entity.label}"
+                                    },
+                                    breachDigests = reviewCase.breachDigests.map { digest ->
+                                        "${digest.email}: ${digest.breachCount} breach record(s)"
+                                    },
+                                    riskLevel = reviewCase.riskLevel.name,
+                                    redactionMode = ExportRedactionMode.ShareSafe
+                                )
+                                actionNotice = "Share-safe export prepared. Review the generated files before sharing."
+                            },
                             onChanged = { notice ->
                                 actionNotice = notice
                                 refreshCases()
@@ -304,7 +326,7 @@ private fun CaseSelectionCard(
         ) {
             OutlinedButton(
                 onClick = onSelectBefore,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).height(48.dp),
                 colors = ButtonDefaults.outlinedButtonColors(
                     contentColor = if (isBefore) NeuralTheme.Amber else NeuralTheme.TextSecondary
                 )
@@ -313,7 +335,7 @@ private fun CaseSelectionCard(
             }
             OutlinedButton(
                 onClick = onSelectAfter,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).height(48.dp),
                 colors = ButtonDefaults.outlinedButtonColors(
                     contentColor = if (isAfter) NeuralTheme.Cobalt else NeuralTheme.TextSecondary
                 )
@@ -338,36 +360,20 @@ private fun RenderDiff(
             .border(1.dp, NeuralTheme.BorderColor, DossierButtonShape)
             .padding(18.dp)
     ) {
-        Text(
-            text = "Changes",
-            color = NeuralTheme.TextPrimary,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold
-        )
+        Text("Changes", color = NeuralTheme.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Text(
             text = "$beforeLabel  →  $afterLabel",
             color = NeuralTheme.TextSecondary,
             fontSize = 12.sp,
             modifier = Modifier.padding(top = 2.dp, bottom = 10.dp)
         )
-
         DeltaRow("Risk score", diff.riskDelta, positiveIsGood = false)
         DeltaRow("Exposure score", diff.exposureDelta, positiveIsGood = false)
-        DeltaRow(
-            "Discovered profiles",
-            diff.profilesAdded - diff.profilesRemoved,
-            positiveIsGood = null
-        )
-        DeltaRow(
-            "Known breaches",
-            diff.breachesAdded - diff.breachesRemoved,
-            positiveIsGood = false
-        )
-
+        DeltaRow("Discovered profiles", diff.profilesAdded - diff.profilesRemoved, positiveIsGood = null)
+        DeltaRow("Known breaches", diff.breachesAdded - diff.breachesRemoved, positiveIsGood = false)
         Spacer(modifier = Modifier.height(10.dp))
         HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
         Spacer(modifier = Modifier.height(8.dp))
-
         DiffList("Added evidence", diff.added.map { it.value to it.risk }, NeuralTheme.Crimson)
         DiffList("Removed evidence", diff.removed.map { it.value to it.risk }, NeuralTheme.Emerald)
         if (diff.changed.isNotEmpty()) {
@@ -390,7 +396,6 @@ private fun RenderDiff(
     }
 }
 
-/** null means direction is informational rather than good/bad. */
 @Composable
 private fun DeltaRow(label: String, value: Int, positiveIsGood: Boolean?) {
     val color = when {
@@ -446,12 +451,7 @@ private fun RenderSingleCase(case: DossierCase) {
             .border(1.dp, NeuralTheme.BorderColor, DossierButtonShape)
             .padding(18.dp)
     ) {
-        Text(
-            text = "Snapshot",
-            color = NeuralTheme.TextPrimary,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold
-        )
+        Text("Snapshot", color = NeuralTheme.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Text(
             text = case.label,
             color = NeuralTheme.TextSecondary,
@@ -486,23 +486,18 @@ private fun RenderSingleCase(case: DossierCase) {
 private fun CaseReviewPanel(
     case: DossierCase,
     store: CaseStore,
+    onShareRedacted: () -> Unit,
     onChanged: (String) -> Unit
 ) {
     var showAllEvidence by remember(case.caseId) { mutableStateOf(false) }
     var showAllAccounts by remember(case.caseId) { mutableStateOf(false) }
     var showAllActions by remember(case.caseId) { mutableStateOf(false) }
 
-    val latestEvidenceCorrections = case.userCorrections
-        .filter { it.evidenceId != null }
-        .associateBy { it.evidenceId!! }
-    val latestEntityCorrections = case.userCorrections
-        .filter { it.entityId != null }
-        .associateBy { it.entityId!! }
+    val latestEvidenceCorrections = case.userCorrections.filter { it.evidenceId != null }.associateBy { it.evidenceId!! }
+    val latestEntityCorrections = case.userCorrections.filter { it.entityId != null }.associateBy { it.entityId!! }
     val distinctFindings = case.findings.distinctBy(case::findingKey)
     val visibleFindings = if (showAllEvidence) distinctFindings else distinctFindings.take(REVIEW_PREVIEW_LIMIT)
-    val accounts = case.entityGraph.entities
-        .filter { it.type == EntityType.Profile }
-        .distinctBy { it.id }
+    val accounts = case.entityGraph.entities.filter { it.type == EntityType.Profile }.distinctBy { it.id }
     val visibleAccounts = if (showAllAccounts) accounts else accounts.take(REVIEW_PREVIEW_LIMIT)
     val actionableFindings = distinctFindings.filter { it.remediation.isNotBlank() }
     val visibleActions = if (showAllActions) actionableFindings else actionableFindings.take(REVIEW_PREVIEW_LIMIT)
@@ -516,12 +511,7 @@ private fun CaseReviewPanel(
             .border(1.dp, NeuralTheme.Cobalt.copy(alpha = 0.45f), DossierButtonShape)
             .padding(18.dp)
     ) {
-        Text(
-            text = "Review newer case",
-            color = NeuralTheme.TextPrimary,
-            fontSize = 17.sp,
-            fontWeight = FontWeight.SemiBold
-        )
+        Text("Review newer case", color = NeuralTheme.TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
         Text(
             text = "Corrections affect later analysis and graph linkage. Raw evidence remains encrypted in the case unless you delete the whole case.",
             color = NeuralTheme.TextSecondary,
@@ -549,19 +539,13 @@ private fun CaseReviewPanel(
                                 createdAtUtc = Instant.now().toString()
                             )
                         )
-                        onChanged(
-                            if (ok) "Evidence decision saved to the encrypted case."
-                            else "Evidence decision could not be saved."
-                        )
+                        onChanged(if (ok) "Evidence decision saved to the encrypted case." else "Evidence decision could not be saved.")
                     }
                 )
             }
             if (distinctFindings.size > REVIEW_PREVIEW_LIMIT) {
                 TextButton(onClick = { showAllEvidence = !showAllEvidence }) {
-                    Text(
-                        if (showAllEvidence) "Show fewer evidence items"
-                        else "Show all ${distinctFindings.size} evidence items"
-                    )
+                    Text(if (showAllEvidence) "Show fewer evidence items" else "Show all ${distinctFindings.size} evidence items")
                 }
             }
         }
@@ -569,7 +553,6 @@ private fun CaseReviewPanel(
         Spacer(modifier = Modifier.height(14.dp))
         HorizontalDivider(color = NeuralTheme.BorderColor)
         Spacer(modifier = Modifier.height(14.dp))
-
         ReviewSectionTitle("Account attribution", "Account decisions directly update effective graph membership.")
         if (accounts.isEmpty()) {
             Text("No account nodes to review.", color = NeuralTheme.TextMuted, fontSize = 11.5.sp)
@@ -577,12 +560,7 @@ private fun CaseReviewPanel(
             visibleAccounts.forEach { entity ->
                 val current = latestEntityCorrections[entity.id]?.decision
                 Column(modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
-                    Text(
-                        text = entity.label,
-                        color = NeuralTheme.TextPrimary,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+                    Text(entity.label, color = NeuralTheme.TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Medium)
                     entity.sourceUrls.firstOrNull()?.let { url ->
                         Text(url, color = NeuralTheme.TextMuted, fontSize = 10.5.sp, maxLines = 1)
                     }
@@ -590,25 +568,13 @@ private fun CaseReviewPanel(
                         modifier = Modifier.fillMaxWidth().padding(top = 5.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        CorrectionButton(
-                            label = "This is me",
-                            selected = current == UserCorrectionDecision.ThisIsMe,
-                            modifier = Modifier.weight(1f)
-                        ) {
+                        CorrectionButton("This is me", current == UserCorrectionDecision.ThisIsMe, Modifier.weight(1f)) {
                             saveEntityCorrection(store, case, entity.id, UserCorrectionDecision.ThisIsMe, onChanged)
                         }
-                        CorrectionButton(
-                            label = "Not me",
-                            selected = current == UserCorrectionDecision.ThisIsNotMe,
-                            modifier = Modifier.weight(1f)
-                        ) {
+                        CorrectionButton("Not me", current == UserCorrectionDecision.ThisIsNotMe, Modifier.weight(1f)) {
                             saveEntityCorrection(store, case, entity.id, UserCorrectionDecision.ThisIsNotMe, onChanged)
                         }
-                        CorrectionButton(
-                            label = "Unsure",
-                            selected = current == UserCorrectionDecision.Unsure,
-                            modifier = Modifier.weight(1f)
-                        ) {
+                        CorrectionButton("Unsure", current == UserCorrectionDecision.Unsure, Modifier.weight(1f)) {
                             saveEntityCorrection(store, case, entity.id, UserCorrectionDecision.Unsure, onChanged)
                         }
                     }
@@ -624,7 +590,6 @@ private fun CaseReviewPanel(
         Spacer(modifier = Modifier.height(14.dp))
         HorizontalDivider(color = NeuralTheme.BorderColor)
         Spacer(modifier = Modifier.height(14.dp))
-
         ReviewSectionTitle(
             "Remediation tracking",
             "Status records your workflow only. Completed does not prove the remote source was removed; verify with a later scan."
@@ -640,10 +605,7 @@ private fun CaseReviewPanel(
                     current = existing?.status ?: RemediationStatus.NotStarted,
                     onStatus = { status ->
                         val now = Instant.now().toString()
-                        val record = existing?.copy(
-                            status = status,
-                            updatedAtUtc = now
-                        ) ?: RemediationRecord(
+                        val record = existing?.copy(status = status, updatedAtUtc = now) ?: RemediationRecord(
                             findingKey = key,
                             sourceUrl = finding.sourceUrl,
                             action = finding.remediation,
@@ -665,6 +627,28 @@ private fun CaseReviewPanel(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(14.dp))
+        HorizontalDivider(color = NeuralTheme.BorderColor)
+        Spacer(modifier = Modifier.height(14.dp))
+        ReviewSectionTitle(
+            "Share-safe export",
+            "Creates PDF + JSON from redacted data. Direct values, source URLs, snippets, graph labels, breach identifiers and generated analysis are removed or generalized before files are written."
+        )
+        OutlinedButton(
+            onClick = onShareRedacted,
+            modifier = Modifier.fillMaxWidth().height(48.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt)
+        ) {
+            Text("Share redacted case report", fontWeight = FontWeight.SemiBold)
+        }
+        Text(
+            text = "Redaction reduces disclosure but cannot guarantee that every contextual clue is anonymous. Review the generated files before sharing.",
+            color = NeuralTheme.TextMuted,
+            fontSize = 10.5.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.padding(top = 5.dp)
+        )
     }
 }
 
@@ -677,18 +661,8 @@ private fun EvidenceCorrectionRow(
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
         Row(verticalAlignment = Alignment.Top) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = finding.type.name,
-                    color = NeuralTheme.TextSecondary,
-                    fontSize = 10.5.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = finding.value,
-                    color = NeuralTheme.TextPrimary,
-                    fontSize = 12.5.sp,
-                    maxLines = 2
-                )
+                Text(finding.type.name, color = NeuralTheme.TextSecondary, fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold)
+                Text(finding.value, color = NeuralTheme.TextPrimary, fontSize = 12.5.sp, maxLines = 2)
             }
             Text(
                 text = current?.displayLabel() ?: "Unreviewed",
@@ -701,26 +675,18 @@ private fun EvidenceCorrectionRow(
             modifier = Modifier.fillMaxWidth().padding(top = 5.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            CorrectionButton(
-                label = "Mine",
-                selected = current == UserCorrectionDecision.ThisIsMe,
-                modifier = Modifier.weight(1f)
-            ) { onDecision(UserCorrectionDecision.ThisIsMe) }
-            CorrectionButton(
-                label = "Not mine",
-                selected = current == UserCorrectionDecision.ThisIsNotMe,
-                modifier = Modifier.weight(1f)
-            ) { onDecision(UserCorrectionDecision.ThisIsNotMe) }
-            CorrectionButton(
-                label = "Unsure",
-                selected = current == UserCorrectionDecision.Unsure,
-                modifier = Modifier.weight(1f)
-            ) { onDecision(UserCorrectionDecision.Unsure) }
-            CorrectionButton(
-                label = "Ignore",
-                selected = current == UserCorrectionDecision.IgnoreEvidence,
-                modifier = Modifier.weight(1f)
-            ) { onDecision(UserCorrectionDecision.IgnoreEvidence) }
+            CorrectionButton("Mine", current == UserCorrectionDecision.ThisIsMe, Modifier.weight(1f)) {
+                onDecision(UserCorrectionDecision.ThisIsMe)
+            }
+            CorrectionButton("Not mine", current == UserCorrectionDecision.ThisIsNotMe, Modifier.weight(1f)) {
+                onDecision(UserCorrectionDecision.ThisIsNotMe)
+            }
+            CorrectionButton("Unsure", current == UserCorrectionDecision.Unsure, Modifier.weight(1f)) {
+                onDecision(UserCorrectionDecision.Unsure)
+            }
+            CorrectionButton("Ignore", current == UserCorrectionDecision.IgnoreEvidence, Modifier.weight(1f)) {
+                onDecision(UserCorrectionDecision.IgnoreEvidence)
+            }
         }
     }
 }
@@ -734,12 +700,7 @@ private fun RemediationRow(
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         Row(verticalAlignment = Alignment.Top) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = finding.remediation,
-                    color = NeuralTheme.TextPrimary,
-                    fontSize = 12.5.sp,
-                    lineHeight = 17.sp
-                )
+                Text(finding.remediation, color = NeuralTheme.TextPrimary, fontSize = 12.5.sp, lineHeight = 17.sp)
                 Text(
                     text = finding.value,
                     color = NeuralTheme.TextMuted,
@@ -772,6 +733,20 @@ private fun RemediationRow(
                 onStatus(RemediationStatus.Completed)
             }
         }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            StatusButton("Reset", current == RemediationStatus.NotStarted, Modifier.weight(1f)) {
+                onStatus(RemediationStatus.NotStarted)
+            }
+            StatusButton("Rejected", current == RemediationStatus.Rejected, Modifier.weight(1f)) {
+                onStatus(RemediationStatus.Rejected)
+            }
+            StatusButton("Manual", current == RemediationStatus.NeedsManualAction, Modifier.weight(1f)) {
+                onStatus(RemediationStatus.NeedsManualAction)
+            }
+        }
     }
 }
 
@@ -784,7 +759,7 @@ private fun CorrectionButton(
 ) {
     OutlinedButton(
         onClick = onClick,
-        modifier = modifier.height(38.dp),
+        modifier = modifier.height(48.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp),
         colors = ButtonDefaults.outlinedButtonColors(
             contentColor = if (selected) NeuralTheme.Cobalt else NeuralTheme.TextSecondary
@@ -803,7 +778,7 @@ private fun StatusButton(
 ) {
     OutlinedButton(
         onClick = onClick,
-        modifier = modifier.height(38.dp),
+        modifier = modifier.height(48.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp),
         colors = ButtonDefaults.outlinedButtonColors(
             contentColor = if (selected) NeuralTheme.Emerald else NeuralTheme.TextSecondary
