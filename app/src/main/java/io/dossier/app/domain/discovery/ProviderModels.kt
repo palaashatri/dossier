@@ -118,8 +118,9 @@ enum class ScanMode {
     val includeHistoricalProviders: Boolean
         get() = this == Deep || this == Exhaustive
 
+    /** Enables the existing bounded linked-site/search expansion path. */
     val includeExtendedDiscovery: Boolean
-        get() = this != Quick
+        get() = this == Deep || this == Exhaustive
 }
 
 @Serializable
@@ -244,7 +245,7 @@ data class ProviderHealthSnapshot(
 
 /**
  * Process-local provider diagnostics. Persistent/longitudinal health belongs to
- * later production telemetry that stores no investigation content.
+ * later production diagnostics that store no investigation content.
  */
 class ProviderHealthTracker(private val latencyWindow: Int = 101) {
     private data class MutableHealth(
