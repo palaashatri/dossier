@@ -42,12 +42,27 @@ import androidx.compose.ui.unit.sp
 import io.dossier.app.domain.case.CaseComparison
 import io.dossier.app.domain.case.CaseStore
 import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.case.RemediationRecord
+import io.dossier.app.domain.case.RemediationStatus
+import io.dossier.app.domain.case.UserCorrection
+import io.dossier.app.domain.case.UserCorrectionDecision
+import io.dossier.app.domain.evidence.toEvidence
+import io.dossier.app.domain.model.EntityType
+import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.NeuralTheme
+import java.time.Instant
 
-/** Explicit local saved-case selection, comparison, and deletion. */
+/**
+ * Explicit local saved-case selection, comparison, correction and remediation.
+ *
+ * User corrections change the effective analysis view but never delete the raw
+ * evidence stored in the encrypted case. Remediation state records what the user
+ * actually did; it never claims that a remote page was removed merely because a
+ * button was pressed.
+ */
 @Composable
 fun CaseComparisonScreen() {
     val context = LocalContext.current
@@ -56,6 +71,7 @@ fun CaseComparisonScreen() {
     var selectedBefore by remember { mutableStateOf<String?>(null) }
     var selectedAfter by remember { mutableStateOf<String?>(null) }
     var pendingDelete by remember { mutableStateOf<DossierCase?>(null) }
+    var actionNotice by remember { mutableStateOf<String?>(null) }
 
     fun refreshCases() {
         cases = store.list()
@@ -86,6 +102,7 @@ fun CaseComparisonScreen() {
                     onClick = {
                         store.delete(target.caseId)
                         pendingDelete = null
+                        actionNotice = "Saved case deleted from this device."
                         refreshCases()
                     }
                 ) {
@@ -113,12 +130,21 @@ fun CaseComparisonScreen() {
             fontWeight = FontWeight.SemiBold
         )
         Text(
-            text = "Encrypted on this device. Choose an older and newer scan to compare changes.",
+            text = "Encrypted on this device. Compare scans, correct attribution, and track cleanup work without altering raw evidence.",
             color = NeuralTheme.TextSecondary,
             fontSize = 12.5.sp,
             lineHeight = 18.sp,
-            modifier = Modifier.padding(top = 4.dp, bottom = 14.dp)
+            modifier = Modifier.padding(top = 4.dp, bottom = 10.dp)
         )
+        actionNotice?.let { notice ->
+            Text(
+                text = notice,
+                color = NeuralTheme.Emerald,
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
 
         if (cases.isEmpty()) {
             EmptyCasesState()
@@ -171,8 +197,22 @@ fun CaseComparisonScreen() {
                             fontSize = 13.sp
                         )
                     }
-                    Spacer(modifier = Modifier.height(32.dp))
                 }
+
+                afterCase?.let { reviewCase ->
+                    item(key = "review-${reviewCase.caseId}") {
+                        CaseReviewPanel(
+                            case = reviewCase,
+                            store = store,
+                            onChanged = { notice ->
+                                actionNotice = notice
+                                refreshCases()
+                            }
+                        )
+                    }
+                }
+
+                item { Spacer(modifier = Modifier.height(32.dp)) }
             }
         }
     }
@@ -240,6 +280,14 @@ private fun CaseSelectionCard(
                     fontSize = 11.5.sp,
                     modifier = Modifier.padding(top = 3.dp)
                 )
+                if (case.userCorrections.isNotEmpty() || case.remediationRecords.isNotEmpty()) {
+                    Text(
+                        text = "${case.userCorrections.size} correction(s) · ${case.remediationRecords.size} tracked action(s)",
+                        color = NeuralTheme.TextMuted,
+                        fontSize = 10.5.sp,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
             }
             IconButton(onClick = onDelete) {
                 Icon(
@@ -433,3 +481,404 @@ private fun RenderSingleCase(case: DossierCase) {
         )
     }
 }
+
+@Composable
+private fun CaseReviewPanel(
+    case: DossierCase,
+    store: CaseStore,
+    onChanged: (String) -> Unit
+) {
+    var showAllEvidence by remember(case.caseId) { mutableStateOf(false) }
+    var showAllAccounts by remember(case.caseId) { mutableStateOf(false) }
+    var showAllActions by remember(case.caseId) { mutableStateOf(false) }
+
+    val latestEvidenceCorrections = case.userCorrections
+        .filter { it.evidenceId != null }
+        .associateBy { it.evidenceId!! }
+    val latestEntityCorrections = case.userCorrections
+        .filter { it.entityId != null }
+        .associateBy { it.entityId!! }
+    val distinctFindings = case.findings.distinctBy(case::findingKey)
+    val visibleFindings = if (showAllEvidence) distinctFindings else distinctFindings.take(REVIEW_PREVIEW_LIMIT)
+    val accounts = case.entityGraph.entities
+        .filter { it.type == EntityType.Profile }
+        .distinctBy { it.id }
+    val visibleAccounts = if (showAllAccounts) accounts else accounts.take(REVIEW_PREVIEW_LIMIT)
+    val actionableFindings = distinctFindings.filter { it.remediation.isNotBlank() }
+    val visibleActions = if (showAllActions) actionableFindings else actionableFindings.take(REVIEW_PREVIEW_LIMIT)
+    val remediationByKey = case.remediationRecords.associateBy(RemediationRecord::findingKey)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(DossierButtonShape)
+            .background(NeuralTheme.CardBackground)
+            .border(1.dp, NeuralTheme.Cobalt.copy(alpha = 0.45f), DossierButtonShape)
+            .padding(18.dp)
+    ) {
+        Text(
+            text = "Review newer case",
+            color = NeuralTheme.TextPrimary,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            text = "Corrections affect later analysis and graph linkage. Raw evidence remains encrypted in the case unless you delete the whole case.",
+            color = NeuralTheme.TextSecondary,
+            fontSize = 11.5.sp,
+            lineHeight = 16.sp,
+            modifier = Modifier.padding(top = 3.dp, bottom = 12.dp)
+        )
+
+        ReviewSectionTitle("Evidence decisions", "Mark attribution, uncertainty, or exclude an item from analysis.")
+        if (distinctFindings.isEmpty()) {
+            Text("No finding evidence to review.", color = NeuralTheme.TextMuted, fontSize = 11.5.sp)
+        } else {
+            visibleFindings.forEach { finding ->
+                val evidence = finding.toEvidence()
+                val current = latestEvidenceCorrections[evidence.id]?.decision
+                EvidenceCorrectionRow(
+                    finding = finding,
+                    current = current,
+                    onDecision = { decision ->
+                        val ok = store.recordCorrection(
+                            case.caseId,
+                            UserCorrection(
+                                evidenceId = evidence.id,
+                                decision = decision,
+                                createdAtUtc = Instant.now().toString()
+                            )
+                        )
+                        onChanged(
+                            if (ok) "Evidence decision saved to the encrypted case."
+                            else "Evidence decision could not be saved."
+                        )
+                    }
+                )
+            }
+            if (distinctFindings.size > REVIEW_PREVIEW_LIMIT) {
+                TextButton(onClick = { showAllEvidence = !showAllEvidence }) {
+                    Text(
+                        if (showAllEvidence) "Show fewer evidence items"
+                        else "Show all ${distinctFindings.size} evidence items"
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+        HorizontalDivider(color = NeuralTheme.BorderColor)
+        Spacer(modifier = Modifier.height(14.dp))
+
+        ReviewSectionTitle("Account attribution", "Account decisions directly update effective graph membership.")
+        if (accounts.isEmpty()) {
+            Text("No account nodes to review.", color = NeuralTheme.TextMuted, fontSize = 11.5.sp)
+        } else {
+            visibleAccounts.forEach { entity ->
+                val current = latestEntityCorrections[entity.id]?.decision
+                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
+                    Text(
+                        text = entity.label,
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    entity.sourceUrls.firstOrNull()?.let { url ->
+                        Text(url, color = NeuralTheme.TextMuted, fontSize = 10.5.sp, maxLines = 1)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        CorrectionButton(
+                            label = "This is me",
+                            selected = current == UserCorrectionDecision.ThisIsMe,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            saveEntityCorrection(store, case, entity.id, UserCorrectionDecision.ThisIsMe, onChanged)
+                        }
+                        CorrectionButton(
+                            label = "Not me",
+                            selected = current == UserCorrectionDecision.ThisIsNotMe,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            saveEntityCorrection(store, case, entity.id, UserCorrectionDecision.ThisIsNotMe, onChanged)
+                        }
+                        CorrectionButton(
+                            label = "Unsure",
+                            selected = current == UserCorrectionDecision.Unsure,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            saveEntityCorrection(store, case, entity.id, UserCorrectionDecision.Unsure, onChanged)
+                        }
+                    }
+                }
+            }
+            if (accounts.size > REVIEW_PREVIEW_LIMIT) {
+                TextButton(onClick = { showAllAccounts = !showAllAccounts }) {
+                    Text(if (showAllAccounts) "Show fewer accounts" else "Show all ${accounts.size} accounts")
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+        HorizontalDivider(color = NeuralTheme.BorderColor)
+        Spacer(modifier = Modifier.height(14.dp))
+
+        ReviewSectionTitle(
+            "Remediation tracking",
+            "Status records your workflow only. Completed does not prove the remote source was removed; verify with a later scan."
+        )
+        if (actionableFindings.isEmpty()) {
+            Text("No remediation actions were generated for this case.", color = NeuralTheme.TextMuted, fontSize = 11.5.sp)
+        } else {
+            visibleActions.forEach { finding ->
+                val key = case.findingKey(finding)
+                val existing = remediationByKey[key]
+                RemediationRow(
+                    finding = finding,
+                    current = existing?.status ?: RemediationStatus.NotStarted,
+                    onStatus = { status ->
+                        val now = Instant.now().toString()
+                        val record = existing?.copy(
+                            status = status,
+                            updatedAtUtc = now
+                        ) ?: RemediationRecord(
+                            findingKey = key,
+                            sourceUrl = finding.sourceUrl,
+                            action = finding.remediation,
+                            status = status,
+                            createdAtUtc = now,
+                            updatedAtUtc = now
+                        )
+                        val ok = store.upsertRemediation(case.caseId, record)
+                        onChanged(
+                            if (ok) "Remediation status saved. Re-scan later to verify the exposure state."
+                            else "Remediation status could not be saved."
+                        )
+                    }
+                )
+            }
+            if (actionableFindings.size > REVIEW_PREVIEW_LIMIT) {
+                TextButton(onClick = { showAllActions = !showAllActions }) {
+                    Text(if (showAllActions) "Show fewer actions" else "Show all ${actionableFindings.size} actions")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EvidenceCorrectionRow(
+    finding: Finding,
+    current: UserCorrectionDecision?,
+    onDecision: (UserCorrectionDecision) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
+        Row(verticalAlignment = Alignment.Top) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = finding.type.name,
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = finding.value,
+                    color = NeuralTheme.TextPrimary,
+                    fontSize = 12.5.sp,
+                    maxLines = 2
+                )
+            }
+            Text(
+                text = current?.displayLabel() ?: "Unreviewed",
+                color = correctionColor(current),
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            CorrectionButton(
+                label = "Mine",
+                selected = current == UserCorrectionDecision.ThisIsMe,
+                modifier = Modifier.weight(1f)
+            ) { onDecision(UserCorrectionDecision.ThisIsMe) }
+            CorrectionButton(
+                label = "Not mine",
+                selected = current == UserCorrectionDecision.ThisIsNotMe,
+                modifier = Modifier.weight(1f)
+            ) { onDecision(UserCorrectionDecision.ThisIsNotMe) }
+            CorrectionButton(
+                label = "Unsure",
+                selected = current == UserCorrectionDecision.Unsure,
+                modifier = Modifier.weight(1f)
+            ) { onDecision(UserCorrectionDecision.Unsure) }
+            CorrectionButton(
+                label = "Ignore",
+                selected = current == UserCorrectionDecision.IgnoreEvidence,
+                modifier = Modifier.weight(1f)
+            ) { onDecision(UserCorrectionDecision.IgnoreEvidence) }
+        }
+    }
+}
+
+@Composable
+private fun RemediationRow(
+    finding: Finding,
+    current: RemediationStatus,
+    onStatus: (RemediationStatus) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.Top) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = finding.remediation,
+                    color = NeuralTheme.TextPrimary,
+                    fontSize = 12.5.sp,
+                    lineHeight = 17.sp
+                )
+                Text(
+                    text = finding.value,
+                    color = NeuralTheme.TextMuted,
+                    fontSize = 10.5.sp,
+                    maxLines = 1,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+            Text(
+                text = current.displayLabel(),
+                color = remediationColor(current),
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            StatusButton("Start", current == RemediationStatus.InProgress, Modifier.weight(1f)) {
+                onStatus(RemediationStatus.InProgress)
+            }
+            StatusButton("Submitted", current == RemediationStatus.Submitted, Modifier.weight(1f)) {
+                onStatus(RemediationStatus.Submitted)
+            }
+            StatusButton("Waiting", current == RemediationStatus.AwaitingResponse, Modifier.weight(1f)) {
+                onStatus(RemediationStatus.AwaitingResponse)
+            }
+            StatusButton("Complete", current == RemediationStatus.Completed, Modifier.weight(1f)) {
+                onStatus(RemediationStatus.Completed)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CorrectionButton(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.height(38.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp),
+        colors = ButtonDefaults.outlinedButtonColors(
+            contentColor = if (selected) NeuralTheme.Cobalt else NeuralTheme.TextSecondary
+        )
+    ) {
+        Text(label, fontSize = 9.5.sp, maxLines = 1)
+    }
+}
+
+@Composable
+private fun StatusButton(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.height(38.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp),
+        colors = ButtonDefaults.outlinedButtonColors(
+            contentColor = if (selected) NeuralTheme.Emerald else NeuralTheme.TextSecondary
+        )
+    ) {
+        Text(label, fontSize = 9.sp, maxLines = 1)
+    }
+}
+
+@Composable
+private fun ReviewSectionTitle(title: String, subtitle: String) {
+    Text(title, color = NeuralTheme.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    Text(
+        subtitle,
+        color = NeuralTheme.TextSecondary,
+        fontSize = 10.5.sp,
+        lineHeight = 15.sp,
+        modifier = Modifier.padding(top = 2.dp, bottom = 6.dp)
+    )
+}
+
+private fun saveEntityCorrection(
+    store: CaseStore,
+    case: DossierCase,
+    entityId: String,
+    decision: UserCorrectionDecision,
+    onChanged: (String) -> Unit
+) {
+    val ok = store.recordCorrection(
+        case.caseId,
+        UserCorrection(
+            entityId = entityId,
+            decision = decision,
+            createdAtUtc = Instant.now().toString()
+        )
+    )
+    onChanged(
+        if (ok) "Account attribution decision saved to the encrypted case."
+        else "Account attribution decision could not be saved."
+    )
+}
+
+private fun UserCorrectionDecision.displayLabel(): String = when (this) {
+    UserCorrectionDecision.ThisIsMe -> "Confirmed by user"
+    UserCorrectionDecision.ThisIsNotMe -> "Rejected by user"
+    UserCorrectionDecision.Unsure -> "User unsure"
+    UserCorrectionDecision.IgnoreEvidence -> "Ignored in analysis"
+}
+
+private fun correctionColor(decision: UserCorrectionDecision?): Color = when (decision) {
+    UserCorrectionDecision.ThisIsMe -> NeuralTheme.Emerald
+    UserCorrectionDecision.ThisIsNotMe -> NeuralTheme.Crimson
+    UserCorrectionDecision.Unsure -> NeuralTheme.Amber
+    UserCorrectionDecision.IgnoreEvidence -> NeuralTheme.TextMuted
+    null -> NeuralTheme.TextMuted
+}
+
+private fun RemediationStatus.displayLabel(): String = when (this) {
+    RemediationStatus.NotStarted -> "Not started"
+    RemediationStatus.InProgress -> "In progress"
+    RemediationStatus.Submitted -> "Submitted"
+    RemediationStatus.AwaitingResponse -> "Awaiting response"
+    RemediationStatus.Completed -> "Completed — verify"
+    RemediationStatus.Rejected -> "Rejected"
+    RemediationStatus.NeedsManualAction -> "Manual action"
+}
+
+private fun remediationColor(status: RemediationStatus): Color = when (status) {
+    RemediationStatus.Completed -> NeuralTheme.Emerald
+    RemediationStatus.Rejected -> NeuralTheme.Crimson
+    RemediationStatus.Submitted,
+    RemediationStatus.AwaitingResponse,
+    RemediationStatus.InProgress -> NeuralTheme.Cobalt
+    RemediationStatus.NeedsManualAction -> NeuralTheme.Amber
+    RemediationStatus.NotStarted -> NeuralTheme.TextMuted
+}
+
+private const val REVIEW_PREVIEW_LIMIT = 8
