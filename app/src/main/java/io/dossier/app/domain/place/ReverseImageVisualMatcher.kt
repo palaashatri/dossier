@@ -5,6 +5,7 @@ import android.net.Uri
 import io.dossier.app.data.image.VisualFingerprint
 import io.dossier.app.data.web.DiscoveryHttpPolicy
 import io.dossier.app.data.web.ReverseImageCandidateSearchService
+import io.dossier.app.domain.image.ImageDuplicateClusterer
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.scanner.ScanSession
 import kotlinx.coroutines.Dispatchers
@@ -20,6 +21,7 @@ import okhttp3.Request
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.URI
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 /**
@@ -27,16 +29,30 @@ import java.util.concurrent.TimeUnit
  *
  * The user's image is never uploaded. Dossier gathers a bounded candidate corpus from
  * public image indexes and already-discovered profile avatars, downloads those public
- * images, and compares perceptual fingerprints locally. This can identify copies,
- * resizes, recompressions, screenshots, and modest crops. It intentionally cannot and
- * must not identify the same person across unrelated photos.
+ * images, and compares whole-image perceptual fingerprints locally. This can identify
+ * copies, resizes, recompressions, screenshots, and modest crops. It intentionally does
+ * not identify the same person across unrelated photos.
  */
 internal class ReverseImageVisualMatcher(private val context: Context) {
 
     data class Outcome(
         val matches: List<ReverseImageLookupResult.VisualMatch>,
         val note: String,
-        val candidateCount: Int
+        val candidateCount: Int,
+        val candidates: List<ReverseImageLookupResult.ImageCandidateProvenance> = emptyList(),
+        val clusters: List<ReverseImageLookupResult.ImageCluster> = emptyList()
+    )
+
+    private data class DownloadedImage(
+        val bytes: ByteArray,
+        val url: String,
+        val retrievedAtEpochMillis: Long
+    )
+
+    private data class CandidateAnalysis(
+        val provenance: ReverseImageLookupResult.ImageCandidateProvenance,
+        val fingerprint: VisualFingerprint.FingerprintSet?,
+        val match: ReverseImageLookupResult.VisualMatch?
     )
 
     private val client = OkHttpClient.Builder()
@@ -96,75 +112,181 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
         }
 
         val semaphore = Semaphore(MAX_PARALLEL_DOWNLOADS)
-        val matches = coroutineScope {
+        val analyses = coroutineScope {
             candidates.map { candidate ->
                 async(Dispatchers.IO) {
                     semaphore.withPermit {
                         compareCandidate(queryFingerprint, candidate)
                     }
                 }
-            }.awaitAll().filterNotNull()
+            }.awaitAll()
         }
+
+        val clusterInputs = analyses.mapNotNull { analysis ->
+            val fingerprint = analysis.fingerprint ?: return@mapNotNull null
+            val primary = fingerprint.variants.firstOrNull() ?: return@mapNotNull null
+            ImageDuplicateClusterer.Candidate(
+                id = analysis.provenance.id,
+                sha256 = fingerprint.sha256,
+                perceptualHash = primary.perceptualHash,
+                querySimilarity = analysis.provenance.comparisonScore ?: 0f
+            )
+        }
+        val duplicateClusters = ImageDuplicateClusterer.cluster(clusterInputs)
+        val clusterByCandidate = buildMap {
+            duplicateClusters.forEach { cluster ->
+                cluster.memberCandidateIds.forEach { candidateId -> put(candidateId, cluster.id) }
+            }
+        }
+        val provenance = analyses.map { analysis ->
+            analysis.provenance.copy(clusterId = clusterByCandidate[analysis.provenance.id])
+        }
+        val matches = analyses
+            .mapNotNull(CandidateAnalysis::match)
+            .map { match -> match.copy(clusterId = match.candidateId?.let(clusterByCandidate::get)) }
             .distinctBy { "${canonical(it.imageUrl)}|${canonical(it.sourcePageUrl)}" }
             .sortedByDescending { it.similarity }
             .take(MAX_MATCHES)
+        val clusters = duplicateClusters.map { cluster ->
+            ReverseImageLookupResult.ImageCluster(
+                id = cluster.id,
+                type = when (cluster.type) {
+                    ImageDuplicateClusterer.ClusterType.ExactContent ->
+                        ReverseImageLookupResult.ImageClusterType.ExactContent
+                    ImageDuplicateClusterer.ClusterType.PerceptualNearDuplicate ->
+                        ReverseImageLookupResult.ImageClusterType.PerceptualNearDuplicate
+                },
+                representativeCandidateId = cluster.representativeCandidateId,
+                memberCandidateIds = cluster.memberCandidateIds
+            )
+        }
 
         val note = when {
-            matches.isNotEmpty() ->
-                "Compared ${candidates.size} public images locally using SHA-256, pHash, dHash, aHash, color histograms, and crop variants. No facial identification was performed."
+            matches.isNotEmpty() -> buildString {
+                append("Compared ${candidates.size} public images locally using SHA-256, pHash, dHash, aHash, color histograms, and crop variants.")
+                if (clusters.isNotEmpty()) append(" Grouped ${clusters.size} public duplicate/repost cluster(s).")
+                append(" No facial identification was performed.")
+            }
             else ->
                 "Compared ${candidates.size} public images locally; no candidate crossed the ${(MIN_MATCH_SCORE * 100).toInt()}% near-duplicate threshold. This does not prove that no copy exists outside the candidate indexes."
         }
 
-        Outcome(matches, note, candidates.size)
+        Outcome(
+            matches = matches,
+            note = note,
+            candidateCount = candidates.size,
+            candidates = provenance,
+            clusters = clusters
+        )
     }
 
     private suspend fun compareCandidate(
         query: VisualFingerprint.FingerprintSet,
         candidate: ReverseImageCandidateSearchService.Candidate
-    ): ReverseImageLookupResult.VisualMatch? {
-        val firstUrl = candidate.thumbnailUrl?.takeIf { it.startsWith("http", true) }
+    ): CandidateAnalysis {
+        val candidateId = stableCandidateId(candidate)
+        val base = ReverseImageLookupResult.ImageCandidateProvenance(
+            id = candidateId,
+            title = candidate.title.ifBlank { "Public image candidate" },
+            imageUrl = candidate.imageUrl,
+            sourcePageUrl = candidate.sourcePageUrl,
+            source = candidate.source,
+            acquisitionQuery = candidate.query,
+            state = ReverseImageLookupResult.ImageCandidateState.Indexed
+        )
+
+        val preferredUrl = candidate.thumbnailUrl?.takeIf { it.startsWith("http", true) }
             ?: candidate.imageUrl
-        val firstBytes = download(firstUrl) ?: return null
-        val firstFingerprint = VisualFingerprint.fromBytes(firstBytes) ?: return null
+        val firstDownload = download(preferredUrl)
+            ?: candidate.imageUrl
+                .takeIf { !it.equals(preferredUrl, ignoreCase = true) }
+                ?.let { download(it) }
+            ?: return CandidateAnalysis(
+                provenance = base.copy(
+                    comparedImageUrl = preferredUrl,
+                    state = ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable
+                ),
+                fingerprint = null,
+                match = null
+            )
+
+        val firstFingerprint = VisualFingerprint.fromBytes(firstDownload.bytes)
+            ?: return CandidateAnalysis(
+                provenance = base.copy(
+                    comparedImageUrl = firstDownload.url,
+                    retrievedAtEpochMillis = firstDownload.retrievedAtEpochMillis,
+                    state = ReverseImageLookupResult.ImageCandidateState.DecodeFailed
+                ),
+                fingerprint = null,
+                match = null
+            )
+
+        var bestFingerprint = firstFingerprint
         var best = VisualFingerprint.compare(query, firstFingerprint)
-        var comparedUrl = firstUrl
+        var comparedUrl = firstDownload.url
+        var retrievedAt = firstDownload.retrievedAtEpochMillis
 
         if (!best.exactBytes && best.score >= FULL_IMAGE_RETRY_FLOOR &&
-            !candidate.imageUrl.equals(firstUrl, ignoreCase = true)) {
-            download(candidate.imageUrl)?.let { fullBytes ->
-                VisualFingerprint.fromBytes(fullBytes)?.let { fullFingerprint ->
+            !candidate.imageUrl.equals(comparedUrl, ignoreCase = true)) {
+            download(candidate.imageUrl)?.let { fullDownload ->
+                VisualFingerprint.fromBytes(fullDownload.bytes)?.let { fullFingerprint ->
                     val full = VisualFingerprint.compare(query, fullFingerprint)
                     if (full.score > best.score) {
                         best = full
-                        comparedUrl = candidate.imageUrl
+                        bestFingerprint = fullFingerprint
+                        comparedUrl = fullDownload.url
+                        retrievedAt = fullDownload.retrievedAtEpochMillis
                     }
                 }
             }
         }
 
-        if (best.score < MIN_MATCH_SCORE) return null
-
-        return ReverseImageLookupResult.VisualMatch(
-            title = candidate.title.ifBlank { "Visual match" },
-            imageUrl = candidate.imageUrl,
-            sourcePageUrl = candidate.sourcePageUrl,
-            source = candidate.source,
-            similarity = best.score,
-            matchType = VisualFingerprint.classify(best.score, best.exactBytes),
-            evidence = buildString {
-                append("Whole-image near-duplicate comparison")
-                if (comparedUrl != candidate.imageUrl) append(" using indexed thumbnail")
-                append(": pHash ").append(percent(best.perceptual))
-                append(", dHash ").append(percent(best.difference))
-                append(", aHash ").append(percent(best.average))
-                append(", color ").append(percent(best.color))
-                if (best.exactBytes) append(", exact SHA-256 match")
+        val primary = bestFingerprint.variants.firstOrNull()
+        val matched = best.score >= MIN_MATCH_SCORE
+        val provenance = base.copy(
+            comparedImageUrl = comparedUrl,
+            retrievedAtEpochMillis = retrievedAt,
+            contentSha256 = bestFingerprint.sha256,
+            width = bestFingerprint.width,
+            height = bestFingerprint.height,
+            averageHashHex = primary?.averageHash?.unsignedHex(),
+            differenceHashHex = primary?.differenceHash?.unsignedHex(),
+            perceptualHashHex = primary?.perceptualHash?.unsignedHex(),
+            comparisonScore = best.score,
+            exactBytes = best.exactBytes,
+            state = if (matched) {
+                ReverseImageLookupResult.ImageCandidateState.Matched
+            } else {
+                ReverseImageLookupResult.ImageCandidateState.ComparedNoMatch
             }
         )
+
+        val visualMatch = if (!matched) {
+            null
+        } else {
+            ReverseImageLookupResult.VisualMatch(
+                title = candidate.title.ifBlank { "Visual match" },
+                imageUrl = candidate.imageUrl,
+                sourcePageUrl = candidate.sourcePageUrl,
+                source = candidate.source,
+                similarity = best.score,
+                matchType = VisualFingerprint.classify(best.score, best.exactBytes),
+                evidence = buildString {
+                    append("Whole-image near-duplicate comparison")
+                    if (comparedUrl != candidate.imageUrl) append(" using indexed thumbnail")
+                    append(": pHash ").append(percent(best.perceptual))
+                    append(", dHash ").append(percent(best.difference))
+                    append(", aHash ").append(percent(best.average))
+                    append(", color ").append(percent(best.color))
+                    if (best.exactBytes) append(", exact SHA-256 match")
+                },
+                candidateId = candidateId
+            )
+        }
+        return CandidateAnalysis(provenance, bestFingerprint, visualMatch)
     }
 
-    private suspend fun download(url: String): ByteArray? {
+    private suspend fun download(url: String): DownloadedImage? {
         if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) return null
 
         repeat(MAX_DOWNLOAD_ATTEMPTS) { attempt ->
@@ -180,9 +302,14 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
                         if (length > MAX_CANDIDATE_BYTES) return null
                         val contentType = response.body?.contentType()?.toString().orEmpty()
                         if (contentType.isNotBlank() && !contentType.startsWith("image/", true)) return null
-                        return response.body?.byteStream()?.use {
+                        val bytes = response.body?.byteStream()?.use {
                             readLimited(it, MAX_CANDIDATE_BYTES)
-                        }
+                        } ?: return null
+                        return DownloadedImage(
+                            bytes = bytes,
+                            url = response.request.url.toString(),
+                            retrievedAtEpochMillis = System.currentTimeMillis()
+                        )
                     }
                     if (DiscoveryHttpPolicy.isTransientHttpStatus(response.code) &&
                         attempt < MAX_DOWNLOAD_ATTEMPTS - 1) {
@@ -214,6 +341,21 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
         return output.toByteArray()
     }
 
+    private fun stableCandidateId(candidate: ReverseImageCandidateSearchService.Candidate): String {
+        val canonicalValue = listOf(
+            canonical(candidate.imageUrl),
+            canonical(candidate.sourcePageUrl),
+            candidate.source.trim().lowercase()
+        ).joinToString("|")
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(canonicalValue.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        return "imgcandidate:${digest.take(20)}"
+    }
+
+    private fun Long.unsignedHex(): String =
+        java.lang.Long.toUnsignedString(this, 16).padStart(16, '0')
+
     private fun canonical(url: String): String = runCatching {
         val uri = URI(url)
         URI(uri.scheme?.lowercase(), uri.userInfo, uri.host?.lowercase(), uri.port, uri.path, uri.query, null)
@@ -232,7 +374,6 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
         const val MAX_MATCHES = 12
         const val MIN_MATCH_SCORE = 0.80f
         const val FULL_IMAGE_RETRY_FLOOR = 0.70f
-        const val USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 14; SM-S931B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36"
+        const val USER_AGENT = "Dossier/0.1 authorized-public-image-audit"
     }
 }
