@@ -19,6 +19,8 @@ import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.case.RemediationStatus
 import io.dossier.app.domain.case.UserCorrectionDecision
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ScanHistoryRuntime
+import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
@@ -28,6 +30,7 @@ import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.time.Instant
 
 @RunWith(AndroidJUnit4::class)
 class DossierComposeSmokeTest {
@@ -114,12 +117,32 @@ class DossierComposeSmokeTest {
     }
 
     @Test
-    fun savedCaseReviewPersistsCorrectionAndRemediationState() {
+    fun savedCaseReviewPersistsScanHistoryCorrectionAndRemediationState() {
         val store = CaseStore(composeRule.activity)
+        val input = IdentityInput(fullName = "Jane Example")
+
+        ScanHistoryRuntime.scanStarted(
+            scanId = ScanId("case-scan-one"),
+            input = input,
+            mode = ScanMode.Deep,
+            directProfileProviderCount = 61,
+            occurredAt = Instant.parse("2026-08-08T00:00:00Z")
+        )
+        ScanHistoryRuntime.scanFinished(
+            scanId = ScanId("case-scan-one"),
+            occurredAt = Instant.parse("2026-08-08T00:03:00Z"),
+            cancelled = false,
+            profileResultCount = 12,
+            findingCount = 1,
+            breachRecordCount = 0,
+            graphEntityCount = 4,
+            graphRelationshipCount = 3
+        )
+
         val savedCase = DossierCase(
-            createdAt = "2026-08-08 00:00",
+            createdAt = "2026-08-08 00:03",
             subjectName = "Jane Example",
-            input = IdentityInput(fullName = "Jane Example"),
+            input = input,
             findings = listOf(
                 Finding(
                     type = FindingType.Email,
@@ -134,6 +157,27 @@ class DossierComposeSmokeTest {
             riskLevel = RiskLevel.High
         )
         check(store.save(savedCase))
+        check(store.load(savedCase.caseId)?.scanHistory?.singleOrNull()?.scanId == "case-scan-one")
+
+        // A newer run for the same seeds must not be silently grafted onto the
+        // already-saved old case when the user later edits corrections/actions.
+        ScanHistoryRuntime.scanStarted(
+            scanId = ScanId("case-scan-two"),
+            input = input,
+            mode = ScanMode.Standard,
+            directProfileProviderCount = 40,
+            occurredAt = Instant.parse("2026-08-08T01:00:00Z")
+        )
+        ScanHistoryRuntime.scanFinished(
+            scanId = ScanId("case-scan-two"),
+            occurredAt = Instant.parse("2026-08-08T01:01:00Z"),
+            cancelled = false,
+            profileResultCount = 5,
+            findingCount = 0,
+            breachRecordCount = 0,
+            graphEntityCount = 2,
+            graphRelationshipCount = 1
+        )
 
         acceptConsent()
         openTab("Cases")
@@ -146,15 +190,21 @@ class DossierComposeSmokeTest {
 
         composeRule.onNodeWithText("Mine").performScrollTo().performClick()
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            store.load(savedCase.caseId)?.userCorrections?.any {
-                it.decision == UserCorrectionDecision.ThisIsMe
+            store.load(savedCase.caseId)?.let { loaded ->
+                loaded.userCorrections.any {
+                    it.decision == UserCorrectionDecision.ThisIsMe
+                } && loaded.scanHistory.size == 1 &&
+                    loaded.scanHistory.single().scanId == "case-scan-one"
             } == true
         }
 
         composeRule.onNodeWithText("Start").performScrollTo().performClick()
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            store.load(savedCase.caseId)?.remediationRecords?.any {
-                it.status == RemediationStatus.InProgress
+            store.load(savedCase.caseId)?.let { loaded ->
+                loaded.remediationRecords.any {
+                    it.status == RemediationStatus.InProgress
+                } && loaded.scanHistory.size == 1 &&
+                    loaded.scanHistory.single().scanId == "case-scan-one"
             } == true
         }
     }
