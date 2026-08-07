@@ -9,7 +9,7 @@ class ProviderCatalogCountTest {
     fun catalogInventoryMatchesTruthDocument() {
         assertEquals(
             "Update TRUTH.md and this assertion together when the reviewed catalog changes",
-            75,
+            78,
             ProviderCatalogV2.definitions.size
         )
     }
