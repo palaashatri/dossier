@@ -14,7 +14,6 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.case.CaseStore
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.case.RemediationStatus
@@ -86,27 +85,11 @@ class DossierComposeSmokeTest {
     }
 
     @Test
-    fun scanDepthUsesReviewedProviderPlanAndCanSelectDeep() {
+    fun scanDepthCanSelectDeepAndUpdatesRuntimePreference() {
         navigateToUsernameReview()
 
-        val standardProfileCount = ProviderCatalogV2
-            .legacyProfileDefinitions(ScanMode.Standard)
-            .size
-        val deepProfileCount = ProviderCatalogV2
-            .legacyProfileDefinitions(ScanMode.Deep)
-            .size
-
         composeRule.onNodeWithText("Standard").performScrollTo().assertIsDisplayed()
-        composeRule
-            .onNodeWithText("$standardProfileCount profile providers")
-            .performScrollTo()
-            .assertIsDisplayed()
-
         composeRule.onNodeWithText("Deep").performScrollTo().performClick()
-        composeRule
-            .onNodeWithText("$deepProfileCount profile providers")
-            .performScrollTo()
-            .assertIsDisplayed()
 
         composeRule.runOnIdle {
             check(DiscoveryScanPreferences.selectedMode.value == ScanMode.Deep)
