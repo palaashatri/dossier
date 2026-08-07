@@ -21,6 +21,7 @@ import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.security.MessageDigest
+import java.time.Instant
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -143,6 +144,7 @@ class BreachCheckService(private val context: Context) {
             client.newCall(request).execute().use { response ->
                 when (response.code) {
                     200 -> {
+                        val retrievedAt = Instant.now().toString()
                         // Only the exact local suffix match is retained. All other
                         // records in the anonymity range are discarded immediately.
                         val breachNames = parseHibpEmailRange(
@@ -158,13 +160,20 @@ class BreachCheckService(private val context: Context) {
                         } else {
                             val catalogue = getBreachCatalogue()
                             val breaches = breachNames.map { name ->
-                                catalogue[name.lowercase(Locale.ROOT)] ?: EmailBreach(
-                                    name = name,
-                                    title = name,
-                                    domain = "",
-                                    breachDate = null,
-                                    dataClasses = emptyList()
-                                )
+                                val catalogued = catalogue[name.lowercase(Locale.ROOT)]
+                                if (catalogued != null) {
+                                    catalogued.copy(retrievedAtUtc = retrievedAt)
+                                } else {
+                                    EmailBreach(
+                                        name = name,
+                                        title = name,
+                                        domain = "",
+                                        breachDate = null,
+                                        dataClasses = emptyList(),
+                                        sourceProvider = HIBP_PROVIDER,
+                                        retrievedAtUtc = retrievedAt
+                                    )
+                                }
                             }
                             HibpFetchResult(
                                 breaches,
@@ -222,7 +231,9 @@ class BreachCheckService(private val context: Context) {
                     .build()
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@use emptyMap()
+                    val retrievedAt = Instant.now().toString()
                     parseHibpBreaches(response.body?.string().orEmpty())
+                        .map { it.copy(retrievedAtUtc = retrievedAt) }
                         .associateBy { it.name.lowercase(Locale.ROOT) }
                 }
             }.getOrDefault(emptyMap())
@@ -258,6 +269,7 @@ class BreachCheckService(private val context: Context) {
 
     companion object {
         private const val USER_AGENT = "Dossier Android self-audit app"
+        private const val HIBP_PROVIDER = "Have I Been Pwned"
         private const val PASSWORD_PREFIX_LENGTH = 5
         private const val EMAIL_PREFIX_LENGTH = 6
 
@@ -311,7 +323,11 @@ class BreachCheckService(private val context: Context) {
                         title = dto.title,
                         domain = dto.domain,
                         breachDate = dto.breachDate,
-                        dataClasses = dto.dataClasses
+                        dataClasses = dto.dataClasses,
+                        publicationDate = dto.addedDate,
+                        modifiedDate = dto.modifiedDate,
+                        verified = dto.isVerified,
+                        sourceProvider = HIBP_PROVIDER
                     )
                 }
         }
@@ -330,5 +346,8 @@ private data class HibpBreachDto(
     @SerialName("Title") val title: String,
     @SerialName("Domain") val domain: String = "",
     @SerialName("BreachDate") val breachDate: String? = null,
+    @SerialName("AddedDate") val addedDate: String? = null,
+    @SerialName("ModifiedDate") val modifiedDate: String? = null,
+    @SerialName("IsVerified") val isVerified: Boolean? = null,
     @SerialName("DataClasses") val dataClasses: List<String> = emptyList()
 )
