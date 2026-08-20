@@ -43,7 +43,7 @@ class WaybackHistoryPlugin(
     override suspend fun scan(input: IdentityInput): EvidenceCollection = withContext(Dispatchers.IO) {
         val urls = input.profileUrls
             .mapNotNull(::normalizeOriginalUrl)
-            .distinctBy(String::lowercase)
+            .distinctBy { it.lowercase() }
             .take(MAX_PROFILE_URLS)
         if (urls.isEmpty()) return@withContext EvidenceCollection()
 
@@ -76,6 +76,7 @@ class WaybackHistoryPlugin(
                         signals = buildList {
                             add("Exact URL was explicitly supplied to this authorized audit")
                             add("Wayback CDX indexed HTTP ${capture.statusCode} ${capture.mimeType} capture")
+                            if (capture.digest.isNotBlank()) add("Wayback CDX digest: ${capture.digest} (archive digest, not SHA-256)")
                             if (fetched != null) add("Archived snapshot was directly re-fetched and parsed")
                             else add("CDX-indexed historical capture; snapshot body was not re-fetched within the verification budget")
                         },
@@ -84,7 +85,7 @@ class WaybackHistoryPlugin(
                         observedAtEpochMillis = timestampMillis(capture.timestamp),
                         state = state,
                         reliability = EvidenceReliability.ArchiveSnapshot,
-                        contentHashSha256 = fetched?.let { sha256(it.text) } ?: capture.digest.takeIf(String::isNotBlank),
+                        contentHashSha256 = fetched?.let { sha256(it.text) },
                         parserVersion = PARSER_VERSION,
                         historical = true
                     )
