@@ -16,10 +16,20 @@ import org.jsoup.Jsoup
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.URI
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
-/** Bounded historical-page resolver for exact public URLs. */
+/**
+ * Bounded historical-page resolver for exact public URLs.
+ *
+ * Wayback is the primary provider because it exposes a stable availability API.
+ * archive.today/archive.ph is a best-effort secondary provider: it has no stable
+ * official API, so Dossier uses only its public newest-snapshot route and returns
+ * Unavailable if that route changes or presents a challenge.
+ */
 internal class ArchivePageResolver(
     private val client: OkHttpClient = defaultClient()
 ) {
@@ -61,13 +71,27 @@ internal class ArchivePageResolver(
                 }
             }
 
-            val resolved = queryAvailability(normalized)
+            val wayback = queryWaybackAvailability(normalized)
+            val resolved = if (wayback is Result.Found) {
+                wayback
+            } else {
+                mergeArchiveFallback(wayback, queryArchiveToday(normalized))
+            }
             cache[normalized] = CachedResult(System.currentTimeMillis(), resolved)
             resolved
         }
     }
 
-    private fun queryAvailability(originalUrl: String): Result {
+    private fun mergeArchiveFallback(wayback: Result, archiveToday: Result): Result = when {
+        archiveToday is Result.Found -> archiveToday
+        wayback is Result.Unavailable && archiveToday is Result.Unavailable ->
+            Result.Unavailable("${wayback.reason}; archive.today fallback unavailable: ${archiveToday.reason}")
+        wayback is Result.Unavailable -> wayback
+        archiveToday is Result.Unavailable -> archiveToday
+        else -> Result.NotFound
+    }
+
+    private fun queryWaybackAvailability(originalUrl: String): Result {
         val availabilityUrl = AVAILABILITY_ENDPOINT.toHttpUrl().newBuilder()
             .addQueryParameter("url", originalUrl)
             .build()
@@ -85,7 +109,7 @@ internal class ArchivePageResolver(
                 }
                 val payload = response.body?.string().orEmpty()
                 val capture = parseAvailability(payload) ?: return Result.NotFound
-                return fetchCapture(originalUrl, capture)
+                return fetchWaybackCapture(originalUrl, capture)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -96,9 +120,87 @@ internal class ArchivePageResolver(
         }
     }
 
-    private fun fetchCapture(originalUrl: String, capture: AvailabilityCapture): Result {
+    private fun fetchWaybackCapture(originalUrl: String, capture: AvailabilityCapture): Result {
         val snapshotUrl = normalizeSnapshotUrl(capture.snapshotUrl)
             ?: return Result.Unavailable("Wayback returned an invalid snapshot URL")
+        return fetchHtmlSnapshot(
+            provider = WAYBACK_PROVIDER_NAME,
+            originalUrl = originalUrl,
+            snapshotUrl = snapshotUrl,
+            timestamp = capture.timestamp,
+            providerLabel = "Wayback"
+        )
+    }
+
+    private fun queryArchiveToday(originalUrl: String): Result {
+        val target = sanitizeArchiveTodayTarget(originalUrl)
+            ?: return Result.Unavailable("archive.today received an invalid original URL")
+        val lookupUrl = "$ARCHIVE_TODAY_NEWEST$target"
+        val request = runCatching {
+            Request.Builder()
+                .url(lookupUrl)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.3")
+                .build()
+        }.getOrElse { return Result.Unavailable("archive.today lookup URL could not be built") }
+
+        try {
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.code == 404 -> return Result.NotFound
+                    response.code == 401 || response.code == 403 || response.code == 429 ->
+                        return Result.Unavailable("archive.today rejected or rate-limited the lookup (HTTP ${response.code})")
+                    !response.isSuccessful ->
+                        return Result.Unavailable("archive.today returned HTTP ${response.code}")
+                }
+
+                val finalUrl = response.request.url.toString()
+                val snapshotUrl = normalizeArchiveTodaySnapshotUrl(finalUrl) ?: return Result.NotFound
+                val contentType = response.body?.contentType()?.toString().orEmpty().lowercase()
+                if (contentType.isNotBlank() && !contentType.contains("html") && !contentType.startsWith("text/")) {
+                    return Result.Unavailable("archive.today snapshot is not an HTML/text document")
+                }
+                val body = response.body ?: return Result.Unavailable("archive.today snapshot was empty")
+                val declaredLength = body.contentLength()
+                if (declaredLength > MAX_BODY_BYTES) {
+                    return Result.Unavailable("archive.today snapshot exceeds verification size limit")
+                }
+                val bytes = body.byteStream().use { readBounded(it, MAX_BODY_BYTES) }
+                    ?: return Result.Unavailable("archive.today snapshot exceeds verification size limit")
+                val html = bytes.toString(Charsets.UTF_8)
+                if (html.isBlank()) return Result.Unavailable("archive.today snapshot was empty")
+                if (DiscoveryHttpPolicy.looksBlocked(html)) {
+                    return Result.Unavailable("archive.today snapshot presented a challenge page")
+                }
+
+                val parsed = parseHtml(snapshotUrl, html)
+                    ?: return Result.Unavailable("archive.today snapshot contained no usable page content")
+                return Result.Found(
+                    provider = ARCHIVE_TODAY_PROVIDER_NAME,
+                    originalUrl = originalUrl,
+                    snapshotUrl = snapshotUrl,
+                    timestamp = parseArchiveTimestamp(response.header("Memento-Datetime")).orEmpty(),
+                    title = parsed.title,
+                    description = parsed.description,
+                    text = parsed.text
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return Result.Unavailable(
+                "archive.today lookup failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
+            )
+        }
+    }
+
+    private fun fetchHtmlSnapshot(
+        provider: String,
+        originalUrl: String,
+        snapshotUrl: String,
+        timestamp: String,
+        providerLabel: String
+    ): Result {
         val request = Request.Builder()
             .url(snapshotUrl)
             .header("User-Agent", USER_AGENT)
@@ -108,61 +210,67 @@ internal class ArchivePageResolver(
         try {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    return Result.Unavailable("Wayback snapshot returned HTTP ${response.code}")
+                    return Result.Unavailable("$providerLabel snapshot returned HTTP ${response.code}")
                 }
                 val contentType = response.body?.contentType()?.toString().orEmpty().lowercase()
                 if (contentType.isNotBlank() &&
                     !contentType.contains("html") &&
                     !contentType.startsWith("text/")) {
-                    return Result.Unavailable("Wayback snapshot is not an HTML/text document")
+                    return Result.Unavailable("$providerLabel snapshot is not an HTML/text document")
                 }
 
-                val body = response.body ?: return Result.Unavailable("Wayback snapshot was empty")
+                val body = response.body ?: return Result.Unavailable("$providerLabel snapshot was empty")
                 val declaredLength = body.contentLength()
                 if (declaredLength > MAX_BODY_BYTES) {
-                    return Result.Unavailable("Wayback snapshot exceeds verification size limit")
+                    return Result.Unavailable("$providerLabel snapshot exceeds verification size limit")
                 }
                 val bytes = body.byteStream().use { readBounded(it, MAX_BODY_BYTES) }
-                    ?: return Result.Unavailable("Wayback snapshot exceeds verification size limit")
+                    ?: return Result.Unavailable("$providerLabel snapshot exceeds verification size limit")
                 val html = bytes.toString(Charsets.UTF_8)
-                if (html.isBlank()) return Result.Unavailable("Wayback snapshot was empty")
+                if (html.isBlank()) return Result.Unavailable("$providerLabel snapshot was empty")
                 if (DiscoveryHttpPolicy.looksBlocked(html)) {
-                    return Result.Unavailable("Wayback snapshot presented a challenge page")
+                    return Result.Unavailable("$providerLabel snapshot presented a challenge page")
                 }
 
-                val document = Jsoup.parse(html, snapshotUrl)
-                document.select(
-                    "script,style,noscript,svg,template,#wm-ipp,#wm-ipp-base,.wb-autocomplete-suggestions"
-                ).remove()
-                val title = document.title().trim()
-                val description = document
-                    .select("meta[name=description],meta[property=og:description],meta[name=twitter:description]")
-                    .firstOrNull()
-                    ?.attr("content")
-                    ?.trim()
-                    .orEmpty()
-                val text = document.body()?.text()?.trim().orEmpty().take(MAX_TEXT_CHARS)
-                if (title.isBlank() && description.isBlank() && text.isBlank()) {
-                    return Result.Unavailable("Wayback snapshot contained no usable page content")
-                }
+                val parsed = parseHtml(snapshotUrl, html)
+                    ?: return Result.Unavailable("$providerLabel snapshot contained no usable page content")
 
                 return Result.Found(
-                    provider = PROVIDER_NAME,
+                    provider = provider,
                     originalUrl = originalUrl,
                     snapshotUrl = snapshotUrl,
-                    timestamp = capture.timestamp,
-                    title = title,
-                    description = description,
-                    text = text
+                    timestamp = timestamp,
+                    title = parsed.title,
+                    description = parsed.description,
+                    text = parsed.text
                 )
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
             return Result.Unavailable(
-                "Wayback snapshot fetch failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
+                "$providerLabel snapshot fetch failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
             )
         }
+    }
+
+    private data class ParsedHtml(val title: String, val description: String, val text: String)
+
+    private fun parseHtml(baseUrl: String, html: String): ParsedHtml? {
+        val document = Jsoup.parse(html, baseUrl)
+        document.select(
+            "script,style,noscript,svg,template,#wm-ipp,#wm-ipp-base,.wb-autocomplete-suggestions"
+        ).remove()
+        val title = document.title().trim()
+        val description = document
+            .select("meta[name=description],meta[property=og:description],meta[name=twitter:description]")
+            .firstOrNull()
+            ?.attr("content")
+            ?.trim()
+            .orEmpty()
+        val text = document.body()?.text()?.trim().orEmpty().take(MAX_TEXT_CHARS)
+        if (title.isBlank() && description.isBlank() && text.isBlank()) return null
+        return ParsedHtml(title, description, text)
     }
 
     internal data class AvailabilityCapture(
@@ -172,11 +280,14 @@ internal class ArchivePageResolver(
 
     companion object {
         private const val AVAILABILITY_ENDPOINT = "https://archive.org/wayback/available"
-        private const val PROVIDER_NAME = "Internet Archive Wayback Machine"
+        private const val ARCHIVE_TODAY_NEWEST = "https://archive.ph/newest/"
+        private const val WAYBACK_PROVIDER_NAME = "Internet Archive Wayback Machine"
+        private const val ARCHIVE_TODAY_PROVIDER_NAME = "Archive.today (archive.ph)"
         private const val USER_AGENT = "Dossier/0.1 authorized-public-self-audit"
         private const val MAX_BODY_BYTES = 2_000_000L
         private const val MAX_TEXT_CHARS = 10_000
         private const val CACHE_TTL_MS = 6 * 60 * 60 * 1_000L
+        private val ARCHIVE_TODAY_HOSTS = setOf("archive.ph", "archive.today", "archive.is")
 
         internal fun parseAvailability(payload: String): AvailabilityCapture? = runCatching {
             val root = Json.parseToJsonElement(payload).jsonObject
@@ -202,6 +313,35 @@ internal class ArchivePageResolver(
             if (host != "web.archive.org" && !host.endsWith(".web.archive.org")) return null
             if (uri.scheme != "https") return null
             return upgraded
+        }
+
+        internal fun sanitizeArchiveTodayTarget(raw: String): String? {
+            val normalized = normalizeOriginalUrl(raw) ?: return null
+            // archive.today's public newest route treats an unescaped '?' as its own
+            // query string. Prefer the stable base URL rather than pretending a
+            // query-specific snapshot was verified.
+            return normalized.substringBefore('?')
+        }
+
+        internal fun normalizeArchiveTodaySnapshotUrl(raw: String): String? {
+            val uri = runCatching { URI(raw.trim()) }.getOrNull() ?: return null
+            if (uri.scheme != "https") return null
+            val host = uri.host?.removePrefix("www.")?.lowercase() ?: return null
+            if (host !in ARCHIVE_TODAY_HOSTS) return null
+            val path = uri.path.orEmpty().trim('/')
+            if (path.isBlank() || path.startsWith("newest/", true)) return null
+            // Snapshot IDs are short opaque path components. Reject search/home routes.
+            val first = path.substringBefore('/')
+            if (first.length < 4 || first.equals("search", true) || first.equals("submit", true)) return null
+            return raw.trim()
+        }
+
+        internal fun parseArchiveTimestamp(header: String?): String? {
+            if (header.isNullOrBlank()) return null
+            return runCatching {
+                ZonedDateTime.parse(header, DateTimeFormatter.RFC_1123_DATE_TIME)
+                    .format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss", Locale.ROOT))
+            }.getOrNull()
         }
 
         internal fun displayTimestamp(timestamp: String): String = when {
