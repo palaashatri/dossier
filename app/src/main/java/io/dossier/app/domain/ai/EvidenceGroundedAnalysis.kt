@@ -12,6 +12,9 @@ enum class AiClaimConfidence {
     CONFLICTING
 }
 
+/** Backward-compatible name retained for evaluation fixtures and saved integrations. */
+typealias AiConfidence = AiClaimConfidence
+
 @Serializable
 data class AiAnalysisClaim(
     val claim: String,
@@ -35,18 +38,37 @@ data class ValidatedAiAnalysis(
 data class RejectedAiClaim(
     val claim: AiAnalysisClaim,
     val reasons: List<String>
-)
+) {
+    /** Stable machine-readable compatibility code for deterministic evaluation/UI. */
+    val reason: String
+        get() = when {
+            reasons.any { it.startsWith("Unsupported identifier", ignoreCase = true) } ->
+                "unsupported_identifier_in_claim"
+            reasons.any { it.startsWith("Unknown supporting evidence IDs", ignoreCase = true) } ||
+                reasons.any { it.startsWith("Unknown contradicting evidence IDs", ignoreCase = true) } ->
+                "unknown_evidence_id"
+            reasons.any { it.contains("no supporting evidence", ignoreCase = true) } ->
+                "claim_has_no_supporting_evidence"
+            reasons.any { it.contains("Claim limit exceeded", ignoreCase = true) } ->
+                "claim_budget_exceeded"
+            else -> "validation_failed"
+        }
+}
 
 /**
  * Deterministic output gate between any language model and production UI.
- * Models may summarize evidence; they cannot create new evidence IDs or bypass
- * contradictory evidence already present in their own structured response.
+ * Models may summarize evidence; they cannot create new evidence IDs, introduce
+ * uncited identifiers, or bypass contradictory evidence already present in their
+ * own structured response.
  */
 object EvidenceGroundedAiValidator {
     private const val MAX_CLAIM_CHARS = 600
     private const val MAX_REASONING_CHARS = 1_500
     private const val MAX_ACTION_CHARS = 800
     private const val MAX_CLAIMS = 20
+
+    private val EMAIL = Regex("(?i)(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}(?![A-Z0-9._%+-])")
+    private val URL = Regex("(?i)https?://[^\\s<>\\[\\]{}\\\"']+")
 
     fun validate(result: AiAnalysisResult, evidence: List<Evidence>): ValidatedAiAnalysis {
         val byId = evidence.associateBy(Evidence::id)
@@ -77,6 +99,33 @@ object EvidenceGroundedAiValidator {
             val missingContradictions = contradictionIds.filterNot(byId::containsKey)
             if (missingContradictions.isNotEmpty()) {
                 reasons += "Unknown contradicting evidence IDs: ${missingContradictions.joinToString()}"
+            }
+
+            // A cited evidence ID cannot be used as cover for a fabricated email/URL.
+            // Every explicit identifier emitted by the model must occur in at least one
+            // of the evidence records the claim actually cites.
+            if (missingSupport.isEmpty() && missingContradictions.isEmpty() && supportIds.isNotEmpty()) {
+                val cited = (supportIds + contradictionIds).mapNotNull(byId::get)
+                val citedCorpus = cited.joinToString("\n") { record ->
+                    buildList {
+                        add(record.value)
+                        record.sourceUrl?.let(::add)
+                        record.snippet?.let(::add)
+                        addAll(record.signals)
+                    }.joinToString("\n")
+                }.lowercase()
+
+                val outputCorpus = buildList {
+                    add(original.claim)
+                    add(original.reasoningSummary)
+                    original.recommendedAction?.let(::add)
+                }.joinToString("\n")
+
+                val identifiers = extractIdentifiers(outputCorpus)
+                val unsupported = identifiers.filterNot { citedCorpus.contains(it.lowercase()) }
+                if (unsupported.isNotEmpty()) {
+                    reasons += "Unsupported identifier in claim: ${unsupported.take(3).joinToString()}"
+                }
             }
 
             if (reasons.isNotEmpty()) {
@@ -112,5 +161,13 @@ object EvidenceGroundedAiValidator {
         }
 
         return ValidatedAiAnalysis(accepted, rejected)
+    }
+
+    private fun extractIdentifiers(text: String): Set<String> {
+        val emails = EMAIL.findAll(text).map { it.value.lowercase() }
+        val urls = URL.findAll(text).map {
+            it.value.trimEnd('.', ',', ';', ':', '!', '?', ')').lowercase()
+        }
+        return (emails + urls).toSet()
     }
 }
