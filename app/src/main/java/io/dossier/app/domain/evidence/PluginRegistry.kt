@@ -14,7 +14,14 @@ import io.dossier.app.domain.model.IdentityInput
  * unit-testable without a device or Context.
  */
 object PluginRegistry {
-    private val plugins = mutableListOf<ScannerPlugin>()
+    /**
+     * Production-safe built-ins. These must obey the same authorization and
+     * public-source boundary as the rest of Dossier. Tests may call [clear]
+     * and register an isolated set explicitly.
+     */
+    private val plugins = mutableListOf<ScannerPlugin>(
+        RedditPublicActivityPlugin()
+    )
 
     fun register(plugin: ScannerPlugin) {
         if (plugins.none { it.id == plugin.id }) plugins.add(plugin)
