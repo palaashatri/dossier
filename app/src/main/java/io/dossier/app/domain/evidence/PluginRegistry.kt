@@ -1,5 +1,6 @@
 package io.dossier.app.domain.evidence
 
+import io.dossier.app.data.web.WaybackHistoryPlugin
 import io.dossier.app.domain.model.IdentityInput
 
 /**
@@ -20,7 +21,8 @@ object PluginRegistry {
      * and register an isolated set explicitly.
      */
     private val plugins = mutableListOf<ScannerPlugin>(
-        RedditPublicActivityPlugin()
+        RedditPublicActivityPlugin(),
+        WaybackHistoryPlugin()
     )
 
     fun register(plugin: ScannerPlugin) {
