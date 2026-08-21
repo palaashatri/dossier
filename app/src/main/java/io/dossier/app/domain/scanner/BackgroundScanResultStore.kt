@@ -3,6 +3,7 @@ package io.dossier.app.domain.scanner
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import io.dossier.app.domain.analysis.OsintAnalysisBundle
 import io.dossier.app.domain.case.DossierCase
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -22,17 +23,17 @@ import javax.crypto.spec.GCMParameterSpec
 /**
  * Encrypted transient storage for durable WorkManager scans.
  *
- * Background results are deliberately separate from [io.dossier.app.domain.case.CaseStore]:
- * finishing a background scan must not silently create a user-saved case. The latest
- * result can be restored into [ScanSession] and is only promoted to a saved case when
- * the user explicitly chooses Save.
+ * Background results are deliberately separate from CaseStore: finishing a scan
+ * never silently creates a user-saved case. The latest result can be restored into
+ * ScanSession and promoted only after an explicit Save action.
  */
 class BackgroundScanResultStore(private val context: Context) {
     @Serializable
     data class Snapshot(
         val workId: String,
         val completedAtUtc: String,
-        val dossierCase: DossierCase
+        val dossierCase: DossierCase,
+        val analysis: OsintAnalysisBundle = OsintAnalysisBundle()
     )
 
     @Serializable
@@ -50,11 +51,16 @@ class BackgroundScanResultStore(private val context: Context) {
         coerceInputValues = true
     }
 
-    fun save(workId: String, dossierCase: DossierCase): Boolean = runCatching {
+    fun save(
+        workId: String,
+        dossierCase: DossierCase,
+        analysis: OsintAnalysisBundle = OsintAnalysisBundle()
+    ): Boolean = runCatching {
         val snapshot = Snapshot(
             workId = workId,
             completedAtUtc = Instant.now().toString(),
-            dossierCase = dossierCase
+            dossierCase = dossierCase,
+            analysis = analysis
         )
         val plaintext = json.encodeToString(snapshot).toByteArray(Charsets.UTF_8)
         val cipher = Cipher.getInstance(TRANSFORMATION)
