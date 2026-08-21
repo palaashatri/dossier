@@ -67,7 +67,9 @@ object EvidenceGroundedAiValidator {
     private const val MAX_ACTION_CHARS = 800
     private const val MAX_CLAIMS = 20
 
-    private val EMAIL = Regex("(?i)(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}(?![A-Z0-9._%+-])")
+    // Terminal punctuation such as the full stop ending a sentence is intentionally
+    // allowed after the address; it is not part of the email identifier itself.
+    private val EMAIL = Regex("(?i)(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}(?![A-Z0-9_%+-])")
     private val URL = Regex("(?i)https?://[^\\s<>\\[\\]{}\\\"']+")
 
     fun validate(result: AiAnalysisResult, evidence: List<Evidence>): ValidatedAiAnalysis {
