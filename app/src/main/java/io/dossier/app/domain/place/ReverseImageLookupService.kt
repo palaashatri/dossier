@@ -90,7 +90,7 @@ class ReverseImageLookupService(private val context: Context) {
                     .distinctBy { "${it.title}|${it.url}" }
                     .take(MAX_LOCATION_EVIDENCE)
 
-                ReverseImageLookupResult(
+                val result = ReverseImageLookupResult(
                     gps = gps,
                     extractedText = extractedText,
                     labels = labels,
@@ -104,6 +104,8 @@ class ReverseImageLookupService(private val context: Context) {
                     visualClusters = visual.clusters,
                     visualSearchNote = visual.note
                 )
+                MediaIntelligenceSession.recordImage(result)
+                result
             }
         }
 
