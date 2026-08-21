@@ -28,6 +28,7 @@ object EvidenceRuntimeCache {
 object PluginRegistry {
     private val plugins = mutableListOf<ScannerPlugin>(
         RedditPublicActivityPlugin(),
+        WhatsMyNameUsernamePlugin(),
         WaybackHistoryPlugin(),
         LegacyOsintImportPlugin(),
         ExternalOsintImportPlugin()
@@ -54,6 +55,8 @@ suspend fun runPlugins(
     input: IdentityInput,
     plugins: List<ScannerPlugin> = PluginRegistry.registered()
 ): EvidenceCollection {
+    EvidenceRuntimeCache.clear()
+    UsernameSurfaceRuntimeCache.clear()
     val allEvidence = mutableListOf<Evidence>()
     val allRelationships = mutableListOf<EvidenceRelationship>()
     for (plugin in plugins) {
