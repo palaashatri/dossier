@@ -2,24 +2,30 @@ package io.dossier.app.domain.evidence
 
 import io.dossier.app.data.web.WaybackHistoryPlugin
 import io.dossier.app.domain.model.IdentityInput
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
- * Plugin registry + runner (ROADMAP Milestone 15).
- *
- * Third parties implement [ScannerPlugin] and register an instance here; the
- * scan orchestrator can then fold every plugin's [EvidenceCollection] into the
- * same pipeline the built-in scanners feed. Adding a plugin requires **zero
- * changes elsewhere** — it only needs to be registered.
- *
- * This is intentionally Android-free so a plugin (and this registry) is
- * unit-testable without a device or Context.
+ * Process-local cache of the latest merged plugin evidence. It exists so deterministic
+ * post-scan analyzers can reuse already-collected public activity rather than hitting
+ * Reddit/archive/import sources a second time. Durable/background workers persist
+ * derived analysis separately; this cache is not itself a persistence layer.
  */
+object EvidenceRuntimeCache {
+    private val _collection = MutableStateFlow(EvidenceCollection())
+    val collection: StateFlow<EvidenceCollection> = _collection
+
+    fun replace(value: EvidenceCollection) {
+        _collection.value = value
+    }
+
+    fun clear() {
+        _collection.value = EvidenceCollection()
+    }
+}
+
+/** Plugin registry + isolated runner. */
 object PluginRegistry {
-    /**
-     * Production-safe built-ins. These must obey the same authorization and
-     * public-source boundary as the rest of Dossier. Tests may call [clear]
-     * and register an isolated set explicitly.
-     */
     private val plugins = mutableListOf<ScannerPlugin>(
         RedditPublicActivityPlugin(),
         WaybackHistoryPlugin(),
@@ -41,9 +47,8 @@ object PluginRegistry {
 }
 
 /**
- * Runs a set of plugins and merges their [EvidenceCollection] outputs.
- * Failures in one plugin are isolated: a throwing plugin contributes nothing
- * rather than aborting the whole scan (fail-safe, like the pivot pass).
+ * Runs plugins and merges their Evidence collections. A failing source is isolated.
+ * The merged result is cached once so post-processing can remain local and bounded.
  */
 suspend fun runPlugins(
     input: IdentityInput,
@@ -56,21 +61,21 @@ suspend fun runPlugins(
             val result = plugin.scan(input)
             allEvidence.addAll(result.evidence)
             allRelationships.addAll(result.relationships)
-        } catch (t: Throwable) {
-            // Isolation: skip a misbehaving plugin, keep the rest.
+        } catch (_: Throwable) {
+            // Isolation: one brittle provider/import never aborts the authorized scan.
         }
     }
-    return EvidenceCollection(
+    val merged = EvidenceCollection(
         evidence = allEvidence.distinctBy { it.id },
-        relationships = allRelationships
+        relationships = allRelationships.distinctBy {
+            "${it.fromValue}|${it.toValue}|${it.relation}|${it.evidence.orEmpty()}"
+        }
     )
+    EvidenceRuntimeCache.replace(merged)
+    return merged
 }
 
-/**
- * Example plugin: emits [Evidence] directly from the identity seeds the user
- * supplied (emails, phones, usernames). Demonstrates the [ScannerPlugin]
- * contract without any network/Android dependency.
- */
+/** Example plugin emitting explicit user-provided seeds. */
 class SeedEvidencePlugin : ScannerPlugin {
     override val id: String = "seed-evidence"
     override val displayName: String = "Identity Seed Evidence"
@@ -84,7 +89,9 @@ class SeedEvidencePlugin : ScannerPlugin {
                 add(Evidence(id = "seed:phone:$it", kind = EvidenceKind.Phone, value = it, confidence = 1.0f))
             }
             (listOfNotNull(input.primaryUsername) + input.usernames)
-                .filter { it.isNotBlank() }.distinctBy { it.lowercase() }.forEach {
+                .filter { it.isNotBlank() }
+                .distinctBy { it.lowercase() }
+                .forEach {
                     add(Evidence(id = "seed:username:$it", kind = EvidenceKind.Username, value = it, confidence = 1.0f))
                 }
         }
