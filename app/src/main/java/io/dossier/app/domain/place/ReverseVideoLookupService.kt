@@ -20,10 +20,10 @@ import kotlin.math.roundToLong
 /**
  * Reverse video lookup via local frame sampling.
  *
- * This intentionally mirrors ReverseImageLookupService's privacy boundary:
- * video frames are never uploaded. The app samples a few frames locally, runs
- * face detection only as a safety gate, extracts OCR/scene labels, and searches
- * the public web using those text clues.
+ * Video frames remain local. The app samples a few frames, extracts OCR/scene
+ * labels and searches public indexes using those text clues. The completed
+ * evidence bundle is retained only in the working session until an explicit
+ * encrypted Case save occurs.
  */
 class ReverseVideoLookupService(private val context: Context) {
 
@@ -67,7 +67,7 @@ class ReverseVideoLookupService(private val context: Context) {
                 }
                 val faceDetected = frameSummaries.any { it.faceDetected }
 
-                ReverseVideoLookupResult(
+                val result = ReverseVideoLookupResult(
                     durationMs = durationMs,
                     sampledFrames = frameSummaries.size,
                     extractedText = extractedText,
@@ -79,6 +79,8 @@ class ReverseVideoLookupService(private val context: Context) {
                     webEvidence = webResult.evidence,
                     frameSummaries = frameSummaries
                 )
+                MediaIntelligenceSession.recordVideo(result)
+                result
             } finally {
                 try {
                     retriever.release()
