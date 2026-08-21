@@ -6,6 +6,7 @@ import io.dossier.app.data.web.PublicSearchDiscoveryService
 import io.dossier.app.data.web.StableProfileApiResolver
 import io.dossier.app.domain.model.IdentityInput
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -37,7 +38,7 @@ class DiscoveryPrecisionRecallTest {
     }
 
     @Test
-    fun directVerification_nameOnlyMatchCannotBecomeHighConfidence() {
+    fun directVerification_nameOnlyMatchCannotBecomeVerifiedAttribution() {
         val assessment = PublicPageVerifier.assessIdentitySignals(
             input = IdentityInput(fullName = "Jane Doe"),
             url = "https://example.com/team/jane-doe",
@@ -46,6 +47,20 @@ class DiscoveryPrecisionRecallTest {
 
         assertTrue(assessment.directScore > 0f)
         assertTrue(assessment.confidenceCeiling <= 0.60f)
+        assertFalse(assessment.verificationQualified)
+    }
+
+    @Test
+    fun directVerification_handleOnlyProvesExistenceNotOwnership() {
+        val assessment = PublicPageVerifier.assessIdentitySignals(
+            input = IdentityInput(fullName = "", primaryUsername = "janedoe"),
+            url = "https://github.com/janedoe",
+            pageText = "janedoe"
+        )
+
+        assertTrue(assessment.directScore > 0f)
+        assertTrue(assessment.confidenceCeiling <= 0.58f)
+        assertFalse(assessment.verificationQualified)
     }
 
     @Test
@@ -63,6 +78,7 @@ class DiscoveryPrecisionRecallTest {
         assertTrue(assessment.directScore >= 0.90f)
         assertTrue(assessment.confidenceCeiling >= 0.95f)
         assertTrue(assessment.signals.size >= 3)
+        assertTrue(assessment.verificationQualified)
     }
 
     @Test
@@ -78,6 +94,20 @@ class DiscoveryPrecisionRecallTest {
 
         assertTrue(assessment.directScore >= 0.95f)
         assertEquals(0.97f, assessment.confidenceCeiling, 0.0001f)
+        assertTrue(assessment.verificationQualified)
+    }
+
+    @Test
+    fun directVerification_explicitUrlIsQualifiedWhenItExists() {
+        val url = "https://example.com/users/jane"
+        val assessment = PublicPageVerifier.assessIdentitySignals(
+            input = IdentityInput(fullName = "", profileUrls = listOf(url)),
+            url = url,
+            pageText = "Public profile"
+        )
+
+        assertTrue(assessment.verificationQualified)
+        assertEquals(0.99f, assessment.confidenceCeiling, 0.0001f)
     }
 
     @Test
