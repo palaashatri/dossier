@@ -1,6 +1,7 @@
 package io.dossier.app.domain.case
 
 import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.RiskLevel
 
 /** Pure before/after comparison for encrypted saved cases. */
@@ -30,6 +31,15 @@ class CaseComparison {
         val explanation: String
     )
 
+    data class MediaDiff(
+        val exactContentReused: Int = 0,
+        val perceptualFingerprintsReused: Int = 0,
+        val clustersAdded: Int = 0,
+        val clustersRemoved: Int = 0,
+        val sourcePagesAdded: Int = 0,
+        val sourcePagesRemoved: Int = 0
+    )
+
     data class CaseDiff(
         val added: List<Finding>,
         val removed: List<Finding>,
@@ -41,6 +51,7 @@ class CaseComparison {
         val breachesRemoved: Int,
         val riskDelta: Int,
         val exposureDelta: Int,
+        val media: MediaDiff = MediaDiff(),
         val remediationVerification: List<RemediationVerification> = emptyList()
     )
 
@@ -89,8 +100,62 @@ class CaseComparison {
             breachesRemoved = (beforeBreaches - afterBreaches).size,
             riskDelta = riskDelta,
             exposureDelta = exposureDelta,
+            media = compareMedia(before, after),
             remediationVerification = verifyRemediation(before, after, afterMap.keys)
         )
+    }
+
+    private data class MediaState(
+        val contentHashes: Set<String>,
+        val perceptualHashes: Set<String>,
+        val clusterSignatures: Set<String>,
+        val sourcePages: Set<String>
+    )
+
+    private fun compareMedia(before: DossierCase, after: DossierCase): MediaDiff {
+        val left = mediaState(before)
+        val right = mediaState(after)
+        return MediaDiff(
+            exactContentReused = left.contentHashes.intersect(right.contentHashes).size,
+            perceptualFingerprintsReused = left.perceptualHashes.intersect(right.perceptualHashes).size,
+            clustersAdded = (right.clusterSignatures - left.clusterSignatures).size,
+            clustersRemoved = (left.clusterSignatures - right.clusterSignatures).size,
+            sourcePagesAdded = (right.sourcePages - left.sourcePages).size,
+            sourcePagesRemoved = (left.sourcePages - right.sourcePages).size
+        )
+    }
+
+    private fun mediaState(case: DossierCase): MediaState {
+        val contentHashes = linkedSetOf<String>()
+        val perceptualHashes = linkedSetOf<String>()
+        val clusterSignatures = linkedSetOf<String>()
+        val sourcePages = linkedSetOf<String>()
+
+        case.mediaIntelligence.imageResults.forEach { result ->
+            val byId = result.visualCandidates.associateBy { it.id }
+            result.visualCandidates.forEach { candidate ->
+                candidate.contentSha256?.lowercase()?.takeIf(String::isNotBlank)?.let(contentHashes::add)
+                candidate.perceptualHashHex?.lowercase()?.takeIf(String::isNotBlank)?.let(perceptualHashes::add)
+                candidate.sourcePageUrl.trim().lowercase().takeIf(String::isNotBlank)?.let(sourcePages::add)
+            }
+            result.visualClusters.forEach { cluster ->
+                val signatures = cluster.memberCandidateIds.mapNotNull(byId::get)
+                    .mapNotNull { candidate ->
+                        when (cluster.type) {
+                            ReverseImageLookupResult.ImageClusterType.ExactContent ->
+                                candidate.contentSha256?.lowercase()?.takeIf(String::isNotBlank)
+                            ReverseImageLookupResult.ImageClusterType.PerceptualNearDuplicate ->
+                                candidate.perceptualHashHex?.lowercase()?.takeIf(String::isNotBlank)
+                        } ?: candidate.imageUrl.trim().lowercase().takeIf(String::isNotBlank)
+                    }
+                    .distinct()
+                    .sorted()
+                if (signatures.isNotEmpty()) {
+                    clusterSignatures += "${cluster.type.name}:${signatures.joinToString("|")}"
+                }
+            }
+        }
+        return MediaState(contentHashes, perceptualHashes, clusterSignatures, sourcePages)
     }
 
     private fun verifyRemediation(
@@ -112,9 +177,9 @@ class CaseComparison {
                 RemediationVerificationState.StatusChanged ->
                     "Remediation status changed from ${previous.status} to ${current?.status}."
                 RemediationVerificationState.StillObserved ->
-                    "The current authorized scan still observed evidence matching this finding; remediation is not verified."
+                    "The current assessment still observed evidence matching this finding; remediation is not verified."
                 RemediationVerificationState.NotObservedInLatestScan ->
-                    "The latest authorized scan did not observe this finding. This is not proof of global deletion; indexes, caches or archives may still retain it."
+                    "The latest assessment did not observe this finding. This is not proof of global deletion; indexes, caches or archives may still retain it."
                 RemediationVerificationState.NotRechecked ->
                     "No conclusive before/after verification is available for this remediation record."
             }
