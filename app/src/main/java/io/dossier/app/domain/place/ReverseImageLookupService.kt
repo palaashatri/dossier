@@ -16,10 +16,10 @@ import kotlinx.coroutines.withContext
 /**
  * Orchestrates location intelligence and whole-image near-duplicate discovery.
  *
- * Query image bytes remain on-device. Dossier searches only text/identity clues,
- * downloads public candidate images, and compares them locally. Faces never enable
- * facial identification; whole-image duplicate matching may still detect the same
- * uploaded image after resizing, recompression, screenshots, or modest crops.
+ * Query image bytes remain on-device. If the selected image already contains EXIF
+ * coordinates/time, Dossier may send only those coordinates/date to public mapping
+ * and weather endpoints for corroboration. Faces never enable facial identification;
+ * whole-image duplicate matching only compares the complete selected image.
  */
 class ReverseImageLookupService(private val context: Context) {
 
@@ -32,7 +32,8 @@ class ReverseImageLookupService(private val context: Context) {
 
             val faceResult = faceAnalyzer.analyze(uri)
             val faceDetected = faceResult.faceDetected
-            val gps = exifParser.parseGps(uri)
+            val metadata = exifParser.parseMetadata(uri)
+            val gps = metadata?.gps
             val extractedText = textRecognizer.recognize(uri)
             val labels = imageLabeler.label(uri)
 
@@ -56,6 +57,12 @@ class ReverseImageLookupService(private val context: Context) {
                     }
                 }
 
+                val geoDeferred = if (metadata?.latitude != null && metadata.longitude != null) {
+                    async(Dispatchers.IO) {
+                        runCatching { GeoCorroborationService().corroborate(metadata) }.getOrNull()
+                    }
+                } else null
+
                 val webDeferred = if (gps == null) {
                     async(Dispatchers.IO) {
                         runCatching {
@@ -66,20 +73,22 @@ class ReverseImageLookupService(private val context: Context) {
                             )
                         }.getOrNull()
                     }
-                } else {
-                    null
-                }
+                } else null
 
                 val visual = visualDeferred.await()
+                val geo = geoDeferred?.await()
                 val webResult = webDeferred?.await()
-                val resolvedLocation = gps ?: webResult?.resolvedLocation
+                val resolvedLocation = geo?.displayName ?: gps ?: webResult?.resolvedLocation
                 val mapsUrl = when {
-                    gps != null -> "https://www.google.com/maps/search/?api=1&query=$gps"
+                    gps != null -> "https://www.google.com/maps/search/?api=1&query=${android.net.Uri.encode(gps)}"
                     webResult?.mapsUrl != null -> webResult.mapsUrl
                     resolvedLocation != null ->
                         "https://www.google.com/maps/search/?api=1&query=${android.net.Uri.encode(resolvedLocation)}"
                     else -> null
                 }
+                val combinedEvidence = (geo?.evidence.orEmpty() + webResult?.evidence.orEmpty())
+                    .distinctBy { "${it.title}|${it.url}" }
+                    .take(MAX_LOCATION_EVIDENCE)
 
                 ReverseImageLookupResult(
                     gps = gps,
@@ -89,7 +98,7 @@ class ReverseImageLookupService(private val context: Context) {
                     faceWarning = if (faceDetected) FACE_WARNING else null,
                     resolvedLocation = resolvedLocation,
                     mapsUrl = mapsUrl,
-                    webEvidence = webResult?.evidence.orEmpty(),
+                    webEvidence = combinedEvidence,
                     visualMatches = visual.matches,
                     visualCandidates = visual.candidates,
                     visualClusters = visual.clusters,
@@ -99,6 +108,7 @@ class ReverseImageLookupService(private val context: Context) {
         }
 
     private companion object {
+        const val MAX_LOCATION_EVIDENCE = 10
         const val FACE_WARNING =
             "Face detected — facial identification remains disabled. Whole-image duplicate matching may continue because it compares the complete image, not identity across different photos."
     }
