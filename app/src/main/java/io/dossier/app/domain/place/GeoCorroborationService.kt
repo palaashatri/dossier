@@ -15,8 +15,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.net.URLEncoder
-import java.time.LocalDateTime
+import java.time.LocalDate
+import java.time.LocalTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -29,6 +29,7 @@ import java.util.concurrent.TimeUnit
  * coordinates already embedded in the selected media, reverse-geocodes that point,
  * retrieves a bounded historical-weather slice, and computes solar geometry locally.
  * Only coordinates/date are sent; image bytes and identity fields are never uploaded.
+ * Temporal analysis is withheld unless EXIF carries the GPS UTC date/time pair.
  */
 class GeoCorroborationService {
     data class WeatherSnapshot(
@@ -58,7 +59,7 @@ class GeoCorroborationService {
         val lat = metadata.latitude ?: return@withContext null
         val lon = metadata.longitude ?: return@withContext null
         if (lat !in -90.0..90.0 || lon !in -180.0..180.0) return@withContext null
-        val capturedMillis = parseExifTimeUtc(metadata.capturedAt)
+        val capturedMillis = parseGpsUtc(metadata.gpsDateStamp, metadata.gpsTimeStamp)
 
         coroutineScope {
             val placeDeferred = async { reverseGeocode(lat, lon) }
@@ -74,6 +75,15 @@ class GeoCorroborationService {
                             title = "OpenStreetMap coordinate corroboration",
                             snippet = "EXIF coordinates reverse-geocode to ${displayName.take(180)}.",
                             url = "https://www.openstreetmap.org/?mlat=$lat&mlon=$lon#map=16/$lat/$lon"
+                        )
+                    )
+                }
+                if (capturedMillis == null && !metadata.capturedAt.isNullOrBlank()) {
+                    add(
+                        ReverseImageLookupResult.WebEvidence(
+                            title = "Temporal corroboration withheld",
+                            snippet = "The image contains a camera-local capture time but no unambiguous GPS UTC date/time. Dossier will not guess a timezone for weather or shadow analysis.",
+                            url = "https://exiftool.org/TagNames/GPS.html"
                         )
                     )
                 }
@@ -97,11 +107,11 @@ class GeoCorroborationService {
                         ReverseImageLookupResult.WebEvidence(
                             title = "Solar / shadow geometry",
                             snippet = buildString {
-                                append("At the EXIF coordinate/time, computed sun azimuth ${format1(solar.azimuthDegrees)}°, ")
+                                append("At the EXIF GPS UTC coordinate/time, computed sun azimuth ${format1(solar.azimuthDegrees)}°, ")
                                 append("elevation ${format1(solar.elevationDegrees)}°, expected shadow bearing ${format1(solar.approximateShadowBearingDegrees)}°")
                                 solar.shadowLengthToObjectHeightRatio?.let { append(", shadow/object-height ratio ≈ ${format2(it)}") }
                                 append(". Use only as temporal corroboration, not identity/location proof.")
-                            }.take(260),
+                            }.take(270),
                             url = "https://gml.noaa.gov/grad/solcalc/calcdetails.html"
                         )
                     )
@@ -114,9 +124,7 @@ class GeoCorroborationService {
 
     private fun reverseGeocode(latitude: Double, longitude: Double): String? = runCatching {
         val request = Request.Builder()
-            .url(
-                "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=$latitude&lon=$longitude&zoom=18&addressdetails=1"
-            )
+            .url("https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=$latitude&lon=$longitude&zoom=18&addressdetails=1")
             .header("User-Agent", USER_AGENT)
             .header("Accept", "application/json")
             .build()
@@ -160,19 +168,39 @@ class GeoCorroborationService {
         }
     }.getOrNull()
 
-    internal fun parseExifTimeUtc(raw: String?): Long? {
-        val value = raw?.trim()?.takeIf(String::isNotBlank) ?: return null
-        val formats = listOf(
-            DateTimeFormatter.ofPattern("yyyy:MM:dd HH:mm:ss", Locale.ROOT),
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT),
-            DateTimeFormatter.ISO_LOCAL_DATE_TIME
-        )
-        formats.forEach { formatter ->
-            runCatching {
-                return LocalDateTime.parse(value, formatter).toInstant(ZoneOffset.UTC).toEpochMilli()
-            }
-        }
-        return runCatching { java.time.Instant.parse(value).toEpochMilli() }.getOrNull()
+    internal fun parseGpsUtc(dateStamp: String?, timeStamp: String?): Long? {
+        val dateRaw = dateStamp?.trim()?.takeIf(String::isNotBlank) ?: return null
+        val timeRaw = timeStamp?.trim()?.takeIf(String::isNotBlank) ?: return null
+        val date = runCatching {
+            LocalDate.parse(dateRaw.replace('-', ':'), DateTimeFormatter.ofPattern("yyyy:MM:dd", Locale.ROOT))
+        }.getOrNull() ?: return null
+        val time = parseGpsClock(timeRaw) ?: return null
+        return date.atTime(time).toInstant(ZoneOffset.UTC).toEpochMilli()
+    }
+
+    private fun parseGpsClock(raw: String): LocalTime? {
+        val simple = runCatching {
+            LocalTime.parse(raw, DateTimeFormatter.ofPattern("H:mm:ss", Locale.ROOT))
+        }.getOrNull()
+        if (simple != null) return simple
+
+        val parts = raw.split(',').map(String::trim)
+        if (parts.size != 3) return null
+        val values = parts.mapNotNull(::parseRational)
+        if (values.size != 3) return null
+        val hour = values[0].toInt()
+        val minute = values[1].toInt()
+        val second = values[2].toInt().coerceIn(0, 59)
+        return runCatching { LocalTime.of(hour, minute, second) }.getOrNull()
+    }
+
+    private fun parseRational(value: String): Double? {
+        value.toDoubleOrNull()?.let { return it }
+        val split = value.split('/')
+        if (split.size != 2) return null
+        val numerator = split[0].trim().toDoubleOrNull() ?: return null
+        val denominator = split[1].trim().toDoubleOrNull()?.takeIf { it != 0.0 } ?: return null
+        return numerator / denominator
     }
 
     private fun JsonObject.string(key: String): String? =
