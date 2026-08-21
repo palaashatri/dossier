@@ -3,11 +3,9 @@ package io.dossier.app.export
 import io.dossier.app.domain.model.EntityGraph
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
-import kotlinx.serialization.json.putJsonObject
 
 /**
  * Dependency-free graph interoperability for Gephi, Cytoscape, NetworkX and
@@ -55,23 +53,39 @@ object GraphInteropExporter {
         appendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
         appendLine("<gexf xmlns=\"http://gexf.net/1.3\" version=\"1.3\">")
         appendLine("  <graph mode=\"static\" defaultedgetype=\"directed\">")
+        appendLine("    <attributes class=\"node\">")
+        appendLine("      <attribute id=\"kind\" title=\"kind\" type=\"string\"/>")
+        appendLine("      <attribute id=\"state\" title=\"state\" type=\"string\"/>")
+        appendLine("      <attribute id=\"confidence\" title=\"confidence\" type=\"double\"/>")
+        appendLine("      <attribute id=\"historical\" title=\"historical\" type=\"boolean\"/>")
+        appendLine("    </attributes>")
+        appendLine("    <attributes class=\"edge\">")
+        appendLine("      <attribute id=\"relation\" title=\"relation\" type=\"string\"/>")
+        appendLine("      <attribute id=\"historical\" title=\"historical\" type=\"boolean\"/>")
+        appendLine("    </attributes>")
         appendLine("    <nodes>")
         graph.entities.forEach { node ->
-            appendLine(
-                "      <node id=\"${xml(node.id)}\" label=\"${xml(node.label)}\"><attvalues>" +
-                    "<attvalue for=\"kind\" value=\"${xml(node.kind.name)}\"/>" +
-                    "<attvalue for=\"state\" value=\"${xml(node.state.name)}\"/>" +
-                    "<attvalue for=\"confidence\" value=\"${node.confidence.coerceIn(0f, 1f)}\"/>" +
-                    "</attvalues></node>"
-            )
+            appendLine("      <node id=\"${xml(node.id)}\" label=\"${xml(node.label)}\">")
+            appendLine("        <attvalues>")
+            appendLine("          <attvalue for=\"kind\" value=\"${xml(node.kind.name)}\"/>")
+            appendLine("          <attvalue for=\"state\" value=\"${xml(node.state.name)}\"/>")
+            appendLine("          <attvalue for=\"confidence\" value=\"${node.confidence.coerceIn(0f, 1f)}\"/>")
+            appendLine("          <attvalue for=\"historical\" value=\"${node.historical}\"/>")
+            appendLine("        </attvalues>")
+            appendLine("      </node>")
         }
         appendLine("    </nodes>")
         appendLine("    <edges>")
         graph.edges.forEachIndexed { index, edge ->
             appendLine(
                 "      <edge id=\"$index\" source=\"${xml(edge.fromId)}\" target=\"${xml(edge.toId)}\" " +
-                    "label=\"${xml(edge.relationType.name)}\" weight=\"${edge.confidence?.coerceIn(0f, 1f) ?: 0.5f}\"/>"
+                    "label=\"${xml(edge.relationType.name)}\" weight=\"${edge.confidence?.coerceIn(0f, 1f) ?: 0.5f}\">"
             )
+            appendLine("        <attvalues>")
+            appendLine("          <attvalue for=\"relation\" value=\"${xml(edge.relationType.name)}\"/>")
+            appendLine("          <attvalue for=\"historical\" value=\"${edge.historical}\"/>")
+            appendLine("        </attvalues>")
+            appendLine("      </edge>")
         }
         appendLine("    </edges>")
         appendLine("  </graph>")
