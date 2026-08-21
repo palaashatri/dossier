@@ -32,7 +32,7 @@ Reddit,https://www.reddit.com/user/janedoe,found
 
     @Test
     fun unrelatedUsernameEnumerationIsRejected() {
-        val input = IdentityInput(primaryUsername = "janedoe")
+        val input = IdentityInput(fullName = "", primaryUsername = "janedoe")
         val report = "https://github.com/random-stranger\nhttps://reddit.com/user/random-stranger"
 
         val result = ExternalOsintReportParser.parse(
@@ -47,7 +47,7 @@ Reddit,https://www.reddit.com/user/janedoe,found
 
     @Test
     fun breachSummaryWithCredentialFieldIsRejectedEntirely() {
-        val input = IdentityInput(emails = listOf("jane@example.com"))
+        val input = IdentityInput(fullName = "", emails = listOf("jane@example.com"))
         val report = """[
           {
             "email": "jane@example.com",
@@ -69,7 +69,7 @@ Reddit,https://www.reddit.com/user/janedoe,found
 
     @Test
     fun redactedBreachSummaryMayRemainLowConfidenceCandidate() {
-        val input = IdentityInput(emails = listOf("jane@example.com"))
+        val input = IdentityInput(fullName = "", emails = listOf("jane@example.com"))
         val report = "email=jane@example.com | breach=Example breach | exposed=data classes only"
 
         val result = ExternalOsintReportParser.parse(
@@ -87,7 +87,7 @@ Reddit,https://www.reddit.com/user/janedoe,found
 
     @Test
     fun phoneInfogaRequiresExplicitPhoneSeed() {
-        val input = IdentityInput(phones = listOf("+91 98765 43210"))
+        val input = IdentityInput(fullName = "", phones = listOf("+91 98765 43210"))
         val report = "number=+91 98765 43210 | country=India | carrier=Example Carrier"
 
         val result = ExternalOsintReportParser.parse(
@@ -102,7 +102,7 @@ Reddit,https://www.reddit.com/user/janedoe,found
 
     @Test
     fun amassOnlyRetainsInScopeDomainUrls() {
-        val input = IdentityInput(emails = listOf("security@example.com"))
+        val input = IdentityInput(fullName = "", emails = listOf("security@example.com"))
         val report = """host,url
 api.example.com,https://api.example.com/status
 unrelated.test,https://unrelated.test/status
