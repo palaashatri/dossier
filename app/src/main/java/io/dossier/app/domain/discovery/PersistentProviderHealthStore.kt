@@ -94,3 +94,27 @@ class PersistentProviderHealthStore(context: Context) {
         const val EWMA_ALPHA = 0.20
     }
 }
+
+/**
+ * Application-context bridge for framework-free ScannerPlugins. Installing the
+ * bridge does not persist any investigation state; it only gives provider code a
+ * sink for aggregate health counters.
+ */
+object ProviderDiagnosticsRuntime {
+    @Volatile
+    private var store: PersistentProviderHealthStore? = null
+
+    fun install(context: Context) {
+        store = PersistentProviderHealthStore(context.applicationContext)
+    }
+
+    fun record(providerId: String, outcome: ProviderOutcome, latencyMs: Long) {
+        store?.record(providerId, outcome, latencyMs)
+    }
+
+    fun snapshot(): List<PersistentProviderHealthStore.Record> = store?.snapshot().orEmpty()
+
+    fun clear() {
+        store?.clear()
+    }
+}
