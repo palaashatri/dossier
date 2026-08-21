@@ -5,6 +5,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import io.dossier.app.domain.discovery.ScanHistoryRuntime
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.place.MediaIntelligenceSession
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -35,7 +36,9 @@ class CaseStore(private val context: Context) {
     /**
      * Initial explicit save. If the coordinator has a terminal lifecycle record
      * for the same normalized identity seed set, attach it to the new encrypted
-     * case. Later case updates never auto-attach a newer scan implicitly.
+     * case. Reverse-media results from the same working session are also attached
+     * at this explicit save boundary; they are never persisted merely by viewing
+     * or analyzing media.
      */
     fun save(case: DossierCase): Boolean = saveInternal(case, attachLatestScanHistory = true)
 
@@ -43,12 +46,18 @@ class CaseStore(private val context: Context) {
         case: DossierCase,
         attachLatestScanHistory: Boolean
     ): Boolean = runCatching {
-        val withHistory = if (attachLatestScanHistory && case.scanHistory.isEmpty()) {
-            ScanHistoryRuntime.latestFor(case.input)?.let { entry ->
-                case.copy(scanHistory = listOf(entry))
-            } ?: case
+        val withSessionMedia = if (attachLatestScanHistory && case.mediaIntelligence.isEmpty) {
+            val media = MediaIntelligenceSession.snapshot()
+            if (!media.isEmpty) case.copy(mediaIntelligence = media) else case
         } else {
             case
+        }
+        val withHistory = if (attachLatestScanHistory && withSessionMedia.scanHistory.isEmpty()) {
+            ScanHistoryRuntime.latestFor(withSessionMedia.input)?.let { entry ->
+                withSessionMedia.copy(scanHistory = listOf(entry))
+            } ?: withSessionMedia
+        } else {
+            withSessionMedia
         }
         val normalized = normalizeCase(withHistory)
         val plaintext = json.encodeToString(normalized).toByteArray(Charsets.UTF_8)
@@ -136,7 +145,8 @@ class CaseStore(private val context: Context) {
     /**
      * Migrates privacy-sensitive metadata without changing the underlying finding
      * values themselves. v3 correction/graph evidence IDs can contain raw values;
-     * v4 stores only deterministic `ev2:` hashes for those IDs.
+     * v4+ stores only deterministic `ev2:` hashes for those IDs. v5 additionally
+     * materializes persisted reverse-media clusters into graph nodes/edges.
      */
     internal fun normalizeCase(case: DossierCase): DossierCase {
         val migratedCorrections = case.userCorrections.map { correction ->
@@ -153,13 +163,15 @@ class CaseStore(private val context: Context) {
                     .distinct()
             )
         }
+        val migratedGraph = case.entityGraph.copy(
+            entities = migratedEntities,
+            edges = migratedEdges
+        )
+        val mediaGraph = MediaGraphEnricher.enrich(migratedGraph, case.mediaIntelligence)
         return case.copy(
             schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION,
             userCorrections = migratedCorrections,
-            entityGraph = case.entityGraph.copy(
-                entities = migratedEntities,
-                edges = migratedEdges
-            )
+            entityGraph = mediaGraph
         )
     }
 
