@@ -38,14 +38,17 @@ class BackgroundScanWorker(
     params: WorkerParameters
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = coroutineScope {
+        BackgroundScanManager.markActive(applicationContext, true)
         val rawInput = inputData.getString(KEY_IDENTITY_JSON)
         if (rawInput == null) {
             ScanSession.markBackgroundFailure("Missing identity input")
+            BackgroundScanManager.markActive(applicationContext, false)
             return@coroutineScope Result.failure(errorData("Missing identity input"))
         }
         val input = runCatching { JSON.decodeFromString<IdentityInput>(rawInput) }.getOrNull()
         if (input == null) {
             ScanSession.markBackgroundFailure("Invalid identity input")
+            BackgroundScanManager.markActive(applicationContext, false)
             return@coroutineScope Result.failure(errorData("Invalid identity input"))
         }
         val deepResearch = inputData.getBoolean(KEY_DEEP_RESEARCH, false)
@@ -105,6 +108,7 @@ class BackgroundScanWorker(
         } finally {
             progressRelay.cancelAndJoin()
             FaceCorrelationSessionPolicy.useBasicMatching()
+            BackgroundScanManager.markActive(applicationContext, false)
         }
     }
 
@@ -154,10 +158,13 @@ object BackgroundScanManager {
         deepResearch: Boolean,
         strongFaceCorrelation: Boolean
     ): UUID {
+        val appContext = context.applicationContext
         val encoded = json.encodeToString(input)
         require(encoded.toByteArray(Charsets.UTF_8).size <= MAX_INPUT_JSON_BYTES) {
             "Identity input is too large for durable background scheduling"
         }
+        BackgroundScanResultStore(appContext).clear()
+        markActive(appContext, true)
         val request = OneTimeWorkRequestBuilder<BackgroundScanWorker>()
             .setInputData(
                 workDataOf(
@@ -168,7 +175,7 @@ object BackgroundScanManager {
             )
             .addTag(BackgroundScanWorker.WORK_TAG)
             .build()
-        WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
+        WorkManager.getInstance(appContext).enqueueUniqueWork(
             BackgroundScanWorker.UNIQUE_WORK_NAME,
             ExistingWorkPolicy.REPLACE,
             request
@@ -177,8 +184,9 @@ object BackgroundScanManager {
     }
 
     fun cancel(context: Context) {
-        WorkManager.getInstance(context.applicationContext)
-            .cancelUniqueWork(BackgroundScanWorker.UNIQUE_WORK_NAME)
+        val appContext = context.applicationContext
+        WorkManager.getInstance(appContext).cancelUniqueWork(BackgroundScanWorker.UNIQUE_WORK_NAME)
+        markActive(appContext, false)
     }
 
     fun statusFlow(context: Context): Flow<List<WorkInfo>> =
@@ -206,5 +214,19 @@ object BackgroundScanManager {
     fun clearLatestResult(context: Context): Boolean =
         BackgroundScanResultStore(context.applicationContext).clear()
 
+    fun hasActiveMarker(context: Context): Boolean = context.applicationContext
+        .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        .getBoolean(KEY_ACTIVE, false)
+
+    internal fun markActive(context: Context, active: Boolean) {
+        context.applicationContext
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_ACTIVE, active)
+            .apply()
+    }
+
     private const val MAX_INPUT_JSON_BYTES = 8_000
+    private const val PREFS = "dossier-background-work"
+    private const val KEY_ACTIVE = "active"
 }
