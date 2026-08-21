@@ -10,6 +10,8 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import io.dossier.app.data.face.FaceCorrelationSessionPolicy
+import io.dossier.app.domain.analysis.OsintPostProcessor
+import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancelAndJoin
@@ -28,7 +30,7 @@ import java.util.UUID
  * WorkManager owns scheduling/restart semantics, so leaving the scan screen or
  * backgrounding the app no longer aborts analysis just because a Compose scope or
  * activity disappears. If Android terminates the process, WorkManager may restart
- * the unit of work from the beginning; Dossier does not claim stage-level checkpoint
+ * this unit of work from the beginning; Dossier does not claim stage-level frontier
  * resume until the scanner frontier itself is persisted.
  */
 class BackgroundScanWorker(
@@ -65,12 +67,24 @@ class BackgroundScanWorker(
 
         try {
             ScanSession.executeScan(applicationContext, input, deepResearch)
+
+            setProgress(workDataOf(KEY_STAGE to STAGE_POST_PROCESSING))
+            val analysis = OsintPostProcessor.analyze(
+                input = input,
+                profiles = ScanSession.profileScanResults.value,
+                evidence = EvidenceRuntimeCache.collection.value
+            )
+
             val snapshot = ScanSession.buildCase()
             if (snapshot == null) {
                 ScanSession.markBackgroundFailure("Scan completed without a persistable result")
                 return@coroutineScope Result.failure(errorData("Scan completed without a persistable result"))
             }
-            val saved = BackgroundScanResultStore(applicationContext).save(id.toString(), snapshot)
+            val saved = BackgroundScanResultStore(applicationContext).save(
+                workId = id.toString(),
+                dossierCase = snapshot,
+                analysis = analysis
+            )
             if (!saved) {
                 ScanSession.markBackgroundFailure("Unable to persist encrypted background result")
                 return@coroutineScope Result.failure(errorData("Unable to persist encrypted background result"))
@@ -106,6 +120,7 @@ class BackgroundScanWorker(
         const val KEY_ERROR = "error"
         const val KEY_WORK_ID = "work_id"
         const val STAGE_STARTING = "QUEUED_BACKGROUND_SCAN..."
+        const val STAGE_POST_PROCESSING = "ANALYZING_BEHAVIOR_AND_NETWORK..."
         const val STAGE_COMPLETE = "BACKGROUND_SCAN_COMPLETE"
         const val STAGE_FAILED = "BACKGROUND_SCAN_FAILED"
 
