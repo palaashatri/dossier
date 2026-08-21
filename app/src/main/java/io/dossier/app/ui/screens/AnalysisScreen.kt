@@ -35,15 +35,19 @@ import androidx.compose.ui.unit.sp
 import androidx.work.WorkInfo
 import io.dossier.app.domain.analysis.OsintAnalysisBundle
 import io.dossier.app.domain.analysis.PresenceState
+import io.dossier.app.domain.case.CaseTimelineBuilder
+import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.scanner.BackgroundScanManager
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.theme.NeuralTheme
-import kotlinx.coroutines.flow.map
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 /**
  * Non-blocking landing surface for durable analysis. Users can leave this screen,
- * use the rest of Dossier, or even background the app while WorkManager continues.
+ * use the rest of Dossier, or background the app while WorkManager continues.
  */
 @Composable
 fun AnalysisScreen(
@@ -123,14 +127,15 @@ fun AnalysisScreen(
             }
         }
 
-        if (snapshot != null) {
+        snapshot?.let { completed ->
             IdentitySurfaceSection(analysis)
             BehavioralSection(analysis)
             InteractionSection(analysis)
+            TimelineSection(completed.dossierCase)
 
             Button(
                 onClick = {
-                    snapshot?.dossierCase?.let(ScanSession::restoreFromCase)
+                    ScanSession.restoreFromCase(completed.dossierCase)
                     onOpenReport()
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = NeuralTheme.Cobalt),
@@ -270,6 +275,53 @@ private fun InteractionSection(bundle: OsintAnalysisBundle) {
 }
 
 @Composable
+private fun TimelineSection(case: DossierCase) {
+    val timeline = remember(case) { CaseTimelineBuilder.build(case, limit = 120) }
+    AnalysisCard("Investigation Timeline") {
+        if (timeline.isEmpty()) {
+            Text(
+                "No timestamped evidence is available. Dossier does not invent dates for undated observations.",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 17.sp
+            )
+        } else {
+            Text(
+                "${timeline.size} provenance-backed events · newest first",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 11.5.sp
+            )
+            timeline.take(18).forEach { event ->
+                val timestamp = Instant.ofEpochMilli(event.timestampEpochMillis)
+                    .atZone(ZoneId.systemDefault())
+                    .format(TIMELINE_FORMAT)
+                Text(
+                    text = "$timestamp · ${event.title}",
+                    color = if (event.historical) NeuralTheme.Amber else NeuralTheme.TextPrimary,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+                Text(
+                    text = event.detail,
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 10.5.sp,
+                    lineHeight = 15.sp
+                )
+            }
+            if (timeline.size > 18) {
+                Text(
+                    "+ ${timeline.size - 18} more events retained in the case timeline",
+                    color = NeuralTheme.Cobalt,
+                    fontSize = 10.5.sp,
+                    modifier = Modifier.padding(top = 5.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun AnalysisCard(title: String, content: @Composable () -> Unit) {
     Column(
         modifier = Modifier
@@ -302,3 +354,5 @@ private fun MonoText(value: String) {
         fontWeight = FontWeight.Medium
     )
 }
+
+private val TIMELINE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
