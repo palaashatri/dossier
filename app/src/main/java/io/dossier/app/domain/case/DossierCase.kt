@@ -2,6 +2,7 @@ package io.dossier.app.domain.case
 
 import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.evidence.AttackPathFinder.AttackPath
+import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.ExposureEngine.ExposureResult
 import io.dossier.app.domain.evidence.RelationshipConfidence
 import io.dossier.app.domain.model.*
@@ -92,10 +93,11 @@ data class DossierCase(
     val createdAt: String,
     val subjectName: String,
     val input: IdentityInput,
-    // Keep SelfAudit as the decoding default for pre-v5 cases. New investigations
-    // can explicitly select AuthorizedAssessment without rewriting historical meaning.
+    // Keep SelfAudit as the decoding default for legacy cases. New investigations
+    // may explicitly use AuthorizedAssessment without rewriting historical meaning.
     val authorizedScope: AuthorizedScope = AuthorizedScope.SelfAudit,
     val findings: List<Finding> = emptyList(),
+    val evidenceRecords: List<Evidence> = emptyList(),
     val profileResults: List<ProfileScanResult> = emptyList(),
     val faceMatches: List<FaceConsistencyMatch> = emptyList(),
     val entityGraph: EntityGraph = EntityGraph(),
@@ -121,7 +123,7 @@ data class DossierCase(
         "${finding.type.name}|${finding.value}|${finding.sourceUrl.orEmpty()}"
 
     companion object {
-        /** v5 persists bounded reverse-media provenance and clusters in encrypted cases. */
-        const val CURRENT_SCHEMA_VERSION = 5
+        /** v6 persists universal provenance-rich evidence alongside reverse-media intelligence. */
+        const val CURRENT_SCHEMA_VERSION = 6
     }
 }
