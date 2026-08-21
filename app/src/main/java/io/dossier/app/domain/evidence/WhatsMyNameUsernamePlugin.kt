@@ -1,6 +1,9 @@
 package io.dossier.app.domain.evidence
 
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
+import io.dossier.app.domain.discovery.ProviderOutcome
+import io.dossier.app.domain.discovery.ProviderRequestScheduler
 import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
@@ -8,9 +11,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -29,13 +29,16 @@ import java.util.concurrent.TimeUnit
  * Broad username-surface enumeration using WhatsMyName's public site-definition
  * dataset as response-classification rules.
  *
- * Safety / correctness boundary:
- * - only usernames explicitly supplied to this authorized audit are checked;
+ * Correctness boundary:
+ * - only usernames explicitly supplied to the assessment are checked;
  * - GET-only entries with a literal {account} placeholder are eligible;
  * - POST probes, authentication/CAPTCHA flows, invalid/broken entries and NSFW
  *   categories are skipped rather than bypassed;
  * - direct account existence is an observation, never proof that the account
- *   belongs to the audited person.
+ *   belongs to the investigated identity.
+ *
+ * Requests are paced per provider and bounded globally. Aggregate provider health
+ * records contain provider IDs/outcomes only and never queried handles or content.
  */
 class WhatsMyNameUsernamePlugin : ScannerPlugin {
     override val id: String = SOURCE_ID
@@ -47,6 +50,7 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
+    private val scheduler = ProviderRequestScheduler(MAX_CONCURRENCY)
 
     override suspend fun scan(input: IdentityInput): EvidenceCollection {
         val handles = (listOfNotNull(input.primaryUsername) + input.usernames)
@@ -76,19 +80,21 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
             return EvidenceCollection()
         }
 
-        val semaphore = Semaphore(MAX_CONCURRENCY)
         val observations = coroutineScope {
             handles.flatMap { handle ->
                 eligible.map { site ->
                     async(Dispatchers.IO) {
-                        semaphore.withPermit {
-                            delay(PER_REQUEST_DELAY_MS)
+                        scheduler.execute(
+                            providerKey = providerKey(site),
+                            minimumIntervalMs = PER_PROVIDER_INTERVAL_MS
+                        ) {
                             checkSite(site, handle)
                         }
                     }
                 }
             }.awaitAll().filterNotNull()
         }
+        scheduler.clearIdleState()
 
         UsernameSurfaceRuntimeCache.replace(SOURCE_ID, observations)
 
@@ -105,8 +111,8 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
                     risk = RiskLevel.Low,
                     signals = listOf(
                         "Direct GET check matched a WhatsMyName public existence rule",
-                        "The handle was explicitly supplied to this audit",
-                        "Account existence does not establish ownership by the audited identity"
+                        "The handle was explicitly supplied to this assessment",
+                        "Account existence does not establish ownership by the investigated identity"
                     ),
                     providerId = SOURCE_ID,
                     retrievedAtEpochMillis = observation.observedAtEpochMillis,
@@ -180,6 +186,7 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
 
     private fun checkSite(site: JsonObject, originalHandle: String): UsernameSurfaceObservation? {
         val siteName = site.string("name")?.take(MAX_SITE_NAME_CHARS) ?: return null
+        val healthId = "$SOURCE_ID:${siteName.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "-").trim('-').take(100)}"
         val stripChars = site.string("strip_bad_char").orEmpty()
         val handle = stripChars.fold(originalHandle) { acc, ch -> acc.replace(ch.toString(), "") }
             .takeIf { it.length >= 2 } ?: return null
@@ -195,6 +202,7 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
         val existsText = site.string("e_string").orEmpty()
         val missingText = site.string("m_string").orEmpty()
         val observedAt = System.currentTimeMillis()
+        val started = System.nanoTime()
 
         return try {
             val request = Request.Builder()
@@ -211,32 +219,67 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
                 }.orEmpty()
                 val exists = status == expectedExistsCode && (existsText.isBlank() || body.contains(existsText, ignoreCase = false))
                 val missing = status == expectedMissingCode && (missingText.isBlank() || body.contains(missingText, ignoreCase = false))
+                val latency = elapsedMillis(started)
                 when {
-                    exists -> UsernameSurfaceObservation(
-                        SOURCE_ID, siteName, originalHandle, profileUrl,
-                        UsernameSurfaceState.Present, 0.68,
-                        "HTTP $status matched the site's published existence rule", observedAt
-                    )
-                    missing -> UsernameSurfaceObservation(
-                        SOURCE_ID, siteName, originalHandle, profileUrl,
-                        UsernameSurfaceState.Absent, 0.90,
-                        "HTTP $status matched the site's published missing-account rule", observedAt
-                    )
-                    else -> UsernameSurfaceObservation(
-                        SOURCE_ID, siteName, originalHandle, profileUrl,
-                        UsernameSurfaceState.Unavailable, 0.0,
-                        "Response did not conclusively match the published exists/missing rules (HTTP $status)", observedAt
-                    )
+                    exists -> {
+                        ProviderDiagnosticsRuntime.record(healthId, ProviderOutcome.Success, latency)
+                        UsernameSurfaceObservation(
+                            SOURCE_ID, siteName, originalHandle, profileUrl,
+                            UsernameSurfaceState.Present, 0.68,
+                            "HTTP $status matched the site's published existence rule", observedAt
+                        )
+                    }
+                    missing -> {
+                        ProviderDiagnosticsRuntime.record(healthId, ProviderOutcome.NotFound, latency)
+                        UsernameSurfaceObservation(
+                            SOURCE_ID, siteName, originalHandle, profileUrl,
+                            UsernameSurfaceState.Absent, 0.90,
+                            "HTTP $status matched the site's published missing-account rule", observedAt
+                        )
+                    }
+                    status == 429 -> {
+                        ProviderDiagnosticsRuntime.record(healthId, ProviderOutcome.RateLimited, latency)
+                        unavailable(siteName, originalHandle, profileUrl, observedAt, "Provider rate-limited the public check")
+                    }
+                    status == 401 -> {
+                        ProviderDiagnosticsRuntime.record(healthId, ProviderOutcome.AuthenticationRequired, latency)
+                        unavailable(siteName, originalHandle, profileUrl, observedAt, "Provider requires authentication")
+                    }
+                    else -> {
+                        ProviderDiagnosticsRuntime.record(healthId, ProviderOutcome.ParseFailure, latency)
+                        unavailable(
+                            siteName, originalHandle, profileUrl, observedAt,
+                            "Response did not conclusively match the published exists/missing rules (HTTP $status)"
+                        )
+                    }
                 }
             }
-        } catch (_: Throwable) {
-            UsernameSurfaceObservation(
-                SOURCE_ID, siteName, originalHandle, profileUrl,
-                UsernameSurfaceState.Unavailable, 0.0,
-                "Provider could not be conclusively checked", observedAt
-            )
+        } catch (error: Throwable) {
+            val outcome = if (error is java.net.SocketTimeoutException) ProviderOutcome.Timeout else ProviderOutcome.NetworkFailure
+            ProviderDiagnosticsRuntime.record(healthId, outcome, elapsedMillis(started))
+            unavailable(siteName, originalHandle, profileUrl, observedAt, "Provider could not be conclusively checked")
         }
     }
+
+    private fun unavailable(
+        siteName: String,
+        handle: String,
+        profileUrl: String,
+        observedAt: Long,
+        reason: String
+    ) = UsernameSurfaceObservation(
+        SOURCE_ID, siteName, handle, profileUrl,
+        UsernameSurfaceState.Unavailable, 0.0, reason, observedAt
+    )
+
+    private fun providerKey(site: JsonObject): String {
+        val uri = site.string("uri_check").orEmpty().replace("{account}", "probe")
+        return runCatching { URI(uri).host?.lowercase(Locale.ROOT) }.getOrNull()
+            ?: site.string("name").orEmpty().lowercase(Locale.ROOT)
+    }
+
+    private fun elapsedMillis(startedNanos: Long): Long =
+        ((System.nanoTime() - startedNanos) / 1_000_000L).coerceAtLeast(0L)
 
     private fun normalizeHandle(raw: String): String = raw.trim()
         .removePrefix("@")
@@ -270,15 +313,15 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
     private companion object {
         const val SOURCE_ID = "whatsmyname-direct"
         const val DATASET_URL = "https://raw.githubusercontent.com/WebBreacher/WhatsMyName/main/wmn-data.json"
-        const val USER_AGENT = "Dossier/0.1 authorized-self-audit (+https://github.com/palaashatri/dossier)"
+        const val USER_AGENT = "Dossier/0.1 authorized-assessment (+https://github.com/palaashatri/dossier)"
         const val MAX_HANDLES = 3
         const val MAX_CONCURRENCY = 6
-        const val PER_REQUEST_DELAY_MS = 120L
+        const val PER_PROVIDER_INTERVAL_MS = 350L
         const val MAX_RESPONSE_BYTES = 192 * 1024
         const val MAX_DATASET_BYTES = 4L * 1024L * 1024L
         const val MAX_DATASET_CHARS = 4 * 1024 * 1024
         const val MAX_SITE_NAME_CHARS = 120
-        const val PARSER_VERSION = "whatsmyname-direct-v1"
+        const val PARSER_VERSION = "whatsmyname-direct-v2"
         val HANDLE = Regex("[a-z0-9_][a-z0-9_.-]{1,63}")
         val JSON = Json { ignoreUnknownKeys = true }
     }
