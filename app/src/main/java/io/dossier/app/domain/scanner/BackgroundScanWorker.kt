@@ -13,6 +13,7 @@ import io.dossier.app.data.face.FaceCorrelationSessionPolicy
 import io.dossier.app.domain.analysis.OsintPostProcessor
 import io.dossier.app.domain.analysis.UsernameSurfaceAnalysis
 import io.dossier.app.domain.case.AuthorizedScope
+import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.UsernameSurfaceRuntimeCache
 import io.dossier.app.domain.model.IdentityInput
@@ -33,6 +34,7 @@ class BackgroundScanWorker(
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = coroutineScope {
         BackgroundScanManager.markActive(applicationContext, true)
+        ProviderDiagnosticsRuntime.install(applicationContext)
         val rawInput = inputData.getString(KEY_IDENTITY_JSON)
         if (rawInput == null) {
             ScanSession.markBackgroundFailure("Missing identity input")
