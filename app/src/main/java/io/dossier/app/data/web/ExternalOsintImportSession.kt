@@ -78,7 +78,7 @@ object ExternalOsintImportSession {
     }
 
     fun summaries(): List<ImportSummary> = synchronized(lock) {
-        pending.map(PendingImport::toSummary)
+        pending.map { item -> item.toSummary() }
     }
 
     internal fun snapshot(): List<PendingImport> = synchronized(lock) { pending.toList() }
