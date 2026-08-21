@@ -1,15 +1,20 @@
 package io.dossier.app.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -28,15 +33,16 @@ import io.dossier.app.domain.discovery.ScanRunState
 import io.dossier.app.ui.theme.NeuralTheme
 
 /**
- * Compatibility shell that keeps the existing face-consent-aware ScanScreen
- * intact while making its real ScanSession state available through the M2 typed
- * event bus. The compact HUD is derived from coordinator events/state only.
+ * Compatibility shell that exposes the existing scan through the typed event bus.
+ * Durable WorkManager execution now means the user can explicitly leave this screen
+ * without cancelling the scan; the worker continues independently of Compose.
  */
 @Composable
 fun CoordinatedScanScreen(
     onScanComplete: () -> Unit,
     onScanCancelled: () -> Unit,
-    onInvalidInput: () -> Unit = onScanCancelled
+    onInvalidInput: () -> Unit = onScanCancelled,
+    onScanBackgrounded: () -> Unit = onScanCancelled
 ) {
     LaunchedEffect(Unit) {
         ScanCoordinatorRuntime.ensureMonitoring()
@@ -86,6 +92,29 @@ fun CoordinatedScanScreen(
                 LiveMetric("G", snapshot.entityCount)
                 Spacer(Modifier.width(5.dp))
                 LiveMetric("E", snapshot.findingCount)
+            }
+
+            OutlinedButton(
+                onClick = onScanBackgrounded,
+                border = BorderStroke(1.dp, NeuralTheme.Cobalt.copy(alpha = 0.85f)),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt),
+                shape = io.dossier.app.ui.theme.DossierButtonShape,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .safeDrawingPadding()
+                    .padding(horizontal = 24.dp, vertical = 76.dp)
+                    .fillMaxWidth()
+                    .height(46.dp)
+                    .semantics {
+                        contentDescription = "Continue using Dossier while this scan runs in the background"
+                    }
+            ) {
+                Text(
+                    text = "CONTINUE IN BACKGROUND",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    letterSpacing = 0.7.sp
+                )
             }
         }
     }
