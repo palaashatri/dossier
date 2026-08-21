@@ -22,7 +22,8 @@ object PluginRegistry {
      */
     private val plugins = mutableListOf<ScannerPlugin>(
         RedditPublicActivityPlugin(),
-        WaybackHistoryPlugin()
+        WaybackHistoryPlugin(),
+        LegacyOsintImportPlugin()
     )
 
     fun register(plugin: ScannerPlugin) {
