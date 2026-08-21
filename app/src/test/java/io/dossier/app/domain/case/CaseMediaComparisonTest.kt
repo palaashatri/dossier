@@ -39,7 +39,7 @@ class CaseMediaComparisonTest {
         caseId = id,
         createdAt = "2026-08-21 01:00",
         subjectName = "X",
-        input = IdentityInput(primaryUsername = "x"),
+        input = IdentityInput(fullName = "", primaryUsername = "x"),
         mediaIntelligence = MediaIntelligenceSnapshot(imageResults = listOf(media))
     )
 
