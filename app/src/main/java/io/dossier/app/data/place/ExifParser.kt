@@ -45,7 +45,7 @@ class ExifParser(private val context: Context) {
                 Metadata(
                     latitude = latLong[0].toDouble().takeIf { hasGps },
                     longitude = latLong[1].toDouble().takeIf { hasGps },
-                    altitudeMeters = exif.getAltitude(Double.NaN).takeUnless(Double::isNaN),
+                    altitudeMeters = exif.getAltitude(Double.NaN).takeUnless { it.isNaN() },
                     capturedAt = firstNonBlank(
                         exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL),
                         exif.getAttribute(ExifInterface.TAG_DATETIME_DIGITIZED),
@@ -61,11 +61,12 @@ class ExifParser(private val context: Context) {
                     focalLength = clean(exif.getAttribute(ExifInterface.TAG_FOCAL_LENGTH)),
                     exposureTime = clean(exif.getAttribute(ExifInterface.TAG_EXPOSURE_TIME)),
                     fNumber = clean(exif.getAttribute(ExifInterface.TAG_F_NUMBER)),
-                    iso = firstNonBlank(
-                        exif.getAttribute(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY),
-                        exif.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS)
-                    ),
-                    lensModel = clean(exif.getAttribute(ExifInterface.TAG_LENS_MODEL)),
+                    // Framework ExifInterface exposes the older ISO tag constant;
+                    // using it keeps this path compatible with the app's min/compile SDK.
+                    iso = clean(exif.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS)),
+                    // TAG_LENS_MODEL is not exposed by android.media.ExifInterface on
+                    // all API levels. getAttribute accepts the canonical EXIF tag name.
+                    lensModel = clean(exif.getAttribute("LensModel")),
                     artist = clean(exif.getAttribute(ExifInterface.TAG_ARTIST)),
                     copyright = clean(exif.getAttribute(ExifInterface.TAG_COPYRIGHT))
                 )
