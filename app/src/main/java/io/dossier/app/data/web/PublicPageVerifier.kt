@@ -14,12 +14,17 @@ import java.util.concurrent.TimeUnit
  * Re-fetches indexed search results before Dossier gives them meaningful confidence.
  * Search snippets are useful leads, but they are stale, truncated, and occasionally
  * associated with the wrong URL. This verifier confirms that the source still exists
- * and that an identity signal is present on the actual page.
+ * and that independently corroborating identity signals are present on the actual page.
  *
- * When a live page is definitively deleted or replaced, the verifier performs one
- * exact-URL Wayback lookup. A matching archive capture is retained as explicitly
- * historical evidence with a lower confidence ceiling; it is never treated as proof
- * that the profile or page is currently active.
+ * A matching handle or name by itself can prove that an account/page exists, but it is
+ * not sufficient to prove that the account belongs to the audited person. Exact URLs
+ * supplied by the user, exact email/phone matches, or corroborated multi-signal matches
+ * can qualify attribution.
+ *
+ * When a live page is definitively deleted, replaced, or lacks enough current attribution
+ * evidence, the verifier performs one exact-URL archive lookup. A matching archive capture
+ * is retained as explicitly historical evidence with a lower confidence ceiling; it is
+ * never treated as proof that the profile or page is currently active.
  */
 internal class PublicPageVerifier(
     private val client: OkHttpClient = defaultClient(),
@@ -110,6 +115,15 @@ internal class PublicPageVerifier(
                         noArchiveReason = "Direct source contains no matching identity signal"
                     )
                 }
+                if (!assessment.verificationQualified) {
+                    return@withContext verifyArchivedVersion(
+                        input = input,
+                        originalUrl = url,
+                        indexedTitle = indexedTitle,
+                        indexedSnippet = indexedSnippet,
+                        noArchiveReason = "Direct source exists but attribution is not independently corroborated"
+                    )
+                }
 
                 val snippet = description.ifBlank { text.take(360) }.ifBlank { indexedSnippet }.take(360)
                 Outcome.Verified(
@@ -118,7 +132,7 @@ internal class PublicPageVerifier(
                     snippet = snippet,
                     directScore = assessment.directScore,
                     confidenceCeiling = assessment.confidenceCeiling,
-                    signals = assessment.signals
+                    signals = assessment.signals + "Independent attribution threshold satisfied"
                 )
             }
         } catch (cancelled: CancellationException) {
@@ -137,13 +151,13 @@ internal class PublicPageVerifier(
     ): Outcome = when (val archive = archiveResolver.resolveExactUrl(originalUrl)) {
         is ArchivePageResolver.Result.Found -> {
             // Do not use the search snippet to establish attribution: the archive
-            // capture itself must independently expose an identity signal.
+            // capture itself must independently expose enough identity signal.
             val archiveContent = listOf(archive.title, archive.description, archive.text)
                 .filter { it.isNotBlank() }
                 .joinToString("\n")
             val assessment = assessIdentitySignals(input, archive.originalUrl, archiveContent)
-            if (assessment.directScore <= 0f) {
-                Outcome.Rejected("$noArchiveReason; archived capture contained no matching identity signal")
+            if (assessment.directScore <= 0f || !assessment.verificationQualified) {
+                Outcome.Rejected("$noArchiveReason; archived capture did not independently corroborate attribution")
             } else {
                 val date = ArchivePageResolver.displayTimestamp(archive.timestamp)
                 val archiveSnippet = archive.description
@@ -157,15 +171,16 @@ internal class PublicPageVerifier(
                     directScore = (assessment.directScore * HISTORICAL_SCORE_FACTOR).coerceIn(0f, 1f),
                     confidenceCeiling = historicalConfidenceCeiling(assessment.confidenceCeiling),
                     signals = listOf(
-                        "Historical evidence only — live page is deleted, unavailable, or replaced",
+                        "Historical evidence only — live page is deleted, unavailable, replaced, or insufficiently attributed",
                         "Verified against ${archive.provider} capture dated $date",
-                        "Original URL: ${archive.originalUrl}"
+                        "Original URL: ${archive.originalUrl}",
+                        "Independent attribution threshold satisfied on archived content"
                     ) + assessment.signals
                 )
             }
         }
         ArchivePageResolver.Result.NotFound ->
-            Outcome.Rejected("$noArchiveReason; no accessible Wayback capture was found")
+            Outcome.Rejected("$noArchiveReason; no accessible archive capture was found")
         is ArchivePageResolver.Result.Unavailable ->
             Outcome.Unavailable("$noArchiveReason; archive lookup unavailable: ${archive.reason}")
     }
@@ -173,7 +188,8 @@ internal class PublicPageVerifier(
     data class IdentityAssessment(
         val directScore: Float,
         val confidenceCeiling: Float,
-        val signals: List<String>
+        val signals: List<String>,
+        val verificationQualified: Boolean
     )
 
     companion object {
@@ -196,14 +212,12 @@ internal class PublicPageVerifier(
             val normalizedText = pageText.lowercase()
             val signals = mutableListOf<String>()
             var score = 0f
-            var strongCategories = 0
 
             val explicitUrl = input.profileUrls.any {
                 canonical(it) == canonical(url)
             }
             if (explicitUrl) {
                 score += 0.95f
-                strongCategories++
                 signals += "Source URL was explicitly supplied"
             }
 
@@ -214,18 +228,18 @@ internal class PublicPageVerifier(
             val handleInPath = handles.firstOrNull { handleAppearsInPath(url, it) }
             if (handleInPath != null) {
                 score += 0.50f
-                strongCategories++
                 signals += "Exact supplied handle appears in source URL"
             }
-            if (handles.any { containsToken(normalizedText, it) }) {
+            val handleInContent = handles.any { containsToken(normalizedText, it) }
+            if (handleInContent) {
                 score += 0.14f
                 signals += "Supplied handle appears in source content"
             }
 
             val emails = input.emails.map { it.trim().lowercase() }.filter { it.contains('@') }
-            if (emails.any(normalizedText::contains)) {
+            val exactEmailMatch = emails.any(normalizedText::contains)
+            if (exactEmailMatch) {
                 score += 0.72f
-                strongCategories++
                 signals += "Exact email appears on source page"
             }
 
@@ -233,9 +247,9 @@ internal class PublicPageVerifier(
             val phones = input.phones
                 .map { it.filter(Char::isDigit) }
                 .filter { it.length >= 8 }
-            if (phones.any(pageDigits::contains)) {
+            val exactPhoneMatch = phones.any(pageDigits::contains)
+            if (exactPhoneMatch) {
                 score += 0.70f
-                strongCategories++
                 signals += "Exact phone number appears on source page"
             }
 
@@ -243,44 +257,73 @@ internal class PublicPageVerifier(
             val nameParts = name.split("\\s+".toRegex()).filter { it.length >= 3 }
             val fullNameMatch = nameParts.size >= 2 && normalizedText.contains(name)
             val bothNameParts = nameParts.size >= 2 && nameParts.all(normalizedText::contains)
+            val nameMatch = fullNameMatch || bothNameParts
             if (fullNameMatch) {
                 score += 0.34f
-                strongCategories++
                 signals += "Full name appears on source page"
             } else if (bothNameParts) {
                 score += 0.24f
-                strongCategories++
                 signals += "First and last name both appear on source page"
             }
 
             val aliases = input.aliases
                 .map { it.trim().removePrefix("@").lowercase() }
                 .filter { it.length >= 3 }
-            if (aliases.any { containsToken(normalizedText, it) }) {
+            val independentAliasMatch = aliases.any { alias ->
+                alias != handleInPath && containsToken(normalizedText, alias)
+            }
+            if (independentAliasMatch) {
                 score += 0.18f
-                signals += "Known alias appears on source page"
+                signals += "Known independent alias appears on source page"
             }
 
-            if (input.organizations.any { it.trim().length >= 3 && normalizedText.contains(it.trim().lowercase()) }) {
+            val organizationMatch = input.organizations.any {
+                it.trim().length >= 3 && normalizedText.contains(it.trim().lowercase())
+            }
+            if (organizationMatch) {
                 score += 0.12f
                 signals += "Known organization appears on source page"
             }
-            if (input.locations.any { it.trim().length >= 3 && normalizedText.contains(it.trim().lowercase()) }) {
+            val locationMatch = input.locations.any {
+                it.trim().length >= 3 && normalizedText.contains(it.trim().lowercase())
+            }
+            if (locationMatch) {
                 score += 0.08f
                 signals += "Known location appears on source page"
+            }
+
+            val contextualCorroborators = listOf(
+                nameMatch,
+                independentAliasMatch,
+                organizationMatch,
+                locationMatch
+            ).count { it }
+
+            val verificationQualified = when {
+                explicitUrl -> true
+                exactEmailMatch || exactPhoneMatch -> true
+                handleInPath != null && contextualCorroborators >= 1 -> true
+                nameMatch && (independentAliasMatch || organizationMatch || locationMatch) -> true
+                else -> false
             }
 
             score = score.coerceIn(0f, 1f)
             val ceiling = when {
                 explicitUrl -> 0.99f
-                emails.any(normalizedText::contains) || phones.any(pageDigits::contains) -> 0.97f
-                handleInPath != null && strongCategories >= 2 -> 0.95f
-                handleInPath != null -> 0.82f
-                (fullNameMatch || bothNameParts) && signals.size >= 2 -> 0.86f
-                fullNameMatch || bothNameParts -> 0.60f
+                exactEmailMatch || exactPhoneMatch -> 0.97f
+                handleInPath != null && contextualCorroborators >= 2 -> 0.95f
+                handleInPath != null && contextualCorroborators == 1 -> 0.88f
+                nameMatch && (organizationMatch || locationMatch || independentAliasMatch) -> 0.82f
+                nameMatch -> 0.60f
+                handleInPath != null -> 0.58f
                 else -> 0.48f
             }
-            return IdentityAssessment(score, ceiling, signals.distinct())
+            return IdentityAssessment(
+                directScore = score,
+                confidenceCeiling = ceiling,
+                signals = signals.distinct(),
+                verificationQualified = verificationQualified
+            )
         }
 
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
