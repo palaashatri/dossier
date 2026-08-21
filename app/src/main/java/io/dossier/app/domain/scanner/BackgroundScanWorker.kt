@@ -11,7 +11,9 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import io.dossier.app.data.face.FaceCorrelationSessionPolicy
 import io.dossier.app.domain.analysis.OsintPostProcessor
+import io.dossier.app.domain.analysis.UsernameSurfaceAnalysis
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
+import io.dossier.app.domain.evidence.UsernameSurfaceRuntimeCache
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancelAndJoin
@@ -69,10 +71,16 @@ class BackgroundScanWorker(
             ScanSession.executeScan(applicationContext, input, deepResearch)
 
             setProgress(workDataOf(KEY_STAGE to STAGE_POST_PROCESSING))
-            val analysis = OsintPostProcessor.analyze(
+            val baseAnalysis = OsintPostProcessor.analyze(
                 input = input,
                 profiles = ScanSession.profileScanResults.value,
                 evidence = EvidenceRuntimeCache.collection.value
+            )
+            val analysis = baseAnalysis.copy(
+                identitySurface = UsernameSurfaceAnalysis.merge(
+                    base = baseAnalysis.identitySurface,
+                    observations = UsernameSurfaceRuntimeCache.observations.value
+                )
             )
 
             val snapshot = ScanSession.buildCase()
