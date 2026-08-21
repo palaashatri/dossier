@@ -9,6 +9,7 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
 - **Last validated implementation commit:** `1942f06351a9fba9cc0dc429edaf42522e9bfc79`
 - **Validated CI on that commit:** provider-registry audit, face-calibration runtime check, JVM unit tests, debug APK assembly, and API 35 Compose instrumentation tests
+- **Documentation-only commits after the validated implementation:** may update this file/PR prose without changing the validated code claim
 - **Last validated device class:** Pixel 6 profile, Android API 35, x86_64 emulator
 - **Real-device production validation:** not yet recorded
 - **Declarative provider definitions:** **78 authored**
