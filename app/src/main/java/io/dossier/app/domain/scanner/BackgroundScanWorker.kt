@@ -37,9 +37,15 @@ class BackgroundScanWorker(
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = coroutineScope {
         val rawInput = inputData.getString(KEY_IDENTITY_JSON)
-            ?: return@coroutineScope Result.failure(errorData("Missing identity input"))
+        if (rawInput == null) {
+            ScanSession.markBackgroundFailure("Missing identity input")
+            return@coroutineScope Result.failure(errorData("Missing identity input"))
+        }
         val input = runCatching { JSON.decodeFromString<IdentityInput>(rawInput) }.getOrNull()
-            ?: return@coroutineScope Result.failure(errorData("Invalid identity input"))
+        if (input == null) {
+            ScanSession.markBackgroundFailure("Invalid identity input")
+            return@coroutineScope Result.failure(errorData("Invalid identity input"))
+        }
         val deepResearch = inputData.getBoolean(KEY_DEEP_RESEARCH, false)
         val strongCorrelation = inputData.getBoolean(KEY_STRONG_FACE_CORRELATION, false)
 
@@ -60,9 +66,13 @@ class BackgroundScanWorker(
         try {
             ScanSession.executeScan(applicationContext, input, deepResearch)
             val snapshot = ScanSession.buildCase()
-                ?: return@coroutineScope Result.failure(errorData("Scan completed without a persistable result"))
+            if (snapshot == null) {
+                ScanSession.markBackgroundFailure("Scan completed without a persistable result")
+                return@coroutineScope Result.failure(errorData("Scan completed without a persistable result"))
+            }
             val saved = BackgroundScanResultStore(applicationContext).save(id.toString(), snapshot)
             if (!saved) {
+                ScanSession.markBackgroundFailure("Unable to persist encrypted background result")
                 return@coroutineScope Result.failure(errorData("Unable to persist encrypted background result"))
             }
             setProgress(workDataOf(KEY_STAGE to STAGE_COMPLETE))
@@ -75,7 +85,9 @@ class BackgroundScanWorker(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
-            Result.failure(errorData(error.localizedMessage ?: error.javaClass.simpleName))
+            val message = error.localizedMessage ?: error.javaClass.simpleName
+            ScanSession.markBackgroundFailure(message)
+            Result.failure(errorData(message))
         } finally {
             progressRelay.cancelAndJoin()
             FaceCorrelationSessionPolicy.useBasicMatching()
