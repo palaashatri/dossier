@@ -27,6 +27,7 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
@@ -36,6 +37,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.scanner.BackgroundScanManager
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.theme.NeuralTheme
 
@@ -160,7 +162,11 @@ private fun DossierNavGraph(
     navController: NavHostController,
     onNavigateToBrowser: (String) -> Unit
 ) {
-    NavHost(navController = navController, startDestination = "identity") {
+    val context = LocalContext.current
+    val initialRoute = remember(context) {
+        if (BackgroundScanManager.latestResult(context) != null) "analysis" else "identity"
+    }
+    NavHost(navController = navController, startDestination = initialRoute) {
         composable("identity") {
             IdentityScreen(onNext = { navController.navigate("username_discovery") })
         }
