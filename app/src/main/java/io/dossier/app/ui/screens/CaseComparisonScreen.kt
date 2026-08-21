@@ -56,14 +56,7 @@ import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.NeuralTheme
 import java.time.Instant
 
-/**
- * Explicit local saved-case selection, comparison, correction and remediation.
- *
- * User corrections change the effective analysis view but never delete the raw
- * evidence stored in the encrypted case. Remediation state records what the user
- * actually did; it never claims that a remote page was removed merely because a
- * button was pressed.
- */
+/** Explicit local saved-case selection, comparison, correction and remediation. */
 @Composable
 fun CaseComparisonScreen() {
     val context = LocalContext.current
@@ -132,7 +125,7 @@ fun CaseComparisonScreen() {
             fontWeight = FontWeight.SemiBold
         )
         Text(
-            text = "Encrypted on this device. Compare scans, correct attribution, and track cleanup work without altering raw evidence.",
+            text = "Encrypted on this device. Compare scans, correlate reused media, correct attribution, and track cleanup work without altering raw evidence.",
             color = NeuralTheme.TextSecondary,
             fontSize = 12.5.sp,
             lineHeight = 18.sp,
@@ -302,6 +295,15 @@ private fun CaseSelectionCard(
                     fontSize = 11.5.sp,
                     modifier = Modifier.padding(top = 3.dp)
                 )
+                val imageCandidateCount = case.mediaIntelligence.imageResults.sumOf { it.visualCandidates.size }
+                if (case.evidenceRecords.isNotEmpty() || imageCandidateCount > 0) {
+                    Text(
+                        text = "${case.evidenceRecords.size} provenance records · $imageCandidateCount image candidates",
+                        color = NeuralTheme.TextMuted,
+                        fontSize = 10.5.sp,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
                 if (case.userCorrections.isNotEmpty() || case.remediationRecords.isNotEmpty()) {
                     Text(
                         text = "${case.userCorrections.size} correction(s) · ${case.remediationRecords.size} tracked action(s)",
@@ -380,6 +382,35 @@ private fun RenderDiff(
         DeltaRow("Exposure score", diff.exposureDelta, positiveIsGood = false)
         DeltaRow("Discovered profiles", diff.profilesAdded - diff.profilesRemoved, positiveIsGood = null)
         DeltaRow("Known breaches", diff.breachesAdded - diff.breachesRemoved, positiveIsGood = false)
+
+        val media = diff.media
+        if (
+            media.exactContentReused > 0 || media.perceptualFingerprintsReused > 0 ||
+            media.clustersAdded != 0 || media.clustersRemoved != 0 ||
+            media.sourcePagesAdded != 0 || media.sourcePagesRemoved != 0
+        ) {
+            Spacer(modifier = Modifier.height(10.dp))
+            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Cross-scan media correlation",
+                color = NeuralTheme.TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "Hash reuse tracks copied/reposted image content between these saved cases; it does not by itself establish identity.",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 10.5.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)
+            )
+            MediaMetricRow("Exact SHA-256 reused", media.exactContentReused)
+            MediaMetricRow("Perceptual hashes reused", media.perceptualFingerprintsReused)
+            DeltaRow("Image clusters", media.clustersAdded - media.clustersRemoved, positiveIsGood = null)
+            DeltaRow("Image source pages", media.sourcePagesAdded - media.sourcePagesRemoved, positiveIsGood = null)
+        }
+
         Spacer(modifier = Modifier.height(10.dp))
         HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
         Spacer(modifier = Modifier.height(8.dp))
@@ -414,7 +445,7 @@ private fun RenderDiff(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "Verification compares only these two authorized case snapshots. A result disappearing from the newer scan is not proof that search indexes, caches, archives, or every live copy are gone.",
+                text = "Verification compares only these two assessment snapshots. A result disappearing from the newer scan is not proof that search indexes, caches, archives, or every live copy are gone.",
                 color = NeuralTheme.TextSecondary,
                 fontSize = 10.5.sp,
                 lineHeight = 15.sp,
@@ -424,6 +455,17 @@ private fun RenderDiff(
                 RemediationVerificationRow(verification)
             }
         }
+    }
+}
+
+@Composable
+private fun MediaMetricRow(label: String, value: Int) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, color = NeuralTheme.TextSecondary, fontSize = 11.5.sp)
+        Text(value.toString(), color = NeuralTheme.Cobalt, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
     }
 }
 
@@ -531,6 +573,15 @@ private fun RenderSingleCase(case: DossierCase) {
             color = NeuralTheme.TextPrimary,
             fontSize = 12.5.sp
         )
+        val imageCandidateCount = case.mediaIntelligence.imageResults.sumOf { it.visualCandidates.size }
+        if (case.evidenceRecords.isNotEmpty() || imageCandidateCount > 0) {
+            Text(
+                text = "${case.evidenceRecords.size} provenance records · $imageCandidateCount image candidates",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
         case.exposure?.let { exposure ->
             Text(
                 text = "Exposure: ${exposure.dimensions.joinToString(", ") { dimension -> "${dimension.dimension.name.lowercase()} ${dimension.score}" }}",
