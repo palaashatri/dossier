@@ -59,7 +59,7 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
         ?.route
 
     LaunchedEffect(currentDossierRoute) {
-        if (currentDossierRoute in listOf("identity", "username_discovery", "scan", "report")) {
+        if (currentDossierRoute in listOf("identity", "username_discovery", "scan", "analysis", "report")) {
             selectedTab = HubTab.DOSSIER
         }
     }
@@ -178,6 +178,12 @@ private fun DossierNavGraph(
                         launchSingleTop = true
                     }
                 },
+                onScanBackgrounded = {
+                    navController.navigate("analysis") {
+                        popUpTo("scan") { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
                 onScanCancelled = {
                     val returned = navController.popBackStack("username_discovery", inclusive = false)
                     if (!returned) {
@@ -188,6 +194,22 @@ private fun DossierNavGraph(
                     }
                 },
                 onInvalidInput = {
+                    navController.navigate("identity") {
+                        popUpTo("identity") { inclusive = false }
+                        launchSingleTop = true
+                    }
+                }
+            )
+        }
+        composable("analysis") {
+            AnalysisScreen(
+                onOpenReport = {
+                    navController.navigate("report") {
+                        popUpTo("analysis") { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
+                onBackToSetup = {
                     navController.navigate("identity") {
                         popUpTo("identity") { inclusive = false }
                         launchSingleTop = true
