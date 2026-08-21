@@ -22,10 +22,10 @@ import java.time.format.DateTimeFormatter
 /**
  * Local-only compatibility parser for historical Twint and snscrape exports.
  *
- * Dossier does not execute either scraper. The caller supplies an export created
- * elsewhere for an explicitly authorized handle; every parsed record stays a
- * Candidate/ThirdPartyAggregation observation until its public URL is independently
- * verified by Dossier's live/archive verification pipeline.
+ * Dossier never launches either scraper. Every accepted record must belong to an
+ * explicitly authorized handle and remains Candidate/ThirdPartyAggregation. Public
+ * mention/reply metadata is converted into bounded interaction edges for local graph
+ * analysis; those edges describe observed interactions and never establish identity.
  */
 object LegacyOsintExportParser {
     enum class Source { TwintJson, SnscrapeJsonl }
@@ -39,7 +39,7 @@ object LegacyOsintExportParser {
 
     fun parse(source: Source, raw: String, authorizedHandles: Collection<String>): ParseResult {
         val handles = authorizedHandles
-            .map { normalizeHandle(it) }
+            .map(::normalizeHandle)
             .filter { it.length >= 2 }
             .toSet()
         if (handles.isEmpty() || raw.isBlank()) {
@@ -91,18 +91,45 @@ object LegacyOsintExportParser {
                 relation = "IMPORTED_PUBLIC_ACTIVITY",
                 evidence = "User-supplied ${sourceLabel(source)} export; independent verification required"
             )
+
+            parsed.replyTo?.let { target ->
+                if (target != handle) {
+                    relationships += EvidenceRelationship(
+                        fromValue = handle,
+                        toValue = target,
+                        relation = "REPLIES_TO",
+                        evidence = parsed.url
+                    )
+                }
+            }
+            parsed.mentions
+                .asSequence()
+                .filter { it != handle && it != parsed.replyTo }
+                .take(MAX_INTERACTIONS_PER_RECORD)
+                .forEach { target ->
+                    relationships += EvidenceRelationship(
+                        fromValue = handle,
+                        toValue = target,
+                        relation = "MENTIONS",
+                        evidence = parsed.url
+                    )
+                }
         }
 
+        val dedupedEvidence = evidence.distinctBy(Evidence::id)
+        val dedupedRelationships = relationships.distinctBy {
+            "${it.fromValue}|${it.toValue}|${it.relation}|${it.evidence.orEmpty()}"
+        }
         val warnings = buildList {
             if (records.size > MAX_RECORDS) add("Export truncated to $MAX_RECORDS records")
             if (rejected > 0) add("$rejected record(s) rejected because the handle/URL did not match the authorized import contract")
         }
         return ParseResult(
             collection = EvidenceCollection(
-                evidence = evidence.distinctBy { it.id },
-                relationships = relationships.distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}" }
+                evidence = dedupedEvidence,
+                relationships = dedupedRelationships
             ),
-            acceptedRecords = evidence.distinctBy { it.id }.size,
+            acceptedRecords = dedupedEvidence.size,
             rejectedRecords = rejected,
             warnings = warnings
         )
@@ -112,7 +139,9 @@ object LegacyOsintExportParser {
         val username: String,
         val url: String,
         val text: String,
-        val observedAtEpochMillis: Long?
+        val observedAtEpochMillis: Long?,
+        val mentions: List<String> = emptyList(),
+        val replyTo: String? = null
     )
 
     private fun parseTwint(obj: JsonObject): ImportedRecord? {
@@ -124,7 +153,18 @@ object LegacyOsintExportParser {
             obj.string("date"),
             listOfNotNull(obj.string("date"), obj.string("time")).joinToString(" ").ifBlank { null }
         )
-        return ImportedRecord(username, url, text, timestamp)
+        val replyTo = firstHandle(
+            obj.string("reply_to_username"),
+            obj.string("in_reply_to_screen_name"),
+            obj.obj("reply_to")?.string("username"),
+            obj.obj("reply_to")?.string("screen_name")
+        ) ?: handlesFromElement(obj["reply_to"]).firstOrNull()
+        val mentions = (
+            handlesFromElement(obj["mentions"]) +
+                handlesFromElement(obj["mentioned_users"]) +
+                handlesFromText(text)
+            ).distinct().take(MAX_INTERACTIONS_PER_RECORD)
+        return ImportedRecord(username, url, text, timestamp, mentions, replyTo)
     }
 
     private fun parseSnscrape(obj: JsonObject): ImportedRecord? {
@@ -140,8 +180,48 @@ object LegacyOsintExportParser {
             ?: obj.string("renderedContent")
             ?: ""
         val timestamp = firstTimestamp(obj.string("date"), obj.string("createdAt"), obj.string("created_at"))
-        return ImportedRecord(username, url, text, timestamp)
+        val replyObject = obj.obj("inReplyToUser") ?: obj.obj("in_reply_to_user")
+        val replyTo = firstHandle(
+            replyObject?.string("username"),
+            replyObject?.string("displayname"),
+            obj.string("inReplyToUserUsername"),
+            obj.string("in_reply_to_screen_name")
+        )
+        val mentions = (
+            handlesFromElement(obj["mentionedUsers"]) +
+                handlesFromElement(obj["mentioned_users"]) +
+                handlesFromText(text)
+            ).distinct().take(MAX_INTERACTIONS_PER_RECORD)
+        return ImportedRecord(username, url, text, timestamp, mentions, replyTo)
     }
+
+    private fun handlesFromElement(element: JsonElement?): List<String> = when (element) {
+        is JsonArray -> element.flatMap(::handlesFromElement)
+        is JsonObject -> listOfNotNull(
+            element.string("username"),
+            element.string("screen_name"),
+            element.string("user")
+        ).map(::normalizeHandle).filter(String::isNotBlank)
+        is JsonPrimitive -> element.contentOrNull
+            ?.let(::normalizeHandle)
+            ?.takeIf(String::isNotBlank)
+            ?.let(::listOf)
+            ?: emptyList()
+        else -> emptyList()
+    }
+
+    private fun handlesFromText(text: String): List<String> = HANDLE_MENTION.findAll(text)
+        .map { normalizeHandle(it.groupValues[1]) }
+        .filter(String::isNotBlank)
+        .distinct()
+        .take(MAX_INTERACTIONS_PER_RECORD)
+        .toList()
+
+    private fun firstHandle(vararg values: String?): String? = values
+        .asSequence()
+        .filterNotNull()
+        .map(::normalizeHandle)
+        .firstOrNull(String::isNotBlank)
 
     private fun parseRecords(raw: String): List<JsonObject> {
         val trimmed = raw.trim()
@@ -157,7 +237,7 @@ object LegacyOsintExportParser {
 
         return trimmed.lineSequence()
             .map(String::trim)
-            .filter { it.isNotBlank() }
+            .filter(String::isNotBlank)
             .mapNotNull { line -> runCatching { JSON.parseToJsonElement(line) as? JsonObject }.getOrNull() }
             .toList()
     }
@@ -194,7 +274,10 @@ object LegacyOsintExportParser {
     private fun normalizeHandle(raw: String): String = raw.trim()
         .removePrefix("@")
         .removePrefix("u/")
+        .trimEnd(',', '.', ':', ';', ')', ']', '}')
         .lowercase()
+        .takeIf { it.matches(HANDLE_VALUE) }
+        .orEmpty()
 
     private fun sourceLabel(source: Source): String = when (source) {
         Source.TwintJson -> "Twint JSON"
@@ -216,7 +299,10 @@ object LegacyOsintExportParser {
 
     private const val MAX_RECORDS = 2_000
     private const val MAX_SNIPPET_CHARS = 900
+    private const val MAX_INTERACTIONS_PER_RECORD = 24
     private const val IMPORT_CONFIDENCE = 0.52f
-    private const val PARSER_VERSION = "legacy-osint-import-v1"
+    private const val PARSER_VERSION = "legacy-osint-import-v2"
+    private val HANDLE_MENTION = Regex("(?<![A-Za-z0-9_])@([A-Za-z0-9_][A-Za-z0-9_.-]{1,63})")
+    private val HANDLE_VALUE = Regex("[a-z0-9_][a-z0-9_.-]{1,63}")
     private val JSON = Json { ignoreUnknownKeys = true }
 }
