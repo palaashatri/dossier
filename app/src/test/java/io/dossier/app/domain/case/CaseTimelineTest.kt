@@ -15,7 +15,7 @@ class CaseTimelineTest {
         val case = DossierCase(
             createdAt = "2026-08-21 01:00",
             subjectName = "X",
-            input = IdentityInput(primaryUsername = "x"),
+            input = IdentityInput(fullName = "", primaryUsername = "x"),
             evidenceRecords = listOf(
                 Evidence(
                     id = "old",
@@ -53,10 +53,7 @@ class CaseTimelineTest {
 
     @Test
     fun parsesRecordedScanTimesWithoutFabricatingUnknownFormats() {
-        assertEquals(
-            0L,
-            CaseTimelineBuilder.parseTimestamp("1970-01-01T00:00:00Z")
-        )
+        assertEquals(0L, CaseTimelineBuilder.parseTimestamp("1970-01-01T00:00:00Z"))
         assertEquals(null, CaseTimelineBuilder.parseTimestamp("definitely-not-a-time"))
     }
 }
