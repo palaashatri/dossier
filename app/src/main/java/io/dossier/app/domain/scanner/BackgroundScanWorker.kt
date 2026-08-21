@@ -12,6 +12,7 @@ import androidx.work.workDataOf
 import io.dossier.app.data.face.FaceCorrelationSessionPolicy
 import io.dossier.app.domain.analysis.OsintPostProcessor
 import io.dossier.app.domain.analysis.UsernameSurfaceAnalysis
+import io.dossier.app.domain.case.AuthorizedScope
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.UsernameSurfaceRuntimeCache
 import io.dossier.app.domain.model.IdentityInput
@@ -25,15 +26,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.util.UUID
 
-/**
- * Durable authorized scan execution.
- *
- * WorkManager owns scheduling/restart semantics, so leaving the scan screen or
- * backgrounding the app no longer aborts analysis just because a Compose scope or
- * activity disappears. If Android terminates the process, WorkManager may restart
- * this unit of work from the beginning; Dossier does not claim stage-level frontier
- * resume until the scanner frontier itself is persisted.
- */
+/** Durable WorkManager-owned assessment execution. */
 class BackgroundScanWorker(
     appContext: Context,
     params: WorkerParameters
@@ -71,10 +64,11 @@ class BackgroundScanWorker(
             ScanSession.executeScan(applicationContext, input, deepResearch)
 
             setProgress(workDataOf(KEY_STAGE to STAGE_POST_PROCESSING))
+            val evidenceCollection = EvidenceRuntimeCache.collection.value
             val baseAnalysis = OsintPostProcessor.analyze(
                 input = input,
                 profiles = ScanSession.profileScanResults.value,
-                evidence = EvidenceRuntimeCache.collection.value
+                evidence = evidenceCollection
             )
             val analysis = baseAnalysis.copy(
                 identitySurface = UsernameSurfaceAnalysis.merge(
@@ -83,7 +77,12 @@ class BackgroundScanWorker(
                 )
             )
 
-            val snapshot = ScanSession.buildCase()
+            val snapshot = ScanSession.buildCase()?.copy(
+                authorizedScope = AuthorizedScope.AuthorizedAssessment,
+                evidenceRecords = evidenceCollection.evidence
+                    .distinctBy { it.id }
+                    .take(MAX_SNAPSHOT_EVIDENCE)
+            )
             if (snapshot == null) {
                 ScanSession.markBackgroundFailure("Scan completed without a persistable result")
                 return@coroutineScope Result.failure(errorData("Scan completed without a persistable result"))
@@ -138,6 +137,7 @@ class BackgroundScanWorker(
         internal const val KEY_STRONG_FACE_CORRELATION = "strong_face_correlation"
         private const val MAX_STAGE_CHARS = 180
         private const val MAX_ERROR_CHARS = 400
+        private const val MAX_SNAPSHOT_EVIDENCE = 10_000
         private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
     }
 }
