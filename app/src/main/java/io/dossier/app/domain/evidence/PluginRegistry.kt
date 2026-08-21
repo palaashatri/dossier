@@ -31,7 +31,8 @@ object PluginRegistry {
         WhatsMyNameUsernamePlugin(),
         WaybackHistoryPlugin(),
         LegacyOsintImportPlugin(),
-        ExternalOsintImportPlugin()
+        ExternalOsintImportPlugin(),
+        ExternalInteractionImportPlugin()
     )
 
     fun register(plugin: ScannerPlugin) {
