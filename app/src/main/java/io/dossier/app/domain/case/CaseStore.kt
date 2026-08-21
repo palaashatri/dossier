@@ -5,6 +5,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import io.dossier.app.domain.discovery.ScanHistoryRuntime
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.place.MediaIntelligenceSession
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -34,25 +35,31 @@ class CaseStore(private val context: Context) {
         get() = File(context.filesDir, CASE_DIRECTORY).also { it.mkdirs() }
 
     /**
-     * Initial explicit save. If the coordinator has a terminal lifecycle record
-     * for the same normalized identity seed set, attach it to the new encrypted
-     * case. Reverse-media results from the same working session are also attached
-     * at this explicit save boundary; they are never persisted merely by viewing
-     * or analyzing media.
+     * Initial explicit save attaches the current bounded working-session evidence,
+     * media intelligence, and matching terminal scan history. None of these are
+     * promoted into persistent Case storage merely by running a scan or lookup.
      */
-    fun save(case: DossierCase): Boolean = saveInternal(case, attachLatestScanHistory = true)
+    fun save(case: DossierCase): Boolean = saveInternal(case, attachSessionState = true)
 
     private fun saveInternal(
         case: DossierCase,
-        attachLatestScanHistory: Boolean
+        attachSessionState: Boolean
     ): Boolean = runCatching {
-        val withSessionMedia = if (attachLatestScanHistory && case.mediaIntelligence.isEmpty) {
-            val media = MediaIntelligenceSession.snapshot()
-            if (!media.isEmpty) case.copy(mediaIntelligence = media) else case
+        val withEvidence = if (attachSessionState && case.evidenceRecords.isEmpty()) {
+            val evidence = EvidenceRuntimeCache.collection.value.evidence
+                .distinctBy { it.id }
+                .take(MAX_EVIDENCE_RECORDS)
+            if (evidence.isNotEmpty()) case.copy(evidenceRecords = evidence) else case
         } else {
             case
         }
-        val withHistory = if (attachLatestScanHistory && withSessionMedia.scanHistory.isEmpty()) {
+        val withSessionMedia = if (attachSessionState && withEvidence.mediaIntelligence.isEmpty) {
+            val media = MediaIntelligenceSession.snapshot()
+            if (!media.isEmpty) withEvidence.copy(mediaIntelligence = media) else withEvidence
+        } else {
+            withEvidence
+        }
+        val withHistory = if (attachSessionState && withSessionMedia.scanHistory.isEmpty()) {
             ScanHistoryRuntime.latestFor(withSessionMedia.input)?.let { entry ->
                 withSessionMedia.copy(scanHistory = listOf(entry))
             } ?: withSessionMedia
@@ -83,7 +90,7 @@ class CaseStore(private val context: Context) {
             json.decodeFromString<DossierCase>(legacy.readText())
         }.getOrNull() ?: return null
         val normalized = normalizeCase(migrated)
-        return if (saveInternal(normalized, attachLatestScanHistory = false)) normalized else migrated
+        return if (saveInternal(normalized, attachSessionState = false)) normalized else migrated
     }
 
     fun list(): List<DossierCase> = runCatching {
@@ -138,15 +145,14 @@ class CaseStore(private val context: Context) {
         val current = load(caseId) ?: return false
         return saveInternal(
             transform(current),
-            attachLatestScanHistory = false
+            attachSessionState = false
         )
     }
 
     /**
-     * Migrates privacy-sensitive metadata without changing the underlying finding
-     * values themselves. v3 correction/graph evidence IDs can contain raw values;
-     * v4+ stores only deterministic `ev2:` hashes for those IDs. v5 additionally
-     * materializes persisted reverse-media clusters into graph nodes/edges.
+     * Normalizes legacy privacy-sensitive identifiers and projects persisted
+     * reverse-media evidence into the semantic graph. Missing v5/v6 fields decode
+     * to empty defaults, so old encrypted/plaintext cases remain migratable.
      */
     internal fun normalizeCase(case: DossierCase): DossierCase {
         val migratedCorrections = case.userCorrections.map { correction ->
@@ -170,6 +176,7 @@ class CaseStore(private val context: Context) {
         val mediaGraph = MediaGraphEnricher.enrich(migratedGraph, case.mediaIntelligence)
         return case.copy(
             schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION,
+            evidenceRecords = case.evidenceRecords.distinctBy { it.id }.take(MAX_EVIDENCE_RECORDS),
             userCorrections = migratedCorrections,
             entityGraph = mediaGraph
         )
@@ -254,6 +261,7 @@ class CaseStore(private val context: Context) {
         const val LEGACY_EXTENSION = "json"
         const val TEMP_EXTENSION = "tmp"
         const val ENVELOPE_VERSION = 1
+        const val MAX_EVIDENCE_RECORDS = 10_000
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         const val KEY_ALIAS = "dossier-case-storage-v1"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
