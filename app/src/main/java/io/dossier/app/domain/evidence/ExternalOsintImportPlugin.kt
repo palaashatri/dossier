@@ -2,6 +2,7 @@ package io.dossier.app.domain.evidence
 
 import io.dossier.app.data.web.ExternalOsintImportSession
 import io.dossier.app.data.web.ExternalOsintReportParser
+import io.dossier.app.data.web.NumverifyReportParser
 import io.dossier.app.domain.model.IdentityInput
 
 /**
@@ -19,6 +20,21 @@ class ExternalOsintImportPlugin : ScannerPlugin {
         val relationships = mutableListOf<EvidenceRelationship>()
 
         ExternalOsintImportSession.snapshot().forEach { pending ->
+            if (NumverifyReportParser.looksLikeNumverify(pending.displayName, pending.rawText)) {
+                val numverify = NumverifyReportParser.parse(pending.rawText, input)
+                evidence += numverify.evidence.map { record ->
+                    record.copy(
+                        signals = record.signals + listOf(
+                            "Locally selected report: ${pending.displayName}",
+                            "Report SHA-256: ${pending.sha256}",
+                            "Report bytes: ${pending.byteCount}"
+                        )
+                    )
+                }
+                relationships += numverify.relationships
+                return@forEach
+            }
+
             val parsed = ExternalOsintReportParser.parse(
                 source = pending.source,
                 raw = pending.rawText,
