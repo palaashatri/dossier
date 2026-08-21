@@ -24,11 +24,14 @@ jobs:
           # These are low-frequency health probes, not attribution fixtures. A
           # healthy HTTP response proves only that a public provider surface is
           # reachable from this runner. Deterministic parsing/soft-error behavior
-          # remains covered by JVM fixtures.
+          # remains covered by JVM fixtures. Canary subjects are platform/system
+          # accounts or example.com, never an investigation target.
           probes = [
               ("GitHub API found", "https://api.github.com/users/octocat", {200}),
               ("GitHub API absent", "https://api.github.com/users/dossier-canary-account-that-must-not-exist-928471", {404}),
-              ("Reddit public API", "https://www.reddit.com/user/spez/about.json?raw_json=1", {200}),
+              ("Reddit public profile API", "https://www.reddit.com/user/AutoModerator/about.json?raw_json=1", {200}),
+              ("Reddit exact-author post search", "https://api.reddit.com/search/?q=author:%22AutoModerator%22&sort=new&limit=1&raw_json=1", {200}),
+              ("Reddit Shreddit comment search", "https://www.reddit.com/svc/shreddit/search/?q=author:%22AutoModerator%22&type=comments&sort=new", {200}),
               ("Bluesky public API", "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=jay.bsky.team", {200}),
               ("Hacker News API", "https://hacker-news.firebaseio.com/v0/user/pg.json", {200}),
               ("DEV public API", "https://dev.to/api/users/by_username?url=ben", {200}),
@@ -44,6 +47,8 @@ jobs:
               ("SoundCloud public profile", "https://soundcloud.com/soundcloud", {200}),
               ("Letterboxd public profile", "https://letterboxd.com/jack/", {200}),
               ("Wayback availability", "https://archive.org/wayback/available?url=example.com", {200}),
+              ("Wayback CDX exact URL", "https://web.archive.org/cdx/search/cdx?url=https%3A%2F%2Fexample.com%2F&output=json&fl=timestamp%2Coriginal%2Cdigest%2Cstatuscode%2Cmimetype&filter=statuscode%3A200&filter=mimetype%3Atext%2Fhtml&limit=1", {200}),
+              ("archive.ph newest exact URL", "https://archive.ph/newest/https://example.com/", {200, 404}),
               ("DuckDuckGo HTML", "https://html.duckduckgo.com/html/?q=example", {200}),
               ("Bing Search", "https://www.bing.com/search?q=example&count=10", {200}),
               ("Yandex Search", "https://yandex.com/search/?text=example&noreask=1", {200}),
