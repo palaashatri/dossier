@@ -164,7 +164,10 @@ private fun DossierNavGraph(
 ) {
     val context = LocalContext.current
     val initialRoute = remember(context) {
-        if (BackgroundScanManager.latestResult(context) != null) "analysis" else "identity"
+        if (
+            BackgroundScanManager.hasActiveMarker(context) ||
+            BackgroundScanManager.latestResult(context) != null
+        ) "analysis" else "identity"
     }
     NavHost(navController = navController, startDestination = initialRoute) {
         composable("identity") {
