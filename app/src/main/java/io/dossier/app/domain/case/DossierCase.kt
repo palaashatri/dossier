@@ -5,6 +5,7 @@ import io.dossier.app.domain.evidence.AttackPathFinder.AttackPath
 import io.dossier.app.domain.evidence.ExposureEngine.ExposureResult
 import io.dossier.app.domain.evidence.RelationshipConfidence
 import io.dossier.app.domain.model.*
+import io.dossier.app.domain.place.MediaIntelligenceSnapshot
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
@@ -12,7 +13,8 @@ import java.util.UUID
 enum class AuthorizedScope {
     SelfAudit,
     ExplicitConsent,
-    AuthorizedResearch
+    AuthorizedResearch,
+    AuthorizedAssessment
 }
 
 @Serializable
@@ -82,7 +84,7 @@ data class CaseExportRecord(
     val manifestSha256: String? = null
 )
 
-/** Complete, persistable snapshot of an explicitly saved authorized audit. */
+/** Complete, persistable snapshot of an explicitly saved assessment. */
 @Serializable
 data class DossierCase(
     val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
@@ -90,7 +92,7 @@ data class DossierCase(
     val createdAt: String,
     val subjectName: String,
     val input: IdentityInput,
-    val authorizedScope: AuthorizedScope = AuthorizedScope.SelfAudit,
+    val authorizedScope: AuthorizedScope = AuthorizedScope.AuthorizedAssessment,
     val findings: List<Finding> = emptyList(),
     val profileResults: List<ProfileScanResult> = emptyList(),
     val faceMatches: List<FaceConsistencyMatch> = emptyList(),
@@ -101,6 +103,7 @@ data class DossierCase(
     val attackPaths: List<AttackPath> = emptyList(),
     val relationshipConfidence: Map<String, RelationshipConfidence> = emptyMap(),
     val aiSummary: String? = null,
+    val mediaIntelligence: MediaIntelligenceSnapshot = MediaIntelligenceSnapshot(),
     val scanHistory: List<CaseScanHistoryEntry> = emptyList(),
     val userCorrections: List<UserCorrection> = emptyList(),
     val remediationRecords: List<RemediationRecord> = emptyList(),
@@ -116,7 +119,7 @@ data class DossierCase(
         "${finding.type.name}|${finding.value}|${finding.sourceUrl.orEmpty()}"
 
     companion object {
-        /** v4 replaces raw-value evidence IDs with deterministic hashed IDs. */
-        const val CURRENT_SCHEMA_VERSION = 4
+        /** v5 persists bounded reverse-media provenance and clusters in encrypted cases. */
+        const val CURRENT_SCHEMA_VERSION = 5
     }
 }
