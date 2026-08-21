@@ -58,7 +58,9 @@ import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.DeepResearchToggle
+import io.dossier.app.ui.components.ExternalOsintImportPicker
 import io.dossier.app.ui.components.ImageSourcePicker
+import io.dossier.app.ui.components.LegacyOsintImportPicker
 import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.DossierCardShape
 import io.dossier.app.ui.theme.NeuralTheme
@@ -403,7 +405,7 @@ private fun StepThree(
     Column {
         StepTitle(
             "3. Add direct sources",
-            "Specific links improve precision. A selfie is optional and never silently enables strong face correlation."
+            "Specific links and locally selected public-OSINT reports improve precision. Imports are discovery evidence only; Dossier still verifies surviving public sources independently."
         )
         CyberTextField(
             profileUrls,
@@ -428,6 +430,10 @@ private fun StepThree(
             singleLine = false,
             supportingText = "One per line or separated by commas."
         )
+        Spacer(modifier = Modifier.height(18.dp))
+        LegacyOsintImportPicker()
+        Spacer(modifier = Modifier.height(12.dp))
+        ExternalOsintImportPicker()
         Spacer(modifier = Modifier.height(18.dp))
         ImageSourcePicker(
             label = "Consented reference photo (optional)",
