@@ -92,7 +92,9 @@ data class DossierCase(
     val createdAt: String,
     val subjectName: String,
     val input: IdentityInput,
-    val authorizedScope: AuthorizedScope = AuthorizedScope.AuthorizedAssessment,
+    // Keep SelfAudit as the decoding default for pre-v5 cases. New investigations
+    // can explicitly select AuthorizedAssessment without rewriting historical meaning.
+    val authorizedScope: AuthorizedScope = AuthorizedScope.SelfAudit,
     val findings: List<Finding> = emptyList(),
     val profileResults: List<ProfileScanResult> = emptyList(),
     val faceMatches: List<FaceConsistencyMatch> = emptyList(),
