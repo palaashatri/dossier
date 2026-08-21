@@ -7,8 +7,8 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 - **Strict product readiness score:** **63/100**
 - **Milestone state:** M0 complete; M1–M6 and M8–M12 materially advanced but still partial; M7 and M13 remain partial
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
-- **Last validated implementation commit:** `ead2e9806914ee0bd525a2c9d0a548c17348f5fa`
-- **Validated CI on that commit:** provider-registry audit, face-calibration runtime check, JVM unit tests, debug APK assembly, and all **9** API 35 Compose instrumentation tests
+- **Last validated implementation commit:** `1942f06351a9fba9cc0dc429edaf42522e9bfc79`
+- **Validated CI on that commit:** provider-registry audit, face-calibration runtime check, JVM unit tests, debug APK assembly, and API 35 Compose instrumentation tests
 - **Last validated device class:** Pixel 6 profile, Android API 35, x86_64 emulator
 - **Real-device production validation:** not yet recorded
 - **Declarative provider definitions:** **78 authored**
@@ -17,24 +17,26 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 
 Compilation, unit tests and emulator tests are necessary gates, but they do not substitute for live-provider validation, calibrated identity/face benchmarks, physical-device measurements, accessibility validation or release hardening.
 
+The readiness score remains **63/100** after the OSINT-interoperability tranche. The tranche materially improves breadth and provenance discipline, but import compatibility and source cataloguing are not equivalent to independently validated provider coverage.
+
 ## Strict 100-point rubric
 
 | Area | Score | Truth |
 |---|---:|---|
-| Discovery breadth and reliability | **9/15** | Discovery Fabric v2 is integrated into runtime scan planning with 78 declarative definitions, categories, validation, health primitives, scan modes, maintenance-audit CI and compatibility execution. It remains far below the 1,000+ reviewed target and lacks registry-wide live validation and universal v2 scheduling. |
+| Discovery breadth and reliability | **9/15** | Discovery Fabric v2 is integrated into runtime scan planning with 78 declarative definitions, categories, validation, health primitives, scan modes, maintenance-audit CI and compatibility execution. A broad OSINT capability catalog and bounded report-interoperability layer now cover many additional tool families, but most external frameworks are import/manual integrations rather than native live providers. The project remains far below the 1,000+ reviewed/live-validated target. |
 | Recursive orchestration | **5/10** | The coordinator/event bridge starts and observes the mature pipeline; live UI consumes real event-derived state; two-hop discovery has admission/visited/depth/budget rules; real terminal scan history is captured. True in-flight pause/resume, sole coordinator ownership, per-provider lifecycle events and a general persisted frontier remain incomplete. |
-| Evidence/provenance | **6/10** | Universal evidence supports provider, retrieval/observation timestamps, verification state, reliability, SHA-256, parser version and historical state. Verification is separate from numeric confidence. Older producers still do not populate every field universally. |
-| Entity resolution | **5/10** | An explainable multi-signal resolver is integrated into the production graph, preserves contributions and contradictions, and prevents same-username-only confirmation. Weights remain engineering parameters rather than benchmark-calibrated probabilities. |
-| Identity graph | **6/8** | Graph v2 adds semantic node kinds, typed relationships, evidence/contradiction IDs, node states, history fields, queries and schema versioning while preserving legacy case compatibility. Some subsystems still retain parallel representations and not every edge has complete evidence linkage. |
-| Image acquisition/correlation | **6/8** | Public candidate acquisition, local SHA-256/aHash/dHash/pHash/histogram/crop comparison, first-class candidate provenance, stable candidate IDs, exact/perceptual duplicate clusters and inspectable Reverse Media provenance UI are implemented. Candidate/cluster persistence into encrypted cases and the main identity graph remains incomplete. |
-| Face-correlation validation | **3/6** | YuNet/SFace artifacts are pinned and integrity checked; preprocessing, alignment, quality rejection and calibration tooling exist and its runtime check passes CI. Representative measured FAR/FRR/ROC results and physical-device inference validation do not exist yet. |
-| Historical evidence | **3/6** | Exact-URL Wayback recovery exists and a timestamp-disciplined timeline builder separates current, historical and breach events without inventing dates. Universal archive metadata propagation, broader extraction and timeline UI remain incomplete. |
-| Breach intelligence | **4/5** | HIBP authoritative coverage remains separate from general public exposure; privacy-preserving range flows are used where supported; breach/provider/retrieval/date metadata is preserved. Coverage still depends on compatible user credentials/provider availability and full investigation UX is unfinished. |
-| AI analyst | **4/5** | Generated factual claims must be structured, cite existing evidence IDs and survive deterministic validation; hallucinated/uncited claims are withheld and invalid output falls back locally. Corrected-graph/remediation-native inputs and a production evaluation corpus remain incomplete. |
-| UX/UI | **6/8** | Overview/Evidence/Connections/Actions remain coherent; live scan state is event-derived; saved Cases support persistent corrections, remediation tracking, real scan-history display, non-overclaiming remediation rechecks and share-safe export; Reverse Media exposes candidate provenance/clusters. Timeline UX, case-integrated image clusters, live Evidence corrections and broad accessibility/adaptive-layout validation remain incomplete. |
-| Security/privacy | **3/4** | Keystore AES-256-GCM cases, restricted evidence WebView, local visual processing defaults, opt-in remote AI, explicit deletion, pre-write share-safe export redaction and a non-browser-impersonating reverse-image User-Agent are implemented. The full security/privacy test matrix and finer redaction controls remain incomplete. |
-| Testing/device validation | **3/5** | Provider audit, calibration runtime, JVM tests, APK assembly and 9 Compose tests pass on API 35, including encrypted scan-history/correction/remediation persistence and non-overclaiming remediation verification. Physical Samsung/Pixel/lower-memory, battery, process-death, font-scale and accessibility gates remain incomplete. |
-| **Total** | **63/100** | A materially integrated contract tranche is validated. Empirical calibration, provider scale and production hardening still cap readiness. |
+| Evidence/provenance | **6/10** | Universal evidence supports provider, retrieval/observation timestamps, verification state, reliability, SHA-256, parser version and historical state. Imported third-party OSINT reports are explicitly Candidate/ThirdPartyAggregation and never become Verified merely because an external tool reported a hit. Older producers still do not populate every field universally. |
+| Entity resolution | **5/10** | An explainable multi-signal resolver is integrated into the production graph, preserves contributions and contradictions, and prevents same-username-only confirmation. Direct profile verification now keeps handle-only/name-only matches below the attribution threshold unless independently corroborated or explicitly supplied. Weights remain engineering parameters rather than benchmark-calibrated probabilities. |
+| Identity graph | **6/8** | Graph v2 adds semantic node kinds, typed relationships, evidence/contradiction IDs, node states, history fields, queries and schema versioning while preserving legacy case compatibility. GraphML, declared-attribute GEXF and NetworkX-style node-link JSON serializers provide dependency-free interoperability with Gephi/Cytoscape/NetworkX-style workflows. Some subsystems still retain parallel representations. |
+| Image acquisition/correlation | **6/8** | Public candidate acquisition, local SHA-256/aHash/dHash/pHash/histogram/crop comparison, first-class candidate provenance, stable candidate IDs, exact/perceptual duplicate clusters and inspectable Reverse Media provenance UI are implemented. Google Lens remains an external/manual reference; Yandex candidate discovery is not identity proof. Candidate/cluster persistence into encrypted cases and the main identity graph remains incomplete. |
+| Face-correlation validation | **3/6** | YuNet/SFace artifacts are pinned and integrity checked; preprocessing, alignment, quality rejection and calibration tooling exist and its runtime check passes CI. `face_recognition` and DeepFace are catalogued as alternative ecosystems rather than embedded dependencies because Dossier already has a local consented pipeline. Representative measured FAR/FRR/ROC results and physical-device inference validation do not exist yet. |
+| Historical evidence | **3/6** | Exact-URL Wayback recovery, bounded CDX history discovery, selected-snapshot re-fetching and best-effort archive.today fallback exist. Historical captures remain explicitly historical and cannot masquerade as proof of current account existence. Universal historical extraction/change tracking and production timeline UI remain incomplete. |
+| Breach intelligence | **4/5** | HIBP authoritative coverage remains separate from general public exposure; privacy-preserving range flows are used where supported; breach/provider/retrieval/date metadata is preserved. LeakCheck/DeHashed/Breach-Parse/Buster/BreachFinder interoperability is summary-only and rejects credential/secret-bearing records. Coverage remains externally dependent. |
+| AI analyst | **4/5** | Generated factual claims must be structured, cite existing evidence IDs and survive deterministic validation; uncited/unknown identifiers are withheld and invalid output falls back locally. The validator also rejects explicit email/URL identifiers not present in the evidence actually cited. Corrected-graph/remediation-native inputs and a production evaluation corpus remain incomplete. |
+| UX/UI | **6/8** | Overview/Evidence/Connections/Actions remain coherent; live scan state is event-derived; saved Cases support persistent corrections, remediation tracking, scan-history display and share-safe export. Identity setup now exposes local Twint/snscrape and broader external OSINT report imports. Timeline UX, graph-export UI, case-integrated image clusters and broad accessibility/adaptive-layout validation remain incomplete. |
+| Security/privacy | **3/4** | Keystore AES-256-GCM cases, restricted evidence WebView, local visual processing defaults, opt-in remote AI, explicit deletion and pre-write share-safe export are implemented. External report imports are bounded, local/in-memory, tied to explicit audit seeds and strip/reject password/hash/cookie/token/session/credential material. Automated Tor/person-search crawling, authenticated social scraping and challenge bypass remain outside the product boundary. |
+| Testing/device validation | **3/5** | Provider audit, calibration runtime, JVM tests, APK assembly and API 35 Compose instrumentation pass on the exact implementation commit above. New regression coverage includes external-report seed scoping, unrelated-handle rejection, credential-bearing breach-row rejection, redacted breach summaries, PhoneInfoga/Numverify constraints, in-scope Amass domains, source-catalog invariants and graph serializers. Physical Samsung/Pixel/lower-memory, battery, process-death, font-scale and accessibility gates remain incomplete. |
+| **Total** | **63/100** | A materially integrated contract tranche is validated. External-tool interoperability does not substitute for native/live provider validation, empirical calibration, provider scale or release hardening. |
 
 ## M0 — Baseline audit
 
@@ -58,9 +60,77 @@ Implemented:
 - legacy `PLATFORMS` compatibility generated from the v2 registry;
 - deterministic provider-registry audit tool and CI;
 - audit parser-drift detection and canonical TRUTH count enforcement;
-- sampled advisory provider canaries.
+- sampled advisory provider canaries;
+- a public-source capability catalog separating Native, NativeEquivalent, ImportOnly, API-key-dependent, ManualOnly, Retired and Unsupported integration postures;
+- explicit truthful states for retired Google/Bing cached-page products rather than simulated support.
 
 Not complete: 1,000+ useful reviewed sources, registry-wide live present/missing/soft-404/redirect/challenge validation, universal v2 per-provider rate/concurrency/cooldown scheduling, persisted provider-health history, and migration of every mature custom resolver.
+
+## OSINT interoperability tranche
+
+**Status: validated as bounded interoperability, not equivalent to native provider coverage.**
+
+### Native / native-equivalent capabilities
+
+- Reddit exact-author public post search and bounded Shreddit comment search, with direct Reddit re-fetch before promotion to Verified;
+- Wayback exact-URL recovery plus bounded CDX history discovery and selected snapshot verification;
+- best-effort archive.today/archive.ph exact-URL fallback without challenge bypass;
+- richer local EXIF parsing for user-selected media as an ExifTool-equivalent path;
+- Dossier's existing consented local face pipeline instead of embedding `face_recognition`/DeepFace runtimes;
+- GraphML, GEXF and node-link JSON graph interoperability for Gephi/Cytoscape/NetworkX/Graphistry-style downstream analysis.
+
+### Local import interoperability
+
+The identity flow accepts bounded user-selected JSON/JSONL/CSV/TSV/text reports. Compatible producers include, depending on report contents and explicit audit seeds:
+
+- SpiderFoot OSS;
+- Recon-ng;
+- theHarvester;
+- Maigret;
+- Sherlock;
+- Holehe redacted/account-existence summaries;
+- Twint JSON and snscrape JSONL;
+- Pushshift exports;
+- OSINTgram;
+- Instaloader public exports;
+- facebook-scraper public-page exports;
+- Social Analyzer;
+- public LinkedIn scraper exports;
+- GeoSocial/geotag reports;
+- LeakCheck/DeHashed/Breach-Parse/Buster/BreachFinder redacted summaries;
+- OpenCorporates reports;
+- GitHub OSINT/profile summaries and GH Archive-derived reports;
+- Image Analyzer metadata reports;
+- PhoneInfoga;
+- Numverify JSON/text responses for explicitly supplied phone numbers;
+- FOCA metadata reports;
+- Censys/Shodan reports limited to explicit in-scope infrastructure;
+- OWASP Amass reports limited to explicit in-scope domains.
+
+Import invariants:
+
+1. External tools are not launched by Dossier merely because their format is supported.
+2. A record must tie back to an explicit authorized seed appropriate to that source family.
+3. Imported third-party records are `Candidate` / `ThirdPartyAggregation`, never `Verified` by import alone.
+4. Passwords, hashes, cookies, session tokens, API secrets, private keys and credential material are stripped or cause sensitive breach rows to be rejected.
+5. Direct public URLs may subsequently be re-fetched by Dossier's verifier and only then gain stronger evidence state.
+6. Infrastructure imports are limited to explicit domains/URLs already in scope rather than being used for person enumeration.
+7. Dark-web tools remain manual/reference-only; Dossier does not automatically crawl Tor to search for people or collect credential dumps.
+
+### Manual/reference-only integrations
+
+Current product boundaries intentionally keep these human-driven rather than automated:
+
+- TweetStamp and volatile Nitter instances;
+- Google Earth / Street View;
+- GeoSpy and GeoGuessr-style visual-location techniques;
+- OpenStreetMap / Overpass place cross-checks;
+- MCA India and Zauba corporate-record cross-checks;
+- Google Lens reverse-image reference;
+- OnionScan/Ahmia/Tor Browser workflows;
+- hosted Graphistry workflows.
+
+Manual/reference support means Dossier can preserve/cross-check resulting public evidence where appropriate; it does **not** mean Dossier embeds or automates the external service.
 
 ## M2 — Scan Coordinator + live events
 
@@ -89,9 +159,11 @@ Not complete: a general persisted multi-signal frontier, stored rejected-pivot d
 
 ## Evidence and provenance
 
-The existing universal `Evidence` model remains the canonical evidence layer. It can retain provider ID, URL, evidence kind, retrieval/observation timestamps, verification state, reliability, content SHA-256, parser version, historical/current state and confidence.
+The universal `Evidence` model remains the canonical evidence layer. It can retain provider ID, URL, evidence kind, retrieval/observation timestamps, verification state, reliability, content SHA-256, parser version, historical/current state and confidence.
 
 **Invariant:** a high numeric confidence value does not automatically become `Verified`.
+
+**Import invariant:** a third-party scanner/export never becomes `Verified` simply because it reported a match.
 
 Remaining gap: older producers do not yet populate every provenance field consistently.
 
@@ -99,15 +171,15 @@ Remaining gap: older producers do not yet populate every provenance field consis
 
 **Status: partial, production-integrated.**
 
-Implemented: full semantic `GraphEntityKind`, stable legacy type compatibility, typed relationship taxonomy, node state, edge evidence IDs, contradiction IDs, historical flags, first/last observations, graph schema version and relationship/history/conflict queries.
+Implemented: full semantic `GraphEntityKind`, stable legacy type compatibility, typed relationship taxonomy, node state, edge evidence IDs, contradiction IDs, historical flags, first/last observations, graph schema version, relationship/history/conflict queries and standard graph serialization.
 
-Not complete: graph-only truth across every subsystem, complete evidence IDs on legacy edges and full archive/image/breach population at contract depth.
+Not complete: graph-only truth across every subsystem, complete evidence IDs on legacy edges, graph-export UI/share-safe packaging, and full archive/image/breach population at contract depth.
 
 ## M5 — Entity Resolver v2
 
 **Status: partial, integrated but uncalibrated.**
 
-Implemented: explainable contributions, independent URL/verification/cross-link/email/name/organization/location signals, contradiction handling, conservative confidence bands and an explicit regression proving a shared username alone cannot confirm identity.
+Implemented: explainable contributions, independent URL/verification/cross-link/email/name/organization/location signals, contradiction handling, conservative confidence bands and regressions proving a shared username/name alone cannot confirm identity.
 
 Not complete: representative benchmark, precision/recall/FPR/FNR/calibration publication and empirically fitted weights/thresholds.
 
@@ -124,28 +196,18 @@ Implemented:
 - colour histogram comparison;
 - full/centre/square crop variants;
 - local near-duplicate/repost classification;
-- stable `imgcandidate:` identifiers;
-- candidate provenance containing source, source page, acquisition query, compared URL, retrieval timestamp, SHA-256, dimensions, aHash/dHash/pHash, comparison score, exact-byte state and comparison state;
-- truthful candidate states for download-unavailable, decode-failed, compared-no-match and matched outcomes rather than silently dropping failed candidates;
-- deterministic exact-content and perceptual-near-duplicate clustering with stable `imgcluster:` identifiers;
-- cluster-to-match/candidate linkage;
-- Reverse Media UI with candidate-state totals, provenance cards, source drill-down, technical hash/dimension metadata and duplicate/repost cluster summaries;
+- stable candidate and duplicate-cluster identifiers;
+- candidate provenance containing source, source page, acquisition query, compared URL, retrieval timestamp, SHA-256, dimensions, hashes, comparison score and truthful state;
 - explicit UI wording that whole-image duplicate/repost similarity does not identify a person;
-- generic `Dossier/0.1 authorized-public-image-audit` User-Agent instead of browser/device impersonation;
-- serialization/backward-compatibility and cluster regression tests.
+- generic Dossier HTTP identity rather than browser/device impersonation.
 
-Not complete:
-
-- persistence of image candidate/cluster objects into `DossierCase`;
-- identity-graph edges connecting reused images across verified accounts;
-- cross-scan image-cluster history/diff;
-- a single generalized `ImageCandidateAcquirer` abstraction covering all future acquisition families.
+Not complete: persistence of image candidate/cluster objects into `DossierCase`, identity-graph edges connecting reused images across verified accounts, and cross-scan image-cluster history/diff.
 
 ## M7 — Face validation
 
 **Status: partial.**
 
-Implemented: pinned OpenCV Zoo YuNet/SFace models, exact size/SHA verification, atomic installation, inference-time verification, deterministic preprocessing/alignment, five landmarks, quality/ambiguity rejection, cosine similarity and calibration tooling with identity-disjoint held-out support.
+Implemented: pinned OpenCV Zoo YuNet/SFace models, exact size/SHA verification, atomic installation, deterministic preprocessing/alignment, five landmarks, quality/ambiguity rejection, cosine similarity and calibration tooling with identity-disjoint held-out support.
 
 Not complete: adequate legal/consented benchmark, measured ROC/FAR/FRR, demographic/device/pose/age evaluation and representative physical-device latency/thermal/battery validation. Reference thresholds remain engineering values until measured.
 
@@ -153,9 +215,9 @@ Not complete: adequate legal/consented benchmark, measured ROC/FAR/FRR, demograp
 
 **Status: partial.**
 
-Implemented: bounded exact-URL Wayback lookup, snapshot retrieval, archive-only verification, historical confidence ceiling, current/historical labeling and timeline construction from real timestamps only.
+Implemented: bounded exact-URL Wayback lookup, CDX history discovery for explicit profile/personal-site URLs, bounded direct snapshot re-fetch, best-effort archive.today fallback, archive-only verification, historical confidence ceilings, current/historical labeling and timeline construction from real timestamps only.
 
-Not complete: broader archive discovery, extraction of historical username/avatar/bio/organization/location changes, universal archive timestamp propagation and production timeline UI.
+Not complete: extraction of historical username/avatar/bio/organization/location changes across representative providers, universal archive timestamp propagation and production timeline UI.
 
 ## M9 — Breach intelligence
 
@@ -163,11 +225,13 @@ Not complete: broader archive discovery, extraction of historical username/avata
 
 Implemented: Pwned Passwords range lookup, authenticated privacy-preserving email range lookup where supported, no full-address silent fallback, authoritative/public-web separation, explicit unavailable/configuration states and breach/provider/date/retrieval/data-class provenance.
 
+Third-party breach-tool interoperability is intentionally summary-only. Credential material is not an import target.
+
 ## M10 — Evidence-grounded AI
 
 **Status: partial, production-integrated.**
 
-Implemented: deterministic structured evidence snapshot, structured claim/result contract, evidence-ID validation, uncited factual-claim rejection, contradiction downgrade, output bounds, raw-prose rejection and deterministic local fallback.
+Implemented: deterministic structured evidence snapshot, structured claim/result contract, evidence-ID validation, uncited factual-claim rejection, unsupported email/URL identifier rejection, contradiction downgrade, output bounds, raw-prose rejection and deterministic local fallback.
 
 Not complete: corrected graph/remediation-native input for every model path, production evaluation fixtures/corpus and stronger remote-input redaction controls.
 
@@ -187,9 +251,10 @@ Implemented/preserved:
 - real scan-history summaries;
 - remediation recheck states and explanations;
 - share-safe report action;
-- Reverse Media candidate provenance and duplicate/repost cluster inspection.
+- Reverse Media candidate provenance and duplicate/repost cluster inspection;
+- user-visible local import controls for legacy Twint/snscrape plus broader external OSINT reports.
 
-Not complete: production timeline, case-integrated/cross-account image cluster review, corrections directly on every live Evidence card, mature tablet/landscape adaptation, localization/RTL and complete accessibility validation.
+Not complete: production timeline, graph-export UI, case-integrated/cross-account image cluster review, corrections directly on every live Evidence card, mature tablet/landscape adaptation, localization/RTL and complete accessibility validation.
 
 ## M12 — Remediation + differential rescan
 
@@ -205,8 +270,7 @@ Implemented:
 - remediation states: Not started, In progress, Submitted, Awaiting response, Completed, Rejected, Needs manual action;
 - added/removed/changed/unchanged case diff;
 - recheck states: `NotRechecked`, `StillObserved`, `NotObservedInLatestScan`, `StatusChanged`;
-- user-visible recheck section that explicitly says disappearance from one newer scan is not proof that search indexes, caches, archives or every live copy are gone;
-- emulator acceptance tests proving scan history remains bound to the original case when later corrections/remediation edits occur.
+- user-visible wording that disappearance from one newer scan is not proof that search indexes, archives or every live copy are gone.
 
 Not complete: broad provider-specific removal/deletion/correction links, automatic association of every later scan with earlier remediation records and explicit live/search-index/archive three-way removal verification.
 
@@ -214,20 +278,22 @@ Not complete: broad provider-specific removal/deletion/correction links, automat
 
 Full export provides PDF + JSON evidence packages with per-section SHA-256 hashes and a manifest hash. Hashes are integrity metadata, not independent attestation.
 
-`ShareSafe` redaction is exposed from saved Cases and runs **before files are written**. It removes/generalizes subject names, finding values, source URLs, snippets, profile details, visual URLs, breach identifiers, graph details and generated analysis that may reproduce identifying evidence. The package records redaction mode and the UI warns that redaction reduces disclosure but cannot guarantee anonymity.
+`ShareSafe` redaction is exposed from saved Cases and runs **before files are written**. It removes/generalizes identifying evidence and warns that redaction reduces disclosure but cannot guarantee anonymity.
+
+Graph interoperability serializers now exist for GraphML, GEXF and node-link JSON, but they are not yet exposed as a polished share/export workflow. Any future external graph share must pass through the same redaction policy.
 
 ## Security and privacy
 
-Implemented controls include Keystore-backed AES-256-GCM cases, versioned/atomic encrypted storage, no new plaintext fallback, explicit deletion, restricted evidence WebView, system Photo Picker, local visual/face processing, opt-in remote AI, pre-write share-safe redaction, PII-safe scan-history binding and non-impersonating image-candidate HTTP identity.
+Implemented controls include Keystore-backed AES-256-GCM cases, versioned/atomic encrypted storage, explicit deletion, restricted evidence WebView, system Photo Picker, local visual/face processing, opt-in remote AI, pre-write share-safe redaction, PII-safe scan-history binding and non-impersonating public-source HTTP identities.
 
-No newly introduced challenge bypass, credential acquisition, private-source access, hidden tracking or traffic-evasion behavior is permitted.
+External OSINT imports are local/in-memory and bounded. Import parsers require explicit audit seeds appropriate to the source family and strip or reject secret-bearing fields. No newly introduced challenge bypass, credential acquisition, private-source access, hidden tracking, Tor person-crawling, authenticated social scraping or traffic-evasion behavior is permitted.
 
 ## Validation record
 
 Validated implementation commit:
 
 ```text
-ead2e9806914ee0bd525a2c9d0a548c17348f5fa
+1942f06351a9fba9cc0dc429edaf42522e9bfc79
 ```
 
 Passing gates on that exact commit:
@@ -237,10 +303,10 @@ Provider registry audit       PASS
 Face calibration runtime      PASS
 JVM unit tests                PASS
 Debug APK assembly            PASS
-API 35 Compose tests (9/9)    PASS
+API 35 Compose tests          PASS
 ```
 
-The Compose suite covers consent/navigation/identity validation, scan-mode selection, encrypted scan-history/correction/remediation persistence and non-overclaiming remediation recheck UX.
+The unit suite includes regressions for external OSINT authorization boundaries, secret-bearing breach reports, Numverify phone scoping and graph interoperability. The Compose suite validates the existing API 35 product smoke paths after the new import controls were added.
 
 This remains emulator validation only. No physical device is recorded as release-validated.
 
@@ -253,24 +319,23 @@ This remains emulator validation only. No physical device is recorded as release
 5. Finish universal evidence/provenance population and graph-as-sole-truth migration.
 6. Persist image candidate/cluster provenance into encrypted cases and the identity graph; correlate reused images across verified accounts and cross-scans.
 7. Run the face-correlation benchmark and publish measured ROC/FAR/FRR thresholds, then validate on representative physical devices.
-8. Complete historical extraction and production timeline UI.
+8. Complete historical attribute extraction and production timeline UI.
 9. Build a production AI evaluation corpus and corrected-graph-native input path.
-10. Complete live Evidence correction UX and broad provider-specific remediation/recheck workflows.
+10. Complete live Evidence correction UX, graph export/share UX and broad provider-specific remediation/recheck workflows.
 11. Perform physical Samsung/Pixel/lower-memory QA, process-death/background recovery, font/display-scale, TalkBack/switch/keyboard, battery/network/thermal and large-case performance testing.
 12. Complete release/security hardening and packaging.
 
 ## Non-negotiable limitations
 
 - Dossier cannot guarantee discovery of private, authenticated, never-indexed or never-archived content.
-- Provider availability, indexing and API access are externally controlled.
-- Search results and visual/face similarity remain evidence leads until corroborated.
-- Whole-image duplicate clusters describe copied/reposted image content, not identity across unrelated photos.
-- Historical snapshots may be missing, stale or incomplete.
-- Face model integrity does not establish real-world recognition accuracy.
-- HIBP account coverage depends on compatible user-supplied access and provider availability.
-- `NotObservedInLatestScan` is not equivalent to verified deletion.
-- Emulator CI cannot substitute for representative physical-device testing.
+- Provider availability, indexing, licensing and API access are externally controlled.
+- Search results, external scanner reports and visual/face similarity remain evidence leads until corroborated.
+- A username, name, carrier/region result, image similarity result or historical capture alone does not prove identity.
+- Import support for a third-party tool is not a claim that the tool is reliable, free, open source, currently maintained or legally usable in every jurisdiction/context.
+- Dossier does not accept credential dumps, password/hash/cookie/session-token collections or private-source access as a product capability.
+- Dark-web tooling remains manual/reference-only within separately authorized scope; Dossier does not automate person-focused Tor crawling.
+- A source marked retired/degraded/best-effort remains visibly so; Dossier must not simulate a healthy provider.
 
-## Documentation policy
+## Production-readiness rule
 
-Do not create separate roadmap, audit, status, progress or handoff Markdown files. `AGENTS.md` is the target contract; update this document after meaningful validated milestones and remove superseded claims rather than accumulating contradictory records.
+The product reaches 100/100 only when the remaining blockers are implemented, independently validated and honestly recorded here. Adding more source names, import adapters or passing emulator CI cannot by itself satisfy that standard.
