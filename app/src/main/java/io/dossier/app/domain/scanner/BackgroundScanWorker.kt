@@ -17,7 +17,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -59,13 +58,11 @@ class BackgroundScanWorker(
 
         setProgress(workDataOf(KEY_STAGE to STAGE_STARTING))
         val progressRelay = launch {
-            ScanSession.progressText
-                .distinctUntilChanged()
-                .collect { stage ->
-                    if (stage.isNotBlank()) {
-                        setProgress(workDataOf(KEY_STAGE to stage.take(MAX_STAGE_CHARS)))
-                    }
+            ScanSession.progressText.collect { stage ->
+                if (stage.isNotBlank()) {
+                    setProgress(workDataOf(KEY_STAGE to stage.take(MAX_STAGE_CHARS)))
                 }
+            }
         }
 
         try {
