@@ -39,22 +39,21 @@ import io.dossier.app.domain.case.CaseTimelineBuilder
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.scanner.BackgroundScanManager
 import io.dossier.app.domain.scanner.ScanSession
+import io.dossier.app.export.GraphExportService
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.theme.NeuralTheme
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-/**
- * Non-blocking landing surface for durable analysis. Users can leave this screen,
- * use the rest of Dossier, or background the app while WorkManager continues.
- */
+/** Non-blocking landing surface for durable collection and post-processing. */
 @Composable
 fun AnalysisScreen(
     onOpenReport: () -> Unit,
     onBackToSetup: () -> Unit
 ) {
     val context = LocalContext.current
+    val graphExporter = remember(context) { GraphExportService(context) }
     val workInfos by remember(context) {
         BackgroundScanManager.statusFlow(context)
     }.collectAsState(initial = emptyList())
@@ -128,14 +127,31 @@ fun AnalysisScreen(
         }
 
         snapshot?.let { completed ->
+            val completedCase = completed.dossierCase
             IdentitySurfaceSection(analysis)
             BehavioralSection(analysis)
             InteractionSection(analysis)
-            TimelineSection(completed.dossierCase)
+            TimelineSection(completedCase)
+
+            if (completedCase.entityGraph.entities.isNotEmpty()) {
+                OutlinedButton(
+                    onClick = {
+                        graphExporter.share(
+                            graph = completedCase.entityGraph,
+                            label = completedCase.subjectName.ifBlank { "investigation" }
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = io.dossier.app.ui.theme.DossierButtonShape,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt)
+                ) {
+                    Text("EXPORT GRAPH · GRAPHML + CSV + JSON", fontWeight = FontWeight.Bold, fontSize = 11.5.sp)
+                }
+            }
 
             Button(
                 onClick = {
-                    ScanSession.restoreFromCase(completed.dossierCase)
+                    ScanSession.restoreFromCase(completedCase)
                     onOpenReport()
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = NeuralTheme.Cobalt),
