@@ -14,7 +14,11 @@ class ExifParser(private val context: Context) {
         val latitude: Double? = null,
         val longitude: Double? = null,
         val altitudeMeters: Double? = null,
+        /** Camera-local wall clock; do not assume UTC without an offset. */
         val capturedAt: String? = null,
+        /** GPS date/time are UTC by EXIF convention and are safe for solar/weather corroboration. */
+        val gpsDateStamp: String? = null,
+        val gpsTimeStamp: String? = null,
         val make: String? = null,
         val model: String? = null,
         val software: String? = null,
@@ -51,6 +55,8 @@ class ExifParser(private val context: Context) {
                         exif.getAttribute(ExifInterface.TAG_DATETIME_DIGITIZED),
                         exif.getAttribute(ExifInterface.TAG_DATETIME)
                     ),
+                    gpsDateStamp = clean(exif.getAttribute(ExifInterface.TAG_GPS_DATESTAMP)),
+                    gpsTimeStamp = clean(exif.getAttribute(ExifInterface.TAG_GPS_TIMESTAMP)),
                     make = clean(exif.getAttribute(ExifInterface.TAG_MAKE)),
                     model = clean(exif.getAttribute(ExifInterface.TAG_MODEL)),
                     software = clean(exif.getAttribute(ExifInterface.TAG_SOFTWARE)),
@@ -61,11 +67,7 @@ class ExifParser(private val context: Context) {
                     focalLength = clean(exif.getAttribute(ExifInterface.TAG_FOCAL_LENGTH)),
                     exposureTime = clean(exif.getAttribute(ExifInterface.TAG_EXPOSURE_TIME)),
                     fNumber = clean(exif.getAttribute(ExifInterface.TAG_F_NUMBER)),
-                    // Framework ExifInterface exposes the older ISO tag constant;
-                    // using it keeps this path compatible with the app's min/compile SDK.
                     iso = clean(exif.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS)),
-                    // TAG_LENS_MODEL is not exposed by android.media.ExifInterface on
-                    // all API levels. getAttribute accepts the canonical EXIF tag name.
                     lensModel = clean(exif.getAttribute("LensModel")),
                     artist = clean(exif.getAttribute(ExifInterface.TAG_ARTIST)),
                     copyright = clean(exif.getAttribute(ExifInterface.TAG_COPYRIGHT))
