@@ -50,12 +50,13 @@ The long-term contract calls for 1,000+ useful reviewed definitions. The current
 - Structured scan IDs, requests, run states and events.
 - Live UI state derives from real scan-stage/profile/face/breach/graph/analysis observations.
 - Cancellation is supported; Dossier does not invent provider-level completion events while the underlying scheduler lacks callbacks.
-- Scan mode survives the resumable-input marker.
+- Identity seeds, scan mode, deep-scan choice and per-scan face policy are stored in an Android Keystore AES-GCM resume record; new WorkManager requests receive only its opaque UUID.
+- Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
 - Terminal scan lifecycle stores actual start/end time, mode, plan size, result counts and cancellation state.
 - A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
 - Later case edits cannot silently attach a newer scan to an older case.
 
-True suspended pause/resume, provider-level queue/start/completion events, persisted frontier checkpoints and sole coordinator ownership remain incomplete.
+True suspended pause/resume, provider-level queue/start/completion events, persisted frontier checkpoints, startup owner/WorkManager reconciliation and sole coordinator ownership remain incomplete.
 
 ## Evidence, graph and entity resolution
 
@@ -158,7 +159,7 @@ Dossier has no required project-operated backend and does not include analytics 
 
 Network-dependent operations can include public profile/source checks, search/image-index acquisition, archive retrieval, public candidate-image/model downloads, HIBP range queries and optional remote AI.
 
-Local operations include reference-image processing, exact/perceptual image comparison, YuNet/SFace inference, PII parsing, graph/risk analysis, encrypted case state, report generation and share-safe redaction.
+Local operations include reference-image processing, exact/perceptual image comparison, YuNet/SFace inference, PII parsing, graph/risk analysis, encrypted case and scan-checkpoint state, report generation and share-safe redaction.
 
 The reverse-image matcher identifies itself generically as Dossier rather than impersonating a consumer browser/device. Challenge pages and source restrictions are reported rather than bypassed.
 
@@ -196,6 +197,8 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - Private, authenticated, blocked, never-indexed and never-archived content cannot be discovered reliably.
 - Providers can change markup, challenge requests, rate-limit or omit content.
 - Provider-level live events, true pause/resume and persisted recursive-frontier recovery are incomplete.
+- Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
+- Power-loss/startup reconciliation between the encrypted request pointer, owner marker and WorkManager state is incomplete; cancellation/cleanup operation failures are not yet durably reconciled.
 - Entity resolution still needs a calibrated representative benchmark.
 - Image provenance/clusters are not yet persisted into encrypted cases/identity graph for cross-account or cross-scan investigation.
 - Cross-photo face correlation still requires measured ROC/FAR/FRR and representative physical-device validation.
