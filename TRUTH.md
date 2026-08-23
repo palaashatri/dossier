@@ -7,8 +7,8 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 - **Strict product readiness score:** **63/100**
 - **Milestone state:** M0 complete; M1–M6 and M8–M12 materially advanced but still partial; M7 and M13 remain partial
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
-- **Last validated implementation commit:** `1942f06351a9fba9cc0dc429edaf42522e9bfc79`
-- **Validated CI on that commit:** provider-registry audit, face-calibration runtime check, JVM unit tests, debug APK assembly, and API 35 Compose instrumentation tests
+- **Last validated implementation commit:** `019bcaa55f1fde383a3e5c4bdd6e308295a5ff57`
+- **Validated CI on that commit:** provider-registry audit, face-calibration tool, JVM unit tests, debug APK assembly, and API 35 Compose smoke suite
 - **Documentation-only commits after the validated implementation:** may update this file/PR prose without changing the validated code claim
 - **Last validated device class:** Pixel 6 profile, Android API 35, x86_64 emulator
 - **Real-device production validation:** not yet recorded
@@ -294,20 +294,19 @@ External OSINT imports are local/in-memory and bounded. Import parsers require e
 Validated implementation commit:
 
 ```text
-1942f06351a9fba9cc0dc429edaf42522e9bfc79
+019bcaa55f1fde383a3e5c4bdd6e308295a5ff57
 ```
 
-Passing gates on that exact commit:
+Passing CI gates on that exact commit:
 
 ```text
 Provider registry audit       PASS
-Face calibration runtime      PASS
-JVM unit tests                PASS
-Debug APK assembly            PASS
-API 35 Compose tests          PASS
+Face calibration tool         PASS
+test-and-build                PASS
+API 35 Compose smoke suite    PASS
 ```
 
-The unit suite includes regressions for external OSINT authorization boundaries, secret-bearing breach reports, Numverify phone scoping and graph interoperability. The Compose suite validates the existing API 35 product smoke paths after the new import controls were added.
+The unit suite includes regressions for external OSINT authorization boundaries, secret-bearing breach reports, Numverify phone scoping and graph interoperability. A local final-tree check also passed the provider audit (78 definitions), all 287 JVM tests, debug APK assembly and 11/11 Compose smoke tests on the existing Medium Phone API 36 x86_64 emulator. The smoke harness validates one-time onboarding persistence across activity recreation and isolates onboarding state between tests.
 
 This remains emulator validation only. No physical device is recorded as release-validated.
 

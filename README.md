@@ -11,18 +11,20 @@ The current implementation branch is **63/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-ead2e9806914ee0bd525a2c9d0a548c17348f5fa
+019bcaa55f1fde383a3e5c4bdd6e308295a5ff57
 ```
 
-That exact implementation passed:
+That exact implementation passed the current CI gates:
 
 ```text
 Provider registry audit       PASS
-Face calibration runtime      PASS
+Face calibration tool         PASS
 JVM unit tests                PASS
 Debug APK assembly            PASS
-API 35 Compose tests (9/9)    PASS
+API 35 Compose smoke suite    PASS
 ```
+
+A local final-tree check also passed the provider audit (78 definitions), all 287 JVM tests, debug APK assembly, and 11/11 Compose smoke tests on the existing Medium Phone API 36 x86_64 emulator. The smoke harness covers one-time onboarding persistence across activity recreation and resets onboarding state between tests.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, historical/case-integrated image workflows, and representative physical-device/accessibility/performance validation remain release gates.
 
