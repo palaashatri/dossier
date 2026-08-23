@@ -73,7 +73,9 @@ data class CaseScanHistoryEntry(
     val breachRecordCount: Int = 0,
     val graphEntityCount: Int = 0,
     val graphRelationshipCount: Int = 0,
-    val cancelled: Boolean = false
+    val cancelled: Boolean = false,
+    val failed: Boolean = false,
+    val failureCode: String? = null
 )
 
 @Serializable
@@ -123,7 +125,7 @@ data class DossierCase(
         "${finding.type.name}|${finding.value}|${finding.sourceUrl.orEmpty()}"
 
     companion object {
-        /** v6 persists universal provenance-rich evidence alongside reverse-media intelligence. */
-        const val CURRENT_SCHEMA_VERSION = 6
+        /** v7 adds truthful failed-scan lifecycle state to the v6 provenance/media schema. */
+        const val CURRENT_SCHEMA_VERSION = 7
     }
 }

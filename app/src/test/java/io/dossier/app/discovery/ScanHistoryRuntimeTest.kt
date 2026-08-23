@@ -103,6 +103,72 @@ class ScanHistoryRuntimeTest {
     }
 
     @Test
+    fun failedScanIsNotPersistedAsCompletedOrCancelled() {
+        val input = IdentityInput(fullName = "Jane Example", usernames = listOf("sample_user"))
+        val scanId = ScanId("scan-failed")
+
+        ScanHistoryRuntime.scanStarted(
+            scanId,
+            input,
+            ScanMode.Standard,
+            directProfileProviderCount = 40,
+            occurredAt = Instant.parse("2026-08-08T02:00:00Z")
+        )
+        ScanHistoryRuntime.scanFinished(
+            scanId,
+            occurredAt = Instant.parse("2026-08-08T02:01:00Z"),
+            cancelled = false,
+            failed = true,
+            failureCode = "SCAN_EXECUTION_FAILED",
+            profileResultCount = 2,
+            findingCount = 1,
+            breachRecordCount = 0,
+            graphEntityCount = 1,
+            graphRelationshipCount = 0
+        )
+
+        val entry = requireNotNull(ScanHistoryRuntime.latestFor(input))
+        assertTrue(entry.failed)
+        assertFalse(entry.cancelled)
+        assertEquals("SCAN_EXECUTION_FAILED", entry.failureCode)
+    }
+
+    @Test
+    fun failedHistoryNormalizesUnsafeCodeFlagsAndNegativeCounts() {
+        val input = IdentityInput(fullName = "Jane Example")
+        val scanId = ScanId("scan-normalized-failure")
+        ScanHistoryRuntime.scanStarted(
+            scanId,
+            input,
+            ScanMode.Standard,
+            directProfileProviderCount = 1,
+            occurredAt = Instant.parse("2026-08-08T03:00:00Z")
+        )
+        ScanHistoryRuntime.scanFinished(
+            scanId,
+            occurredAt = Instant.parse("2026-08-08T03:01:00Z"),
+            cancelled = true,
+            failed = true,
+            failureCode = "TOKEN_DO_NOT_PERSIST",
+            profileResultCount = -1,
+            findingCount = -2,
+            breachRecordCount = -3,
+            graphEntityCount = -4,
+            graphRelationshipCount = -5
+        )
+
+        val entry = requireNotNull(ScanHistoryRuntime.latestFor(input))
+        assertTrue(entry.failed)
+        assertFalse(entry.cancelled)
+        assertEquals("SCAN_FAILED", entry.failureCode)
+        assertEquals(0, entry.profileResultCount)
+        assertEquals(0, entry.findingCount)
+        assertEquals(0, entry.breachRecordCount)
+        assertEquals(0, entry.graphEntityCount)
+        assertEquals(0, entry.graphRelationshipCount)
+    }
+
+    @Test
     fun fingerprintDoesNotStoreRawIdentityAndIgnoresSelfieSelection() {
         val a = IdentityInput(
             fullName = "Jane Example",

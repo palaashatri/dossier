@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import io.dossier.app.domain.discovery.ScanHistoryRuntime
+import io.dossier.app.domain.discovery.sanitizeTerminalFailureCode
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.place.MediaIntelligenceSession
@@ -178,7 +179,8 @@ class CaseStore(private val context: Context) {
             schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION,
             evidenceRecords = case.evidenceRecords.distinctBy { it.id }.take(MAX_EVIDENCE_RECORDS),
             userCorrections = migratedCorrections,
-            entityGraph = mediaGraph
+            entityGraph = mediaGraph,
+            scanHistory = case.scanHistory.map(::normalizePersistedScanHistoryEntry)
         )
     }
 
@@ -271,4 +273,24 @@ class CaseStore(private val context: Context) {
             .digest(bytes)
             .joinToString("") { byte -> "%02x".format(byte) }
     }
+}
+
+internal fun normalizePersistedScanHistoryEntry(
+    entry: CaseScanHistoryEntry
+): CaseScanHistoryEntry {
+    val failed = entry.failed
+    return entry.copy(
+        directProfileProviderCount = entry.directProfileProviderCount.coerceAtLeast(0),
+        profileResultCount = entry.profileResultCount.coerceAtLeast(0),
+        findingCount = entry.findingCount.coerceAtLeast(0),
+        breachRecordCount = entry.breachRecordCount.coerceAtLeast(0),
+        graphEntityCount = entry.graphEntityCount.coerceAtLeast(0),
+        graphRelationshipCount = entry.graphRelationshipCount.coerceAtLeast(0),
+        cancelled = entry.cancelled && !failed,
+        failureCode = if (failed) {
+            sanitizeTerminalFailureCode(entry.failureCode) ?: "SCAN_FAILED"
+        } else {
+            null
+        }
+    )
 }

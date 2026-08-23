@@ -1,6 +1,7 @@
 package io.dossier.app.domain.scanner
 
 import androidx.work.Data
+import androidx.work.WorkInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -71,6 +72,72 @@ class BackgroundScanWorkerTest {
             data.getString(BackgroundScanWorker.KEY_STAGE)
         )
         assertFalse(data.toByteArray().toString(Charsets.UTF_8).contains(secret))
+    }
+
+    @Test
+    fun legacyWorkInfoStageIsSanitizedBeforeUiStatus() {
+        val secret = "java.io.IOException token=do-not-render"
+
+        assertEquals(
+            BackgroundScanWorker.STAGE_RUNNING,
+            BackgroundScanManager.safeStatusStage(secret, null, WorkInfo.State.RUNNING)
+        )
+        assertEquals(
+            BackgroundScanWorker.STAGE_FAILED,
+            BackgroundScanManager.safeStatusStage(null, BackgroundScanWorker.STAGE_FAILED, WorkInfo.State.FAILED)
+        )
+        assertEquals(
+            BackgroundScanWorker.STAGE_FAILED,
+            BackgroundScanManager.safeStatusStage(
+                BackgroundScanWorker.STAGE_STARTING,
+                BackgroundScanWorker.STAGE_FAILED,
+                WorkInfo.State.FAILED
+            )
+        )
+        assertEquals(
+            BackgroundScanWorker.STAGE_FAILED,
+            BackgroundScanManager.safeStatusStage(
+                BackgroundScanWorker.STAGE_STARTING,
+                "unsafe terminal detail",
+                WorkInfo.State.FAILED
+            )
+        )
+        assertEquals(
+            BackgroundScanWorker.STAGE_CANCELLED,
+            BackgroundScanManager.safeStatusStage(null, null, WorkInfo.State.CANCELLED)
+        )
+    }
+
+    @Test
+    fun unrelatedUniqueWorkGenerationIsNeverSelected() {
+        val active = "11111111-1111-4111-8111-111111111111"
+        val completed = "22222222-2222-4222-8222-222222222222"
+        val unrelated = "33333333-3333-4333-8333-333333333333"
+
+        assertEquals(
+            null,
+            BackgroundScanManager.selectRelevantWorkId(
+                activeOwnerId = null,
+                completedWorkId = null,
+                availableWorkIds = setOf(unrelated)
+            )
+        )
+        assertEquals(
+            completed,
+            BackgroundScanManager.selectRelevantWorkId(
+                activeOwnerId = active,
+                completedWorkId = completed,
+                availableWorkIds = setOf(completed, unrelated)
+            )
+        )
+        assertEquals(
+            active,
+            BackgroundScanManager.selectRelevantWorkId(
+                activeOwnerId = active,
+                completedWorkId = completed,
+                availableWorkIds = setOf(active, completed, unrelated)
+            )
+        )
     }
 
     @Test

@@ -1,6 +1,7 @@
 package io.dossier.app.domain.case
 
 import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.discovery.sanitizeTerminalFailureCode
 import kotlinx.serialization.Serializable
 import java.time.Instant
 import java.time.LocalDateTime
@@ -14,6 +15,8 @@ enum class TimelineEventKind {
     Retrieval,
     ScanStarted,
     ScanCompleted,
+    ScanFailed,
+    ScanCancelled,
     MediaCandidate
 }
 
@@ -59,21 +62,39 @@ object CaseTimelineBuilder {
         }
 
         case.scanHistory.forEach { scan ->
+            val safeFailureCode = if (scan.failed) {
+                sanitizeTerminalFailureCode(scan.failureCode) ?: "SCAN_FAILED"
+            } else {
+                null
+            }
             parseTimestamp(scan.startedAtUtc)?.let { timestamp ->
                 events += TimelineEvent(
                     timestampEpochMillis = timestamp,
                     kind = TimelineEventKind.ScanStarted,
                     title = "Assessment started",
-                    detail = "${scan.mode.name} · ${scan.directProfileProviderCount} direct providers",
+                    detail = "${scan.mode.name} · ${scan.directProfileProviderCount.coerceAtLeast(0)} direct providers",
                     evidenceId = "scan:${scan.scanId}:start"
                 )
             }
             scan.completedAtUtc?.let(::parseTimestamp)?.let { timestamp ->
                 events += TimelineEvent(
                     timestampEpochMillis = timestamp,
-                    kind = TimelineEventKind.ScanCompleted,
-                    title = if (scan.cancelled) "Assessment cancelled" else "Assessment completed",
-                    detail = "${scan.profileResultCount} profiles · ${scan.findingCount} findings · ${scan.graphEntityCount} entities",
+                    kind = when {
+                        scan.failed -> TimelineEventKind.ScanFailed
+                        scan.cancelled -> TimelineEventKind.ScanCancelled
+                        else -> TimelineEventKind.ScanCompleted
+                    },
+                    title = when {
+                        scan.failed -> "Assessment failed"
+                        scan.cancelled -> "Assessment cancelled"
+                        else -> "Assessment completed"
+                    },
+                    detail = buildString {
+                        append("${scan.profileResultCount.coerceAtLeast(0)} profiles · ")
+                        append("${scan.findingCount.coerceAtLeast(0)} findings · ")
+                        append("${scan.graphEntityCount.coerceAtLeast(0)} entities")
+                        safeFailureCode?.let { append(" · $it") }
+                    },
                     evidenceId = "scan:${scan.scanId}:complete"
                 )
             }

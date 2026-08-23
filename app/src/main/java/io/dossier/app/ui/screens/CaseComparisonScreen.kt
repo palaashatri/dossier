@@ -43,6 +43,7 @@ import io.dossier.app.domain.case.CaseStore
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.case.RemediationRecord
 import io.dossier.app.domain.case.RemediationStatus
+import io.dossier.app.domain.discovery.sanitizeTerminalFailureCode
 import io.dossier.app.domain.case.UserCorrection
 import io.dossier.app.domain.case.UserCorrectionDecision
 import io.dossier.app.domain.evidence.toEvidence
@@ -315,7 +316,11 @@ private fun CaseSelectionCard(
                 case.scanHistory.lastOrNull()?.let { scan ->
                     Text(
                         text = "${scan.mode.displayName} scan · ${scan.profileResultCount} profiles · ${scan.findingCount} findings" +
-                            if (scan.cancelled) " · cancelled" else "",
+                            when {
+                                scan.failed -> " · failed · ${sanitizeTerminalFailureCode(scan.failureCode) ?: "SCAN_FAILED"}"
+                                scan.cancelled -> " · cancelled"
+                                else -> ""
+                            },
                         color = NeuralTheme.TextMuted,
                         fontSize = 10.5.sp,
                         modifier = Modifier.padding(top = 2.dp)
@@ -594,7 +599,11 @@ private fun RenderSingleCase(case: DossierCase) {
         case.scanHistory.lastOrNull()?.let { scan ->
             Text(
                 text = "Last scan: ${scan.mode.displayName} · ${scan.profileResultCount} profiles · ${scan.findingCount} findings" +
-                    if (scan.cancelled) " · cancelled" else "",
+                    when {
+                        scan.failed -> " · failed · ${sanitizeTerminalFailureCode(scan.failureCode) ?: "SCAN_FAILED"}"
+                        scan.cancelled -> " · cancelled"
+                        else -> ""
+                    },
                 color = NeuralTheme.TextSecondary,
                 fontSize = 11.sp,
                 lineHeight = 15.sp,

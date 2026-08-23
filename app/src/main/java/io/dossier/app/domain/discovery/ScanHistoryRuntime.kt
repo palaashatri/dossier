@@ -50,6 +50,8 @@ object ScanHistoryRuntime {
         scanId: ScanId,
         occurredAt: Instant,
         cancelled: Boolean,
+        failed: Boolean = false,
+        failureCode: String? = null,
         profileResultCount: Int,
         findingCount: Int,
         breachRecordCount: Int,
@@ -59,15 +61,24 @@ object ScanHistoryRuntime {
         synchronized(lock) {
             val current = active ?: return
             if (current.entry.scanId != scanId.value) return
+            val terminalFailed = failed
+            val terminalCancelled = cancelled && !terminalFailed
+            val safeFailureCode = if (terminalFailed) {
+                sanitizeTerminalFailureCode(failureCode) ?: "SCAN_FAILED"
+            } else {
+                null
+            }
             latestTerminal = current.copy(
                 entry = current.entry.copy(
                     completedAtUtc = occurredAt.toString(),
-                    profileResultCount = profileResultCount,
-                    findingCount = findingCount,
-                    breachRecordCount = breachRecordCount,
-                    graphEntityCount = graphEntityCount,
-                    graphRelationshipCount = graphRelationshipCount,
-                    cancelled = cancelled
+                    profileResultCount = profileResultCount.coerceAtLeast(0),
+                    findingCount = findingCount.coerceAtLeast(0),
+                    breachRecordCount = breachRecordCount.coerceAtLeast(0),
+                    graphEntityCount = graphEntityCount.coerceAtLeast(0),
+                    graphRelationshipCount = graphRelationshipCount.coerceAtLeast(0),
+                    cancelled = terminalCancelled,
+                    failed = terminalFailed,
+                    failureCode = safeFailureCode
                 )
             )
             active = null

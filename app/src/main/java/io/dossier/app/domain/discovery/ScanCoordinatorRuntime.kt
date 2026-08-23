@@ -3,6 +3,8 @@ package io.dossier.app.domain.discovery
 import android.content.Context
 import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.scanner.BackgroundScanWorker
+import io.dossier.app.domain.scanner.ScanLifecycleErrors
 import io.dossier.app.domain.scanner.ScanSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -101,6 +103,59 @@ sealed interface ScanEvent {
         val profileCount: Int,
         val findingCount: Int
     ) : ScanEvent
+
+    data class ScanFailed(
+        override val scanId: ScanId,
+        override val occurredAt: Instant,
+        val profileCount: Int,
+        val findingCount: Int,
+        val errorCode: String
+    ) : ScanEvent
+}
+
+internal data class TerminalScanClassification(
+    val state: ScanRunState,
+    val failureCode: String? = null
+)
+
+private const val STAGE_CANCELLED = "SCAN_CANCELLED"
+private const val GENERIC_SCAN_FAILURE = "SCAN_FAILED"
+private val SAFE_TERMINAL_FAILURE_CODES =
+    BackgroundScanWorker.SAFE_ERROR_CODES +
+        ScanLifecycleErrors.SAFE_ERROR_CODES +
+        setOf(
+            GENERIC_SCAN_FAILURE,
+            "WORK_SCHEDULING_FAILED",
+            "SECURE_REQUEST_PERSISTENCE_FAILED",
+            "ACTIVE_MARKER_PERSISTENCE_FAILED",
+            "WORK_ENQUEUE_FAILED"
+        )
+
+internal fun sanitizeTerminalFailureCode(code: String?): String? =
+    code?.takeIf { it in SAFE_TERMINAL_FAILURE_CODES }
+
+internal fun safeCoordinatorStage(stage: String): String =
+    BackgroundScanWorker.safeProgressData(stage)
+        .getString(BackgroundScanWorker.KEY_STAGE)
+        ?: BackgroundScanWorker.STAGE_RUNNING
+
+internal fun classifyTerminalStage(stage: String): TerminalScanClassification {
+    if (stage == STAGE_CANCELLED || stage == BackgroundScanWorker.STAGE_CANCELLED) {
+        return TerminalScanClassification(ScanRunState.Cancelled)
+    }
+    if (stage == BackgroundScanWorker.STAGE_FAILED) {
+        return TerminalScanClassification(ScanRunState.Failed, GENERIC_SCAN_FAILURE)
+    }
+    if (stage.startsWith("${BackgroundScanWorker.STAGE_FAILED}:")) {
+        val code = stage.substringAfter(':').trim()
+            .let(::sanitizeTerminalFailureCode)
+            ?: GENERIC_SCAN_FAILURE
+        return TerminalScanClassification(ScanRunState.Failed, code)
+    }
+    if (stage == BackgroundScanWorker.STAGE_COMPLETE) {
+        return TerminalScanClassification(ScanRunState.Completed)
+    }
+    return TerminalScanClassification(ScanRunState.Failed, GENERIC_SCAN_FAILURE)
 }
 
 data class LiveScanSnapshot(
@@ -169,7 +224,7 @@ object ScanCoordinatorRuntime {
                             state = ScanRunState.Running,
                             mode = mode,
                             directProfileProviders = directProviders,
-                            stage = ScanSession.progressText.value
+                            stage = safeCoordinatorStage(ScanSession.progressText.value)
                         )
                         ScanHistoryRuntime.scanStarted(
                             scanId = id,
@@ -190,8 +245,10 @@ object ScanCoordinatorRuntime {
                     }
                 } else {
                     val id = activeScanId ?: return@collect
-                    val cancelled = ScanSession.progressText.value == "SCAN_CANCELLED"
-                    val terminal = if (cancelled) ScanRunState.Cancelled else ScanRunState.Completed
+                    val classification = classifyTerminalStage(ScanSession.progressText.value)
+                    val terminal = classification.state
+                    val cancelled = terminal == ScanRunState.Cancelled
+                    val failed = terminal == ScanRunState.Failed
                     val finishedAt = Instant.now()
                     val profileCount = ScanSession.profileScanResults.value.size
                     val findingCount = ScanSession.findings.value.size
@@ -209,14 +266,16 @@ object ScanCoordinatorRuntime {
                         scanId = id,
                         occurredAt = finishedAt,
                         cancelled = cancelled,
+                        failed = failed,
+                        failureCode = classification.failureCode,
                         profileResultCount = profileCount,
                         findingCount = findingCount,
                         breachRecordCount = breachRecordCount,
                         graphEntityCount = graph.entities.size,
                         graphRelationshipCount = graph.edges.size
                     )
-                    if (cancelled) {
-                        emit(
+                    when (terminal) {
+                        ScanRunState.Cancelled -> emit(
                             ScanEvent.ScanCancelled(
                                 scanId = id,
                                 occurredAt = finishedAt,
@@ -224,8 +283,16 @@ object ScanCoordinatorRuntime {
                                 findingCount = findingCount
                             )
                         )
-                    } else {
-                        emit(
+                        ScanRunState.Failed -> emit(
+                            ScanEvent.ScanFailed(
+                                scanId = id,
+                                occurredAt = finishedAt,
+                                profileCount = profileCount,
+                                findingCount = findingCount,
+                                errorCode = classification.failureCode ?: GENERIC_SCAN_FAILURE
+                            )
+                        )
+                        else -> emit(
                             ScanEvent.ScanCompleted(
                                 scanId = id,
                                 occurredAt = finishedAt,
@@ -246,10 +313,11 @@ object ScanCoordinatorRuntime {
             var previous = ""
             ScanSession.progressText.collect { stage ->
                 val id = activeScanId ?: return@collect
-                if (stage.isBlank() || stage == previous) return@collect
-                previous = stage
-                _snapshot.value = _snapshot.value.copy(stage = stage)
-                emit(ScanEvent.StageChanged(id, Instant.now(), stage))
+                val safeStage = safeCoordinatorStage(stage)
+                if (safeStage == previous) return@collect
+                previous = safeStage
+                _snapshot.value = _snapshot.value.copy(stage = safeStage)
+                emit(ScanEvent.StageChanged(id, Instant.now(), safeStage))
             }
         }
 
@@ -387,4 +455,5 @@ object ScanCoordinatorRuntime {
     }
 
     private fun newScanId(): ScanId = ScanId(UUID.randomUUID().toString())
+
 }

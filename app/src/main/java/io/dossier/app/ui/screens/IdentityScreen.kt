@@ -321,13 +321,15 @@ private fun StepOne(
             minLines = 2,
             maxLines = 4,
             singleLine = false,
-            supportingText = "One per line or separated by commas."
-        )
-        when {
-            invalidEmails.isNotEmpty() -> InlineError(
+            supportingText = if (invalidEmails.isEmpty()) {
+                "One per line or separated by commas."
+            } else {
                 "Check invalid email input: ${invalidEmails.take(2).joinToString(", ")}"
-            )
-            !hasIdentitySignal -> InlineError("Enter at least one identity signal to continue.")
+            },
+            isError = invalidEmails.isNotEmpty()
+        )
+        if (!hasIdentitySignal) {
+            InlineError("Enter at least one identity signal to continue.")
         }
     }
 }
@@ -527,7 +529,8 @@ fun CyberTextField(
     minLines: Int = 1,
     maxLines: Int = 1,
     singleLine: Boolean = minLines == 1,
-    supportingText: String? = null
+    supportingText: String? = null,
+    isError: Boolean = false
 ) {
     OutlinedTextField(
         value = value,
@@ -540,6 +543,7 @@ fun CyberTextField(
         minLines = minLines,
         maxLines = maxLines,
         singleLine = singleLine,
+        isError = isError,
         colors = OutlinedTextFieldDefaults.colors(
             focusedContainerColor = NeuralTheme.CardBackground,
             unfocusedContainerColor = NeuralTheme.CardBackground,

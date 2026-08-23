@@ -427,15 +427,19 @@ class ScanResumeStoreTest {
     @Test
     fun oversizedPointerAndSyntacticallyValidEnvelopeAreRejected() {
         val fixture = fixture()
-        val store = store(fixture)
+        val store = store(fixture, ids = listOf(ID_ONE, ID_TWO))
         store.save(IdentityInput(fullName = "X"), false)
         val pointer = File(fixture.records, ScanResumeStore.POINTER_FILE_NAME)
         pointer.writeText("x".repeat(ScanResumeStore.MAX_POINTER_BYTES.toInt() + 1))
 
         assertEquals(ResumeReadState.Invalid(ResumeInvalidReason.InvalidRequestId), store.loadDetailed())
 
-        store.save(IdentityInput(fullName = "X"), false)
-        val record = fixture.records.listFiles()!!.single { it.name.endsWith(".dscan") }
+        // Invalid pointer cleanup preserves the encrypted generation. Reconcile
+        // that single unambiguous orphan before scheduling its replacement.
+        assertTrue(store.loadDetailed() is ResumeReadState.Available)
+        assertTrue(store.save(IdentityInput(fullName = "X"), false))
+        val activeId = pointer.readText()
+        val record = File(fixture.records, "$activeId${ScanResumeStore.RECORD_EXTENSION}")
         val oversizedCiphertext = Base64.getEncoder().encodeToString(
             ByteArray(ScanResumeStore.MAX_RECORD_BYTES + ScanResumeStore.GCM_TAG_BYTES + 1)
         )
@@ -495,10 +499,10 @@ class ScanResumeStoreTest {
         )
 
         assertEquals(
-            ResumeWriteState.StorageFailure(ResumeStorageReason.KeyUnavailable),
+            ResumeWriteState.StorageFailure(ResumeStorageReason.PointerFailure),
             stalePointerStore.saveDetailed(IdentityInput(fullName = "Stale"), false)
         )
-        assertEquals(listOf(false), stalePointerCrypto.allowKeyCreationCalls)
+        assertTrue(stalePointerCrypto.allowKeyCreationCalls.isEmpty())
         assertTrue(stalePointerFixture.records.listFiles().orEmpty().none { it.name.endsWith(ScanResumeStore.RECORD_EXTENSION) })
 
         val malformedRecordFixture = fixture()
@@ -523,6 +527,84 @@ class ScanResumeStoreTest {
     }
 
     @Test
+    fun firstFreshSaveCapturesKeystoreCreationBeforePublishingPreparedMarker() {
+        val fixture = fixture()
+        val crypto = KeyCreationGuardResumeCrypto()
+        val store = ScanResumeStore(
+            recordsDir = fixture.records,
+            legacyDir = fixture.legacy,
+            crypto = crypto,
+            idFactory = { ID_ONE }
+        )
+
+        assertTrue(store.saveDetailed(IdentityInput(fullName = "Fresh Key"), false) is ResumeWriteState.Saved)
+        assertEquals(listOf(true), crypto.allowKeyCreationCalls)
+    }
+
+    @Test
+    fun preExistingResumeStateStillDeniesKeystoreCreationBeforePreparedMarker() {
+        val fixture = fixture()
+        assertTrue(store(fixture, ids = listOf(ID_ONE)).save(IdentityInput(fullName = "Existing"), false))
+        val crypto = KeyCreationGuardResumeCrypto()
+        val store = ScanResumeStore(
+            recordsDir = fixture.records,
+            legacyDir = fixture.legacy,
+            crypto = crypto,
+            idFactory = { ID_TWO }
+        )
+
+        assertEquals(
+            ResumeWriteState.StorageFailure(ResumeStorageReason.KeyUnavailable),
+            store.prepareRequestDetailed(IdentityInput(fullName = "Second"), false, false)
+        )
+        assertEquals(listOf(false), crypto.allowKeyCreationCalls)
+        assertTrue(File(fixture.records, "$ID_ONE${ScanResumeStore.RECORD_EXTENSION}").exists())
+    }
+
+    @Test
+    fun markerOnlyCrashIsDiscardedBeforeFreshKeystoreCreationRetry() {
+        val fixture = fixture()
+        fixture.records.mkdirs()
+        val staleMarker = File(fixture.records, "$ID_ONE${ScanResumeStore.PREPARED_EXTENSION}")
+        staleMarker.writeBytes(byteArrayOf(1))
+        val crypto = KeyCreationGuardResumeCrypto()
+        val store = ScanResumeStore(
+            recordsDir = fixture.records,
+            legacyDir = fixture.legacy,
+            crypto = crypto,
+            idFactory = { ID_TWO }
+        )
+
+        assertTrue(store.saveDetailed(IdentityInput(fullName = "Retry After Marker"), false) is ResumeWriteState.Saved)
+        assertEquals(listOf(true), crypto.allowKeyCreationCalls)
+        assertFalse(staleMarker.exists())
+    }
+
+    @Test
+    fun markerIsNotDiscardedWhenItsEncryptedRecordExists() {
+        val fixture = fixture()
+        val initial = store(fixture, ids = listOf(ID_ONE, ID_TWO))
+        initial.saveDetailed(IdentityInput(fullName = "Existing"), false) as ResumeWriteState.Saved
+        val prepared = initial.prepareRequestDetailed(IdentityInput(fullName = "Prepared"), false, false)
+            as ResumeWriteState.Saved
+        val crypto = KeyCreationGuardResumeCrypto()
+        val retry = ScanResumeStore(
+            recordsDir = fixture.records,
+            legacyDir = fixture.legacy,
+            crypto = crypto,
+            idFactory = { ID_C }
+        )
+
+        assertEquals(
+            ResumeWriteState.StorageFailure(ResumeStorageReason.KeyUnavailable),
+            retry.prepareRequestDetailed(IdentityInput(fullName = "Must Not Create"), false, false)
+        )
+        assertEquals(listOf(false), crypto.allowKeyCreationCalls)
+        assertTrue(File(fixture.records, "${prepared.point.requestId}${ScanResumeStore.PREPARED_EXTENSION}").exists())
+        assertTrue(File(fixture.records, "${prepared.point.requestId}${ScanResumeStore.RECORD_EXTENSION}").exists())
+    }
+
+    @Test
     fun uniqueTempCleanup() {
         val fixture = fixture()
         val store = store(fixture)
@@ -541,7 +623,7 @@ class ScanResumeStoreTest {
         var syncCount = 0
         val failingSyncer = object : DirectorySyncer {
             override fun sync(dir: File) {
-                if (dir.name == "records" && ++syncCount == 2) throw java.io.IOException("Sync failed")
+                if (dir.name == "records" && ++syncCount == 3) throw java.io.IOException("Sync failed")
             }
         }
         val store2 = ScanResumeStore(fixture.records, TestResumeCrypto(), { 1000L }, { ID_TWO }, fixture.legacy, failingSyncer)
@@ -550,7 +632,8 @@ class ScanResumeStoreTest {
 
         assertArrayEquals(priorRecord, File(fixture.records, ID_ONE + ScanResumeStore.RECORD_EXTENSION).readBytes())
         assertArrayEquals(priorPointer, File(fixture.records, ScanResumeStore.POINTER_FILE_NAME).readBytes())
-        assertFalse(File(fixture.records, ID_TWO + ScanResumeStore.RECORD_EXTENSION).exists())
+        assertTrue(File(fixture.records, ID_TWO + ScanResumeStore.RECORD_EXTENSION).exists())
+        assertTrue(File(fixture.records, ID_TWO + ScanResumeStore.PREPARED_EXTENSION).exists())
         val state = store1.loadDetailed() as ResumeReadState.Available
         assertEquals("Prior", state.point.input.fullName)
         assertEquals(ID_ONE, state.point.requestId)
@@ -568,7 +651,7 @@ class ScanResumeStoreTest {
         var priorDeletionFailureInjected = false
         val failingSyncer = object : DirectorySyncer {
             override fun sync(dir: File) {
-                if (++syncCount == 3) {
+                if (++syncCount == 4) {
                     priorDeletionFailureInjected = true
                     throw java.io.IOException("prior deletion fsync failed")
                 }
@@ -596,7 +679,215 @@ class ScanResumeStoreTest {
     }
 
     @Test
-    fun privacyWinCryptoFailure() {
+    fun legacySaveRejectsPreparedUuidCollisionWithoutOverwritingEitherGeneration() {
+        val fixture = fixture()
+        val store = store(fixture, ids = listOf(ID_ONE, ID_TWO, ID_TWO))
+        val active = store.saveDetailed(IdentityInput(fullName = "Active A"), false)
+            as ResumeWriteState.Saved
+        val prepared = store.prepareRequestDetailed(IdentityInput(fullName = "Prepared B"), false, false)
+            as ResumeWriteState.Saved
+        val preparedFile = File(fixture.records, "$ID_TWO${ScanResumeStore.RECORD_EXTENSION}")
+        val preparedBytes = preparedFile.readBytes()
+
+        assertEquals(
+            ResumeWriteState.Invalid(ResumeInvalidReason.InvalidRequestId),
+            store.saveDetailed(IdentityInput(fullName = "Collision"), false)
+        )
+        assertArrayEquals(preparedBytes, preparedFile.readBytes())
+        assertEquals(active.point.requestId, File(fixture.records, ScanResumeStore.POINTER_FILE_NAME).readText())
+        assertEquals(
+            prepared.point.input,
+            (store.loadPreparedRequestDetailed(prepared.point.requestId) as ResumeReadState.Available).point.input
+        )
+    }
+
+    @Test
+    fun legacyMarkerDeletionFailurePreservesCurrentEncryptedGeneration() {
+        val fixture = fixture()
+        val store = store(fixture, ids = listOf(ID_ONE, ID_TWO))
+        val active = store.saveDetailed(IdentityInput(fullName = "Active A"), false)
+            as ResumeWriteState.Saved
+        fixture.legacy.mkdirs()
+        val markerDirectory = File(fixture.legacy, ScanResumeStore.LEGACY_FILE_NAME)
+        markerDirectory.mkdirs()
+        File(markerDirectory, "keep").writeText("plaintext marker cannot be removed")
+
+        assertEquals(
+            ResumeWriteState.StorageFailure(ResumeStorageReason.LegacyDeletionFailure),
+            store.saveDetailed(IdentityInput(fullName = "Rejected B"), false)
+        )
+        assertEquals(active.point.requestId, File(fixture.records, ScanResumeStore.POINTER_FILE_NAME).readText())
+        assertTrue(File(fixture.records, "$ID_ONE${ScanResumeStore.RECORD_EXTENSION}").exists())
+        assertFalse(File(fixture.records, "$ID_TWO${ScanResumeStore.RECORD_EXTENSION}").exists())
+        assertTrue(markerDirectory.exists())
+    }
+
+    @Test
+    fun failedEncryptionNeverDeletesTheOnlyLegacyResumeMarker() {
+        val fixture = fixture()
+        fixture.legacy.mkdirs()
+        val legacy = File(fixture.legacy, ScanResumeStore.LEGACY_FILE_NAME)
+        legacy.writeText("{\"fullName\":\"Recoverable Legacy\"}")
+        val failingCrypto = object : ResumeCrypto {
+            override fun seal(
+                plaintext: ByteArray,
+                aad: ByteArray,
+                allowKeyCreation: Boolean
+            ): SealedResumePayload = throw ResumeCryptoFailure(ResumeStorageReason.KeyFailure)
+
+            override fun open(payload: SealedResumePayload, aad: ByteArray): ByteArray =
+                throw ResumeCryptoFailure(ResumeStorageReason.KeyFailure)
+        }
+        val store = ScanResumeStore(
+            fixture.records,
+            fixture.legacy,
+            failingCrypto,
+            { 1_000L },
+            { ID_ONE },
+            object : DirectorySyncer { override fun sync(dir: File) = Unit }
+        )
+
+        assertEquals(
+            ResumeWriteState.StorageFailure(ResumeStorageReason.KeyFailure),
+            store.saveDetailed(IdentityInput(fullName = "New"), false)
+        )
+        assertTrue(legacy.exists())
+        assertTrue(fixture.records.listFiles().orEmpty().none {
+            it.name.endsWith(ScanResumeStore.RECORD_EXTENSION) ||
+                it.name == ScanResumeStore.POINTER_FILE_NAME
+        })
+    }
+
+    @Test
+    fun legacySaveRejectsMalformedOrMissingPriorPointerTargetBeforeWriting() {
+        val malformedFixture = fixture()
+        malformedFixture.records.mkdirs()
+        val malformedPointer = File(malformedFixture.records, ScanResumeStore.POINTER_FILE_NAME)
+        malformedPointer.writeText("malformed-pointer")
+        val malformedStore = store(malformedFixture, ids = listOf(ID_TWO))
+        assertEquals(
+            ResumeWriteState.StorageFailure(ResumeStorageReason.PointerFailure),
+            malformedStore.saveDetailed(IdentityInput(fullName = "New"), false)
+        )
+        assertEquals("malformed-pointer", malformedPointer.readText())
+        assertFalse(File(malformedFixture.records, "$ID_TWO${ScanResumeStore.RECORD_EXTENSION}").exists())
+
+        val missingFixture = fixture()
+        missingFixture.records.mkdirs()
+        val stalePointer = File(missingFixture.records, ScanResumeStore.POINTER_FILE_NAME)
+        stalePointer.writeText(ID_ONE)
+        val missingStore = store(missingFixture, ids = listOf(ID_TWO))
+        assertEquals(
+            ResumeWriteState.StorageFailure(ResumeStorageReason.IoFailure),
+            missingStore.saveDetailed(IdentityInput(fullName = "New"), false)
+        )
+        assertEquals(ID_ONE, stalePointer.readText())
+        assertFalse(File(missingFixture.records, "$ID_TWO${ScanResumeStore.RECORD_EXTENSION}").exists())
+    }
+
+    @Test
+    fun missingOrBlankPointerTargetIsClearedFailClosed() {
+        val missingFixture = fixture()
+        missingFixture.records.mkdirs()
+        val missingPointer = File(missingFixture.records, ScanResumeStore.POINTER_FILE_NAME)
+        missingPointer.writeText(ID_ONE)
+        assertEquals(ResumeReadState.Missing, store(missingFixture).loadDetailed())
+        assertFalse(missingPointer.exists())
+
+        val blankFixture = fixture()
+        blankFixture.records.mkdirs()
+        val blankPointer = File(blankFixture.records, ScanResumeStore.POINTER_FILE_NAME)
+        blankPointer.writeText("   ")
+        assertEquals(
+            ResumeReadState.Invalid(ResumeInvalidReason.InvalidRequestId),
+            store(blankFixture).loadDetailed()
+        )
+        assertFalse(blankPointer.exists())
+    }
+
+    @Test
+    fun clearRequestPointerSyncFailureRetainsEncryptedRecord() {
+        val fixture = fixture()
+        val initial = store(fixture, ids = listOf(ID_ONE))
+        val saved = initial.saveDetailed(IdentityInput(fullName = "Active"), false)
+            as ResumeWriteState.Saved
+        val failingSyncer = object : DirectorySyncer {
+            override fun sync(dir: File) {
+                throw java.io.IOException("pointer fsync failed")
+            }
+        }
+        val clearing = ScanResumeStore(
+            fixture.records,
+            fixture.legacy,
+            TestResumeCrypto(),
+            { 2_000L },
+            { ID_TWO },
+            failingSyncer
+        )
+
+        assertFalse(clearing.clearRequest(saved.point.requestId))
+        assertTrue(File(fixture.records, "$ID_ONE${ScanResumeStore.RECORD_EXTENSION}").exists())
+    }
+
+    @Test
+    fun clearDetailedPointerSyncFailureDoesNotDeleteEncryptedRecords() {
+        val fixture = fixture()
+        val initial = store(fixture, ids = listOf(ID_ONE))
+        initial.saveDetailed(IdentityInput(fullName = "Active"), false) as ResumeWriteState.Saved
+        val failingSyncer = object : DirectorySyncer {
+            override fun sync(dir: File) {
+                throw java.io.IOException("pointer fsync failed")
+            }
+        }
+        val clearing = ScanResumeStore(
+            fixture.records,
+            fixture.legacy,
+            TestResumeCrypto(),
+            { 2_000L },
+            { ID_TWO },
+            failingSyncer
+        )
+
+        assertEquals(
+            ResumeWriteState.StorageFailure(ResumeStorageReason.IoFailure),
+            clearing.clearDetailed()
+        )
+        assertTrue(File(fixture.records, "$ID_ONE${ScanResumeStore.RECORD_EXTENSION}").exists())
+    }
+
+    @Test
+    fun legacyPointerRollbackNeverLeavesPointerWithoutItsRecord() {
+        val fixture = fixture()
+        val prior = store(fixture, ids = listOf(ID_ONE))
+        prior.saveDetailed(IdentityInput(fullName = "Prior"), false) as ResumeWriteState.Saved
+        var syncCount = 0
+        val failingSyncer = object : DirectorySyncer {
+            override fun sync(dir: File) {
+                syncCount += 1
+                if (syncCount == 3 || syncCount == 4) {
+                    throw java.io.IOException("simulated pointer fsync failure")
+                }
+            }
+        }
+        val next = ScanResumeStore(
+            fixture.records,
+            fixture.legacy,
+            TestResumeCrypto(),
+            { 2_000L },
+            { ID_TWO },
+            failingSyncer
+        )
+
+        assertEquals(
+            ResumeWriteState.StorageFailure(ResumeStorageReason.PointerFailure),
+            next.saveDetailed(IdentityInput(fullName = "New"), false)
+        )
+        val pointer = File(fixture.records, ScanResumeStore.POINTER_FILE_NAME).readText()
+        assertTrue(File(fixture.records, "$pointer${ScanResumeStore.RECORD_EXTENSION}").exists())
+    }
+
+    @Test
+    fun migrationCryptoFailurePreservesOnlyRecoverableLegacyMarker() {
         val fixture = fixture()
         fixture.legacy.mkdirs()
         val legacy = File(fixture.legacy, ScanResumeStore.LEGACY_FILE_NAME)
@@ -610,7 +901,7 @@ class ScanResumeStoreTest {
         val store = ScanResumeStore(fixture.records, failingCrypto, legacyDir = fixture.legacy)
 
         assertEquals(ResumeReadState.StorageFailure(ResumeStorageReason.KeyFailure), store.loadDetailed())
-        assertFalse(legacy.exists())
+        assertTrue(legacy.exists())
     }
 
     @Test
@@ -623,7 +914,7 @@ class ScanResumeStoreTest {
 
         val result = store(fixture).loadDetailed()
         assertEquals(
-            ResumeReadState.StorageFailure(ResumeStorageReason.LegacyDeletionFailure),
+            ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure),
             result
         )
         assertTrue(legacyMarkerPath.exists())
@@ -746,6 +1037,7 @@ class ScanResumeStoreTest {
     private companion object {
         const val ID_ONE = "123e4567-e89b-12d3-a456-426614174000"
         const val ID_TWO = "123e4567-e89b-12d3-a456-426614174001"
+        const val ID_C = "123e4567-e89b-12d3-a456-426614174002"
     }
 }
 

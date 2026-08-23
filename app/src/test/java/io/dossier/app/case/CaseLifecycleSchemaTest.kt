@@ -7,11 +7,13 @@ import io.dossier.app.domain.case.RemediationRecord
 import io.dossier.app.domain.case.RemediationStatus
 import io.dossier.app.domain.case.UserCorrection
 import io.dossier.app.domain.case.UserCorrectionDecision
+import io.dossier.app.domain.case.normalizePersistedScanHistoryEntry
 import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -81,7 +83,38 @@ class CaseLifecycleSchemaTest {
         val decoded = json.decodeFromString<DossierCase>(json.encodeToString(dossierCase))
         assertEquals(DossierCase.CURRENT_SCHEMA_VERSION, decoded.schemaVersion)
         assertEquals(ScanMode.Deep, decoded.scanHistory.single().mode)
+        assertFalse(decoded.scanHistory.single().failed)
+        assertEquals(null, decoded.scanHistory.single().failureCode)
         assertEquals(UserCorrectionDecision.ThisIsNotMe, decoded.userCorrections.single().decision)
         assertEquals(RemediationStatus.Submitted, decoded.remediationRecords.single().status)
+    }
+
+    @Test
+    fun persistedFailureHistoryIsSanitizedBeforeUiOrResave() {
+        val normalized = normalizePersistedScanHistoryEntry(
+            CaseScanHistoryEntry(
+                scanId = "unsafe-history",
+                startedAtUtc = "2026-08-01T00:00:00Z",
+                failed = true,
+                cancelled = true,
+                failureCode = "token=do-not-render",
+                directProfileProviderCount = -9,
+                profileResultCount = -1,
+                findingCount = -2,
+                breachRecordCount = -3,
+                graphEntityCount = -4,
+                graphRelationshipCount = -5
+            )
+        )
+
+        assertTrue(normalized.failed)
+        assertFalse(normalized.cancelled)
+        assertEquals("SCAN_FAILED", normalized.failureCode)
+        assertEquals(0, normalized.directProfileProviderCount)
+        assertEquals(0, normalized.profileResultCount)
+        assertEquals(0, normalized.findingCount)
+        assertEquals(0, normalized.breachRecordCount)
+        assertEquals(0, normalized.graphEntityCount)
+        assertEquals(0, normalized.graphRelationshipCount)
     }
 }

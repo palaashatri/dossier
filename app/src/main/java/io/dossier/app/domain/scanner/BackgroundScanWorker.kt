@@ -176,6 +176,7 @@ class BackgroundScanWorker(
         const val STAGE_COMPLETE = "BACKGROUND_SCAN_COMPLETE"
         const val STAGE_FAILED = "BACKGROUND_SCAN_FAILED"
         const val STAGE_RUNNING = "BACKGROUND_SCAN_RUNNING"
+        const val STAGE_CANCELLED = "BACKGROUND_SCAN_CANCELLED"
 
         internal const val KEY_REQUEST_ID = "request_id"
         private const val LEGACY_KEY_IDENTITY_JSON = "identity_json"
@@ -226,7 +227,8 @@ class BackgroundScanWorker(
             "COMPILING_EXPOSURE_LEVELS...",
             "COMPILING_EXPOSURE_SCORES...",
             "GENERATING_AI_SUMMARY...",
-            "SCAN_CANCELLED"
+            "SCAN_CANCELLED",
+            STAGE_CANCELLED
         )
 
         internal fun secureInputData(requestId: String): Data {
@@ -350,28 +352,53 @@ object BackgroundScanManager {
         completedWorkId: String?
     ): WorkInfo? = synchronized(LIFECYCLE_LOCK) {
         val ownerId = activeOwner(context.applicationContext)
-        workInfos.firstOrNull { it.id.toString() == ownerId }
-            ?: workInfos.firstOrNull { it.id.toString() == completedWorkId }
-            ?: workInfos.firstOrNull {
-                it.state == WorkInfo.State.RUNNING ||
-                    it.state == WorkInfo.State.ENQUEUED ||
-                    it.state == WorkInfo.State.BLOCKED
-            }
-            ?: workInfos.lastOrNull()
+        val selectedId = selectRelevantWorkId(
+            activeOwnerId = ownerId,
+            completedWorkId = completedWorkId,
+            availableWorkIds = workInfos.mapTo(linkedSetOf()) { it.id.toString() }
+        )
+        selectedId?.let { id -> workInfos.firstOrNull { it.id.toString() == id } }
+    }
+
+    internal fun selectRelevantWorkId(
+        activeOwnerId: String?,
+        completedWorkId: String?,
+        availableWorkIds: Set<String>
+    ): String? = sequenceOf(activeOwnerId, completedWorkId)
+        .filterNotNull()
+        .distinct()
+        .firstOrNull { it in availableWorkIds }
+
+    internal fun safeStatusStage(
+        progressStage: String?,
+        outputStage: String?,
+        state: WorkInfo.State
+    ): String {
+        val stateStage = when (state) {
+            WorkInfo.State.ENQUEUED -> BackgroundScanWorker.STAGE_STARTING
+            WorkInfo.State.SUCCEEDED -> BackgroundScanWorker.STAGE_COMPLETE
+            WorkInfo.State.FAILED -> BackgroundScanWorker.STAGE_FAILED
+            WorkInfo.State.CANCELLED -> BackgroundScanWorker.STAGE_CANCELLED
+            else -> BackgroundScanWorker.STAGE_RUNNING
+        }
+        val terminal = state == WorkInfo.State.SUCCEEDED ||
+            state == WorkInfo.State.FAILED ||
+            state == WorkInfo.State.CANCELLED
+        val candidate = if (terminal) outputStage ?: stateStage else progressStage ?: outputStage ?: stateStage
+        val sanitized = BackgroundScanWorker.safeProgressData(candidate)
+            .getString(BackgroundScanWorker.KEY_STAGE)
+            ?: BackgroundScanWorker.STAGE_RUNNING
+        return if (terminal && sanitized == BackgroundScanWorker.STAGE_RUNNING) stateStage else sanitized
     }
 
     fun toStatus(info: WorkInfo): Status = Status(
         id = info.id,
         state = info.state,
-        stage = info.progress.getString(BackgroundScanWorker.KEY_STAGE)
-            ?: info.outputData.getString(BackgroundScanWorker.KEY_STAGE)
-            ?: when (info.state) {
-                WorkInfo.State.ENQUEUED -> BackgroundScanWorker.STAGE_STARTING
-                WorkInfo.State.SUCCEEDED -> BackgroundScanWorker.STAGE_COMPLETE
-                WorkInfo.State.FAILED -> BackgroundScanWorker.STAGE_FAILED
-                WorkInfo.State.CANCELLED -> "BACKGROUND_SCAN_CANCELLED"
-                else -> "BACKGROUND_SCAN_RUNNING"
-            },
+        stage = safeStatusStage(
+            progressStage = info.progress.getString(BackgroundScanWorker.KEY_STAGE),
+            outputStage = info.outputData.getString(BackgroundScanWorker.KEY_STAGE),
+            state = info.state
+        ),
         error = info.outputData.getString(BackgroundScanWorker.KEY_ERROR)
             ?.takeIf { it in BackgroundScanWorker.SAFE_ERROR_CODES }
     )
