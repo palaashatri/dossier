@@ -7,10 +7,11 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 - **Strict product readiness score:** **63/100**
 - **Milestone state:** M0 complete; M1–M6 and M8–M12 materially advanced but still partial; M7 and M13 remain partial
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
-- **Last validated implementation commit:** `019bcaa55f1fde383a3e5c4bdd6e308295a5ff57`
-- **Validated CI on that commit:** provider-registry audit, face-calibration tool, JVM unit tests, debug APK assembly, and API 35 Compose smoke suite
+- **Last validated implementation commit:** `f3e8cf17d0c85957a9590d76b92dc5f39c35ea7e`
+- **Last validation date:** **2026-08-23**
+- **Current-session validation on that commit:** provider-registry audit, JVM tests, debug APK assembly, lint, API 36 Compose UI and Android Keystore resume tests
 - **Documentation-only commits after the validated implementation:** may update this file/PR prose without changing the validated code claim
-- **Last validated device class:** Pixel 6 profile, Android API 35, x86_64 emulator
+- **Last validated device class:** Medium_Phone profile, Android API 36, x86_64 emulator
 - **Real-device production validation:** not yet recorded
 - **Declarative provider definitions:** **78 authored**
 - **Registry-wide live provider validation:** not established
@@ -36,7 +37,7 @@ The readiness score remains **63/100** after the OSINT-interoperability tranche.
 | AI analyst | **4/5** | Generated factual claims must be structured, cite existing evidence IDs and survive deterministic validation; uncited/unknown identifiers are withheld and invalid output falls back locally. The validator also rejects explicit email/URL identifiers not present in the evidence actually cited. Corrected-graph/remediation-native inputs and a production evaluation corpus remain incomplete. |
 | UX/UI | **6/8** | Overview/Evidence/Connections/Actions remain coherent; live scan state is event-derived; saved Cases support persistent corrections, remediation tracking, scan-history display and share-safe export. Identity setup now exposes local Twint/snscrape and broader external OSINT report imports. Timeline UX, graph-export UI, case-integrated image clusters and broad accessibility/adaptive-layout validation remain incomplete. |
 | Security/privacy | **3/4** | Keystore AES-256-GCM cases, restricted evidence WebView, local visual processing defaults, opt-in remote AI, explicit deletion and pre-write share-safe export are implemented. External report imports are bounded, local/in-memory, tied to explicit audit seeds and strip/reject password/hash/cookie/token/session/credential material. Automated Tor/person-search crawling, authenticated social scraping and challenge bypass remain outside the product boundary. |
-| Testing/device validation | **3/5** | Provider audit, calibration runtime, JVM tests, APK assembly and API 35 Compose instrumentation pass on the exact implementation commit above. New regression coverage includes external-report seed scoping, unrelated-handle rejection, credential-bearing breach-row rejection, redacted breach summaries, PhoneInfoga/Numverify constraints, in-scope Amass domains, source-catalog invariants and graph serializers. Physical Samsung/Pixel/lower-memory, battery, process-death, font-scale and accessibility gates remain incomplete. |
+| Testing/device validation | **3/5** | Provider audit (78 definitions), the full JVM suite (309 tests across 75 suites, 0 failures/errors/skips), debug APK assembly, lint and API 36 Compose instrumentation (13/13), plus targeted Android Keystore resume tests (2/2), pass on the exact implementation commit above. New regression coverage includes external-report seed scoping, unrelated-handle rejection, credential-bearing breach-row rejection, redacted breach summaries, PhoneInfoga/Numverify constraints, in-scope Amass domains, source-catalog invariants, graph serializers and encrypted resume persistence. Physical Samsung/Pixel/lower-memory, battery, process-death, font-scale and accessibility gates remain incomplete. |
 | **Total** | **63/100** | A materially integrated contract tranche is validated. External-tool interoperability does not substitute for native/live provider validation, empirical calibration, provider scale or release hardening. |
 
 ## M0 — Baseline audit
@@ -149,6 +150,8 @@ Implemented:
 - later correction/remediation edits cannot silently graft a newer scan onto an older case.
 
 Not complete: true suspended pause/resume, provider queued/started/completed/unavailable events, sole coordinator ownership, persisted event checkpoints and crash-recovery state.
+
+The encrypted UI resume marker stores the seed input and selected mode only; it is not a persisted scan plan/parser/frontier fingerprint or generation, and does not constitute two-phase process-death or reboot recovery proof.
 
 ## M3 — Recursive frontier
 
@@ -287,6 +290,10 @@ Graph interoperability serializers now exist for GraphML, GEXF and node-link JSO
 
 Implemented controls include Keystore-backed AES-256-GCM cases, versioned/atomic encrypted storage, explicit deletion, restricted evidence WebView, system Photo Picker, local visual/face processing, opt-in remote AI, pre-write share-safe redaction, PII-safe scan-history binding and non-impersonating public-source HTTP identities.
 
+The UI resume marker is encrypted with AES-256-GCM in AndroidKeyStore. It stores the complete identity input and scan mode behind UUID-named ciphertext files plus an opaque UUID pointer, authenticates the format/request ID with AAD, enforces a 24-hour TTL and bounded reads, and uses temporary-file publication with file and parent-directory fsync, rollback and a process-local lock. Key creation is fail-closed when prior encrypted state exists. Legacy plaintext markers migrate through a bounded validation/encryption/deletion policy, and typed internal read/write states preserve invalid, missing, expired and storage-failure distinctions. JVM and Android regression coverage exercises the encrypted marker path.
+
+The encrypted marker does not protect every persistence path: `BackgroundScanWorker` still places raw `identity_json`/flags in the WorkManager database, and production facades/UI currently collapse typed resume failures into nullable/Boolean results.
+
 External OSINT imports are local/in-memory and bounded. Import parsers require explicit audit seeds appropriate to the source family and strip or reject secret-bearing fields. No newly introduced challenge bypass, credential acquisition, private-source access, hidden tracking, Tor person-crawling, authenticated social scraping or traffic-evasion behavior is permitted.
 
 ## Validation record
@@ -294,21 +301,28 @@ External OSINT imports are local/in-memory and bounded. Import parsers require e
 Validated implementation commit:
 
 ```text
-019bcaa55f1fde383a3e5c4bdd6e308295a5ff57
+f3e8cf17d0c85957a9590d76b92dc5f39c35ea7e
 ```
 
-Passing CI gates on that exact commit:
+Validation date:
 
 ```text
-Provider registry audit       PASS
-Face calibration tool         PASS
-test-and-build                PASS
-API 35 Compose smoke suite    PASS
+2026-08-23
 ```
 
-The unit suite includes regressions for external OSINT authorization boundaries, secret-bearing breach reports, Numverify phone scoping and graph interoperability. A local final-tree check also passed the provider audit (78 definitions), all 287 JVM tests, debug APK assembly and 11/11 Compose smoke tests on the existing Medium Phone API 36 x86_64 emulator. The smoke harness validates one-time onboarding persistence across activity recreation and isolates onboarding state between tests.
+Current-session validation on that exact commit:
 
-This remains emulator validation only. No physical device is recorded as release-validated.
+```text
+Provider registry audit       PASS — 78 definitions (70 profile templates + 8 services)
+JVM test suite                PASS — 309 tests / 75 suites / 0 failures / 0 errors / 0 skips
+Debug APK assembly            PASS — 114,932,558 bytes
+Debug APK SHA-256             05E7E627789E0A609294B2F805C5A9717E38A8D1DCF58CD4B0BCAF192EC2FD61
+Lint                          PASS — 0 errors / 64 warnings / 6 informational; 0 ScanResumeStore issues
+API 36 Medium_Phone UI suite  PASS — 13/13 on x86_64 emulator
+Android Keystore resume       PASS — targeted 2/2
+```
+
+The unit suite includes regressions for external OSINT authorization boundaries, secret-bearing breach reports, Numverify phone scoping, graph interoperability and encrypted resume persistence. The API 36 smoke harness validates one-time onboarding persistence across activity recreation and isolates onboarding state between tests. This remains emulator validation only; no two-phase process-death/reboot proof or physical device is recorded as release-validated.
 
 ## Current production blockers
 
