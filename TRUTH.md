@@ -7,9 +7,9 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 - **Strict product readiness score:** **63/100**
 - **Milestone state:** M0 complete; M1–M6 and M8–M12 materially advanced but still partial; M7 and M13 remain partial
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
-- **Last validated implementation commit:** `898ed3a28c4507e5674d7f2a80c3f51065b3cd07`
+- **Last validated implementation commit:** `dd85b8fcd8e32bd7e4d88e4b034af888305aaaee`
 - **Last validation date:** **2026-08-23**
-- **Current-session validation on that commit:** provider-registry audit, JVM tests, debug APK assembly, lint, API 36 Compose/UI tests, Android Keystore resume tests and direct current-row WorkManager database checks
+- **Current-session validation on that commit:** provider-registry audit, JVM tests, debug and uiTest APK assembly, lint, API 36 Compose/UI tests, Android Keystore resume tests, direct current-row WorkManager database checks and inspected synthetic-data screenshots
 - **Documentation-only commits after the validated implementation:** may update this file/PR prose without changing the validated code claim
 - **Last validated device class:** Medium_Phone profile, Android API 36, x86_64 emulator
 - **Real-device production validation:** not yet recorded
@@ -19,14 +19,14 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 
 Compilation, unit tests and emulator tests are necessary gates, but they do not substitute for live-provider validation, calibrated identity/face benchmarks, physical-device measurements, accessibility validation or release hardening.
 
-The readiness score remains **63/100** after the opaque background-checkpoint tranche. New background work no longer writes identity seeds or scan flags into WorkManager `Data`, but the tranche does not establish full persisted scan-plan/frontier recovery, startup reconciliation or physical-device resilience.
+The readiness score remains **63/100** after the lifecycle-foundation and visual-QA tranches. Encrypted two-phase request persistence, deletion guards and a generation-bound lifecycle reducer/store now exist and are JVM-tested, but production `BackgroundScanManager`/`BackgroundScanWorker`/startup call sites do not use that lifecycle yet. Emulator screenshots and layout fixes also do not establish physical-device or accessibility acceptance.
 
 ## Strict 100-point rubric
 
 | Area | Score | Truth |
 |---|---:|---|
 | Discovery breadth and reliability | **9/15** | Discovery Fabric v2 is integrated into runtime scan planning with 78 declarative definitions, categories, validation, health primitives, scan modes, maintenance-audit CI and compatibility execution. A broad OSINT capability catalog and bounded report-interoperability layer now cover many additional tool families, but most external frameworks are import/manual integrations rather than native live providers. The project remains far below the 1,000+ reviewed/live-validated target. |
-| Recursive orchestration | **5/10** | The coordinator/event bridge starts and observes the mature pipeline; live UI consumes real event-derived state; two-hop discovery has admission/visited/depth/budget rules; real terminal scan history is captured. Background requests now restore an encrypted request-scoped seed/mode/policy record through an opaque WorkManager reference and reject stale owners. True in-flight pause/resume, sole coordinator ownership, startup reconciliation, per-provider lifecycle events and a general persisted frontier remain incomplete. |
+| Recursive orchestration | **5/10** | The coordinator/event bridge starts and observes the mature pipeline; live UI consumes real event-derived state; two-hop discovery has admission/visited/depth/budget rules; real terminal scan history is captured. Background requests restore an encrypted request-scoped seed/mode/policy record through an opaque WorkManager reference. A tested generation-bound lifecycle/reconciliation foundation now exists, but it has no production manager/worker/startup call sites; true in-flight pause/resume, sole coordinator ownership, startup reconciliation, per-provider lifecycle events and a general persisted frontier remain incomplete. |
 | Evidence/provenance | **6/10** | Universal evidence supports provider, retrieval/observation timestamps, verification state, reliability, SHA-256, parser version and historical state. Imported third-party OSINT reports are explicitly Candidate/ThirdPartyAggregation and never become Verified merely because an external tool reported a hit. Older producers still do not populate every field universally. |
 | Entity resolution | **5/10** | An explainable multi-signal resolver is integrated into the production graph, preserves contributions and contradictions, and prevents same-username-only confirmation. Direct profile verification now keeps handle-only/name-only matches below the attribution threshold unless independently corroborated or explicitly supplied. Weights remain engineering parameters rather than benchmark-calibrated probabilities. |
 | Identity graph | **6/8** | Graph v2 adds semantic node kinds, typed relationships, evidence/contradiction IDs, node states, history fields, queries and schema versioning while preserving legacy case compatibility. GraphML, declared-attribute GEXF and NetworkX-style node-link JSON serializers provide dependency-free interoperability with Gephi/Cytoscape/NetworkX-style workflows. Some subsystems still retain parallel representations. |
@@ -35,9 +35,9 @@ The readiness score remains **63/100** after the opaque background-checkpoint tr
 | Historical evidence | **3/6** | Exact-URL Wayback recovery, bounded CDX history discovery, selected-snapshot re-fetching and best-effort archive.today fallback exist. Historical captures remain explicitly historical and cannot masquerade as proof of current account existence. Universal historical extraction/change tracking and production timeline UI remain incomplete. |
 | Breach intelligence | **4/5** | HIBP authoritative coverage remains separate from general public exposure; privacy-preserving range flows are used where supported; breach/provider/retrieval/date metadata is preserved. LeakCheck/DeHashed/Breach-Parse/Buster/BreachFinder interoperability is summary-only and rejects credential/secret-bearing records. Coverage remains externally dependent. |
 | AI analyst | **4/5** | Generated factual claims must be structured, cite existing evidence IDs and survive deterministic validation; uncited/unknown identifiers are withheld and invalid output falls back locally. The validator also rejects explicit email/URL identifiers not present in the evidence actually cited. Corrected-graph/remediation-native inputs and a production evaluation corpus remain incomplete. |
-| UX/UI | **6/8** | Overview/Evidence/Connections/Actions remain coherent; live scan state is event-derived; saved Cases support persistent corrections, remediation tracking, scan-history display and share-safe export. Identity setup now exposes local Twint/snscrape and broader external OSINT report imports. Timeline UX, graph-export UI, case-integrated image clusters and broad accessibility/adaptive-layout validation remain incomplete. |
+| UX/UI | **6/8** | Overview/Evidence/Connections/Actions remain coherent; live scan state is event-derived; saved Cases support persistent corrections, remediation tracking, scan-history display and share-safe export. API 36 visual QA fixed consent-footer overlap, machine-token status copy, graph-label clipping and remediation-status overlap, and records synthetic-data screenshots. Timeline UX, graph-export UI, case-integrated image clusters and broad accessibility/adaptive-layout/physical-device validation remain incomplete. |
 | Security/privacy | **3/4** | Keystore AES-256-GCM cases, encrypted request-scoped scan checkpoints, opaque new WorkManager inputs, allowlisted WorkManager progress/error values, restricted evidence WebView, local visual processing defaults, opt-in remote AI, explicit deletion and pre-write share-safe export are implemented. External report imports are bounded, local/in-memory, tied to explicit audit seeds and strip/reject password/hash/cookie/token/session/credential material. Historical plaintext WorkManager rows are not forensically erased by this tranche, and full lifecycle reconciliation remains incomplete. |
-| Testing/device validation | **3/5** | Provider audit (78 definitions), the full JVM suite (319 tests across 76 suites, 0 failures/errors/skips), debug APK assembly, lint and API 36 Compose/instrumentation (15/15), including Android Keystore resume tests (2/2) and current-row WorkManager database tests (2/2), pass on the exact implementation commit above. New regression coverage exercises opaque WorkManager input/output helpers, progress allowlisting, encrypted scan flags, exact request loading, stale-owner rejection and coroutine cancellation propagation. Physical Samsung/Pixel/lower-memory, battery, process-death, font-scale and accessibility gates remain incomplete. |
+| Testing/device validation | **3/5** | Provider audit (78 definitions), the full JVM suite (405 tests across 82 suites, 0 failures/errors/skips), debug/uiTest APK assembly, lint and API 36 Compose/instrumentation (17/17), including Android Keystore resume tests (2/2), current-row WorkManager database tests (2/2) and the uiTest-only encrypted visual fixture (1/1), pass on the exact implementation commit above. Fifteen API 36 screenshots were inspected, but physical Samsung/Pixel/lower-memory, battery, process-death, font-scale and accessibility gates remain incomplete. |
 | **Total** | **63/100** | A materially integrated contract tranche is validated. External-tool interoperability does not substitute for native/live provider validation, empirical calibration, provider scale or release hardening. |
 
 ## M0 — Baseline audit
@@ -138,7 +138,7 @@ Manual/reference support means Dossier can preserve/cross-check resulting public
 
 **Status: partial, production-integrated.**
 
-Implemented:
+Implemented in the current production path:
 
 - `ScanId`, `ScanRequest`, `ScanRunState`, `ScanEvent`, `LiveScanSnapshot`;
 - coordinator start/cancel wrapper around the mature `ScanSession`;
@@ -153,9 +153,19 @@ Implemented:
 - process-local worker serialization plus cancellation propagation through the scanner/plugin paths touched by this tranche;
 - failed scans route to the analysis/error surface rather than being announced as completed reports.
 
-Not complete: true suspended pause/resume, provider queued/started/completed/unavailable events, sole coordinator ownership, a persisted plan/parser/frontier generation, startup WorkInfo/owner reconciliation, acknowledged cancellation operations and complete crash-recovery state.
+Implemented and JVM-validated as a recovery foundation, but not connected to the production manager/worker/startup path:
 
-The encrypted resume record stores the seed input, selected mode, deep-scan flag and per-scan strong-face-policy flag. New WorkManager rows receive only its opaque UUID reference. This is not a persisted scan plan/parser/frontier fingerprint or generation and does not constitute two-phase process-death or reboot recovery proof.
+- encrypted request `prepare` / exact-ID load / `promote` / discard operations that do not auto-adopt orphan prepared generations;
+- durable, opaque deletion tombstones and a global mutation guard for interrupted cleanup;
+- immutable generation/owner/request lifecycle records with safe error codes and compare-and-transition rules;
+- a synchronous compare-and-set lifecycle store that migrates away from the legacy `active_owner` key when it is actually published;
+- exact-WorkManager-ID reconciliation decisions that distinguish authoritative missing work from an unavailable lookup and never adopt a unique-work-list result by ordering.
+
+The current production integration audit finds no `ScanLifecycleStore`, `ScanLifecycleReducer` or `ScanLifecycleReconciler` call in `BackgroundScanManager`, `BackgroundScanWorker` or application startup. `BackgroundScanWorker.kt` still owns the legacy `active_owner` path. These foundation types therefore do not yet change runtime recovery behavior.
+
+Not complete: true suspended pause/resume, provider queued/started/completed/unavailable events, sole coordinator ownership, a persisted plan/parser/frontier generation, lifecycle wiring through manager/worker/startup, exact-ID WorkInfo reconciliation, acknowledged cancellation operations and complete process-death/reboot recovery proof.
+
+The encrypted resume record stores the seed input, selected mode, deep-scan flag and per-scan strong-face-policy flag. New WorkManager rows receive only its opaque UUID reference. The new prepared/current generations are still request checkpoints, not a persisted scan plan/parser/frontier fingerprint, and the unwired lifecycle does not constitute process-death or reboot recovery proof.
 
 ## M3 — Recursive frontier
 
@@ -260,7 +270,13 @@ Implemented/preserved:
 - remediation recheck states and explanations;
 - share-safe report action;
 - Reverse Media candidate provenance and duplicate/repost cluster inspection;
-- user-visible local import controls for legacy Twint/snscrape plus broader external OSINT reports.
+- user-visible local import controls for legacy Twint/snscrape plus broader external OSINT reports;
+- human-readable presence/profile status copy without changing persisted domain enum tokens;
+- measured/clamped graph labels that preserve complete short identifiers and ellipsize only when the canvas cannot fit them;
+- remediation action/value/status rows that remain separate when action copy wraps;
+- a deterministic uiTest-only `.test` fixture that exercises the production encrypted case/transient-result stores and is absent from the debug manifest.
+
+Visual QA on the API 36 Medium Phone emulator produced and inspected 15 canonical screenshots covering consent, identity validation, username review, scan configuration/queued handoff, analysis, all report tabs, saved cases, corrections and remediation. The accepted captures fixed consent copy under the sticky CTA, the raw `SuspiciousSimilarity` token, the clipped `jane@example.tes` graph label and remediation-status collision. The screenshots contain synthetic/non-personal test data only. One minor defect remains visible in `07-scan-progress.png`: the overlaid Continue-in-background and Cancel controls have insufficient vertical separation at this viewport. It is deferred and excluded from the README gallery. This is one viewport and does not establish TalkBack, font/display scaling, reduced motion, landscape/tablet or physical-device acceptance.
 
 Not complete: production timeline, graph-export UI, case-integrated/cross-account image cluster review, corrections directly on every live Evidence card, mature tablet/landscape adaptation, localization/RTL and complete accessibility validation.
 
@@ -298,7 +314,7 @@ The resume record is encrypted with AES-256-GCM in AndroidKeyStore. It stores th
 
 New `BackgroundScanWorker` requests place only a canonical opaque request UUID in WorkManager input `Data`; output and relayed progress are bounded to fixed stage/error codes. The API 36 database test decodes the current WorkSpec input/output row and confirms the seeded identity value is absent. It does not inspect retained historical rows, SQLite WAL/free pages or prove forensic erasure. Pre-upgrade WorkManager rows may retain raw legacy `identity_json`/flags until WorkManager prunes them; the upgraded worker rejects those inputs without decoding or echoing their values.
 
-Lifecycle hardening remains partial. The owner marker is synchronously published and matching-owner terminal updates are serialized, but cancellation `Operation` results, owner-removal commit failures and prior transient-result deletion failures are not yet reconciled or generation-bound. Power loss between owner publication and asynchronous enqueue can leave a phantom owner/checkpoint, startup does not yet reconcile that marker against WorkManager, and terminal cancellation performed outside Dossier's manager is not distinguished from a reschedulable runtime stop. These are explicit M2/M13 blockers, not validated recovery claims.
+Lifecycle hardening remains partial. The new lifecycle model/store is generation-bound and fail-closed, and encrypted checkpoint cleanup has durable deletion guards, but that foundation is not wired into the production manager, worker or startup path. Runtime scheduling still uses the legacy `active_owner` marker; power loss between owner publication and asynchronous enqueue can leave a phantom owner/checkpoint, startup does not reconcile it against exact WorkManager state, cancellation `Operation` acknowledgement is not durable, and terminal cancellation outside Dossier's manager is not distinguished from a reschedulable runtime stop. These are explicit M2/M13 blockers, not validated recovery claims.
 
 External OSINT imports are local/in-memory and bounded. Import parsers require explicit audit seeds appropriate to the source family and strip or reject secret-bearing fields. No newly introduced challenge bypass, credential acquisition, private-source access, hidden tracking, Tor person-crawling, authenticated social scraping or traffic-evasion behavior is permitted.
 
@@ -307,7 +323,7 @@ External OSINT imports are local/in-memory and bounded. Import parsers require e
 Validated implementation commit:
 
 ```text
-898ed3a28c4507e5674d7f2a80c3f51065b3cd07
+dd85b8fcd8e32bd7e4d88e4b034af888305aaaee
 ```
 
 Validation date:
@@ -320,16 +336,20 @@ Current-session validation on that exact commit:
 
 ```text
 Provider registry audit       PASS — 78 definitions (70 profile templates + 8 services)
-JVM test suite                PASS — 319 tests / 76 suites / 0 failures / 0 errors / 0 skips
-Debug APK assembly            PASS — 114,932,558 bytes
-Debug APK SHA-256             71F4590718B439F0995C7588C13533FB0B5073FD84FF6CC310B98019007AF1FD
-Lint                          PASS — 0 errors / 63 warnings / 6 informational
-API 36 Medium_Phone suite     PASS — 15/15 on x86_64 emulator
+JVM test suite                PASS — 405 tests / 82 suites / 0 failures / 0 errors / 0 skips
+Debug APK assembly            PASS — 118,206,364 bytes
+Debug APK SHA-256             35BB01C344716F6A64137B6C7738E76476DDA43F6A1173EB407265F8C1604EC4
+Debug lint                    PASS — 0 errors / 65 warnings / 6 hints
+uiTest APK assembly           PASS — 242,348,799 bytes
+uiTest APK SHA-256            2D7BF9E3587A08CEACF1A5BB4E3EAFF57E95D862A23F54C2FA1A5643E9F82C3C
+API 36 Medium_Phone suite     PASS — 17/17 on x86_64 emulator
 Android Keystore resume       PASS — 2/2 within the full emulator suite
 WorkManager current-row DB    PASS — 2/2 within the full emulator suite
+Encrypted visual fixture      PASS — 1/1 within the full emulator suite
+Manual visual QA              RECORDED — 15 inspected API 36 screenshots; synthetic data only
 ```
 
-The unit suite includes regressions for external OSINT authorization boundaries, secret-bearing breach reports, Numverify phone scoping, graph interoperability, encrypted resume persistence, opaque WorkManager transport, fixed progress/error codes and cancellation propagation. The API 36 smoke harness validates one-time onboarding persistence across activity recreation and isolates onboarding state between tests. The WorkManager database check is scoped to newly created current rows; it is not historical/WAL forensic erasure evidence. This remains emulator validation only; no two-phase process-death/reboot proof or physical device is recorded as release-validated.
+The unit suite includes regressions for external OSINT authorization boundaries, secret-bearing breach reports, Numverify phone scoping, graph interoperability, encrypted two-phase checkpoint persistence/deletion guards, generation-bound lifecycle transitions, opaque WorkManager transport, fixed progress/error codes, graph-label placement, status copy and cancellation propagation. The API 36 smoke harness validates one-time onboarding persistence across activity recreation, isolates onboarding state between tests and checks wrapped remediation/status bounds. The uiTest-only receiver writes deterministic `.test` data through the production encrypted stores and is absent from the debug manifest. The WorkManager database check remains scoped to newly created current rows; it is not historical/WAL forensic erasure evidence. Manual screenshots cover one emulator viewport only; no production lifecycle wiring, process-death/reboot proof, accessibility acceptance or physical device is recorded as release-validated.
 
 ## Current production blockers
 

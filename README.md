@@ -11,24 +11,39 @@ The current implementation branch is **63/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-898ed3a28c4507e5674d7f2a80c3f51065b3cd07
+dd85b8fcd8e32bd7e4d88e4b034af888305aaaee
 ```
 
 That exact implementation passed the current final-tree validation gates:
 
 ```text
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
-JVM unit tests                      PASS — 319 tests / 76 suites / 0 failures, errors, or skips
-Debug APK assembly                  PASS — 114,932,558 bytes
-Android lint                        PASS — 0 errors / 63 warnings / 6 hints
-API 36 x86_64 instrumentation       PASS — 15/15 tests
+JVM unit tests                      PASS — 405 tests / 82 suites / 0 failures, errors, or skips
+Debug APK assembly                  PASS — 118,206,364 bytes
+Debug APK SHA-256                   35BB01C344716F6A64137B6C7738E76476DDA43F6A1173EB407265F8C1604EC4
+Android lint                        PASS — 0 errors / 65 warnings / 6 hints
+API 36 x86_64 instrumentation       PASS — 17/17 tests
 ```
 
-The API 36 Medium Phone emulator run included 2/2 direct-current-row WorkManager database checks that confirm new work input/output contains only opaque identifiers and safe status values, plus 2/2 Android Keystore-backed resume-store checks. This proves the current WorkManager row shape, not historical-row erasure, SQLite WAL/free-page sanitization, restart reconciliation, reboot recovery, or physical-device behavior.
+The API 36 Medium Phone emulator run included 2/2 direct-current-row WorkManager database checks that confirm new work input/output contains only opaque identifiers and safe status values, plus 2/2 Android Keystore-backed resume-store checks. It also exercised the uiTest-only encrypted visual fixture and the remediation-layout regression. This proves the current WorkManager row shape and emulator behavior, not historical-row erasure, SQLite WAL/free-page sanitization, restart reconciliation, reboot recovery, accessibility, or physical-device behavior.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, historical/case-integrated image workflows, and representative physical-device/accessibility/performance validation remain release gates.
 
 See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the target product contract.
+
+## Visual walkthrough
+
+These captures come from the API 36 Medium Phone emulator. Analysis, report and case screens use a deterministic **uiTest-only** fixture written through the production encrypted stores; all identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish TalkBack, large-font, reduced-motion, adaptive-layout or physical-device acceptance.
+
+| Consent and input validation | Scan configuration |
+|---|---|
+| <img src="docs/screenshots/01-onboarding.png" width="320" alt="Dossier one-time usage notice with all consent copy clear of the Continue button"> | <img src="docs/screenshots/06-scan-configuration.png" width="320" alt="Scan depth configuration showing real direct-profile provider counts"> |
+| <img src="docs/screenshots/03-identity-invalid-email.png" width="320" alt="Identity form showing an invalid email message and disabled Continue button"> | <img src="docs/screenshots/08-analysis.png" width="320" alt="Background analysis with readable presence states and bounded supporting analysis"> |
+
+| Evidence-oriented report | Explainable connections |
+|---|---|
+| <img src="docs/screenshots/09-report-overview.png" width="320" alt="Privacy audit report overview with exposure priority and coverage counts"> | <img src="docs/screenshots/10-report-evidence.png" width="320" alt="Evidence tab with provenance URL, attribution confidence and suggested action"> |
+| <img src="docs/screenshots/11-report-connections.png" width="320" alt="Connections tab with a visual identity graph and complete email label"> | <img src="docs/screenshots/15-remediation.png" width="320" alt="Saved-case remediation tracking with long actions and status labels on separate rows"> |
 
 ## Discovery Fabric
 
@@ -52,11 +67,12 @@ The long-term contract calls for 1,000+ useful reviewed definitions. The current
 - Cancellation is supported; Dossier does not invent provider-level completion events while the underlying scheduler lacks callbacks.
 - Identity seeds, scan mode, deep-scan choice and per-scan face policy are stored in an Android Keystore AES-GCM resume record; new WorkManager requests receive only its opaque UUID.
 - Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
+- A tested lifecycle/recovery foundation defines encrypted request prepare/promote/discard, durable deletion guards, generation/owner/request compare-and-transition rules, exact-work reconciliation decisions and safe failure codes.
 - Terminal scan lifecycle stores actual start/end time, mode, plan size, result counts and cancellation state.
 - A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
 - Later case edits cannot silently attach a newer scan to an older case.
 
-True suspended pause/resume, provider-level queue/start/completion events, persisted frontier checkpoints, startup owner/WorkManager reconciliation and sole coordinator ownership remain incomplete.
+The new lifecycle foundation is not yet called by `BackgroundScanManager`, `BackgroundScanWorker` or startup reconciliation; the production path still uses the legacy `active_owner` marker. True suspended pause/resume, provider-level queue/start/completion events, persisted frontier checkpoints, startup owner/WorkManager reconciliation and sole coordinator ownership therefore remain incomplete.
 
 ## Evidence, graph and entity resolution
 
@@ -178,7 +194,7 @@ Core checks:
 python3 tools/provider_registry_audit.py
 ./gradlew :app:testDebugUnitTest
 ./gradlew :app:assembleDebug
-./gradlew connectedUiTestAndroidTest
+./gradlew :app:connectedUiTestAndroidTest
 ```
 
 CI separately validates the pinned Python/OpenCV face-calibration environment.
@@ -205,6 +221,8 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - Historical extraction and timeline UX are incomplete.
 - HIBP email coverage depends on user-supplied supported access and provider availability.
 - Share-safe redaction reduces disclosure but cannot guarantee anonymity.
+- The queued-scan Continue-in-background and Cancel controls need more vertical separation on the captured Medium Phone viewport; the functional fix is deferred.
+- Visual QA currently covers one API 36 emulator viewport with synthetic data; it does not establish accessibility, large-font, landscape/tablet or physical-device acceptance.
 - Emulator CI cannot replace Samsung/Pixel/lower-memory, accessibility, font-scale, process-death, thermal, battery and large-case validation.
 
 ## Documentation policy
