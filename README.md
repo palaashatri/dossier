@@ -11,20 +11,20 @@ The current implementation branch is **63/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-019bcaa55f1fde383a3e5c4bdd6e308295a5ff57
+898ed3a28c4507e5674d7f2a80c3f51065b3cd07
 ```
 
-That exact implementation passed the current CI gates:
+That exact implementation passed the current final-tree validation gates:
 
 ```text
-Provider registry audit       PASS
-Face calibration tool         PASS
-JVM unit tests                PASS
-Debug APK assembly            PASS
-API 35 Compose smoke suite    PASS
+Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
+JVM unit tests                      PASS — 319 tests / 76 suites / 0 failures, errors, or skips
+Debug APK assembly                  PASS — 114,932,558 bytes
+Android lint                        PASS — 0 errors / 63 warnings / 6 hints
+API 36 x86_64 instrumentation       PASS — 15/15 tests
 ```
 
-A local final-tree check also passed the provider audit (78 definitions), all 287 JVM tests, debug APK assembly, and 11/11 Compose smoke tests on the existing Medium Phone API 36 x86_64 emulator. The smoke harness covers one-time onboarding persistence across activity recreation and resets onboarding state between tests.
+The API 36 Medium Phone emulator run included 2/2 direct-current-row WorkManager database checks that confirm new work input/output contains only opaque identifiers and safe status values, plus 2/2 Android Keystore-backed resume-store checks. This proves the current WorkManager row shape, not historical-row erasure, SQLite WAL/free-page sanitization, restart reconciliation, reboot recovery, or physical-device behavior.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, historical/case-integrated image workflows, and representative physical-device/accessibility/performance validation remain release gates.
 
