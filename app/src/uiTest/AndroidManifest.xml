@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- This receiver exists only in the debuggable uiTest application variant. -->
+    <application>
+        <receiver
+            android:name=".uiTest.VisualQaFixtureReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="io.dossier.app.action.SEED_VISUAL_QA_FIXTURE" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>

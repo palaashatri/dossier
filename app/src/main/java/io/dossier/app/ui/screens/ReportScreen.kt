@@ -60,6 +60,7 @@ import io.dossier.app.domain.remediation.RemediationItem
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.export.ReportExporter
 import io.dossier.app.ui.components.AnimatedObsidianBackground
+import io.dossier.app.ui.labels.userFacingStatusLabel
 import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.DossierCardShape
 import io.dossier.app.ui.theme.NeuralTheme
@@ -688,7 +689,7 @@ private fun ProfileEvidenceCard(result: ProfileScanResult, onNavigateToBrowser: 
                     fontWeight = FontWeight.SemiBold
                 )
             }
-            Text(profileStatus(result), color = statusColor, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+            Text(result.userFacingStatusLabel(), color = statusColor, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
         }
         Text(
             result.candidate.url,
@@ -885,15 +886,8 @@ private fun findingOrder(): Comparator<Finding> = compareByDescending<Finding> {
 private fun findingKey(finding: Finding): String =
     "${finding.type}|${finding.value}|${finding.sourceUrl.orEmpty()}"
 
-private fun profileStatus(result: ProfileScanResult): String = when {
-    result.exists && result.verified -> "VERIFIED"
-    result.exists -> "REVIEW"
-    result.verificationStatus?.contains("unverifiable", true) == true -> "UNAVAILABLE"
-    else -> "NOT FOUND"
-}
-
 private fun profileExportLine(result: ProfileScanResult): String =
-    "${result.candidate.platform.name}: ${result.candidate.url} — ${profileStatus(result)} — ${result.verificationStatus.orEmpty()}"
+    "${result.candidate.platform.name}: ${result.candidate.url} — ${result.userFacingStatusLabel()} — ${result.verificationStatus.orEmpty()}"
 
 private fun FindingType.displayName(): String = name.replace(Regex("([a-z])([A-Z])"), "$1 $2")
 private fun isHttpUrl(value: String): Boolean = value.startsWith("https://", true) || value.startsWith("http://", true)
@@ -940,7 +934,7 @@ internal fun formatEntityGraphLines(
         add("${it.type}: ${it.value} (${(it.confidence * 100).toInt()}%)")
     }
     profiles.filter { it.exists }.forEach {
-        add("Profile: ${it.candidate.url} — ${profileStatus(it)}")
+        add("Profile: ${it.candidate.url} — ${it.userFacingStatusLabel()}")
     }
 }
 

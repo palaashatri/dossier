@@ -41,6 +41,7 @@ import io.dossier.app.domain.scanner.BackgroundScanManager
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.export.GraphExportService
 import io.dossier.app.ui.components.AnimatedObsidianBackground
+import io.dossier.app.ui.labels.userFacingLabel
 import io.dossier.app.ui.theme.NeuralTheme
 import java.time.Instant
 import java.time.ZoneId
@@ -204,7 +205,7 @@ private fun IdentitySurfaceSection(bundle: OsintAnalysisBundle) {
             .take(12)
             .forEach { item ->
                 Text(
-                    text = "${item.platform} · @${item.username} · ${item.state.name}",
+                    text = "${item.platform} · @${item.username} · ${item.state.userFacingLabel()}",
                     color = if (item.state == PresenceState.Exists) NeuralTheme.Emerald else NeuralTheme.Amber,
                     fontSize = 11.5.sp,
                     modifier = Modifier.padding(vertical = 2.dp)

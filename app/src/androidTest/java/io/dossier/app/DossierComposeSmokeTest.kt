@@ -206,7 +206,7 @@ class DossierComposeSmokeTest {
                     evidenceSnippet = "Public contact page",
                     confidence = 0.9f,
                     risk = RiskLevel.High,
-                    remediation = "Remove the public contact detail or restrict its visibility."
+                    remediation = "Use distinct handles where cross-linking is not intended."
                 )
             ),
             riskLevel = RiskLevel.High
@@ -237,6 +237,19 @@ class DossierComposeSmokeTest {
         acceptConsent()
         openTab("Cases")
         waitForText("Review newer case")
+
+        val remediationAction = composeRule
+            .onNodeWithText("Use distinct handles where cross-linking is not intended.")
+            .performScrollTo()
+            .assertIsDisplayed()
+        val remediationStatus = composeRule
+            .onNodeWithText("Not started")
+            .performScrollTo()
+        assertTrue(
+            "Remediation status must be below the full action copy so it cannot collide when the action wraps",
+            remediationStatus.fetchSemanticsNode().boundsInRoot.top >=
+                remediationAction.fetchSemanticsNode().boundsInRoot.bottom
+        )
 
         composeRule
             .onNodeWithText("Share redacted case report")

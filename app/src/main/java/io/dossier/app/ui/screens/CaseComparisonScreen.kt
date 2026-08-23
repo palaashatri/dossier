@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.dossier.app.domain.case.CaseComparison
@@ -835,24 +836,33 @@ private fun RemediationRow(
     onStatus: (RemediationStatus) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Row(verticalAlignment = Alignment.Top) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(finding.remediation, color = NeuralTheme.TextPrimary, fontSize = 12.5.sp, lineHeight = 17.sp)
-                Text(
-                    text = finding.value,
-                    color = NeuralTheme.TextMuted,
-                    fontSize = 10.5.sp,
-                    maxLines = 1,
-                    modifier = Modifier.padding(top = 2.dp)
-                )
-            }
-            Text(
-                text = current.displayLabel(),
-                color = remediationColor(current),
-                fontSize = 10.5.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
+        // Keep the action copy and workflow state on separate rows. The action is
+        // user-authored/provider-authored text and can be long enough to wrap;
+        // placing a right-aligned status in the same Row makes the last line
+        // collide with it on narrow screens (and at larger font scales).
+        Text(
+            text = finding.remediation,
+            color = NeuralTheme.TextPrimary,
+            fontSize = 12.5.sp,
+            lineHeight = 17.sp
+        )
+        Text(
+            text = finding.value,
+            color = NeuralTheme.TextMuted,
+            fontSize = 10.5.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.padding(top = 2.dp)
+        )
+        Text(
+            text = current.displayLabel(),
+            color = remediationColor(current),
+            fontSize = 10.5.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.End,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp)
+        )
         Row(
             modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
