@@ -24,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -55,7 +56,8 @@ fun ConsentScreen(onAccepted: () -> Unit) {
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
+                    .verticalScroll(rememberScrollState())
+                    .clipToBounds(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Spacer(Modifier.height(32.dp))
@@ -124,7 +126,10 @@ fun ConsentScreen(onAccepted: () -> Unit) {
                     title = "No required Dossier cloud",
                     detail = "Dossier has no required backend and no product analytics telemetry."
                 )
-                Spacer(Modifier.height(8.dp))
+                // Keep the final notice clear of the sticky footer when the user scrolls
+                // to the end. The scroll viewport is clipped so content never paints
+                // underneath the CTA while retaining the footer as a stable action.
+                Spacer(Modifier.height(24.dp))
             }
 
             Button(
@@ -152,7 +157,7 @@ private fun ConsentItem(title: String, detail: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 7.dp),
+            .padding(vertical = 5.dp),
         verticalAlignment = Alignment.Top
     ) {
         Box(

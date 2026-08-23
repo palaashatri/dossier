@@ -32,6 +32,7 @@ import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.domain.place.MediaIntelligenceSession
 import org.junit.After
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -70,6 +71,28 @@ class DossierComposeSmokeTest {
         composeRule.onNodeWithText("Dossier").assertIsDisplayed()
         composeRule.onNodeWithText("One-time usage notice").assertIsDisplayed()
         composeRule.onNodeWithText("CONTINUE").assertIsDisplayed()
+    }
+
+    @Test
+    fun consentFinalNoticeCanScrollClearOfStickyFooter() {
+        composeRule
+            .onNodeWithText("No required Dossier cloud")
+            .performScrollTo()
+            .assertIsDisplayed()
+
+        val finalNotice = composeRule
+            .onNodeWithText(
+                "Dossier has no required backend and no product analytics telemetry."
+            )
+        finalNotice.performScrollTo().assertIsDisplayed()
+
+        val continueLabel = composeRule.onNodeWithText("CONTINUE")
+        continueLabel.assertIsDisplayed()
+        assertTrue(
+            "The final consent notice must remain above the sticky footer",
+            finalNotice.fetchSemanticsNode().boundsInRoot.bottom <=
+                continueLabel.fetchSemanticsNode().boundsInRoot.top
+        )
     }
 
     @Test
