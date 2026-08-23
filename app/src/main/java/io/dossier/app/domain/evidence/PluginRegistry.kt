@@ -2,6 +2,7 @@ package io.dossier.app.domain.evidence
 
 import io.dossier.app.data.web.WaybackHistoryPlugin
 import io.dossier.app.domain.model.IdentityInput
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -65,6 +66,8 @@ suspend fun runPlugins(
             val result = plugin.scan(input)
             allEvidence.addAll(result.evidence)
             allRelationships.addAll(result.relationships)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Throwable) {
             // Isolation: one brittle provider/import never aborts the authorized scan.
         }

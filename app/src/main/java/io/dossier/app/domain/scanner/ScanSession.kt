@@ -39,10 +39,15 @@ import io.dossier.app.domain.remediation.RemediationItem
 import io.dossier.app.domain.remediation.RemediationProvider
 import io.dossier.app.domain.risk.RiskScorer
 import io.dossier.app.domain.username.UsernameVariantGenerator
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+
+internal class ScanExecutionException : Exception()
 
 /**
  * Observable scan/session state shared by the Compose UI and durable WorkManager
@@ -112,10 +117,6 @@ object ScanSession {
     fun startScan(context: Context, input: IdentityInput, deepResearch: Boolean = false) {
         val appContext = context.applicationContext
         scanApplicationContext = appContext
-        ScanResumeStore(appContext).save(input, deepResearch)
-        _currentInput.value = input
-        _isScanning.value = true
-        _progressText.value = BackgroundScanWorker.STAGE_STARTING
 
         runCatching {
             BackgroundScanManager.enqueue(
@@ -125,9 +126,20 @@ object ScanSession {
                 strongFaceCorrelation = FaceCorrelationSessionPolicy.isStrongCorrelationEnabled()
             )
         }.onFailure { error ->
+            FaceCorrelationSessionPolicy.useBasicMatching()
+            val code = (error as? BackgroundScanSchedulingException)?.code
+                ?: "WORK_SCHEDULING_FAILED"
+            _progressText.value = "${BackgroundScanWorker.STAGE_FAILED}: $code"
             _isScanning.value = false
-            _progressText.value = "BACKGROUND_SCAN_FAILED: ${error.localizedMessage ?: error.javaClass.simpleName}"
         }
+    }
+
+    /** Called under BackgroundScanManager's lifecycle lock after owner publication. */
+    internal fun markBackgroundScheduled(input: IdentityInput, deepResearch: Boolean) {
+        _currentInput.value = input
+        setDeepResearch(deepResearch)
+        _progressText.value = BackgroundScanWorker.STAGE_STARTING
+        _isScanning.value = true
     }
 
     fun loadResumePoint(context: Context): Pair<IdentityInput, Boolean>? = ScanResumeStore(context).load()
@@ -138,15 +150,29 @@ object ScanSession {
 
     /** Cancels durable work. Partial in-memory results are intentionally retained. */
     fun cancelScan() {
+        _progressText.value = "SCAN_CANCELLED"
         scanApplicationContext?.let(BackgroundScanManager::cancel)
         _isScanning.value = false
-        _progressText.value = "SCAN_CANCELLED"
     }
 
     /** Called by the worker when setup/execution fails before normal scan cleanup. */
     internal fun markBackgroundFailure(message: String) {
-        _isScanning.value = false
         _progressText.value = "${BackgroundScanWorker.STAGE_FAILED}: ${message.take(240)}"
+        _isScanning.value = false
+    }
+
+    internal fun markBackgroundSucceeded() {
+        _progressText.value = BackgroundScanWorker.STAGE_COMPLETE
+        _isScanning.value = false
+    }
+
+    internal fun markBackgroundFinished() {
+        _isScanning.value = false
+    }
+
+    internal fun markBackgroundCancelled() {
+        _progressText.value = "SCAN_CANCELLED"
+        _isScanning.value = false
     }
 
     private val _deepResearchEnabled = MutableStateFlow(false)
@@ -253,7 +279,6 @@ object ScanSession {
     ) = withContext(Dispatchers.IO) {
         val inputToUse = input
         _currentInput.value = inputToUse
-        _isScanning.value = true
         _findings.value = emptyList()
         _placeScanResult.value = null
         _profileScanResults.value = emptyList()
@@ -279,6 +304,7 @@ object ScanSession {
             val profileScanner = ProfileScanner(context, piiExtractor, variantGenerator)
 
             val scanResults = profileScanner.scanIdentity(inputToUse, deepResearch = deepResearch)
+            currentCoroutineContext().ensureActive()
             _profileScanResults.value = scanResults
 
             val allFindings = mutableListOf<Finding>()
@@ -286,6 +312,7 @@ object ScanSession {
 
             _progressText.value = "COMPARING_FACE_CONSISTENCY..."
             val faceMatches = runFaceConsistency(context, inputToUse, scanResults)
+            currentCoroutineContext().ensureActive()
             _faceConsistencyMatches.value = faceMatches
             allFindings.addAll(faceFindingsFromMatches(faceMatches))
 
@@ -296,10 +323,12 @@ object ScanSession {
                 deepResearch = deepResearch,
                 findingsOut = allFindings
             )
+            currentCoroutineContext().ensureActive()
             _breachDigests.value = digests
 
             _progressText.value = "BUILDING_ENTITY_GRAPH..."
             val pluginCollection = runPlugins(inputToUse)
+            currentCoroutineContext().ensureActive()
             val scannerEvidence = profileScanner.toEvidenceCollection(scanResults, inputToUse)
             val evidence = (
                 scannerEvidence.evidence +
@@ -354,30 +383,24 @@ object ScanSession {
             }
 
             _progressText.value = "GENERATING_AI_SUMMARY..."
-            _aiSummary.value = runCatching {
+            val summary = try {
                 AiInsightService(context).summarizeDossier(
                     input = inputToUse,
                     profileResults = scanResults,
                     findings = _findings.value
                 )
-            }.getOrNull()
-        } catch (error: Exception) {
-            error.printStackTrace()
-            if (_findings.value.isEmpty() && _profileScanResults.value.isEmpty()) {
-                _findings.value = listOf(
-                    Finding(
-                        type = FindingType.SensitiveSnippet,
-                        value = "Scan interrupted",
-                        sourceUrl = null,
-                        evidenceSnippet = "The scan hit an unexpected error: ${error.localizedMessage ?: error.javaClass.simpleName}. Partial results, if any, are shown. Re-run or try Deep Research.",
-                        confidence = 1.0f,
-                        risk = RiskLevel.Medium,
-                        remediation = "Check network connectivity and retry. If it persists, the target site may be blocking automated access."
-                    )
-                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
             }
+            currentCoroutineContext().ensureActive()
+            _aiSummary.value = summary
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            throw ScanExecutionException()
         } finally {
-            _isScanning.value = false
             cache.close()
         }
     }
@@ -464,8 +487,9 @@ object ScanSession {
                     note = result.error
                 )
             }
-        } catch (error: Exception) {
-            error.printStackTrace()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
             emptyList()
         }
     }

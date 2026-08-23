@@ -1,8 +1,10 @@
 package io.dossier.app.domain.evidence
 
 import io.dossier.app.domain.model.IdentityInput
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -48,5 +50,20 @@ class PluginRegistryTest {
         PluginRegistry.register(SeedEvidencePlugin())
         assertEquals(1, PluginRegistry.registered().size)
         PluginRegistry.clear()
+    }
+
+    @Test
+    fun runPluginsNeverConvertsCancellationIntoProviderFailure() {
+        val cancellingPlugin = object : ScannerPlugin {
+            override val id = "cancel"
+            override val displayName = "cancel"
+            override suspend fun scan(input: IdentityInput): EvidenceCollection {
+                throw CancellationException("replacement requested")
+            }
+        }
+
+        assertThrows(CancellationException::class.java) {
+            runBlocking { runPlugins(input(), listOf(cancellingPlugin)) }
+        }
     }
 }

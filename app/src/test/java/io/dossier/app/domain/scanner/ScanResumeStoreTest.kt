@@ -6,6 +6,8 @@ import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -102,6 +104,65 @@ class ScanResumeStoreTest {
         assertFalse(recordBytes.contains(input.selfieUri.orEmpty()))
         assertFalse(pointer.readText().contains(input.fullName))
         assertFalse(pointer.readText().contains(input.emails.single()))
+    }
+
+    @Test
+    fun requestScopedLoadRestoresEncryptedModeAndFacePolicy() {
+        val fixture = fixture()
+        val store = store(fixture)
+        DiscoveryScanPreferences.setMode(ScanMode.Exhaustive)
+
+        val saved = store.saveRequestDetailed(
+            input = completeInput(),
+            deepResearch = true,
+            strongFaceCorrelation = true
+        ) as ResumeWriteState.Saved
+
+        DiscoveryScanPreferences.reset()
+        val loaded = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+
+        assertEquals(ScanMode.Exhaustive, loaded.point.scanMode)
+        assertTrue(loaded.point.deepResearch)
+        assertTrue(loaded.point.strongFaceCorrelation)
+    }
+
+    @Test
+    fun requestScopedLoadRejectsSupersededPointer() {
+        val fixture = fixture()
+        val store = store(fixture, ids = listOf(ID_ONE, ID_TWO))
+        val first = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        val second = store.saveRequestDetailed(completeInput(), true, true) as ResumeWriteState.Saved
+
+        assertEquals(ResumeReadState.Missing, store.loadRequestDetailed(first.point.requestId))
+        assertTrue(store.loadRequestDetailed(second.point.requestId) is ResumeReadState.Available)
+    }
+
+    @Test
+    fun requestScopedExpiryDurablyRemovesRecordAndPointer() {
+        val fixture = fixture()
+        var now = 1_000L
+        val store = store(fixture, nowMillis = { now })
+        val saved = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        now = saved.point.expiresAtEpochMillis
+
+        assertEquals(ResumeReadState.Expired, store.loadRequestDetailed(saved.point.requestId))
+        assertFalse(File(fixture.records, ScanResumeStore.POINTER_FILE_NAME).exists())
+        assertTrue(
+            fixture.records.listFiles().orEmpty()
+                .none { it.name.endsWith(ScanResumeStore.RECORD_EXTENSION) }
+        )
+    }
+
+    @Test
+    fun priorEncryptedFormatDefaultsStrongCorrelationToFalse() {
+        val fixture = fixture()
+        writePriorRecordWithoutStrongCorrelation(fixture, completeInput())
+
+        val loaded = store(fixture).loadRequestDetailed(ID_ONE) as ResumeReadState.Available
+
+        assertEquals(ScanMode.Deep, loaded.point.scanMode)
+        assertTrue(loaded.point.deepResearch)
+        assertFalse(loaded.point.strongFaceCorrelation)
     }
 
     @Test
@@ -652,6 +713,33 @@ class ScanResumeStoreTest {
         profileUrls = listOf("https://github.com/janedoe"),
         selfieUri = "content://example/selfie"
     )
+
+    private fun writePriorRecordWithoutStrongCorrelation(fixture: Fixture, input: IdentityInput) {
+        val createdAt = 1_000L
+        val expiresAt = createdAt + ScanResumeStore.TTL_MILLIS
+        val json = Json { encodeDefaults = true; explicitNulls = false }
+        val plaintext = """{
+            "formatVersion":${ScanResumeStore.FORMAT_VERSION},
+            "requestId":"$ID_ONE",
+            "createdAtEpochMillis":$createdAt,
+            "updatedAtEpochMillis":$createdAt,
+            "expiresAtEpochMillis":$expiresAt,
+            "input":${json.encodeToString(input)},
+            "deepResearch":true,
+            "scanMode":"Deep"
+        }""".trimIndent().toByteArray(Charsets.UTF_8)
+        val crypto = TestResumeCrypto()
+        val sealed = crypto.seal(
+            plaintext,
+            "${ScanResumeStore.FORMAT_VERSION}:$ID_ONE".toByteArray(Charsets.UTF_8),
+            allowKeyCreation = true
+        )
+        fixture.records.mkdirs()
+        File(fixture.records, "$ID_ONE${ScanResumeStore.RECORD_EXTENSION}").writeText(
+            """{"formatVersion":${ScanResumeStore.FORMAT_VERSION},"ivBase64":"${Base64.getEncoder().encodeToString(sealed.iv)}","ciphertextBase64":"${Base64.getEncoder().encodeToString(sealed.ciphertext)}"}"""
+        )
+        File(fixture.records, ScanResumeStore.POINTER_FILE_NAME).writeText(ID_ONE)
+    }
 
     private data class Fixture(val records: File, val legacy: File)
 

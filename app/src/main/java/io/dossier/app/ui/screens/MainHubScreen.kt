@@ -187,6 +187,12 @@ private fun DossierNavGraph(
                         launchSingleTop = true
                     }
                 },
+                onScanFailed = {
+                    navController.navigate("analysis") {
+                        popUpTo("scan") { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
                 onScanBackgrounded = {
                     navController.navigate("analysis") {
                         popUpTo("scan") { inclusive = true }

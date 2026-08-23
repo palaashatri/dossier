@@ -40,6 +40,7 @@ import io.dossier.app.ui.theme.NeuralTheme
 @Composable
 fun CoordinatedScanScreen(
     onScanComplete: () -> Unit,
+    onScanFailed: () -> Unit,
     onScanCancelled: () -> Unit,
     onInvalidInput: () -> Unit = onScanCancelled,
     onScanBackgrounded: () -> Unit = onScanCancelled
@@ -52,6 +53,7 @@ fun CoordinatedScanScreen(
     Box(modifier = Modifier.fillMaxSize()) {
         ScanScreen(
             onScanComplete = onScanComplete,
+            onScanFailed = onScanFailed,
             onScanCancelled = onScanCancelled,
             onInvalidInput = onInvalidInput
         )

@@ -101,7 +101,7 @@ internal class ScanResumeStore internal constructor(
 
     /** Source-compatible facade used by ScanSession. */
     fun save(input: IdentityInput, deepResearch: Boolean): Boolean =
-        saveDetailed(input, deepResearch) is ResumeWriteState.Saved
+        saveDetailed(input, deepResearch, false) is ResumeWriteState.Saved
 
     /**
      * Source-compatible facade used by IdentityScreen/ScanScreen. It retains
@@ -118,9 +118,52 @@ internal class ScanResumeStore internal constructor(
     /** Source-compatible facade used by ScanSession. */
     fun clear(): Boolean = clearDetailed() is ResumeWriteState.Cleared
 
+    internal fun saveRequestDetailed(
+        input: IdentityInput,
+        deepResearch: Boolean,
+        strongFaceCorrelation: Boolean
+    ): ResumeWriteState = saveDetailed(input, deepResearch, strongFaceCorrelation)
+
+    internal fun loadRequestDetailed(requestId: String): ResumeReadState = synchronized(STORE_LOCK) {
+        if (!isValidRequestId(requestId)) {
+            return@synchronized ResumeReadState.Invalid(ResumeInvalidReason.InvalidRequestId)
+        }
+        val pointer = try {
+            readPointer()
+        } catch (error: ResumeCryptoFailure) {
+            return@synchronized ResumeReadState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        if (pointer != requestId) return@synchronized ResumeReadState.Missing
+
+        when (val state = loadRecord(requestId)) {
+            ResumeReadState.Expired,
+            is ResumeReadState.Invalid -> {
+                val cleanupFailure = cleanupActiveRecord(requestId)
+                cleanupFailure?.let(ResumeReadState::StorageFailure) ?: state
+            }
+            else -> state
+        }
+    }
+
+    /** Removes one request only when it is still the active encrypted pointer. */
+    internal fun clearRequest(requestId: String): Boolean = synchronized(STORE_LOCK) {
+        if (!isValidRequestId(requestId)) return@synchronized false
+        return@synchronized try {
+            if (readPointer() != requestId) return@synchronized true
+            deleteFileDurably(recordFile(requestId), ResumeStorageReason.IoFailure)
+            deleteFileDurably(pointerFile, ResumeStorageReason.PointerFailure)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     internal fun saveDetailed(
         input: IdentityInput,
-        deepResearch: Boolean
+        deepResearch: Boolean,
+        strongFaceCorrelation: Boolean = false
     ): ResumeWriteState = synchronized(STORE_LOCK) {
         return try {
             val inputIssue = validateInput(input)
@@ -136,6 +179,7 @@ internal class ScanResumeStore internal constructor(
                 input = input,
                 deepResearch = deepResearch,
                 scanMode = DiscoveryScanPreferences.selectedMode.value,
+                strongFaceCorrelation = strongFaceCorrelation,
                 createdAtEpochMillis = now,
                 expiresAtEpochMillis = expiresAt
             )
@@ -147,7 +191,8 @@ internal class ScanResumeStore internal constructor(
                 expiresAtEpochMillis = expiresAt,
                 input = point.input,
                 deepResearch = point.deepResearch,
-                scanMode = point.scanMode
+                scanMode = point.scanMode,
+                strongFaceCorrelation = point.strongFaceCorrelation
             )
 
             persistRecord(record)
@@ -370,6 +415,7 @@ internal class ScanResumeStore internal constructor(
                 input = record.input,
                 deepResearch = record.deepResearch,
                 scanMode = record.scanMode,
+                strongFaceCorrelation = record.strongFaceCorrelation,
                 createdAtEpochMillis = record.createdAtEpochMillis,
                 expiresAtEpochMillis = record.expiresAtEpochMillis
             )
@@ -918,7 +964,8 @@ internal class ScanResumeStore internal constructor(
         val expiresAtEpochMillis: Long,
         val input: IdentityInput,
         val deepResearch: Boolean,
-        val scanMode: ScanMode
+        val scanMode: ScanMode,
+        val strongFaceCorrelation: Boolean = false
     )
 
     private data class PriorRecordBackup(
@@ -992,6 +1039,7 @@ internal data class ResumePoint(
     val input: IdentityInput,
     val deepResearch: Boolean,
     val scanMode: ScanMode,
+    val strongFaceCorrelation: Boolean,
     val createdAtEpochMillis: Long,
     val expiresAtEpochMillis: Long
 )

@@ -8,6 +8,7 @@ import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -254,6 +255,8 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
                     }
                 }
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Throwable) {
             val outcome = if (error is java.net.SocketTimeoutException) ProviderOutcome.Timeout else ProviderOutcome.NetworkFailure
             ProviderDiagnosticsRuntime.record(healthId, outcome, elapsedMillis(started))

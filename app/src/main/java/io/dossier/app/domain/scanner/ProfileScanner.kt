@@ -21,6 +21,7 @@ import java.io.IOException
 import java.net.URI
 import java.util.concurrent.TimeUnit
 import android.content.Context
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -211,8 +212,9 @@ class ProfileScanner(
                 emptyList()
             }
             hop1 + hop2
-        } catch (e: Throwable) {
-            e.printStackTrace()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
             emptyList()
         }
 
@@ -227,8 +229,9 @@ class ProfileScanner(
                 .map { PublicSearchDiscoveryService.canonicalUrlKey(it.candidate.url) }
                 .toSet()
             runPublicSearchPass(input, confirmedUrls, deepResearch)
-        } catch (e: Throwable) {
-            e.printStackTrace()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
             emptyList()
         }
 
@@ -237,8 +240,9 @@ class ProfileScanner(
         // face recognition.
         val publicImageResults: List<ProfileScanResult> = try {
             runPublicImagePass(input, publicSearchResults, deepResearch)
-        } catch (e: Throwable) {
-            e.printStackTrace()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
             emptyList()
         }
 
@@ -308,8 +312,10 @@ class ProfileScanner(
                                 scannedUrls.add(pc.candidate.url.lowercase())
                             }
                         }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // One public website failure does not abort other bounded pivots.
                     }
                 }
             }
@@ -653,6 +659,8 @@ class ProfileScanner(
                     }
                 }
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Throwable) {
             val isOffline = e is java.net.UnknownHostException ||
                             e is java.net.ConnectException ||
@@ -679,6 +687,8 @@ class ProfileScanner(
             webviewSemaphore.withPermit {
                 WebViewScraper(context).scrape(candidate.url)
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (t: Throwable) {
             WebViewScraper.Result.Failed("Renderer error: ${t.localizedMessage}")
         }

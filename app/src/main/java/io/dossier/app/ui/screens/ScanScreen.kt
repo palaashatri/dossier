@@ -43,6 +43,7 @@ import io.dossier.app.data.face.FaceCorrelationConsentStore
 import io.dossier.app.data.face.FaceCorrelationModelPack
 import io.dossier.app.data.face.FaceCorrelationSessionPolicy
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.scanner.BackgroundScanWorker
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.LottieLoop
@@ -63,6 +64,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun ScanScreen(
     onScanComplete: () -> Unit,
+    onScanFailed: () -> Unit,
     onScanCancelled: () -> Unit,
     onInvalidInput: () -> Unit = onScanCancelled
 ) {
@@ -189,10 +191,11 @@ fun ScanScreen(
                 !cancelledByUser &&
                 progressText != "SCAN_CANCELLED"
             ) {
-                liveLogs.add("Scan complete.")
+                val failed = progressText.startsWith(BackgroundScanWorker.STAGE_FAILED)
+                liveLogs.add(if (failed) "Scan failed." else "Scan complete.")
                 navigationCompleted = true
                 delay(300)
-                onScanComplete()
+                if (failed) onScanFailed() else onScanComplete()
             }
         }
     }
@@ -607,6 +610,7 @@ private fun friendlyStage(raw: String): String = when {
     raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating analysis"
     raw.contains("AUDITING", ignoreCase = true) -> "Auditing place image metadata"
     raw.contains("CANCELLED", ignoreCase = true) -> "Scan cancelled"
+    raw.contains("FAILED", ignoreCase = true) -> "Scan failed"
     else -> raw.lowercase().replace('_', ' ')
 }
 
@@ -619,5 +623,6 @@ private fun friendlyStageLabel(raw: String): String = when {
     raw.contains("COMPILING", ignoreCase = true) -> "Compiling report"
     raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating analysis"
     raw.contains("CANCELLED", ignoreCase = true) -> "Cancelled"
+    raw.contains("FAILED", ignoreCase = true) -> "Failed"
     else -> raw.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
 }

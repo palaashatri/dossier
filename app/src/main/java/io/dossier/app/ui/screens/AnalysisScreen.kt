@@ -61,9 +61,13 @@ fun AnalysisScreen(
     val findingCount by ScanSession.findings.collectAsState()
     val entityGraph by ScanSession.entityGraph.collectAsState()
 
-    val latestInfo = workInfos.maxByOrNull { it.runAttemptCount }
-    val status = latestInfo?.let(BackgroundScanManager::toStatus)
     var snapshot by remember { mutableStateOf(BackgroundScanManager.latestResult(context)) }
+    val latestInfo = BackgroundScanManager.selectRelevantWorkInfo(
+        context = context,
+        workInfos = workInfos,
+        completedWorkId = snapshot?.workId
+    )
+    val status = latestInfo?.let(BackgroundScanManager::toStatus)
 
     LaunchedEffect(latestInfo?.state, latestInfo?.id) {
         if (latestInfo?.state == WorkInfo.State.SUCCEEDED) {
