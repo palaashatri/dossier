@@ -19,3 +19,6 @@ local.properties
 *.jks
 *.keystore
 screenshot.png
+/.kotlin/
+__pycache__/
+*.pyc

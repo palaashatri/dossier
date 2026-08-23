@@ -14,6 +14,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.dossier.app.data.local.UsageNoticeStore
 import io.dossier.app.domain.case.CaseStore
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.case.RemediationRecord
@@ -23,11 +24,15 @@ import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ScanHistoryRuntime
 import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.evidence.EvidenceRuntimeCache
+import io.dossier.app.domain.evidence.UsernameSurfaceRuntimeCache
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.place.MediaIntelligenceSession
 import org.junit.After
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -39,17 +44,32 @@ class DossierComposeSmokeTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
 
+    @Before
+    fun resetTestStateBeforeEach() {
+        resetSharedTestState()
+        recreateActivity()
+    }
+
     @After
-    fun resetTestState() {
+    fun resetTestStateAfterEach() {
+        resetSharedTestState()
+    }
+
+    private fun resetSharedTestState() {
+        UsageNoticeStore.reset(composeRule.activity)
         DiscoveryScanPreferences.reset()
+        ScanHistoryRuntime.resetForTests()
+        EvidenceRuntimeCache.clear()
+        UsernameSurfaceRuntimeCache.clear()
+        MediaIntelligenceSession.clear()
         CaseStore(composeRule.activity).clear()
     }
 
     @Test
     fun appLaunchesAtConsentGate() {
         composeRule.onNodeWithText("Dossier").assertIsDisplayed()
-        composeRule.onNodeWithText("Before you begin").assertIsDisplayed()
-        composeRule.onNodeWithText("I understand — continue").assertIsDisplayed()
+        composeRule.onNodeWithText("One-time usage notice").assertIsDisplayed()
+        composeRule.onNodeWithText("CONTINUE").assertIsDisplayed()
     }
 
     @Test
@@ -57,7 +77,18 @@ class DossierComposeSmokeTest {
         acceptConsent()
 
         composeRule.onNodeWithText("Start a privacy audit").assertIsDisplayed()
-        composeRule.onNodeWithText("Before you begin").assertDoesNotExist()
+        composeRule.onNodeWithText("One-time usage notice").assertDoesNotExist()
+    }
+
+    @Test
+    fun acceptedUsageNoticePersistsAcrossActivityRecreation() {
+        acceptConsent()
+
+        recreateActivity()
+
+        composeRule.onNodeWithText("Start a privacy audit").assertIsDisplayed()
+        composeRule.onNodeWithText("One-time usage notice").assertDoesNotExist()
+        composeRule.onNodeWithText("CONTINUE").assertDoesNotExist()
     }
 
     @Test
@@ -284,8 +315,13 @@ class DossierComposeSmokeTest {
     }
 
     private fun acceptConsent() {
-        composeRule.onNodeWithText("I understand — continue").performClick()
+        composeRule.onNodeWithText("CONTINUE").performClick()
         waitForText("Start a privacy audit")
+    }
+
+    private fun recreateActivity() {
+        composeRule.activityRule.scenario.recreate()
+        composeRule.waitForIdle()
     }
 
     private fun identityField(index: Int) =
