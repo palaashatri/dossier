@@ -11,7 +11,7 @@ The current implementation branch is **80/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-af32e1f
+cf927d9
 ```
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
@@ -20,13 +20,13 @@ That exact implementation passed the current final-tree build and deterministic 
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
-Debug JVM unit tests                PASS — 679 tests / 112 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 679 tests / 112 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 682 tests / 112 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 682 tests / 112 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
 Debug APK assembly                  PASS — 115,466,728 bytes
-Debug APK SHA-256                   D28339F149B69445F3EE8FF02A3FB878404C0081212CEE7E5C1CD502BF1A81D4
+Debug APK SHA-256                   406EC0C1A45BBD36E7380783D47F37C36A20D30D77E1E7339C8E5B718165DC7F
 uiTest APK assembly                 PASS — 242,932,153 bytes
-uiTest APK SHA-256                  08A322846BFFB6FED5FA1047632920C199D3B4614CC85265D4D198097C0644FD
+uiTest APK SHA-256                  C9EC519D2EDE9CE68C682590CF59A2EDC856ABE22F1026659DDB551F9E3E62B6
 Android-test APK                    PASS — 1,005,660 bytes
 Android-test APK SHA-256             A73C0BFBA3BBDFF211319E549E81D8E81E406CA4E82C8D301411B5B45CCF3680
 Debug lint                          PASS — 0 errors / 69 warnings
@@ -83,9 +83,10 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 
 - `ScanCoordinatorRuntime` wraps the mature vertical scan pipeline.
 - Encrypted request checkpoints retain allow-listed stage names plus bounded item/verified/omitted counts for completed major stages; incomplete stage outputs remain eligible for rerun.
-- New encrypted requests retain a sanitized mode/provider-plan fingerprint/count and allow-listed stage-order summary. Successful public-search and public-image retry payloads are now stored in request/plan/stage-bound encrypted envelopes with bounded size, TTL, tamper checks and scoped tombstones; response text and identifiers remain excluded, and in-flight/frontier payloads for the remaining stages are still not persisted.
+- New encrypted requests retain a sanitized mode/provider-plan fingerprint/count and allow-listed stage-order summary. Successful public-search and public-image retry payloads are now stored in request/plan/stage-bound encrypted envelopes with bounded size, TTL, tamper checks and scoped tombstones; response text and identifiers remain excluded, and in-flight/frontier payloads for the remaining stages are still not persisted. Background result envelopes additionally validate bounded nested case/graph/media/analysis collection shapes on save and authenticated load.
 - Remediation cards expose reviewed provider-specific resources, manual-action fallback or explicit unavailable state; opening a settings page never asserts deletion and later scans remain required.
 - Saved-case comparison exposes source-scoped historical/provider changes and remediation rechecks with exact evidence IDs and only newer successful scan IDs; missing or unavailable observations are not reported as deletion.
+- Scanner/plugin relationship assertions with the same normalized endpoints and relation are merged deterministically while unioning their evidence IDs and retaining a nonblank description, so one producer cannot erase another producer's provenance.
 - Structured scan IDs, requests, run states and events.
 - Live UI state derives from real scan-stage/profile/face/breach/graph/analysis observations.
 - Direct-profile execution emits provider queued/started/completed/unavailable events with one stable scan ID; retries do not inflate unique started counts and stale callbacks are ignored.
@@ -263,7 +264,7 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
 - Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
 - Replacement-generation cleanup is best effort after WorkManager enqueue acknowledgement. A crash or cleanup failure in that narrow hand-off can retain an encrypted prior-request profile scope until explicit purge or later maintenance; a durable retirement ledger remains open.
-- UI latest-result reads, purge and case-save actions now use IO dispatchers; lower-level synchronous helpers remain for controlled lifecycle paths. Background result envelopes enforce bounded file, metadata, IV, ciphertext and plaintext sizes before allocation/decryption. Large-case ANR/storage-corruption testing remains open.
+- UI latest-result reads, purge and case-save actions now use IO dispatchers; lower-level synchronous helpers remain for controlled lifecycle paths. Background result envelopes enforce bounded file, metadata, IV, ciphertext and plaintext sizes before allocation/decryption and reject oversized nested case/graph/media/analysis collection shapes before save or after authenticated load. Large-case ANR/storage-corruption testing remains open.
 - Entity resolution has deterministic metrics and a fail-closed calibration-artifact path, but still needs a consented representative corpus and published measured calibration before weights can be treated as empirically fitted.
 - Verified-account correlation and richer cross-scan image change workflows remain open; bounded candidate/cluster provenance persistence and saved-case fingerprint history review are implemented.
 - Provider-specific remediation resources currently use a small reviewed allowlist and truthful manual/unavailable fallback states; opening a provider settings page is not deletion proof and broader reviewed coverage remains open.
