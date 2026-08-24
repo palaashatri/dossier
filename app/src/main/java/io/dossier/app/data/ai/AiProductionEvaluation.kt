@@ -97,7 +97,11 @@ object AiProductionEvaluation {
                     rejectedReasonCodes = emptyList()
                 )
             } else {
-                val validation = EvidenceGroundedAiValidator.validate(parsed, fixture.snapshot.evidence)
+                val validation = EvidenceGroundedAiValidator.validate(
+                    result = parsed,
+                    evidence = fixture.snapshot.evidence,
+                    remediationLinks = fixture.snapshot.remediationLinks
+                )
                 val actual = if (validation.acceptedClaims.isNotEmpty()) {
                     ExpectedOutcome.ACCEPTED
                 } else {

@@ -2,8 +2,12 @@ package io.dossier.app.ai
 
 import io.dossier.app.domain.ai.AiAnalysisClaim
 import io.dossier.app.domain.ai.AiAnalysisResult
+import io.dossier.app.domain.ai.AiRemediationLink
+import io.dossier.app.domain.ai.AiRemediationLinkState
 import io.dossier.app.domain.ai.AiClaimConfidence
 import io.dossier.app.domain.ai.EvidenceGroundedAiValidator
+import io.dossier.app.domain.case.RemediationRecord
+import io.dossier.app.domain.case.RemediationStatus
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceState
@@ -426,6 +430,101 @@ class EvidenceGroundedAiValidatorTest {
         assertEquals(1, result.acceptedClaims.size)
         assertEquals("Request deletion from the provider", result.acceptedClaims.single().claim)
         assertEquals(1, result.rejectedClaims.size)
+        assertEquals(
+            "remediation_outcome_requires_verification",
+            result.rejectedClaims.single().reason
+        )
+    }
+
+    @Test
+    fun verifiedRemediationLinkCanAuthorizeOutcomeForItsCitedEvidenceOnly() {
+        val verified = AiRemediationLink(
+            record = RemediationRecord(
+                remediationId = "remediation-e1",
+                findingKey = "Username|rare_handle|",
+                action = "Request removal",
+                status = RemediationStatus.Completed,
+                createdAtUtc = "2026-08-24T00:00:00Z",
+                updatedAtUtc = "2026-08-24T00:00:01Z",
+                verifiedByScanId = "scan-after-remediation"
+            ),
+            evidenceId = "E1",
+            effective = true,
+            state = AiRemediationLinkState.Effective
+        )
+
+        val accepted = EvidenceGroundedAiValidator.validate(
+            result = AiAnalysisResult(
+                claims = listOf(
+                    AiAnalysisClaim(
+                        claim = "The provider confirmed removal of this data",
+                        confidence = AiClaimConfidence.HIGH,
+                        supportingEvidence = listOf("E1"),
+                        reasoningSummary = "A later verification scan is linked to the cited evidence."
+                    )
+                )
+            ),
+            evidence = evidence,
+            remediationLinks = listOf(verified)
+        )
+
+        assertEquals(1, accepted.acceptedClaims.size)
+        assertTrue(accepted.rejectedClaims.isEmpty())
+
+        val mismatched = EvidenceGroundedAiValidator.validate(
+            result = AiAnalysisResult(
+                claims = listOf(
+                    AiAnalysisClaim(
+                        claim = "The provider confirmed removal of this data",
+                        confidence = AiClaimConfidence.HIGH,
+                        supportingEvidence = listOf("E2"),
+                        reasoningSummary = "The model cites a different profile."
+                    )
+                )
+            ),
+            evidence = evidence,
+            remediationLinks = listOf(verified)
+        )
+
+        assertTrue(mismatched.acceptedClaims.isEmpty())
+        assertEquals(
+            "remediation_outcome_requires_verification",
+            mismatched.rejectedClaims.single().reason
+        )
+    }
+
+    @Test
+    fun completedRemediationWithoutVerificationScanRemainsFailClosed() {
+        val unverified = AiRemediationLink(
+            record = RemediationRecord(
+                remediationId = "remediation-e1-unverified",
+                findingKey = "Username|rare_handle|",
+                action = "Request removal",
+                status = RemediationStatus.Completed,
+                createdAtUtc = "2026-08-24T00:00:00Z",
+                updatedAtUtc = "2026-08-24T00:00:01Z"
+            ),
+            evidenceId = "E1",
+            effective = true,
+            state = AiRemediationLinkState.Effective
+        )
+
+        val result = EvidenceGroundedAiValidator.validate(
+            result = AiAnalysisResult(
+                claims = listOf(
+                    AiAnalysisClaim(
+                        claim = "The provider confirmed removal of this data",
+                        confidence = AiClaimConfidence.HIGH,
+                        supportingEvidence = listOf("E1"),
+                        reasoningSummary = "Only a workflow status is available."
+                    )
+                )
+            ),
+            evidence = evidence,
+            remediationLinks = listOf(unverified)
+        )
+
+        assertTrue(result.acceptedClaims.isEmpty())
         assertEquals(
             "remediation_outcome_requires_verification",
             result.rejectedClaims.single().reason

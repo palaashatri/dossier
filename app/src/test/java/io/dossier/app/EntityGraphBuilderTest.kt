@@ -205,6 +205,41 @@ class EntityGraphBuilderTest {
     }
 
     @Test
+    fun legacyRelationshipReceivesOnlyExactExistingEvidenceProvenance() {
+        val evidence = Evidence(
+            id = "activity-1",
+            kind = EvidenceKind.PublicSearchEvidence,
+            value = "https://example.test/activity/1",
+            sourceUrl = "https://example.test/activity/1",
+            state = EvidenceState.Observed
+        )
+        val secondEvidence = evidence.copy(
+            id = "activity-2",
+            value = "https://example.test/activity/2",
+            sourceUrl = "https://example.test/activity/2"
+        )
+        val relationship = EvidenceRelationship(
+            fromValue = "alice",
+            toValue = "bob",
+            relation = "MENTIONS",
+            evidence = evidence.sourceUrl
+        )
+        val duplicateRelationship = relationship.copy(evidence = secondEvidence.sourceUrl)
+
+        val graph = EntityGraphBuilder.build(
+            input = IdentityInput(fullName = "Authorized subject"),
+            evidence = listOf(evidence, secondEvidence),
+            relationships = listOf(relationship, duplicateRelationship)
+        )
+
+        val edge = graph.edges.single { it.relation == "MENTIONS" }
+        assertEquals(listOf("activity-1", "activity-2"), edge.evidenceIds)
+        assertTrue(graph.edgesWithEvidence("activity-1").contains(edge))
+        // Endpoint names alone must not attach unrelated records.
+        assertTrue(graph.edgesWithEvidence("unrelated").isEmpty())
+    }
+
+    @Test
     fun historicalAttributesAttachToArchiveSourceWithoutCurrentOwnershipEdges() {
         val snapshotUrl = "https://web.archive.org/web/20240102030405id_/https://example.com/profile"
         val archiveEvidence = Evidence(

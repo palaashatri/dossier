@@ -6,6 +6,9 @@ import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.HistoricalAttributeKind
+import io.dossier.app.domain.evidence.EvidenceCollection
+import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.evidence.withResolvedRelationshipEvidence
 import io.dossier.app.domain.identity.EntityResolverV2
 import io.dossier.app.domain.identity.ResolutionBand
 import io.dossier.app.domain.model.BreachDigest
@@ -60,10 +63,50 @@ object EntityGraphBuilder {
             }
         }
 
-        fun link(fromId: String, toId: String, relation: String, evidenceText: String? = null) {
+        fun addLink(
+            fromId: String,
+            toId: String,
+            relation: String,
+            evidenceText: String? = null,
+            evidenceIds: List<String> = emptyList()
+        ) {
             if (fromId == toId) return
-            if (edges.any { it.fromId == fromId && it.toId == toId && it.relation == relation }) return
-            edges.add(DossierEdge(fromId = fromId, toId = toId, relation = relation, evidence = evidenceText))
+            val duplicateIndex = edges.indexOfFirst {
+                it.fromId == fromId && it.toId == toId && it.relation == relation
+            }
+            if (duplicateIndex >= 0) {
+                val existing = edges[duplicateIndex]
+                edges[duplicateIndex] = existing.copy(
+                    evidence = existing.evidence ?: evidenceText,
+                    evidenceIds = (existing.evidenceIds + evidenceIds)
+                        .map(EvidenceIdPolicy::migrate)
+                        .distinct()
+                )
+                return
+            }
+            edges.add(
+                DossierEdge(
+                    fromId = fromId,
+                    toId = toId,
+                    relation = relation,
+                    evidence = evidenceText,
+                    evidenceIds = evidenceIds.map(EvidenceIdPolicy::migrate).distinct()
+                )
+            )
+        }
+
+        fun link(fromId: String, toId: String, relation: String, evidenceText: String? = null) {
+            addLink(fromId, toId, relation, evidenceText)
+        }
+
+        fun linkWithEvidence(
+            fromId: String,
+            toId: String,
+            relation: String,
+            evidenceText: String? = null,
+            evidenceIds: List<String> = emptyList()
+        ) {
+            addLink(fromId, toId, relation, evidenceText, evidenceIds)
         }
 
         val subjectLabel = input.fullName.trim().ifBlank {
@@ -224,12 +267,16 @@ object EntityGraphBuilder {
             attachFinding(finding, subjectId, profileId, ::putEntity, ::link)
         }
 
-        relationships.forEach { rel ->
+        val resolvedRelationships = EvidenceCollection(
+            evidence = evidence,
+            relationships = relationships
+        ).withResolvedRelationshipEvidence().relationships
+        resolvedRelationships.forEach { rel ->
             val fromId = entityIdForValue(rel.fromValue)
             val toId = entityIdForValue(rel.toValue)
             putEntity(DossierEntity(fromId, EntityType.Website, rel.fromValue, 0.7f))
             putEntity(DossierEntity(toId, EntityType.Website, rel.toValue, 0.7f))
-            link(fromId, toId, rel.relation, rel.evidence)
+            linkWithEvidence(fromId, toId, rel.relation, rel.evidence, rel.evidenceIds)
         }
         evidence.forEach { ev ->
             attachEvidence(ev, subjectId, ::putEntity, ::link)
@@ -450,6 +497,7 @@ object EntityGraphBuilder {
     private fun enrichEdgeProvenance(graph: EntityGraph, evidence: List<Evidence>): EntityGraph {
         if (graph.edges.isEmpty()) return graph
         val byId = graph.entities.associateBy(DossierEntity::id)
+        val evidenceById = evidence.associateBy { EvidenceIdPolicy.migrate(it.id) }
         val evidenceByValue = evidence.groupBy { it.value.trim().lowercase(Locale.US) }
         val evidenceBySource = evidence
             .filter { !it.sourceUrl.isNullOrBlank() }
@@ -459,6 +507,7 @@ object EntityGraphBuilder {
             val from = byId[edge.fromId]
             val to = byId[edge.toId]
             val relevant = buildList {
+                addAll(edge.evidenceIds.mapNotNull { evidenceById[EvidenceIdPolicy.migrate(it)] })
                 if (to != null) addAll(evidenceByValue[to.label.trim().lowercase(Locale.US)].orEmpty())
                 to?.sourceUrls.orEmpty().forEach { url ->
                     addAll(evidenceBySource[url.trim().lowercase(Locale.US)].orEmpty())
@@ -469,10 +518,12 @@ object EntityGraphBuilder {
             }.distinctBy(Evidence::id)
             val contradictions = relevant.filter { it.state == EvidenceState.Conflicting }
             edge.copy(
-                evidenceIds = (edge.evidenceIds + relevant.map(Evidence::id)).distinct(),
+                evidenceIds = (edge.evidenceIds + relevant.map(Evidence::id))
+                    .map(EvidenceIdPolicy::migrate)
+                    .distinct(),
                 contradictingEvidenceIds = (
                     edge.contradictingEvidenceIds + contradictions.map(Evidence::id)
-                ).distinct(),
+                ).map(EvidenceIdPolicy::migrate).distinct(),
                 confidence = edge.confidence ?: to?.confidence,
                 historical = edge.historical || relevant.any(Evidence::historical) || (to?.historical == true)
             )

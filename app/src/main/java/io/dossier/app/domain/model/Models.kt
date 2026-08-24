@@ -386,6 +386,14 @@ data class EntityGraph(
     fun outgoing(id: String): List<DossierEdge> = edges.filter { it.fromId == id }
     fun incoming(id: String): List<DossierEdge> = edges.filter { it.toId == id }
     fun relationshipsFor(id: String): List<DossierEdge> = edges.filter { it.fromId == id || it.toId == id }
+    /** Returns edges whose positive or contradicting provenance cites [evidenceId]. */
+    fun edgesWithEvidence(evidenceId: String): List<DossierEdge> = edges.filter {
+        evidenceId in it.evidenceIds || evidenceId in it.contradictingEvidenceIds
+    }
+    /** Returns nodes whose persisted provenance cites [evidenceId]. */
+    fun entitiesWithEvidence(evidenceId: String): List<DossierEntity> = entities.filter {
+        evidenceId in it.evidenceIds
+    }
     fun historicalEntities(): List<DossierEntity> = entities.filter(DossierEntity::historical)
     fun conflictingEntities(): List<DossierEntity> = entities.filter { it.state == GraphNodeState.Conflicting }
 }

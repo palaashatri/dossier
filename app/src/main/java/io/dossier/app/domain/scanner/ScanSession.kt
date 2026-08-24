@@ -397,7 +397,11 @@ object ScanSession {
                 checkpointOwnerId,
                 checkpointGeneration,
                 ScanCheckpointStage.DiscoveringUsernames,
-                completed = true
+                completed = true,
+                output = ScanStageOutput(
+                    itemCount = scanResults.size,
+                    verifiedCount = scanResults.count { it.exists && it.verified }
+                )
             )
 
             val allFindings = mutableListOf<Finding>()
@@ -422,7 +426,8 @@ object ScanSession {
                 checkpointOwnerId,
                 checkpointGeneration,
                 ScanCheckpointStage.ComparingFaceConsistency,
-                completed = true
+                completed = true,
+                output = ScanStageOutput(itemCount = faceMatches.size)
             )
 
             checkpointStage(
@@ -448,7 +453,11 @@ object ScanSession {
                 checkpointOwnerId,
                 checkpointGeneration,
                 ScanCheckpointStage.CheckingBreachExposure,
-                completed = true
+                completed = true,
+                output = ScanStageOutput(
+                    itemCount = digests.size,
+                    verifiedCount = digests.count { it.breachCount > 0 }
+                )
             )
 
             checkpointStage(
@@ -488,7 +497,11 @@ object ScanSession {
                 checkpointOwnerId,
                 checkpointGeneration,
                 ScanCheckpointStage.BuildingEntityGraph,
-                completed = true
+                completed = true,
+                output = ScanStageOutput(
+                    itemCount = graph.entities.size,
+                    verifiedCount = graph.entities.count { it.state == io.dossier.app.domain.model.GraphNodeState.Confirmed }
+                )
             )
 
             checkpointStage(
@@ -518,7 +531,8 @@ object ScanSession {
                 checkpointOwnerId,
                 checkpointGeneration,
                 ScanCheckpointStage.ScoringRelationshipConfidence,
-                completed = true
+                completed = true,
+                output = ScanStageOutput(itemCount = _relationshipConfidence.value.size)
             )
 
             checkpointStage(
@@ -537,7 +551,8 @@ object ScanSession {
                 checkpointOwnerId,
                 checkpointGeneration,
                 ScanCheckpointStage.TracingAttackPaths,
-                completed = true
+                completed = true,
+                output = ScanStageOutput(itemCount = _attackPaths.value.size)
             )
 
             checkpointStage(
@@ -559,7 +574,11 @@ object ScanSession {
                 checkpointOwnerId,
                 checkpointGeneration,
                 ScanCheckpointStage.CompilingExposureLevels,
-                completed = true
+                completed = true,
+                output = ScanStageOutput(
+                    itemCount = allFindings.size,
+                    verifiedCount = allFindings.count { it.risk != RiskLevel.Low }
+                )
             )
 
             checkpointStage(
@@ -586,7 +605,11 @@ object ScanSession {
                 checkpointOwnerId,
                 checkpointGeneration,
                 ScanCheckpointStage.CompilingExposureScores,
-                completed = true
+                completed = true,
+                output = ScanStageOutput(
+                    itemCount = _findings.value.size,
+                    omittedCount = _memoryDropped.value
+                )
             )
 
             checkpointStage(
@@ -635,7 +658,8 @@ object ScanSession {
                 checkpointOwnerId,
                 checkpointGeneration,
                 ScanCheckpointStage.GeneratingAiSummary,
-                completed = true
+                completed = true,
+                output = ScanStageOutput(itemCount = if (summary.isNullOrBlank()) 0 else 1)
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -661,7 +685,8 @@ object ScanSession {
         ownerId: String?,
         generation: String?,
         stage: ScanCheckpointStage,
-        completed: Boolean
+        completed: Boolean,
+        output: ScanStageOutput? = null
     ) {
         if (requestId == null || ownerId == null || generation == null) return
         when (
@@ -671,7 +696,8 @@ object ScanSession {
                 ownerId = ownerId,
                 generation = generation,
                 stage = stage,
-                completed = completed
+                completed = completed,
+                output = output
             )
         ) {
             is ResumeCheckpointWriteState.Saved -> Unit

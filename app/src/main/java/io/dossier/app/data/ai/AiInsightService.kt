@@ -171,7 +171,13 @@ class AiInsightService(private val context: Context) {
             val generated = runCatching {
                 MediaPipeLlmTextEngine(context).generate(localPrompt, selectedLocal)
             }.getOrNull()?.trim()?.takeIf { it.isNotBlank() }
-            val validated = generated?.let { validateAndRender(it, evidence) }
+            val validated = generated?.let {
+                validateAndRender(
+                    raw = it,
+                    evidence = evidence,
+                    remediationLinks = snapshot.remediationLinks
+                )
+            }
             if (validated != null) {
                 return withProvenance(
                     engine = "On-device MediaPipe ${selectedLocal.name}",
@@ -197,7 +203,8 @@ class AiInsightService(private val context: Context) {
                 validateAndRender(
                     raw = it,
                     evidence = evidence,
-                    remoteToLocalEvidenceIds = remotePrompt.remoteToLocalEvidenceIds
+                    remoteToLocalEvidenceIds = remotePrompt.remoteToLocalEvidenceIds,
+                    remediationLinks = snapshot.remediationLinks
                 )
             }
             if (validated != null) {
@@ -340,7 +347,8 @@ class AiInsightService(private val context: Context) {
     private fun validateAndRender(
         raw: String,
         evidence: List<Evidence>,
-        remoteToLocalEvidenceIds: Map<String, String> = emptyMap()
+        remoteToLocalEvidenceIds: Map<String, String> = emptyMap(),
+        remediationLinks: List<AiRemediationLink> = emptyList()
     ): String? {
         val parsed = parseStructuredResultForEvaluation(raw) ?: return null
         val structured = if (remoteToLocalEvidenceIds.isEmpty()) {
@@ -351,7 +359,11 @@ class AiInsightService(private val context: Context) {
             // remote citation mapping.
             RedactedRemoteAiInput.restoreEvidenceIds(parsed, remoteToLocalEvidenceIds)
         }
-        val validated = EvidenceGroundedAiValidator.validate(structured, evidence)
+        val validated = EvidenceGroundedAiValidator.validate(
+            result = structured,
+            evidence = evidence,
+            remediationLinks = remediationLinks
+        )
         if (validated.acceptedClaims.isEmpty()) return null
 
         return buildString {

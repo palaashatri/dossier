@@ -187,6 +187,49 @@ class ScanResumeStoreTest {
     }
 
     @Test
+    fun coordinatorCheckpointPersistsBoundedStageOutputShape() {
+        val fixture = fixture()
+        val store = store(fixture)
+        val saved = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+
+        val output = ScanStageOutput(itemCount = 12, verifiedCount = 7, omittedCount = 2)
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.BuildingEntityGraph,
+                completed = true,
+                output = output
+            ) is ResumeCheckpointWriteState.Saved
+        )
+
+        val loaded = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertEquals(output, loaded.point.stageOutputs[ScanCheckpointStage.BuildingEntityGraph])
+    }
+
+    @Test
+    fun invalidStageOutputIsRejectedWithoutPersistingMetadata() {
+        val fixture = fixture()
+        val store = store(fixture)
+        val saved = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+
+        val result = store.advanceCheckpoint(
+            requestId = saved.point.requestId,
+            ownerId = OWNER_ONE,
+            stage = ScanCheckpointStage.BuildingEntityGraph,
+            completed = true,
+            output = ScanStageOutput(itemCount = -1)
+        )
+        assertTrue(result is ResumeCheckpointWriteState.Invalid)
+
+        val loaded = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertTrue(loaded.point.stageOutputs.isEmpty())
+        assertEquals(ScanCheckpointStage.Queued, loaded.point.checkpointStage)
+    }
+
+    @Test
     fun staleCheckpointOwnerCannotOverwriteNewOwnerOrRegressStage() {
         val fixture = fixture()
         val store = store(fixture)

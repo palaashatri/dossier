@@ -77,6 +77,36 @@ class GraphSchemaV2Test {
     }
 
     @Test
+    fun graphQueriesExposePositiveAndContradictingEvidenceLinks() {
+        val subject = DossierEntity(
+            id = "person:jane",
+            type = EntityType.Person,
+            label = "Jane",
+            evidenceIds = listOf("E1")
+        )
+        val profile = DossierEntity(
+            id = "profile:one",
+            type = EntityType.Profile,
+            label = "Profile",
+            evidenceIds = listOf("E2")
+        )
+        val edge = DossierEdge(
+            fromId = subject.id,
+            toId = profile.id,
+            relation = "has_profile",
+            evidenceIds = listOf("E2"),
+            contradictingEvidenceIds = listOf("E9")
+        )
+        val graph = EntityGraph(listOf(subject, profile), listOf(edge))
+
+        assertEquals(listOf(edge), graph.edgesWithEvidence("E2"))
+        assertEquals(listOf(edge), graph.edgesWithEvidence("E9"))
+        assertTrue(graph.edgesWithEvidence("missing").isEmpty())
+        assertEquals(listOf(subject), graph.entitiesWithEvidence("E1"))
+        assertEquals(listOf(profile), graph.entitiesWithEvidence("E2"))
+    }
+
+    @Test
     fun legacyRelationshipNamesMapToTypedV2Relationships() {
         assertEquals(RelationshipType.ARCHIVED_AS, RelationshipType.fromLegacy("archived_as"))
         assertEquals(RelationshipType.SAME_IMAGE_AS, RelationshipType.fromLegacy("same_image_content"))

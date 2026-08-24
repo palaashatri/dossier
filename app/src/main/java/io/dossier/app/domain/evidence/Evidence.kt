@@ -5,6 +5,7 @@ import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.RiskLevel
 import kotlinx.serialization.Serializable
 import java.security.MessageDigest
+import java.util.Locale
 
 /**
  * Stable evidence state. This describes the observation itself, not whether an
@@ -120,8 +121,63 @@ data class EvidenceRelationship(
     val fromValue: String,
     val toValue: String,
     val relation: String,
-    val evidence: String? = null
+    val evidence: String? = null,
+    /**
+     * Stable evidence IDs that independently support this relationship.
+     *
+     * Older producers only supplied the free-form [evidence] description, so
+     * this remains optional for backwards compatibility. The graph builder
+     * resolves exact endpoint/source matches as a safe migration aid.
+     */
+    val evidenceIds: List<String> = emptyList()
 )
+
+/**
+ * Resolves relationship provenance without inventing evidence.
+ *
+ * A relationship may arrive from a legacy producer with only endpoint values
+ * and a human-readable description. When an evidence record exactly matches
+ * either endpoint, the record's value/source URL, or an evidence description
+ * that is itself an exact source/value, it is safe to attach that existing ID.
+ * No fuzzy matching, provider inference, or new evidence is created here.
+ */
+fun EvidenceCollection.withResolvedRelationshipEvidence(): EvidenceCollection {
+    if (relationships.isEmpty() || evidence.isEmpty()) return this
+
+    val resolvedRelationships = relationships.map { relationship ->
+        val exactKeys = listOf(
+            relationship.fromValue,
+            relationship.toValue,
+            relationship.evidence
+        ).map(::provenanceKey).filter(String::isNotBlank).toSet()
+
+        val inferredIds = if (exactKeys.isEmpty()) {
+            emptyList()
+        } else {
+            evidence.asSequence()
+                .filter { record ->
+                    provenanceKey(record.id) in exactKeys ||
+                        provenanceKey(record.value) in exactKeys ||
+                        provenanceKey(record.sourceUrl) in exactKeys
+                }
+                .map(Evidence::id)
+                .toList()
+        }
+
+        relationship.copy(
+            evidenceIds = (relationship.evidenceIds + inferredIds)
+                .map(EvidenceIdPolicy::migrate)
+                .distinct()
+        )
+    }
+    return copy(relationships = resolvedRelationships)
+}
+
+private fun provenanceKey(value: String?): String = value
+    ?.trim()
+    ?.replace(Regex("\\s+"), " ")
+    ?.lowercase(Locale.US)
+    .orEmpty()
 
 /**
  * Evidence-ID policy.

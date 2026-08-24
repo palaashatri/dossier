@@ -71,6 +71,7 @@ object EvidenceGroundedAiValidator {
     private const val MAX_REASONING_CHARS = 1_500
     private const val MAX_ACTION_CHARS = 800
     private const val MAX_CLAIMS = 20
+    private const val MAX_REMEDIATION_LINKS = 80
 
     // Terminal punctuation such as the full stop ending a sentence is intentionally
     // allowed after the address; it is not part of the email identifier itself.
@@ -115,7 +116,18 @@ object EvidenceGroundedAiValidator {
             ")"
     )
 
-    fun validate(result: AiAnalysisResult, evidence: List<Evidence>): ValidatedAiAnalysis {
+    /**
+     * Validate model output against effective evidence and, when available,
+     * explicitly linked remediation state. Outcome language is accepted only
+     * when the matching evidence link is effective, completed, and tied to a
+     * later verification scan. Callers without remediation state retain the
+     * fail-closed behavior by using the default empty list.
+     */
+    fun validate(
+        result: AiAnalysisResult,
+        evidence: List<Evidence>,
+        remediationLinks: List<AiRemediationLink> = emptyList()
+    ): ValidatedAiAnalysis {
         val byId = evidence.associateBy(Evidence::id)
         val accepted = mutableListOf<AiAnalysisClaim>()
         val rejected = mutableListOf<RejectedAiClaim>()
@@ -143,7 +155,15 @@ object EvidenceGroundedAiValidator {
                 add(original.reasoningSummary)
                 original.recommendedAction?.let(::add)
             }.joinToString("\n")
-            if (REMEDIATION_OUTCOME.containsMatchIn(remediationCorpus)) {
+            if (
+                REMEDIATION_OUTCOME.containsMatchIn(remediationCorpus) &&
+                !hasVerifiedRemediationSupport(
+                    supportIds = supportIds.toSet(),
+                    contradictionIds = contradictionIds.toSet(),
+                    evidenceById = byId,
+                    remediationLinks = remediationLinks
+                )
+            ) {
                 reasons += "Remediation outcome requires a matching verified remediation record"
             }
             if (supportIds.isEmpty()) {
@@ -250,6 +270,28 @@ object EvidenceGroundedAiValidator {
 
         return ValidatedAiAnalysis(accepted, rejected)
     }
+
+    private fun hasVerifiedRemediationSupport(
+        supportIds: Set<String>,
+        contradictionIds: Set<String>,
+        evidenceById: Map<String, Evidence>,
+        remediationLinks: List<AiRemediationLink>
+    ): Boolean = remediationLinks
+        // Keep this bound aligned with the prompt's visible remediation
+        // projection. An omitted tail record cannot authorize a claim the
+        // model could not inspect.
+        .take(MAX_REMEDIATION_LINKS)
+        .any { link ->
+            val linkedEvidenceId = link.evidenceId
+            link.effective &&
+                link.state == AiRemediationLinkState.Effective &&
+                link.record.status == io.dossier.app.domain.case.RemediationStatus.Completed &&
+                !link.record.verifiedByScanId.isNullOrBlank() &&
+                linkedEvidenceId != null &&
+                linkedEvidenceId in supportIds &&
+                linkedEvidenceId !in contradictionIds &&
+                linkedEvidenceId in evidenceById
+        }
 
     private enum class IdentifierKind {
         Email,

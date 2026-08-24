@@ -19,6 +19,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
+import io.dossier.app.domain.discovery.ProviderHealthAssessment
+import io.dossier.app.domain.discovery.ProviderHealthReport
+import io.dossier.app.domain.discovery.ProviderHealthStatus
 import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.discovery.WhatsMyNameCatalog
 import io.dossier.app.domain.discovery.WhatsMyNameCatalogState
@@ -28,6 +32,7 @@ import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.theme.NeuralTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.time.Instant
 
 internal fun formatModeCounts(
     profileCount: Int,
@@ -60,6 +65,7 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
     var wmnLoadComplete by remember {
         mutableStateOf(initialWmnState is WhatsMyNameCatalogState.Ready)
     }
+    var providerHealthReport by remember { mutableStateOf<ProviderHealthReport?>(null) }
 
     // Migrate the pre-v2 Deep Research choice into the new authoritative scan
     // depth without silently losing the user's earlier intent.
@@ -73,6 +79,13 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
         }
         wmnState = installedState
         wmnLoadComplete = true
+        providerHealthReport = withContext(Dispatchers.IO) {
+            ProviderDiagnosticsRuntime.install(context.applicationContext)
+            ProviderDiagnosticsRuntime.report(
+                knownProviderIds = ProviderCatalogV2.definitions.map { it.id },
+                now = Instant.now()
+            )
+        }
     }
 
     val generator = remember { UsernameVariantGenerator() }
@@ -329,6 +342,11 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
                         modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
                     )
                 }
+
+                providerHealthReport?.let { report ->
+                    Spacer(modifier = Modifier.height(18.dp))
+                    ProviderHealthDiagnosticsPanel(report)
+                }
             }
 
             Row(
@@ -393,6 +411,127 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+internal fun providerHealthSummary(report: ProviderHealthReport): String = listOf(
+    "Healthy ${report.healthyCount}",
+    "Degraded ${report.degradedCount}",
+    "Unavailable ${report.unavailableCount}",
+    "Stale ${report.staleCount}",
+    "Unvalidated ${report.unvalidatedCount}"
+).joinToString(" · ")
+
+private fun providerHealthStatusLabel(status: ProviderHealthStatus): String = when (status) {
+    ProviderHealthStatus.Healthy -> "HEALTHY"
+    ProviderHealthStatus.Degraded -> "DEGRADED"
+    ProviderHealthStatus.Unavailable -> "UNAVAILABLE"
+    ProviderHealthStatus.Stale -> "STALE"
+    ProviderHealthStatus.Unvalidated -> "UNVALIDATED"
+}
+
+@Composable
+internal fun ProviderHealthDiagnosticsPanel(report: ProviderHealthReport) {
+    val notable = remember(report) {
+        report.assessments
+            .filter { it.status != ProviderHealthStatus.Healthy }
+            .take(MAX_HEALTH_PREVIEW_ROWS)
+    }
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = NeuralTheme.CardBackground.copy(alpha = 0.85f)
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, NeuralTheme.BorderColor, io.dossier.app.ui.theme.DossierCardShape),
+        shape = io.dossier.app.ui.theme.DossierCardShape
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = "Provider catalog health",
+                color = NeuralTheme.TextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "${report.knownProviderCount} catalog definition(s) · ${report.observedProviderCount} with recorded validation (${(report.coverageRate * 100).toInt()}% coverage)",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+            Text(
+                text = providerHealthSummary(report),
+                color = NeuralTheme.Cobalt,
+                fontSize = 10.5.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 5.dp)
+            )
+            Text(
+                text = "Health is persisted aggregate provider diagnostics only; catalog membership, an HTTP 200, or a search hit is not live validation or identity evidence.",
+                color = NeuralTheme.TextMuted,
+                fontSize = 10.5.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 7.dp, bottom = 5.dp)
+            )
+            if (notable.isEmpty()) {
+                Text(
+                    text = "No degraded, unavailable, stale, or unvalidated catalog entries are currently recorded.",
+                    color = NeuralTheme.Emerald,
+                    fontSize = 10.5.sp
+                )
+            } else {
+                notable.forEach { assessment ->
+                    ProviderHealthAssessmentRow(assessment)
+                }
+                val remaining = report.assessments.count { it.status != ProviderHealthStatus.Healthy } - notable.size
+                if (remaining > 0) {
+                    Text(
+                        text = "$remaining additional non-healthy provider(s) omitted by the bounded preview.",
+                        color = NeuralTheme.TextMuted,
+                        fontSize = 10.5.sp,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProviderHealthAssessmentRow(assessment: ProviderHealthAssessment) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = assessment.providerId,
+                color = NeuralTheme.TextPrimary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = "${assessment.attempts} attempt(s) · ${(assessment.usableResponseRate * 100).toInt()}% usable responses",
+                color = NeuralTheme.TextMuted,
+                fontSize = 9.5.sp
+            )
+        }
+        Text(
+            text = providerHealthStatusLabel(assessment.status),
+            color = when (assessment.status) {
+                ProviderHealthStatus.Healthy -> NeuralTheme.Emerald
+                ProviderHealthStatus.Degraded,
+                ProviderHealthStatus.Stale,
+                ProviderHealthStatus.Unvalidated -> NeuralTheme.Amber
+                ProviderHealthStatus.Unavailable -> NeuralTheme.Crimson
+            },
+            fontSize = 9.5.sp,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 
@@ -462,3 +601,5 @@ private fun scanModeDescription(mode: ScanMode): String = when (mode) {
     ScanMode.Deep -> "Broader direct-profile fan-out plus bounded extended and historical discovery."
     ScanMode.Exhaustive -> "All compatible enabled profile definitions plus bounded extended discovery."
 }
+
+private const val MAX_HEALTH_PREVIEW_ROWS = 8

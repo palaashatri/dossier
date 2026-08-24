@@ -505,6 +505,39 @@ private fun RenderDiff(
             }
         }
 
+        val sourceEvidenceChanges = diff.evidenceChanges.filter {
+            it.change != CaseComparison.EvidenceChangeKind.UNCHANGED
+        }
+        if (sourceEvidenceChanges.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(12.dp))
+            HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "Historical/provider evidence changes (${sourceEvidenceChanges.size})",
+                color = NeuralTheme.TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "Only records with the same canonical source target are compared. Not observed is not proof of deletion, and unavailable archives remain explicitly unavailable.",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 10.5.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 3.dp, bottom = 5.dp)
+            )
+            sourceEvidenceChanges.take(MAX_EVIDENCE_CHANGE_ROWS).forEach { change ->
+                EvidenceChangeRow(change)
+            }
+            if (sourceEvidenceChanges.size > MAX_EVIDENCE_CHANGE_ROWS) {
+                Text(
+                    text = "${sourceEvidenceChanges.size - MAX_EVIDENCE_CHANGE_ROWS} additional source-scoped changes omitted by the bounded comparison view.",
+                    color = NeuralTheme.TextMuted,
+                    fontSize = 10.5.sp,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+            }
+        }
+
         if (diff.remediationVerification.isNotEmpty()) {
             Spacer(modifier = Modifier.height(12.dp))
             HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
@@ -526,6 +559,76 @@ private fun RenderDiff(
                 RemediationVerificationRow(verification)
             }
         }
+    }
+}
+
+@Composable
+private fun EvidenceChangeRow(change: CaseComparison.EvidenceChange) {
+    val evidence = change.after ?: change.before ?: return
+    val label = when (change.change) {
+        CaseComparison.EvidenceChangeKind.ADDED -> "ADDED"
+        CaseComparison.EvidenceChangeKind.NOT_OBSERVED_IN_LATEST_CASE -> "NOT OBSERVED IN LATEST CASE"
+        CaseComparison.EvidenceChangeKind.CHANGED -> "CHANGED"
+        CaseComparison.EvidenceChangeKind.UNCHANGED -> "UNCHANGED"
+        CaseComparison.EvidenceChangeKind.UNAVAILABLE -> "UNAVAILABLE"
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp)
+            .semantics {
+                contentDescription = buildString {
+                    append("$label ${change.semanticKind} evidence")
+                    if (change.historical) append("; historical")
+                    append(". ${change.explanation}")
+                }
+            },
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Text(
+                label,
+                color = when (change.change) {
+                    CaseComparison.EvidenceChangeKind.UNAVAILABLE -> NeuralTheme.Amber
+                    CaseComparison.EvidenceChangeKind.NOT_OBSERVED_IN_LATEST_CASE -> NeuralTheme.TextSecondary
+                    else -> NeuralTheme.Cobalt
+                },
+                fontSize = 9.5.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                buildString {
+                    append(change.semanticKind)
+                    if (change.historical) append(" · HISTORICAL")
+                },
+                color = NeuralTheme.TextSecondary,
+                fontSize = 10.5.sp
+            )
+        }
+        Text(
+            evidence.value,
+            color = NeuralTheme.TextPrimary,
+            fontSize = 11.5.sp,
+            maxLines = 2
+        )
+        Text(
+            change.explanation,
+            color = NeuralTheme.TextSecondary,
+            fontSize = 10.5.sp,
+            lineHeight = 15.sp
+        )
+        evidence.sourceUrl?.takeIf {
+            it.startsWith("https://", ignoreCase = true) ||
+                it.startsWith("http://", ignoreCase = true)
+        }?.let { source ->
+            Text(
+                source,
+                color = NeuralTheme.Cobalt,
+                fontSize = 10.5.sp,
+                maxLines = 2
+            )
+        }
+        HorizontalDivider(color = NeuralTheme.BorderColor.copy(alpha = 0.7f))
     }
 }
 
@@ -774,6 +877,22 @@ private fun RemediationVerificationRow(
             lineHeight = 15.sp,
             modifier = Modifier.padding(top = 2.dp)
         )
+        verification.observedEvidenceId?.let { evidenceId ->
+            Text(
+                text = "Observed evidence: $evidenceId",
+                color = NeuralTheme.TextMuted,
+                fontSize = 9.5.sp,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+        verification.verificationScanId?.let { scanId ->
+            Text(
+                text = "Verification scan: $scanId",
+                color = NeuralTheme.TextMuted,
+                fontSize = 9.5.sp,
+                modifier = Modifier.padding(top = 1.dp)
+            )
+        }
     }
 }
 
@@ -1480,3 +1599,4 @@ private const val MAX_VISIBLE_MEDIA_HISTORY = 8
 private const val MAX_VISIBLE_MEDIA_OBSERVATIONS = 4
 private const val MAX_VISIBLE_MEDIA_MEMBERS = 4
 private const val MAX_VISIBLE_FINGERPRINT_CHARS = 36
+private const val MAX_EVIDENCE_CHANGE_ROWS = 40

@@ -11,6 +11,7 @@ import io.dossier.app.domain.scanner.ScanCheckpointStage
 import io.dossier.app.domain.scanner.ScanLifecycleErrors
 import io.dossier.app.domain.scanner.ScanResumeStore
 import io.dossier.app.domain.scanner.ScanSession
+import io.dossier.app.domain.scanner.ScanStageOutput
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -359,7 +360,8 @@ object ScanCoordinatorRuntime {
         ownerId: String,
         generation: String,
         stage: ScanCheckpointStage,
-        completed: Boolean
+        completed: Boolean,
+        output: ScanStageOutput? = null
     ): ResumeCheckpointWriteState =
         BackgroundScanManager.advanceCheckpointIfOwner(
             context = context,
@@ -367,7 +369,8 @@ object ScanCoordinatorRuntime {
             generation = generation,
             requestId = requestId,
             stage = stage,
-            completed = completed
+            completed = completed,
+            output = output
         ).also(::publishCheckpointState)
 
     private fun publishCheckpointState(state: ResumeCheckpointWriteState) {

@@ -77,6 +77,19 @@ internal data class ScanCheckpoint(
     val ownerId: String?
 )
 
+/**
+ * Non-sensitive output shape recorded after an allow-listed stage completes.
+ *
+ * Counts are intentionally the only payload. They make a resumed run
+ * inspectable without persisting URLs, identifiers, snippets, provider
+ * responses, exception messages, or generated text in the coordinator ledger.
+ */
+internal data class ScanStageOutput(
+    val itemCount: Int,
+    val verifiedCount: Int = 0,
+    val omittedCount: Int = 0
+)
+
 internal sealed interface ResumeCheckpointWriteState {
     data class Saved(val point: ResumePoint) : ResumeCheckpointWriteState
     data object Missing : ResumeCheckpointWriteState
@@ -578,7 +591,8 @@ internal class ScanResumeStore internal constructor(
         requestId: String,
         ownerId: String,
         stage: ScanCheckpointStage,
-        completed: Boolean
+        completed: Boolean,
+        output: ScanStageOutput? = null
     ): ResumeCheckpointWriteState = synchronized(STORE_LOCK) {
         if (!isValidRequestId(requestId) || !isValidRequestId(ownerId)) {
             return@synchronized ResumeCheckpointWriteState.Invalid(
@@ -609,11 +623,19 @@ internal class ScanResumeStore internal constructor(
         if (available.point.checkpointOwnerId != ownerId) {
             return@synchronized ResumeCheckpointWriteState.StaleOwner
         }
+        if (output != null && !completed) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+        if (output != null && !isValidStageOutput(output)) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
 
         val current = available.point.checkpointStage
         val completedStages = available.point.completedCheckpointStages
             .toMutableList()
         if (completed && stage !in completedStages) completedStages += stage
+        val stageOutputs = available.point.stageOutputs.toMutableMap()
+        if (completed && output != null) stageOutputs[stage] = output
         val nextCurrent = if (stage.order >= current.order) stage else current
         val now = runCatching { nowMillis() }.getOrElse {
             return@synchronized ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
@@ -626,6 +648,18 @@ internal class ScanResumeStore internal constructor(
                 .distinct()
                 .map(ScanCheckpointStage::wireName)
                 .take(MAX_CHECKPOINT_STAGES),
+            stageOutputs = stageOutputs
+                .toList()
+                .sortedBy { it.first.order }
+                .take(MAX_CHECKPOINT_STAGES)
+                .map { (outputStage, outputValue) ->
+                    StageOutputRecord(
+                        stage = outputStage.wireName,
+                        itemCount = outputValue.itemCount,
+                        verifiedCount = outputValue.verifiedCount,
+                        omittedCount = outputValue.omittedCount
+                    )
+                },
             checkpointOwnerId = ownerId
         )
         persistUpdatedRecord(updated)
@@ -1105,6 +1139,11 @@ internal class ScanResumeStore internal constructor(
                 completedCheckpointStages = record.completedCheckpointStages.mapNotNull(
                     ScanCheckpointStage::fromWire
                 ),
+                stageOutputs = record.stageOutputs.mapNotNull { output ->
+                    ScanCheckpointStage.fromWire(output.stage)?.let { stage ->
+                        stage to output.toDomain()
+                    }
+                }.toMap(),
                 checkpointOwnerId = record.checkpointOwnerId
             )
         )
@@ -1131,8 +1170,24 @@ internal class ScanResumeStore internal constructor(
             return false
         }
         if (completed.any { ScanCheckpointStage.fromWire(it) == null }) return false
+        val outputs = record.stageOutputs
+        if (outputs.size > MAX_CHECKPOINT_STAGES ||
+            outputs.map { it.stage }.distinct().size != outputs.size
+        ) return false
+        if (outputs.any { output ->
+                val parsedStage = ScanCheckpointStage.fromWire(output.stage)
+                parsedStage == null ||
+                    parsedStage.wireName !in completed ||
+                    !isValidStageOutput(output.toDomain())
+            }
+        ) return false
         return record.checkpointOwnerId == null || isValidRequestId(record.checkpointOwnerId)
     }
+
+    private fun isValidStageOutput(output: ScanStageOutput): Boolean =
+        output.itemCount in 0..MAX_STAGE_OUTPUT_COUNT &&
+            output.verifiedCount in 0..output.itemCount &&
+            output.omittedCount in 0..MAX_STAGE_OUTPUT_COUNT
 
     private fun recordForPoint(point: ResumePoint): ResumeRecord = ResumeRecord(
         formatVersion = FORMAT_VERSION,
@@ -1149,6 +1204,18 @@ internal class ScanResumeStore internal constructor(
         plannedProviderCount = point.plannedProviderCount,
         checkpointStage = point.checkpointStage.wireName,
         completedCheckpointStages = point.completedCheckpointStages.map(ScanCheckpointStage::wireName),
+        stageOutputs = point.stageOutputs
+            .toList()
+            .sortedBy { it.first.order }
+            .take(MAX_CHECKPOINT_STAGES)
+            .map { (stage, output) ->
+                StageOutputRecord(
+                    stage = stage.wireName,
+                    itemCount = output.itemCount,
+                    verifiedCount = output.verifiedCount,
+                    omittedCount = output.omittedCount
+                )
+            },
         checkpointOwnerId = point.checkpointOwnerId
     )
 
@@ -1212,6 +1279,11 @@ internal class ScanResumeStore internal constructor(
         checkpointStage = ScanCheckpointStage.fromWire(checkpointStage)
             ?: ScanCheckpointStage.Queued,
         completedCheckpointStages = completedCheckpointStages.mapNotNull(ScanCheckpointStage::fromWire),
+        stageOutputs = stageOutputs.mapNotNull { output ->
+            ScanCheckpointStage.fromWire(output.stage)?.let { stage ->
+                stage to output.toDomain()
+            }
+        }.toMap(),
         checkpointOwnerId = checkpointOwnerId
     )
 
@@ -2064,9 +2136,25 @@ internal class ScanResumeStore internal constructor(
         /** Semantic coordinator checkpoint; old records default to queued. */
         val checkpointStage: String = ScanCheckpointStage.Queued.wireName,
         val completedCheckpointStages: List<String> = emptyList(),
+        /** Bounded non-sensitive output shape for completed stages. */
+        val stageOutputs: List<StageOutputRecord> = emptyList(),
         /** Exact WorkManager owner bound after lifecycle CAS succeeds. */
         val checkpointOwnerId: String? = null
     )
+
+    @Serializable
+    private data class StageOutputRecord(
+        val stage: String,
+        val itemCount: Int,
+        val verifiedCount: Int = 0,
+        val omittedCount: Int = 0
+    ) {
+        fun toDomain(): ScanStageOutput = ScanStageOutput(
+            itemCount = itemCount,
+            verifiedCount = verifiedCount,
+            omittedCount = omittedCount
+        )
+    }
 
     private data class PriorRecordBackup(
         val file: File,
@@ -2114,6 +2202,7 @@ internal class ScanResumeStore internal constructor(
         const val MAX_FIELD_CHARS = 4_096
         const val MAX_LIST_ITEMS = 128
         const val MAX_CHECKPOINT_STAGES = 16
+        const val MAX_STAGE_OUTPUT_COUNT = 100_000
         const val MAX_POINTER_BYTES = 64L
         const val GCM_IV_BYTES = 12
         const val GCM_TAG_BYTES = 16
@@ -2162,6 +2251,7 @@ internal data class ResumePoint(
     val plannedProviderCount: Int = 0,
     val checkpointStage: ScanCheckpointStage = ScanCheckpointStage.Queued,
     val completedCheckpointStages: List<ScanCheckpointStage> = emptyList(),
+    val stageOutputs: Map<ScanCheckpointStage, ScanStageOutput> = emptyMap(),
     val checkpointOwnerId: String? = null
 )
 

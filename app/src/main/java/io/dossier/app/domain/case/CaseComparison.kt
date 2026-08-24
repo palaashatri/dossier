@@ -1,8 +1,14 @@
 package io.dossier.app.domain.case
 
+import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.RiskLevel
+import java.net.URI
 import java.util.Locale
 
 /** Pure before/after comparison for encrypted saved cases. */
@@ -58,6 +64,41 @@ class CaseComparison {
         val riskChanged: Boolean = false
     )
 
+    /**
+     * A source-scoped comparison of evidence records from two saved cases.
+     *
+     * This is deliberately not an identity assertion: it only reports that a
+     * record with the same semantic kind and canonical source target changed
+     * between two local case snapshots. Records without a source URL are not
+     * compared because there is no safe context for deciding that two values
+     * refer to the same observation.
+     */
+    data class EvidenceChange(
+        val key: String,
+        val change: EvidenceChangeKind,
+        val before: Evidence? = null,
+        val after: Evidence? = null,
+        val explanation: String
+    ) {
+        val historical: Boolean
+            get() = before?.historical == true || after?.historical == true
+
+        val sourceUrl: String?
+            get() = after?.sourceUrl ?: before?.sourceUrl
+
+        val semanticKind: String
+            get() = (after ?: before)?.attributeKind?.name
+                ?: (after ?: before)?.kind?.name.orEmpty()
+    }
+
+    enum class EvidenceChangeKind {
+        ADDED,
+        NOT_OBSERVED_IN_LATEST_CASE,
+        CHANGED,
+        UNCHANGED,
+        UNAVAILABLE
+    }
+
     enum class ChangeKind { ADDED, REMOVED, CHANGED, UNCHANGED }
 
     enum class RemediationVerificationState {
@@ -73,7 +114,11 @@ class CaseComparison {
         val beforeStatus: RemediationStatus,
         val afterStatus: RemediationStatus?,
         val state: RemediationVerificationState,
-        val explanation: String
+        val explanation: String,
+        /** Exact current evidence record that kept this target observable, when present. */
+        val observedEvidenceId: String? = null,
+        /** Successful scan that supplied the before/after recheck, when available. */
+        val verificationScanId: String? = null
     )
 
     data class MediaDiff(
@@ -97,7 +142,9 @@ class CaseComparison {
         val riskDelta: Int,
         val exposureDelta: Int,
         val media: MediaDiff = MediaDiff(),
-        val remediationVerification: List<RemediationVerification> = emptyList()
+        val remediationVerification: List<RemediationVerification> = emptyList(),
+        /** Bounded, source-scoped comparison of persisted evidence records. */
+        val evidenceChanges: List<EvidenceChange> = emptyList()
     )
 
     fun compare(before: DossierCase, after: DossierCase): CaseDiff {
@@ -146,9 +193,122 @@ class CaseComparison {
             riskDelta = riskDelta,
             exposureDelta = exposureDelta,
             media = compareMedia(before, after),
-            remediationVerification = verifyRemediation(before, after, afterMap.keys)
+            remediationVerification = verifyRemediation(before, after, afterMap.keys),
+            evidenceChanges = compareEvidence(before, after)
         )
     }
+
+    /**
+     * Compare the latest source-scoped evidence observation in each case.
+     *
+     * Archive captures and direct-provider observations are intentionally kept
+     * in the same result but retain their historical flag and full evidence
+     * records. An explicit Unavailable record is surfaced as UNAVAILABLE rather
+     * than being mistaken for a removal. A missing record is described as not
+     * observed in the latest case; it is never presented as proof of deletion.
+     */
+    private fun compareEvidence(before: DossierCase, after: DossierCase): List<EvidenceChange> {
+        val left = indexEvidence(before.evidenceRecords)
+        val right = indexEvidence(after.evidenceRecords)
+        val keys = (left.keys + right.keys).distinct().sorted().take(MAX_EVIDENCE_KEYS)
+
+        return keys.mapNotNull { key ->
+            val previous = left[key]
+            val current = right[key]
+            when {
+                current?.state == EvidenceState.Unavailable -> EvidenceChange(
+                    key = key,
+                    change = EvidenceChangeKind.UNAVAILABLE,
+                    before = previous,
+                    after = current,
+                    explanation = "The latest case recorded this source as unavailable; no historical or current observation is asserted."
+                )
+
+                previous == null && current != null -> EvidenceChange(
+                    key = key,
+                    change = EvidenceChangeKind.ADDED,
+                    after = current,
+                    explanation = "This source-scoped observation was recorded in the latest case."
+                )
+
+                previous != null && current == null -> EvidenceChange(
+                    key = key,
+                    change = EvidenceChangeKind.NOT_OBSERVED_IN_LATEST_CASE,
+                    before = previous,
+                    explanation = "The latest case did not observe this source-scoped record; this is not proof that the source or archived copy was removed."
+                )
+
+                previous != null && current != null -> {
+                    val changed = comparableValue(previous) != comparableValue(current) ||
+                        previous.state != current.state ||
+                        previous.historical != current.historical
+                    EvidenceChange(
+                        key = key,
+                        change = if (changed) EvidenceChangeKind.CHANGED else EvidenceChangeKind.UNCHANGED,
+                        before = previous,
+                        after = current,
+                        explanation = if (changed) {
+                            "The source-scoped observation changed between saved cases; review both evidence records and their timestamps."
+                        } else {
+                            "The source-scoped observation is unchanged between saved cases."
+                        }
+                    )
+                }
+
+                else -> null
+            }
+        }.sortedWith(
+            compareBy<EvidenceChange> { it.change == EvidenceChangeKind.UNCHANGED }
+                .thenBy { it.semanticKind }
+                .thenBy { it.key }
+        )
+    }
+
+    private fun indexEvidence(records: List<Evidence>): Map<String, Evidence> = records
+        .asSequence()
+        .filter { it.state != EvidenceState.Rejected }
+        .mapNotNull { evidence ->
+            val key = evidenceComparisonKey(evidence) ?: return@mapNotNull null
+            key to evidence
+        }
+        .groupBy({ it.first }, { it.second })
+        .mapValues { (_, values) ->
+            values.sortedWith(
+                compareByDescending<Evidence> { it.observedAtEpochMillis ?: Long.MIN_VALUE }
+                    .thenByDescending { it.retrievedAtEpochMillis ?: Long.MIN_VALUE }
+                    .thenByDescending(Evidence::id)
+            ).first()
+        }
+
+    private fun evidenceComparisonKey(evidence: Evidence): String? {
+        val rawSource = evidence.sourceUrl?.trim()?.takeIf(String::isNotBlank) ?: return null
+        val source = canonicalSourceTarget(rawSource).takeIf(String::isNotBlank) ?: return null
+        val semanticKind = evidence.attributeKind?.name ?: evidence.kind.name
+        return "$semanticKind|$source"
+    }
+
+    private fun comparableValue(evidence: Evidence): String = evidence.value
+        .trim()
+        .replace(Regex("\\s+"), " ")
+        .lowercase(Locale.ROOT)
+
+    /** Canonicalizes archive replay URLs without discarding source provenance. */
+    private fun canonicalSourceTarget(raw: String): String = runCatching {
+        val value = raw.trim().substringBefore('#')
+        val archiveMarker = value.indexOf("web.archive.org/web/", ignoreCase = true)
+        val target = if (archiveMarker >= 0) {
+            value.substring(archiveMarker + "web.archive.org/web/".length)
+                .substringAfter("_/", "")
+                .ifBlank { value.substring(archiveMarker + "web.archive.org/web/".length).substringAfter('/', "") }
+        } else {
+            value
+        }
+        val uri = URI(target)
+        val host = uri.host?.removePrefix("www.")?.lowercase(Locale.ROOT).orEmpty()
+        val path = uri.path.orEmpty().ifBlank { "/" }.trimEnd('/').ifBlank { "/" }
+        val query = uri.rawQuery?.let { "?$it" }.orEmpty()
+        if (host.isBlank()) target.lowercase(Locale.ROOT).trimEnd('/') else "$host$path$query"
+    }.getOrDefault(raw.trim().lowercase(Locale.ROOT).trimEnd('/'))
 
     /**
      * Returns bounded, deterministic cluster history for saved-case review.
@@ -335,12 +495,29 @@ class CaseComparison {
         latestFindingKeys: Set<String>
     ): List<RemediationVerification> {
         val afterById = after.remediationRecords.associateBy(RemediationRecord::remediationId)
+        val beforeScanIds = before.scanHistory.mapTo(hashSetOf(), CaseScanHistoryEntry::scanId)
+        val latestNewScan = after.scanHistory
+            .asSequence()
+            .filter { scan -> scan.scanId !in beforeScanIds }
+            .maxByOrNull { it.startedAtUtc }
+        val newSuccessfulScan = latestNewScan?.takeIf { scan ->
+            scan.completedAtUtc != null && !scan.failed && !scan.cancelled
+        }
+        val hasNewScan = latestNewScan != null
         return before.remediationRecords.map { previous ->
             val current = afterById[previous.remediationId]
-            val stillObserved = previous.findingKey in latestFindingKeys
+            val observedEvidence = findObservedEvidence(previous, after)
+            val stillObserved = previous.findingKey in latestFindingKeys || observedEvidence != null
+            val scanId = if (previous.status == RemediationStatus.Completed) {
+                current?.verifiedByScanId?.takeIf(String::isNotBlank) ?: newSuccessfulScan?.scanId
+            } else {
+                null
+            }
+            val incompleteNewScan = hasNewScan && newSuccessfulScan == null
             val state = when {
                 current != null && current.status != previous.status -> RemediationVerificationState.StatusChanged
                 previous.status == RemediationStatus.Completed && stillObserved -> RemediationVerificationState.StillObserved
+                previous.status == RemediationStatus.Completed && incompleteNewScan -> RemediationVerificationState.NotRechecked
                 previous.status == RemediationStatus.Completed && !stillObserved -> RemediationVerificationState.NotObservedInLatestScan
                 else -> RemediationVerificationState.NotRechecked
             }
@@ -348,11 +525,18 @@ class CaseComparison {
                 RemediationVerificationState.StatusChanged ->
                     "Remediation status changed from ${previous.status} to ${current?.status}."
                 RemediationVerificationState.StillObserved ->
-                    "The current assessment still observed evidence matching this finding; remediation is not verified."
-                RemediationVerificationState.NotObservedInLatestScan ->
-                    "The latest assessment did not observe this finding. This is not proof of global deletion; indexes, caches or archives may still retain it."
+                    "The current assessment still observed evidence matching this finding; remediation is not verified." +
+                        (scanId?.let { " Rechecked by scan $it." } ?: "")
                 RemediationVerificationState.NotRechecked ->
-                    "No conclusive before/after verification is available for this remediation record."
+                    if (incompleteNewScan) {
+                        "The newer scan did not complete successfully; remediation was not rechecked."
+                    } else {
+                        "No conclusive before/after verification is available for this remediation record."
+                    }
+                RemediationVerificationState.NotObservedInLatestScan ->
+                    "The latest assessment did not observe this finding" +
+                        (scanId?.let { " (scan $it)" } ?: "") +
+                        ". This is not proof of global deletion; indexes, caches or archives may still retain it."
             }
             RemediationVerification(
                 remediationId = previous.remediationId,
@@ -360,10 +544,95 @@ class CaseComparison {
                 beforeStatus = previous.status,
                 afterStatus = current?.status,
                 state = state,
-                explanation = explanation
+                explanation = explanation,
+                observedEvidenceId = observedEvidence?.id,
+                verificationScanId = scanId
             )
         }
     }
+
+    /**
+     * Match a prior remediation target to a current observation only through
+     * an explicit evidence ID or the full finding key (type, value, source).
+     * A shared username/value without the source/type is never enough.
+     */
+    private fun findObservedEvidence(
+        remediation: RemediationRecord,
+        after: DossierCase
+    ): Evidence? {
+        val currentEvidence = after.evidenceRecords
+            .asSequence()
+            .filter(::isCurrentUsableEvidence)
+            .take(MAX_REMEDIATION_EVIDENCE_RECORDS)
+            .toList()
+
+        remediation.evidenceId?.takeIf(String::isNotBlank)?.let { targetId ->
+            val migrated = EvidenceIdPolicy.migrate(targetId)
+            currentEvidence.firstOrNull { evidence ->
+                EvidenceIdPolicy.migrate(evidence.id) == migrated
+            }?.let { return it }
+        }
+
+        val parsed = parseFindingKey(remediation.findingKey) ?: return null
+        val expectedKind = findingTypeToEvidenceKind(parsed.typeName) ?: return null
+        return currentEvidence.firstOrNull { evidence ->
+            evidence.kind == expectedKind &&
+                comparable(evidence.value) == comparable(parsed.value) &&
+                sourceMatches(evidence.sourceUrl, parsed.sourceUrl)
+        }
+    }
+
+    private data class ParsedFindingKey(
+        val typeName: String,
+        val value: String,
+        val sourceUrl: String
+    )
+
+    private fun parseFindingKey(value: String): ParsedFindingKey? {
+        val parts = value.split('|', limit = 3)
+        if (parts.size != 3 || parts[0].isBlank() || parts[1].isBlank()) return null
+        return ParsedFindingKey(
+            typeName = parts[0].trim(),
+            value = parts[1].trim(),
+            sourceUrl = parts[2].trim()
+        )
+    }
+
+    private fun findingTypeToEvidenceKind(typeName: String): EvidenceKind? {
+        val findingType = FindingType.entries.firstOrNull { it.name.equals(typeName, ignoreCase = true) }
+            ?: return null
+        return when (findingType) {
+            FindingType.Email -> EvidenceKind.Email
+            FindingType.Phone -> EvidenceKind.Phone
+            FindingType.Address -> EvidenceKind.Address
+            FindingType.Location -> EvidenceKind.Location
+            FindingType.Username -> EvidenceKind.Username
+            FindingType.Profile -> EvidenceKind.Profile
+            FindingType.Organization -> EvidenceKind.Organization
+            FindingType.UsernameReuse -> EvidenceKind.UsernameReuse
+            FindingType.PlausibleProfileMatch -> EvidenceKind.PlausibleProfileMatch
+            FindingType.PublicSearchEvidence -> EvidenceKind.PublicSearchEvidence
+            FindingType.PublicImageEvidence -> EvidenceKind.PublicImageEvidence
+            FindingType.ImageConsistency -> EvidenceKind.ImageConsistency
+            FindingType.SensitiveSnippet -> EvidenceKind.SensitiveSnippet
+        }
+    }
+
+    private fun isCurrentUsableEvidence(evidence: Evidence): Boolean =
+        !evidence.historical &&
+            evidence.state != EvidenceState.Rejected &&
+            evidence.state != EvidenceState.Unavailable
+
+    private fun sourceMatches(current: String?, target: String): Boolean {
+        if (target.isBlank()) return current.isNullOrBlank()
+        val currentValue = current?.takeIf(String::isNotBlank) ?: return false
+        return canonicalSourceTarget(currentValue) == canonicalSourceTarget(target)
+    }
+
+    private fun comparable(value: String): String = value
+        .trim()
+        .replace(Regex("\\s+"), " ")
+        .lowercase(Locale.ROOT)
 
     private fun key(finding: Finding): String =
         "${finding.type.name}|${finding.value}|${finding.sourceUrl.orEmpty()}"
@@ -376,6 +645,7 @@ class CaseComparison {
     }
 
     private companion object {
+        const val MAX_EVIDENCE_KEYS = 256
         const val MAX_MEDIA_HISTORY_CASES = 24
         const val MAX_IMAGE_RESULTS_PER_CASE = 12
         const val MAX_CANDIDATES_PER_RESULT = 100
@@ -385,5 +655,6 @@ class CaseComparison {
         const val MAX_HISTORY_ENTRIES = 128
         const val MIN_CLUSTER_MEMBERS = 2
         const val MAX_FINGERPRINT_LENGTH = 256
+        const val MAX_REMEDIATION_EVIDENCE_RECORDS = 256
     }
 }

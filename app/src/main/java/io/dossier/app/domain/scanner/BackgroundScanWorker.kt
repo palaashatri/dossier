@@ -121,7 +121,11 @@ class BackgroundScanWorker(
             return Result.failure(failureData(safeCode))
         }
         try {
-            fun checkpointFailure(stage: ScanCheckpointStage, completed: Boolean): String? {
+            fun checkpointFailure(
+                stage: ScanCheckpointStage,
+                completed: Boolean,
+                output: ScanStageOutput? = null
+            ): String? {
                 val generationRef = generation ?: return null
                 return when (
                     ScanCoordinatorRuntime.recordCheckpoint(
@@ -130,7 +134,8 @@ class BackgroundScanWorker(
                         ownerId = workerId,
                         generation = generationRef,
                         stage = stage,
-                        completed = completed
+                        completed = completed,
+                        output = output
                     )
                 ) {
                     is ResumeCheckpointWriteState.Saved -> null
@@ -236,7 +241,14 @@ class BackgroundScanWorker(
                     observations = UsernameSurfaceRuntimeCache.observations.value
                 )
             )
-            checkpointFailure(ScanCheckpointStage.PostProcessing, completed = true)
+            checkpointFailure(
+                ScanCheckpointStage.PostProcessing,
+                completed = true,
+                output = ScanStageOutput(
+                    itemCount = evidenceCollection.evidence.size,
+                    verifiedCount = evidenceCollection.evidence.count { it.state == io.dossier.app.domain.evidence.EvidenceState.Verified }
+                )
+            )
                 ?.let { return@coroutineScope terminalFailure(it) }
 
             // The coordinator normally records terminal history when the
@@ -1250,7 +1262,8 @@ object BackgroundScanManager {
         generation: String,
         requestId: String,
         stage: ScanCheckpointStage,
-        completed: Boolean
+        completed: Boolean,
+        output: ScanStageOutput? = null
     ): ResumeCheckpointWriteState = synchronized(LIFECYCLE_LOCK) {
         val appContext = context.applicationContext
         val lifecycle = (lifecycleStoreProvider(appContext).read()
@@ -1267,7 +1280,8 @@ object BackgroundScanManager {
             requestId = requestId,
             ownerId = workerId,
             stage = stage,
-            completed = completed
+            completed = completed,
+            output = output
         )
     }
 
