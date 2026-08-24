@@ -8,6 +8,8 @@ import io.dossier.app.domain.discovery.ProviderResponseObservation
 import io.dossier.app.domain.discovery.ProviderVerificationState
 import io.dossier.app.domain.discovery.QueryCapability
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProviderResponseClassifierTest {
@@ -80,6 +82,71 @@ class ProviderResponseClassifierTest {
             )
         )
         assertEquals(ProviderVerificationState.RedirectedOutsideProvider, decision.state)
+    }
+
+    @Test
+    fun arbitrarySubdomainRedirectIsRejectedByDefault() {
+        val decision = ProviderResponseClassifier.classify(
+            provider,
+            ProviderResponseObservation(
+                statusCode = 200,
+                requestedUrl = "https://example.test/sample_user",
+                finalUrl = "https://cdn.example.test/sample_user",
+                bodyText = "Profile"
+            )
+        )
+
+        assertEquals(ProviderVerificationState.RedirectedOutsideProvider, decision.state)
+        assertFalse(
+            ProviderResponseClassifier.sameProviderHost(
+                "https://example.test/sample_user",
+                "https://cdn.example.test/sample_user"
+            )
+        )
+    }
+
+    @Test
+    fun explicitlyApprovedProviderAliasMayReceiveRedirect() {
+        val approvedProvider = provider.copy(approvedHosts = setOf("cdn.example.test"))
+        val decision = ProviderResponseClassifier.classify(
+            approvedProvider,
+            ProviderResponseObservation(
+                statusCode = 200,
+                requestedUrl = "https://example.test/sample_user",
+                finalUrl = "https://cdn.example.test/sample_user",
+                bodyText = "Profile"
+            )
+        )
+
+        assertEquals(ProviderVerificationState.Present, decision.state)
+        assertTrue(
+            ProviderResponseClassifier.sameProviderHost(
+                "https://example.test/sample_user",
+                "https://cdn.example.test/sample_user",
+                setOf("example.test", "cdn.example.test")
+            )
+        )
+    }
+
+    @Test
+    fun httpsProviderCannotBeDowngradedByRedirect() {
+        val decision = ProviderResponseClassifier.classify(
+            provider,
+            ProviderResponseObservation(
+                statusCode = 200,
+                requestedUrl = "https://example.test/sample_user",
+                finalUrl = "http://example.test/sample_user",
+                bodyText = "Profile"
+            )
+        )
+
+        assertEquals(ProviderVerificationState.RedirectedOutsideProvider, decision.state)
+        assertFalse(
+            ProviderResponseClassifier.sameProviderHost(
+                "https://example.test/sample_user",
+                "http://example.test/sample_user"
+            )
+        )
     }
 
     @Test

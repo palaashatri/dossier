@@ -35,6 +35,7 @@ object HandleExtractor {
         alreadyScannedUrls: Set<String>,
         sourcePlatformLabel: String,
         depth: Int = 1,
+        maxDepth: Int = PivotAdmissionPolicy.DEFAULT_MAX_DEPTH,
         onRejected: ((PivotRejection) -> Unit)? = null
     ): List<PivotCandidate> {
         val found = mutableMapOf<String, PivotCandidate>()
@@ -66,6 +67,7 @@ object HandleExtractor {
                     normalizedValue = resolved.username,
                     confidence = 0.70f,
                     depth = depth,
+                    maxDepth = maxDepth,
                     alreadyVisited = false
                 )
             )
@@ -116,6 +118,7 @@ object HandleExtractor {
                     normalizedValue = handle,
                     confidence = 0.60f,
                     depth = depth,
+                    maxDepth = maxDepth,
                     alreadyVisited = false
                 )
             )

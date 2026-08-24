@@ -85,11 +85,14 @@ object ProviderResponseClassifier {
         }
 
         val finalUrl = observation.finalUrl
-        if (finalUrl != null && !sameProviderHost(observation.requestedUrl, finalUrl)) {
-            return ProviderResponseDecision(
-                ProviderVerificationState.RedirectedOutsideProvider,
-                "Final response host differs from requested provider host"
-            )
+        if (finalUrl != null) {
+            val approvedHosts = approvedHosts(definition, observation.requestedUrl)
+            if (!sameProviderHost(observation.requestedUrl, finalUrl, approvedHosts)) {
+                return ProviderResponseDecision(
+                    ProviderVerificationState.RedirectedOutsideProvider,
+                    "Final response host is not an approved host for this provider"
+                )
+            }
         }
 
         if (status !in rules.requiredStatus) {
@@ -119,11 +122,56 @@ object ProviderResponseClassifier {
         )
     }
 
-    internal fun sameProviderHost(first: String, second: String): Boolean {
-        val firstHost = runCatching { URI(first).host?.lowercase()?.removePrefix("www.") }.getOrNull()
-        val secondHost = runCatching { URI(second).host?.lowercase()?.removePrefix("www.") }.getOrNull()
+    /**
+     * Redirects are exact-host by default. A provider may explicitly declare
+     * aliases (for example an owned CDN) through [approvedHosts], but arbitrary
+     * subdomains are never trusted implicitly.
+     */
+    internal fun sameProviderHost(
+        first: String,
+        second: String,
+        approvedHosts: Set<String> = emptySet()
+    ): Boolean {
+        val firstScheme = scheme(first) ?: return false
+        val secondScheme = scheme(second) ?: return false
+        if (firstScheme !in HTTP_SCHEMES || secondScheme !in HTTP_SCHEMES) return false
+        if (firstScheme == "https" && secondScheme != "https") return false
+        val firstHost = host(first)
+        val secondHost = host(second)
         if (firstHost.isNullOrBlank() || secondHost.isNullOrBlank()) return false
-        return firstHost == secondHost || firstHost.endsWith(".$secondHost") || secondHost.endsWith(".$firstHost")
+        if (approvedHosts.isEmpty()) return firstHost == secondHost
+        val approved = approvedHosts.mapNotNull(::hostValue).toSet()
+        return firstHost in approved && secondHost in approved
+    }
+
+    private fun approvedHosts(
+        definition: ProviderDefinition,
+        requestedUrl: String
+    ): Set<String> {
+        val explicit = definition.approvedHosts.mapNotNull(::hostValue).toSet()
+        if (explicit.isNotEmpty()) return explicit + setOfNotNull(host(requestedUrl))
+
+        // A template host is declarative provider metadata. Replace path/query
+        // tokens before parsing so a normal profile provider gets its exact
+        // configured host without trusting arbitrary redirect subdomains.
+        val templateHost = definition.profileUrlTemplate
+            ?.replace("{username}", "probe")
+            ?.let(::host)
+        return setOfNotNull(templateHost, host(requestedUrl))
+    }
+
+    private fun host(value: String): String? = runCatching {
+        URI(value).host?.let(::hostValue)
+    }.getOrNull()
+
+    private fun scheme(value: String): String? = runCatching {
+        URI(value).scheme?.lowercase()
+    }.getOrNull()
+
+    private fun hostValue(value: String): String? {
+        val normalized = value.trim().lowercase().removePrefix("www.")
+        if (normalized.isBlank() || normalized.contains('/') || normalized.contains(':')) return null
+        return normalized
     }
 
     private fun containsGlobalChallenge(body: String): Boolean {
@@ -138,4 +186,6 @@ object ProviderResponseClassifier {
             "attention required"
         ).any(body::contains)
     }
+
+    private val HTTP_SCHEMES = setOf("http", "https")
 }

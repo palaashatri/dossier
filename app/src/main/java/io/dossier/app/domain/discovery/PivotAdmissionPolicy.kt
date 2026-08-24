@@ -32,7 +32,9 @@ data class PivotAdmissionRequest(
     val confidence: Float,
     val depth: Int,
     val corroboratingEvidenceCount: Int = 1,
-    val alreadyVisited: Boolean = false
+    val alreadyVisited: Boolean = false,
+    /** Caller-owned frontier bound; defaults preserve the conservative two-hop policy. */
+    val maxDepth: Int = PivotAdmissionPolicy.DEFAULT_MAX_DEPTH
 )
 
 sealed interface PivotAdmissionDecision {
@@ -51,6 +53,8 @@ sealed interface PivotAdmissionDecision {
  */
 object PivotAdmissionPolicy {
     const val DEFAULT_MAX_DEPTH = 2
+    /** Hard upper bound; normal scans remain at [DEFAULT_MAX_DEPTH]. */
+    const val MAX_ALLOWED_DEPTH = 4
 
     private val commonHandles = setOf(
         "admin", "administrator", "user", "username", "test", "demo",
@@ -62,8 +66,13 @@ object PivotAdmissionPolicy {
         if (request.alreadyVisited) {
             return PivotAdmissionDecision.Reject("Signal was already visited in this scan")
         }
-        if (request.depth !in 1..DEFAULT_MAX_DEPTH) {
-            return PivotAdmissionDecision.Reject("Pivot depth exceeds the bounded recursion limit")
+        if (request.maxDepth !in 1..MAX_ALLOWED_DEPTH) {
+            return PivotAdmissionDecision.Reject("Pivot depth bound is outside the allowed recursion limit")
+        }
+        if (request.depth !in 1..request.maxDepth) {
+            return PivotAdmissionDecision.Reject(
+                "Pivot depth exceeds the configured recursion limit (${request.maxDepth})"
+            )
         }
         val value = request.normalizedValue.trim().lowercase()
         if (value.length < 2) {

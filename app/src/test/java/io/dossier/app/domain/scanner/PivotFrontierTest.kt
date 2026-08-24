@@ -101,6 +101,58 @@ class PivotFrontierTest {
     }
 
     @Test
+    fun `configured depth loop drains exact depths and honors shared budget`() {
+        val config = PivotFrontierConfig(
+            maxDepth = 3,
+            maxTotalPivots = 3
+        )
+        val frontier = BoundedPivotFrontier(REQUEST_ID, config, { now })
+
+        (1..3).forEach { depth ->
+            assertTrue(
+                frontier.offer(
+                    candidate("depth-$depth"),
+                    depth = depth,
+                    signalType = PivotSignalType.ExplicitProfileLink
+                ) is PivotOffer.Admitted
+            )
+        }
+        val overBudget = frontier.offer(
+            candidate("depth-over-budget"),
+            depth = 3,
+            signalType = PivotSignalType.ExplicitProfileLink
+        )
+        assertTrue(overBudget is PivotOffer.Rejected)
+        assertTrue((overBudget as PivotOffer.Rejected).diagnostic.reason.contains("budget"))
+
+        (1..3).forEach { depth ->
+            val pending = frontier.pendingAtDepth(maxEntries = 1, depth = depth)
+            assertEquals(1, pending.size)
+            assertEquals(depth, pending.single().depth)
+            frontier.complete(pending.single().key)
+        }
+        assertEquals(0, frontier.pendingCount)
+    }
+
+    @Test
+    fun `persisted pending entry keeps configured depth for resume`() {
+        val config = PivotFrontierConfig(maxDepth = 3)
+        val store = PivotFrontierStore(root, REQUEST_ID, crypto, nowMillis = { now })
+        val frontier = BoundedPivotFrontier(REQUEST_ID, config, nowMillis = { now })
+        val entry = (frontier.offer(
+            candidate("resume-depth-three"),
+            depth = 3,
+            signalType = PivotSignalType.ExplicitProfileLink
+        ) as PivotOffer.Admitted).entry
+
+        assertTrue(store.save(frontier))
+        val restored = store.load(config)
+        assertNotNull(restored)
+        assertTrue(restored!!.pendingAtDepth(maxEntries = 1, depth = 1).isEmpty())
+        assertEquals(entry.key, restored.pendingAtDepth(maxEntries = 1, depth = 3).single().key)
+    }
+
+    @Test
     fun `pending entries survive encrypted store round trip until acknowledged`() {
         val store = PivotFrontierStore(root, REQUEST_ID, crypto, nowMillis = { now })
         val config = PivotFrontierConfig()

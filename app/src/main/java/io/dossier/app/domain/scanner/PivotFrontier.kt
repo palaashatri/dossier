@@ -37,8 +37,8 @@ data class PivotFrontierConfig(
     val perSignalBudgets: Map<PivotSignalType, Int> = defaultSignalBudgets()
 ) {
     init {
-        require(maxDepth in 1..PivotAdmissionPolicy.DEFAULT_MAX_DEPTH) {
-            "maxDepth must remain within the conservative recursive depth bound"
+        require(maxDepth in 1..PivotAdmissionPolicy.MAX_ALLOWED_DEPTH) {
+            "maxDepth must remain within the allowed recursive depth bound"
         }
         require(maxTotalPivots in 1..MAX_ALLOWED_TOTAL_PIVOTS) {
             "maxTotalPivots must be bounded"
@@ -231,6 +231,18 @@ internal class BoundedPivotFrontier internal constructor(
                 now = now
             )
         }
+        if (depth !in 1..config.maxDepth) {
+            return reject(
+                key = key,
+                normalizedValue = normalized,
+                candidateUrl = key,
+                sourceUrl = sourceUrl,
+                depth = depth,
+                signalType = signalType,
+                reason = "Pivot depth exceeds configured frontier maximum (${config.maxDepth})",
+                now = now
+            )
+        }
         if (key in visitedKeys || queue.any { it.key == key }) {
             return reject(
                 key = key,
@@ -251,7 +263,8 @@ internal class BoundedPivotFrontier internal constructor(
                 confidence = confidence.coerceIn(0f, 1f),
                 depth = depth,
                 corroboratingEvidenceCount = corroboratingEvidenceCount.coerceAtLeast(0),
-                alreadyVisited = false
+                alreadyVisited = false,
+                maxDepth = config.maxDepth
             )
         )
         if (policy is PivotAdmissionDecision.Reject) {
@@ -355,6 +368,13 @@ internal class BoundedPivotFrontier internal constructor(
     fun pending(maxEntries: Int, maxDepth: Int): List<PivotFrontierEntry> =
         queue.asSequence()
             .filter { it.depth <= maxDepth }
+            .take(maxEntries.coerceAtLeast(0))
+            .toList()
+
+    /** Returns only entries at one frontier depth, preserving queue order. */
+    fun pendingAtDepth(maxEntries: Int, depth: Int): List<PivotFrontierEntry> =
+        queue.asSequence()
+            .filter { it.depth == depth }
             .take(maxEntries.coerceAtLeast(0))
             .toList()
 

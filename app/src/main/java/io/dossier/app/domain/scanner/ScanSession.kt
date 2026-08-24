@@ -49,6 +49,7 @@ import io.dossier.app.domain.risk.RiskScorer
 import io.dossier.app.domain.username.UsernameVariantGenerator
 import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanId
+import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -131,6 +132,7 @@ object ScanSession {
         withContext(Dispatchers.IO) {
             val appContext = context.applicationContext
             scanApplicationContext = appContext
+            ProviderDiagnosticsRuntime.install(appContext)
 
             runCatching {
                 BackgroundScanManager.enqueue(
@@ -321,6 +323,7 @@ object ScanSession {
         deepResearch: Boolean = false,
         requestId: String? = null
     ) = withContext(Dispatchers.IO) {
+        ProviderDiagnosticsRuntime.install(context.applicationContext)
         val inputToUse = input
         _currentInput.value = inputToUse
         EvidenceRuntimeCache.clear()

@@ -9,6 +9,7 @@ import io.dossier.app.domain.discovery.ProviderExecutionRuntime
 import io.dossier.app.domain.discovery.ProviderResponseClassifier
 import io.dossier.app.domain.discovery.ProviderRendererPolicy
 import io.dossier.app.domain.discovery.ProviderVerificationState
+import io.dossier.app.domain.discovery.ExtractionRules
 import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.evidence.Evidence
@@ -26,6 +27,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.io.IOException
 import java.net.URI
 import java.util.concurrent.TimeUnit
@@ -199,60 +201,35 @@ class ProfileScanner(
             ?: BoundedPivotFrontier(frontierRequestId, frontierConfig)
         pivotFrontier.markVisited(uniqueCandidates.map { it.url })
 
-        // ---- Pass 2 (+ hop 2): multi-hop pivot discovery. For every profile
-        // confirmed in pass 1, read its rendered content/links for OTHER handles
-        // the user self-disclosed, and check those as new candidates. A second
-        // hop runs on newly verified pivot results (bounded total pivots).
+        // ---- Pass 2: bounded recursive pivot discovery. For every profile
+        // confirmed in the preceding depth, read its rendered content/links for
+        // OTHER handles the user self-disclosed and drain exactly that frontier
+        // depth. The configured maximum depth, rather than a fixed hop count,
+        // controls how far a scan may recurse.
         //
         // FAIL-SAFE: the entire pivot pass is wrapped so ANY failure here never
         // destroys the Pass-1 results. A broken pivot must not make the scan
         // return empty — Pass 1's findings are always surfaced.
         val pivotResults: List<ProfileScanResult> = try {
-            val scanned = uniqueCandidates.map { it.url.lowercase() }.toMutableSet()
-            val hop1 = runPivotPass(
-                seedResults = initialResults,
-                alreadyScannedUrls = scanned,
+            drainPivotFrontier(
+                initialResults = initialResults,
+                uniqueCandidates = uniqueCandidates,
                 input = input,
                 deepResearch = deepResearch,
-                remainingBudget = MAX_PIVOT_CANDIDATES,
                 scanId = scanId,
                 frontier = pivotFrontier,
-                frontierStore = frontierStore,
-                depth = 1
+                frontierStore = frontierStore
             )
-            hop1.forEach {
-                BoundedPivotFrontier.canonicalUrlKey(it.candidate.url)?.let(scanned::add)
-            }
-            // Hop 2: only on newly verified pivot results (soft-existence pages
-            // with verified=false do not seed further pivots). Shared budget across hops.
-            val usedBudget = hop1.size
-            val remaining = (MAX_PIVOT_CANDIDATES - usedBudget).coerceAtLeast(0)
-            val hop2Seeds = hop1.filter { it.exists && it.verified }
-            val hop2 = if (hop2Seeds.isNotEmpty() && remaining > 0) {
-                runPivotPass(
-                    seedResults = hop2Seeds,
-                    alreadyScannedUrls = scanned,
-                    input = input,
-                    deepResearch = deepResearch,
-                    remainingBudget = remaining,
-                    scanId = scanId,
-                    frontier = pivotFrontier,
-                    frontierStore = frontierStore,
-                    depth = 2
-                )
-            } else {
-                emptyList()
-            }
-            hop1 + hop2
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Throwable) {
             emptyList()
+        } finally {
+            // Persist admitted/rejected state even when a non-cancellation
+            // failure aborts one depth. Cancellation is rethrown above, while
+            // the durable queue remains resumable on the next request.
+            frontierStore?.save(pivotFrontier)
         }
-
-        // Keep bounded admission/rejection diagnostics and any interrupted
-        // queue entries available for a later request-scoped resume.
-        frontierStore?.save(pivotFrontier)
 
         // ---- Pass 3: public-search discovery. This broadens coverage beyond
         // deterministic username templates by querying public indexes for the
@@ -331,7 +308,7 @@ class ProfileScanner(
         val scannedUrls = alreadyScannedUrls.mapNotNull(BoundedPivotFrontier::canonicalUrlKey).toMutableSet()
         frontier.markVisited(scannedUrls)
         seedResults.filter { it.exists && it.verified }.forEach { confirmed ->
-            if (frontier.pending(remainingBudget, depth).size >= remainingBudget) return@forEach
+            if (frontier.pendingAtDepth(remainingBudget, depth).size >= remainingBudget) return@forEach
             val sourceLabel = confirmed.candidate.platform.name
             val pivots = HandleExtractor.extract(
                 profileText = confirmed.extractedText,
@@ -340,6 +317,7 @@ class ProfileScanner(
                 alreadyScannedUrls = scannedUrls + frontier.visitedUrls,
                 sourcePlatformLabel = sourceLabel,
                 depth = depth,
+                maxDepth = frontier.config.maxDepth,
                 onRejected = { rejection ->
                     frontier.recordRejected(
                         key = rejection.candidateUrl?.let(BoundedPivotFrontier::canonicalUrlKey).orEmpty(),
@@ -353,7 +331,7 @@ class ProfileScanner(
                 }
             )
             pivots.forEach { pc ->
-                if (frontier.pending(remainingBudget, depth).size >= remainingBudget) return@forEach
+                if (frontier.pendingAtDepth(remainingBudget, depth).size >= remainingBudget) return@forEach
                 val offer = frontier.offer(
                     candidate = pc.candidate,
                     depth = depth,
@@ -372,7 +350,7 @@ class ProfileScanner(
             // profile, read their pages for MORE handles, and pivot from those
             // too. (deanonymizer's website link-follower.) Bounded to keep
             // runtime sane.
-            if (deepResearch && frontier.pending(remainingBudget, depth).size < remainingBudget) {
+            if (deepResearch && frontier.pendingAtDepth(remainingBudget, depth).size < remainingBudget) {
                 val websiteFollower = io.dossier.app.data.web.WebsiteLinkFollower(context)
                 val personalSites = confirmed.links
                     .filter { link ->
@@ -394,6 +372,7 @@ class ProfileScanner(
                             alreadyScannedUrls = scannedUrls + frontier.visitedUrls,
                             sourcePlatformLabel = "$sourceLabel → website",
                             depth = depth,
+                            maxDepth = frontier.config.maxDepth,
                             onRejected = { rejection ->
                                 frontier.recordRejected(
                                     key = rejection.candidateUrl?.let(BoundedPivotFrontier::canonicalUrlKey).orEmpty(),
@@ -407,7 +386,7 @@ class ProfileScanner(
                             }
                         )
                         sitePivots.forEach { pc ->
-                            if (frontier.pending(remainingBudget, depth).size >= remainingBudget) return@forEach
+                            if (frontier.pendingAtDepth(remainingBudget, depth).size >= remainingBudget) return@forEach
                             val offer = frontier.offer(
                                 candidate = pc.candidate,
                                 depth = depth,
@@ -431,7 +410,7 @@ class ProfileScanner(
         }
 
         frontierStore?.save(frontier)
-        val pending = frontier.pending(remainingBudget, depth)
+        val pending = frontier.pendingAtDepth(remainingBudget, depth)
         if (pending.isEmpty()) return emptyList()
 
         pending.forEach { queueProviderCandidate(it.candidate, scanId) }
@@ -454,6 +433,56 @@ class ProfileScanner(
                 scanResult
             }
         }
+    }
+
+    /**
+     * Drain each configured frontier depth in order. Results fetched at depth N
+     * become seeds for depth N+1 only when they are verified, preventing weak
+     * or unverified pages from causing recursive false-positive cascades.
+     *
+     * The shared candidate budget is decremented by completed fetches. Pending
+     * entries loaded from the encrypted request checkpoint are drained at their
+     * persisted depth, so an interrupted scan resumes without replaying an
+     * earlier hop or silently dropping admitted work.
+     */
+    private suspend fun drainPivotFrontier(
+        initialResults: List<ProfileScanResult>,
+        uniqueCandidates: List<UsernameCandidate>,
+        input: IdentityInput,
+        deepResearch: Boolean,
+        scanId: ScanId,
+        frontier: BoundedPivotFrontier,
+        frontierStore: PivotFrontierStore?
+    ): List<ProfileScanResult> {
+        val scanned = uniqueCandidates
+            .mapNotNull { url -> BoundedPivotFrontier.canonicalUrlKey(url.url) }
+            .toMutableSet()
+        var seeds = initialResults
+        var remainingBudget = minOf(MAX_PIVOT_CANDIDATES, frontier.config.maxTotalPivots)
+        val results = mutableListOf<ProfileScanResult>()
+
+        for (depth in 1..frontier.config.maxDepth) {
+            if (remainingBudget <= 0) break
+            val fetched = runPivotPass(
+                seedResults = seeds,
+                alreadyScannedUrls = scanned,
+                input = input,
+                deepResearch = deepResearch,
+                remainingBudget = remainingBudget,
+                scanId = scanId,
+                frontier = frontier,
+                frontierStore = frontierStore,
+                depth = depth
+            )
+            results += fetched
+            fetched.forEach { result ->
+                BoundedPivotFrontier.canonicalUrlKey(result.candidate.url)?.let(scanned::add)
+            }
+            remainingBudget = (remainingBudget - fetched.size).coerceAtLeast(0)
+            seeds = fetched.filter { it.exists && it.verified }
+        }
+
+        return results
     }
 
     /**
@@ -862,19 +891,12 @@ class ProfileScanner(
                     if (text.trim().length >= 300 &&
                         !isProfileNotFoundPage(rawHtml, text, title, candidate.username, candidate.platform)
                     ) {
-                        if (isProfileBelongingToUser(candidate, text, title, input)) {
-                            val displayName = title.ifBlank { null }
-                            val bio = doc.select("meta[name=description]").attr("content").trim().ifBlank {
-                                doc.select("p").firstOrNull()?.text()?.take(200)
-                            }
-                            val profileImageUrl = extractProfileImageUrl(doc)
-                            val links = mutableListOf<String>()
-                            doc.select("a[href]").forEach { element ->
-                                val linkUrl = element.attr("abs:href")
-                                if (linkUrl.startsWith("http")) {
-                                    links.add(linkUrl)
-                                }
-                            }
+                        val extracted = DeclarativeProfileExtractor.extract(
+                            document = doc,
+                            rules = definition.extractionRules,
+                            fallbackTitle = title
+                        )
+                        if (isProfileBelongingToUser(candidate, text, extracted.displayName, input)) {
                             val extractedText = text
                             val confidenceSignals = mutableListOf("Direct HTTP 200 page access — real content")
                             return finalizeResult(
@@ -883,10 +905,10 @@ class ProfileScanner(
                                 verified = true,
                                 verificationStatus = "✓ Verified (HTTP 200, direct page access)",
                                 httpStatus = httpStatus,
-                                displayName = displayName,
-                                bio = bio,
-                                profileImageUrl = profileImageUrl,
-                                links = links,
+                                displayName = extracted.displayName,
+                                bio = extracted.bio,
+                                profileImageUrl = extracted.profileImageUrl,
+                                links = extracted.links.toMutableList(),
                                 extractedText = extractedText,
                                 findings = mutableListOf(),
                                 confidenceSignals = confidenceSignals,
@@ -900,7 +922,7 @@ class ProfileScanner(
                             return buildSoftExistenceResult(
                                 candidate = candidate,
                                 httpStatus = httpStatus,
-                                displayName = title.ifBlank { null },
+                                displayName = extracted.displayName,
                                 extractedText = text,
                                 verificationStatus = "Exists but not attributed to this identity — possible account",
                                 provenance = provenance,
@@ -967,6 +989,11 @@ class ProfileScanner(
                         is WebViewScraper.Result.Rendered -> {
                             val docRender = Jsoup.parse(render.html, candidate.url)
                             val extractedText = render.text
+                            val extracted = DeclarativeProfileExtractor.extract(
+                                document = docRender,
+                                rules = definition.extractionRules,
+                                fallbackTitle = docRender.title().ifBlank { title }
+                            )
 
                             if (isProfileNotFoundPage(render.html, extractedText, docRender.title(), candidate.username, candidate.platform)) {
                                 return buildResult(
@@ -982,25 +1009,17 @@ class ProfileScanner(
                                 )
                             }
 
-                            if (isProfileBelongingToUser(candidate, extractedText, docRender.title(), input)) {
-                                val links = mutableListOf<String>()
-                                docRender.select("a[href]").forEach { element ->
-                                    val linkUrl = element.attr("abs:href")
-                                    if (linkUrl.startsWith("http")) links.add(linkUrl)
-                                }
-                                val bio = docRender.select("meta[name=description]").attr("content").trim().ifBlank {
-                                    docRender.select("p").firstOrNull()?.text()?.take(200)
-                                }
+                            if (isProfileBelongingToUser(candidate, extractedText, extracted.displayName, input)) {
                                 return finalizeResult(
                                     candidate = candidate,
                                     exists = true,
                                     verified = true,
                                     verificationStatus = "✓ Verified in-browser",
                                     httpStatus = httpStatus,
-                                    displayName = docRender.title().ifBlank { title },
-                                    bio = bio,
-                                    profileImageUrl = extractProfileImageUrl(docRender),
-                                    links = links,
+                                    displayName = extracted.displayName,
+                                    bio = extracted.bio,
+                                    profileImageUrl = extracted.profileImageUrl,
+                                    links = extracted.links.toMutableList(),
                                     extractedText = extractedText,
                                     findings = mutableListOf(),
                                     confidenceSignals = mutableListOf("Embedded browser render confirmed against DOM"),
@@ -1014,7 +1033,7 @@ class ProfileScanner(
                                 return buildSoftExistenceResult(
                                     candidate = candidate,
                                     httpStatus = httpStatus,
-                                    displayName = docRender.title().ifBlank { title },
+                                    displayName = extracted.displayName,
                                     extractedText = extractedText,
                                     verificationStatus = "Exists but not attributed to this identity — possible account",
                                     provenance = provenance,
@@ -1806,6 +1825,124 @@ class ProfileScanner(
         results: List<ProfileScanResult>,
         input: IdentityInput
     ): EvidenceCollection = results.toEvidenceCollection(input)
+}
+
+internal data class DeclarativeProfileFields(
+    val displayName: String?,
+    val bio: String?,
+    val profileImageUrl: String?,
+    val links: List<String>
+)
+
+/** Applies provider-owned CSS extraction rules without making selectors fatal. */
+internal object DeclarativeProfileExtractor {
+    fun extract(
+        document: Document,
+        rules: ExtractionRules?,
+        fallbackTitle: String? = null
+    ): DeclarativeProfileFields {
+        val configured = rules ?: ExtractionRules()
+        val displayName = selectedText(document, configured.displayNameSelectors, MAX_DISPLAY_NAME_CHARS)
+            ?: (fallbackTitle ?: document.title()).trim().take(MAX_DISPLAY_NAME_CHARS).takeIf(String::isNotBlank)
+        val bio = selectedText(document, configured.bioSelectors, MAX_BIO_CHARS)
+            ?: document.select("meta[name=description]").attr("content").trim().takeIf(String::isNotBlank)
+            ?: document.select("p").firstOrNull()?.text()?.trim()?.take(MAX_BIO_CHARS)?.takeIf(String::isNotBlank)
+        val profileImageUrl = selectedUrl(document, configured.avatarSelectors)
+            ?.let(::normalizeHttpUrl)
+            ?: defaultImageUrl(document)
+        val linkSelectors = configured.linkSelectors.ifEmpty { ExtractionRules().linkSelectors }
+        val links = selectedUrls(document, linkSelectors)
+        val canonical = selectedUrl(document, configured.canonicalSelectors)
+            ?.let(::normalizeHttpUrl)
+        return DeclarativeProfileFields(
+            displayName = displayName,
+            bio = bio,
+            profileImageUrl = profileImageUrl,
+            links = (listOfNotNull(canonical) + links).distinct().take(MAX_LINKS)
+        )
+    }
+
+    private fun selectedText(document: Document, selectors: List<String>, maxChars: Int): String? =
+        selectedElements(document, selectors)
+            .asSequence()
+            .mapNotNull { element ->
+                sequenceOf(
+                    element.attr("content"),
+                    element.attr("value"),
+                    element.text()
+                ).map(String::trim).firstOrNull(String::isNotBlank)?.take(maxChars)
+            }
+            .firstOrNull()
+
+    private fun selectedUrl(document: Document, selectors: List<String>): String? =
+        selectedElements(document, selectors)
+            .asSequence()
+            .mapNotNull { element ->
+                sequenceOf(
+                    element.attr("abs:content"),
+                    element.attr("abs:src"),
+                    element.attr("abs:href"),
+                    element.attr("content"),
+                    element.attr("src"),
+                    element.attr("href")
+                ).map(String::trim).firstOrNull(String::isNotBlank)?.take(MAX_URL_CHARS)
+            }
+            .firstOrNull()
+
+    private fun selectedUrls(document: Document, selectors: List<String>): List<String> =
+        selectedElements(document, selectors)
+            .asSequence()
+            .mapNotNull { element ->
+                sequenceOf(element.attr("abs:href"), element.attr("abs:src"))
+                    .map(String::trim)
+                    .firstOrNull { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+            }
+            .distinct()
+            .take(MAX_LINKS)
+            .toList()
+
+    private fun selectedElements(document: Document, selectors: List<String>): List<Element> =
+        selectors.asSequence()
+            .flatMap { selector ->
+                runCatching { document.select(selector).asSequence() }
+                    .getOrElse { emptySequence() }
+            }
+            .toList()
+
+    private fun defaultImageUrl(document: Document): String? {
+        val selectors = listOf(
+            "meta[property=og:image]",
+            "meta[name=og:image]",
+            "meta[name=twitter:image]",
+            "meta[property=twitter:image]",
+            "meta[name=twitter:image:src]",
+            "meta[property=twitter:image:src]",
+            "link[rel=image_src]",
+            "img.avatar",
+            "img[alt*=avatar]",
+            "img[alt*=profile]",
+            "img[src*=avatar]",
+            "img[src*=profile]"
+        )
+        return selectedUrl(document, selectors)?.let(::normalizeHttpUrl)
+    }
+
+    private fun normalizeHttpUrl(raw: String): String? {
+        if (raw.length > MAX_URL_CHARS || !io.dossier.app.domain.util.UrlNormalizer.isHttpUrl(raw)) return null
+        val normalized = io.dossier.app.domain.util.UrlNormalizer.stripFragment(
+            io.dossier.app.domain.util.UrlNormalizer.ensureHttps(raw)
+        )
+        val uri = runCatching { java.net.URI(normalized) }.getOrNull() ?: return null
+        if (uri.scheme?.lowercase() !in setOf("http", "https") || uri.host.isNullOrBlank() || uri.userInfo != null) {
+            return null
+        }
+        return normalized.take(MAX_URL_CHARS)
+    }
+
+    private const val MAX_DISPLAY_NAME_CHARS = 240
+    private const val MAX_BIO_CHARS = 2_000
+    private const val MAX_URL_CHARS = 4_096
+    private const val MAX_LINKS = 256
 }
 
 /**

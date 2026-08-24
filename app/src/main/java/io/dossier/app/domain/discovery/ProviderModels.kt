@@ -97,7 +97,12 @@ data class ProviderDefinition(
     /** Existing enum name used only by the compatibility adapter. */
     val legacyPlatformName: String? = null,
     /** True only when the current ProfileScanner can safely execute the template. */
-    val legacyTemplateCompatible: Boolean = profileUrlTemplate?.contains("{username}") == true
+    val legacyTemplateCompatible: Boolean = profileUrlTemplate?.contains("{username}") == true,
+    /**
+     * Optional provider-owned aliases accepted after a redirect. An empty set
+     * means that the requested host itself is the only approved host.
+     */
+    val approvedHosts: Set<String> = emptySet()
 )
 
 @Serializable
