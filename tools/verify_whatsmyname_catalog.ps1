@@ -51,17 +51,17 @@ foreach ($site in $json.sites) {
     if ($site.cat -ne $null -and $site.cat.ToString().ToLower().Contains("nsfw")) { continue }
     if ($site.uri_check -eq $null -or -not $site.uri_check.Contains("{account}")) { continue }
     if ($site.uri_check.IndexOf("{account}") -ne $site.uri_check.LastIndexOf("{account}")) { continue }
-    
+
     $testUri = $site.uri_check.Replace("{account}", "probe")
     if (-not $testUri.ToLower().StartsWith("https://")) { continue }
-    
+
     try {
         $uri = [System.Uri]::new($testUri)
         if ([string]::IsNullOrWhiteSpace($uri.Host)) { continue }
     } catch {
         continue
     }
-    
+
     $protection = @()
     if ($site.protection -ne $null) {
         foreach ($p in $site.protection) {
@@ -69,12 +69,12 @@ foreach ($site in $json.sites) {
         }
     }
     if ("captcha" -in $protection -or "user-auth" -in $protection -or "anubis" -in $protection) { continue }
-    
+
     if ($site.e_code -eq $null -or $site.m_code -eq $null) { continue }
     if ($site.e_code -lt 100 -or $site.e_code -gt 599) { continue }
     if ($site.m_code -lt 100 -or $site.m_code -gt 599) { continue }
     if ($site.e_code -eq $site.m_code -and [string]::IsNullOrWhiteSpace($site.e_string) -and [string]::IsNullOrWhiteSpace($site.m_string)) { continue }
-    
+
     $executable++
 }
 

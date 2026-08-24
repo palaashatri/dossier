@@ -63,15 +63,15 @@ class WhatsMyNameUsernamePluginTest {
     @Test
     fun unavailableCatalogYieldsZeroCallsAndCachedState() = runBlocking {
         WhatsMyNameCatalog.setTestState(WhatsMyNameCatalogState.Unavailable("Test unavailable"))
-        
+
         val calls = AtomicInteger(0)
         val client = createMockClient { req -> calls.incrementAndGet(); mockResponse(req, 200, "found") }
         val plugin = WhatsMyNameUsernamePlugin(ProviderExecutionRuntime(client))
-        
+
         val evidence = plugin.scan(IdentityInput(fullName = "Test", primaryUsername = "testuser"))
         assertTrue(evidence.evidence.isEmpty())
         assertEquals(0, calls.get())
-        
+
         val cached = UsernameSurfaceRuntimeCache.observations.value
         assertEquals(1, cached.size)
         assertEquals(UsernameSurfaceState.Unavailable, cached[0].state)
@@ -85,7 +85,7 @@ class WhatsMyNameUsernamePluginTest {
         }
         WhatsMyNameCatalog.setTestState(WhatsMyNameCatalogState.Ready(sites, emptyList(), emptyList(), emptyList(), emptyList(), 60, 60, 0))
         DiscoveryScanPreferences.setMode(ScanMode.Quick) // Quick mode limits to 50 sites
-        
+
         val calls = AtomicInteger(0)
         val requestedUrls = ConcurrentLinkedQueue<String>()
         val client = createMockClient { request ->
@@ -94,17 +94,17 @@ class WhatsMyNameUsernamePluginTest {
             mockResponse(request, 404, "missing")
         }
         val plugin = WhatsMyNameUsernamePlugin(ProviderExecutionRuntime(client))
-        
+
         // Input has fullName and emails which shouldn't be checked, only usernames
         val input = IdentityInput(fullName = "John Doe", emails = listOf("john@doe.com"), primaryUsername = "user1", usernames = listOf("user2"))
-        
+
         val evidence = plugin.scan(input)
         assertTrue(evidence.evidence.isEmpty())
         // 2 handles * 50 sites = 100 calls
         assertEquals(100, calls.get())
         assertTrue(requestedUrls.all { it.endsWith("/user1") || it.endsWith("/user2") })
         assertTrue(requestedUrls.none { "john" in it.lowercase() || "doe" in it.lowercase() })
-        
+
         val snapshot = ScanCoordinatorRuntime.snapshot.value
         assertEquals(100, snapshot.scheduledProviderCount)
         assertEquals(100, snapshot.completedProviderCount)
@@ -114,23 +114,23 @@ class WhatsMyNameUsernamePluginTest {
     fun presentEvidenceCreatesObservedEvidenceWithNonOwnershipSignal() = runBlocking {
         val site = WhatsMyNameSite("wmn-test-1", "Test", ProviderCategory.Social, "https://test.com/{account}", "https://test.com/{account}", 200, "found", 404, "missing", ".")
         WhatsMyNameCatalog.setTestState(WhatsMyNameCatalogState.Ready(listOf(site), emptyList(), emptyList(), emptyList(), emptyList(), 1, 1, 0))
-        
+
         val client = createMockClient { req -> mockResponse(req, 200, "found") }
         val plugin = WhatsMyNameUsernamePlugin(ProviderExecutionRuntime(client))
-        
+
         val evidence = plugin.scan(IdentityInput(fullName = "Test", primaryUsername = "user.1"))
-        
+
         assertEquals(1, evidence.evidence.size)
         val ev = evidence.evidence.first()
         assertEquals("https://test.com/user1", ev.value)
         assertEquals("wmn-test-1", ev.providerId)
         assertEquals(EvidenceState.Observed, ev.state)
         assertTrue(ev.signals.any { it.contains("does not establish ownership") })
-        
+
         assertEquals(1, evidence.relationships.size)
         val rel = evidence.relationships.first()
         assertEquals("PUBLIC_PROFILE_EXISTS", rel.relation)
-        
+
         val cached = UsernameSurfaceRuntimeCache.observations.value
         assertEquals(1, cached.size)
         assertEquals(UsernameSurfaceState.Present, cached[0].state)
@@ -151,8 +151,8 @@ class WhatsMyNameUsernamePluginTest {
             WhatsMyNameSite("site-unavailable", "Site 2", ProviderCategory.Social, "https://site2.com/{account}", "https://site2.com/{account}", 200, "found", 404, "missing", "")
         )
         WhatsMyNameCatalog.setTestState(WhatsMyNameCatalogState.Ready(sites, emptyList(), emptyList(), emptyList(), emptyList(), 2, 2, 0))
-        
-        val client = createMockClient { req -> 
+
+        val client = createMockClient { req ->
             if (req.url.toString().contains("site1")) {
                 mockResponse(req, 404, "missing")
             } else {
@@ -160,22 +160,22 @@ class WhatsMyNameUsernamePluginTest {
             }
         }
         val plugin = WhatsMyNameUsernamePlugin(ProviderExecutionRuntime(client))
-        
+
         val evidence = plugin.scan(IdentityInput(fullName = "Test", primaryUsername = "user1"))
-        
+
         assertTrue(evidence.evidence.isEmpty())
         assertTrue(evidence.relationships.isEmpty())
-        
+
         val cached = UsernameSurfaceRuntimeCache.observations.value
         assertEquals(2, cached.size)
-        
+
         val absent = cached.find { it.site == "Site 1" }!!
         assertEquals(UsernameSurfaceState.Absent, absent.state)
-        
+
         val unavailable = cached.find { it.site == "Site 2" }!!
         assertEquals(UsernameSurfaceState.Unavailable, unavailable.state)
         assertEquals("site-unavailable", unavailable.providerId)
-        
+
         val snapshot = ScanCoordinatorRuntime.snapshot.value
         assertEquals(2, snapshot.scheduledProviderCount)
         assertEquals(1, snapshot.completedProviderCount) // 404 is completed
