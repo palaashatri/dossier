@@ -1,13 +1,18 @@
 package io.dossier.app.domain.discovery
 
+import kotlinx.serialization.Serializable
 import java.net.URI
 
+@Serializable
 enum class ProviderVerificationState {
     Present,
     NotFound,
     SoftNotFound,
     AuthenticationRequired,
     AutomationChallenged,
+    RateLimited,
+    Timeout,
+    NetworkUnavailable,
     RedirectedOutsideProvider,
     UnexpectedStatus,
     InvalidResponse
@@ -44,6 +49,13 @@ object ProviderResponseClassifier {
             ?: return ProviderResponseDecision(ProviderVerificationState.InvalidResponse, "No HTTP status was recorded")
         val normalizedText = observation.bodyText.lowercase()
 
+        if (containsGlobalChallenge(normalizedText)) {
+            return ProviderResponseDecision(
+                ProviderVerificationState.AutomationChallenged,
+                "Provider returned an automation/human-verification challenge"
+            )
+        }
+
         if (rules.authenticationText.any { normalizedText.contains(it.lowercase()) }) {
             return ProviderResponseDecision(
                 ProviderVerificationState.AuthenticationRequired,
@@ -54,6 +66,12 @@ object ProviderResponseClassifier {
             return ProviderResponseDecision(
                 ProviderVerificationState.AutomationChallenged,
                 "Provider returned an automation/human-verification challenge"
+            )
+        }
+        if (status == 429) {
+            return ProviderResponseDecision(
+                ProviderVerificationState.RateLimited,
+                "Provider rate limit is active"
             )
         }
         if (status in rules.notFoundStatus) {
@@ -101,10 +119,23 @@ object ProviderResponseClassifier {
         )
     }
 
-    private fun sameProviderHost(first: String, second: String): Boolean {
+    internal fun sameProviderHost(first: String, second: String): Boolean {
         val firstHost = runCatching { URI(first).host?.lowercase()?.removePrefix("www.") }.getOrNull()
         val secondHost = runCatching { URI(second).host?.lowercase()?.removePrefix("www.") }.getOrNull()
         if (firstHost.isNullOrBlank() || secondHost.isNullOrBlank()) return false
         return firstHost == secondHost || firstHost.endsWith(".$secondHost") || secondHost.endsWith(".$firstHost")
+    }
+
+    private fun containsGlobalChallenge(body: String): Boolean {
+        val hardMarkers = listOf("cf-challenge", "g-recaptcha", "h-captcha", "data-sitekey")
+        if (hardMarkers.any(body::contains)) return true
+        if (body.length > 12_000) return false
+        return listOf(
+            "checking your browser",
+            "verify you are human",
+            "are you a robot",
+            "unusual traffic",
+            "attention required"
+        ).any(body::contains)
     }
 }

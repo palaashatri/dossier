@@ -75,7 +75,8 @@ object HandleExtractor {
                         platform = resolved.platform,
                         url = resolved.url,
                         matchType = UsernameMatchType.FuzzyVariant,
-                        confidence = 0.70f
+                        confidence = 0.70f,
+                        providerId = resolved.providerId
                     ),
                     provenance = "discovered via $sourcePlatformLabel profile; ${admitted.explanation}",
                     admissionExplanation = admitted.explanation
@@ -107,7 +108,8 @@ object HandleExtractor {
                     platform = platform,
                     url = url,
                     matchType = UsernameMatchType.FuzzyVariant,
-                    confidence = 0.60f
+                    confidence = 0.60f,
+                    providerId = template.providerId
                 ),
                 provenance = "discovered via $sourcePlatformLabel profile; ${admitted.explanation}",
                 admissionExplanation = admitted.explanation

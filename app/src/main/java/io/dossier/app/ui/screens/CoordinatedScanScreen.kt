@@ -1,20 +1,15 @@
 package io.dossier.app.ui.screens
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,7 +50,8 @@ fun CoordinatedScanScreen(
             onScanComplete = onScanComplete,
             onScanFailed = onScanFailed,
             onScanCancelled = onScanCancelled,
-            onInvalidInput = onInvalidInput
+            onInvalidInput = onInvalidInput,
+            onScanBackgrounded = onScanBackgrounded
         )
 
         if (snapshot.state == ScanRunState.Running) {
@@ -72,10 +68,12 @@ fun CoordinatedScanScreen(
                     .semantics {
                         contentDescription = buildString {
                             append("${snapshot.mode.name} scan. ")
-                            append("${snapshot.directProfileProviders} direct profile providers. ")
-                            append("${snapshot.profileCount} profile results. ")
-                            append("${snapshot.entityCount} graph entities. ")
-                            append("${snapshot.findingCount} findings.")
+                            append("Providers scheduled: ${snapshot.scheduledProviderCount}. ")
+                            append("Providers completed: ${snapshot.completedProviderCount}. ")
+                            append("Providers unavailable: ${snapshot.unavailableProviderCount}. ")
+                            append("Profile results: ${snapshot.profileCount}. ")
+                            append("Graph entities: ${snapshot.entityCount}. ")
+                            append("Findings: ${snapshot.findingCount}.")
                         }
                     }
                     .padding(horizontal = 9.dp, vertical = 6.dp),
@@ -89,34 +87,17 @@ fun CoordinatedScanScreen(
                     fontFamily = FontFamily.Monospace
                 )
                 Spacer(Modifier.width(7.dp))
-                LiveMetric("P", snapshot.profileCount)
+                LiveMetric("SCH", snapshot.scheduledProviderCount)
+                Spacer(Modifier.width(5.dp))
+                LiveMetric("DONE", snapshot.completedProviderCount)
+                Spacer(Modifier.width(5.dp))
+                LiveMetric("UNAV", snapshot.unavailableProviderCount)
+                Spacer(Modifier.width(5.dp))
+                LiveMetric("RES", snapshot.profileCount)
                 Spacer(Modifier.width(5.dp))
                 LiveMetric("G", snapshot.entityCount)
                 Spacer(Modifier.width(5.dp))
                 LiveMetric("E", snapshot.findingCount)
-            }
-
-            OutlinedButton(
-                onClick = onScanBackgrounded,
-                border = BorderStroke(1.dp, NeuralTheme.Cobalt.copy(alpha = 0.85f)),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt),
-                shape = io.dossier.app.ui.theme.DossierButtonShape,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .safeDrawingPadding()
-                    .padding(horizontal = 24.dp, vertical = 76.dp)
-                    .fillMaxWidth()
-                    .height(46.dp)
-                    .semantics {
-                        contentDescription = "Continue using Dossier while this scan runs in the background"
-                    }
-            ) {
-                Text(
-                    text = "CONTINUE IN BACKGROUND",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp,
-                    letterSpacing = 0.7.sp
-                )
             }
         }
     }

@@ -1,5 +1,6 @@
 package io.dossier.app.domain.model
 
+import io.dossier.app.domain.discovery.ProviderVerificationState
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -51,7 +52,8 @@ data class UsernameCandidate(
     val platform: Platform,
     val url: String,
     val matchType: UsernameMatchType,
-    val confidence: Float
+    val confidence: Float,
+    val providerId: String? = null
 )
 
 enum class UsernameMatchType {
@@ -77,7 +79,9 @@ data class ProfileScanResult(
     val confidenceSignals: List<String>,
     val verified: Boolean = false,
     val verificationStatus: String? = null,
-    val provenance: String? = null
+    val provenance: String? = null,
+    val providerId: String? = candidate.providerId,
+    val providerVerificationState: ProviderVerificationState? = null
 )
 
 @Serializable
@@ -116,7 +120,8 @@ data class PlatformProfileTemplate(
     val platform: Platform,
     val urlPattern: String,
     val requiresLoginUsually: Boolean,
-    val shouldFetchByDefault: Boolean
+    val shouldFetchByDefault: Boolean,
+    val providerId: String? = null
 )
 
 @Serializable

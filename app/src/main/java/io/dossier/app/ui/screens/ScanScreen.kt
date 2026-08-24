@@ -34,6 +34,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -66,7 +68,8 @@ fun ScanScreen(
     onScanComplete: () -> Unit,
     onScanFailed: () -> Unit,
     onScanCancelled: () -> Unit,
-    onInvalidInput: () -> Unit = onScanCancelled
+    onInvalidInput: () -> Unit = onScanCancelled,
+    onScanBackgrounded: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -139,7 +142,11 @@ fun ScanScreen(
     }
 
     LaunchedEffect(progressText) {
-        if (progressText.isNotBlank() && liveLogs.lastOrNull() != progressText) {
+        if (
+            (hasStarted || isScanning) &&
+            progressText.isNotBlank() &&
+            liveLogs.lastOrNull() != progressText
+        ) {
             liveLogs.add(friendlyStage(progressText))
         }
     }
@@ -417,6 +424,34 @@ fun ScanScreen(
 
                 if (isScanning) {
                     Spacer(modifier = Modifier.height(12.dp))
+                    onScanBackgrounded?.let { backgroundScan ->
+                        OutlinedButton(
+                            onClick = backgroundScan,
+                            border = BorderStroke(
+                                1.dp,
+                                NeuralTheme.Cobalt.copy(alpha = 0.85f)
+                            ),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = NeuralTheme.Cobalt
+                            ),
+                            shape = io.dossier.app.ui.theme.DossierButtonShape,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp)
+                                .semantics {
+                                    contentDescription =
+                                        "Continue using Dossier while this scan runs in the background"
+                                }
+                        ) {
+                            Text(
+                                text = "CONTINUE IN BACKGROUND",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                letterSpacing = 0.7.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
                     OutlinedButton(
                         onClick = {
                             FaceCorrelationSessionPolicy.useBasicMatching()

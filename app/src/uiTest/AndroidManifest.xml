@@ -8,6 +8,7 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="io.dossier.app.action.SEED_VISUAL_QA_FIXTURE" />
+                <action android:name="io.dossier.app.action.SHOW_PROVIDER_PROGRESS_QA" />
             </intent-filter>
         </receiver>
     </application>

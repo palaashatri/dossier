@@ -56,12 +56,18 @@ val PLATFORMS: List<PlatformProfileTemplate> = object : AbstractList<PlatformPro
             platform = entry.platform,
             urlPattern = entry.urlPattern,
             requiresLoginUsually = entry.requiresLoginUsually,
-            shouldFetchByDefault = entry.providerId in plannedIds
+            shouldFetchByDefault = entry.providerId in plannedIds,
+            providerId = entry.providerId
         )
     }
 }
 
-data class ResolvedProfile(val platform: Platform, val username: String, val url: String)
+data class ResolvedProfile(
+    val platform: Platform,
+    val username: String,
+    val url: String,
+    val providerId: String? = null
+)
 
 /** Best-effort mapping from a public profile URL to a platform and handle. */
 fun resolveProfileUrl(rawUrl: String): ResolvedProfile? {
@@ -123,7 +129,12 @@ fun resolveProfileUrl(rawUrl: String): ResolvedProfile? {
         if (pattern.contains("?id=$placeholder")) {
             val idValue = query.substringAfter("id=", "").substringBefore("&").trim()
             if (idValue.isNotBlank() && idValue.length >= 2) {
-                return ResolvedProfile(template.platform, idValue, template.urlPattern.replace(placeholder, idValue))
+                return ResolvedProfile(
+                    template.platform,
+                    idValue,
+                    template.urlPattern.replace(placeholder, idValue),
+                    template.providerId
+                )
             }
         } else {
             val patternPath = pattern
@@ -146,7 +157,12 @@ fun resolveProfileUrl(rawUrl: String): ResolvedProfile? {
             val handle = handleSegment.removePrefix("@")
             if (handle.length < 2) continue
             if (handle.equals("www", true) || handle.equals(host, true)) continue
-            return ResolvedProfile(template.platform, handle, template.urlPattern.replace(placeholder, handle))
+            return ResolvedProfile(
+                template.platform,
+                handle,
+                template.urlPattern.replace(placeholder, handle),
+                template.providerId
+            )
         }
     }
     return null

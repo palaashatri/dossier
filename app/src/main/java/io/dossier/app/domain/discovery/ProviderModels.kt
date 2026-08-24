@@ -220,6 +220,7 @@ enum class ProviderOutcome {
     RateLimited,
     AuthenticationRequired,
     UnsupportedAutomation,
+    ProviderChanged,
     ParseFailure,
     NetworkFailure
 }
@@ -237,7 +238,8 @@ data class ProviderHealthSnapshot(
     val parseFailures: Long,
     val networkFailures: Long,
     val medianLatencyMs: Long?,
-    val lastValidatedAt: Instant?
+    val lastValidatedAt: Instant?,
+    val providerChanged: Long = 0
 ) {
     val successRate: Double
         get() = if (attempts == 0L) 0.0 else successes.toDouble() / attempts.toDouble()
@@ -257,6 +259,7 @@ class ProviderHealthTracker(private val latencyWindow: Int = 101) {
         var rateLimited: Long = 0,
         var authenticationRequired: Long = 0,
         var unsupportedAutomation: Long = 0,
+        var providerChanged: Long = 0,
         var parseFailures: Long = 0,
         var networkFailures: Long = 0,
         var lastValidatedAt: Instant? = null,
@@ -278,6 +281,7 @@ class ProviderHealthTracker(private val latencyWindow: Int = 101) {
             ProviderOutcome.RateLimited -> health.rateLimited++
             ProviderOutcome.AuthenticationRequired -> health.authenticationRequired++
             ProviderOutcome.UnsupportedAutomation -> health.unsupportedAutomation++
+            ProviderOutcome.ProviderChanged -> health.providerChanged++
             ProviderOutcome.ParseFailure -> health.parseFailures++
             ProviderOutcome.NetworkFailure -> health.networkFailures++
         }
@@ -303,7 +307,8 @@ class ProviderHealthTracker(private val latencyWindow: Int = 101) {
             parseFailures = health.parseFailures,
             networkFailures = health.networkFailures,
             medianLatencyMs = sorted.takeIf { it.isNotEmpty() }?.get(sorted.size / 2),
-            lastValidatedAt = health.lastValidatedAt
+            lastValidatedAt = health.lastValidatedAt,
+            providerChanged = health.providerChanged
         )
     }
 }

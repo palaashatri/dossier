@@ -135,6 +135,14 @@ object ProviderCatalogV2 {
                 definition.legacyTemplateCompatible
         }
 
+    private val definitionsById: Map<String, ProviderDefinition> by lazy {
+        definitions.associateBy { it.id.lowercase() }
+    }
+
+    fun findById(id: String): ProviderDefinition? = definitionsById[id.trim().lowercase()]
+
+    operator fun get(id: String): ProviderDefinition? = findById(id)
+
     fun schemaValidCount(): Int = definitions.size - schemaIssues.map { it.providerId }.distinct().size
 
     private fun p(

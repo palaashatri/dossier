@@ -7,6 +7,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.dossier.app.data.local.UsageNoticeStore
 import io.dossier.app.domain.case.CaseStore
+import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.scanner.BackgroundScanResultStore
 import io.dossier.app.uiTest.VisualQaFixtureReceiver
 import org.junit.After
@@ -27,6 +28,7 @@ class VisualQaFixtureReceiverTest {
         BackgroundScanResultStore(context).clear()
         CaseStore(context).clear()
         UsageNoticeStore.reset(context)
+        ScanCoordinatorRuntime.resetForTests()
     }
 
     @Test
@@ -53,8 +55,23 @@ class VisualQaFixtureReceiverTest {
         assertTrue(snapshot?.analysis?.identitySurface?.entries?.isNotEmpty() == true)
     }
 
+    @Test
+    fun receiverSeedsTruthfulProviderProgressForVisualQa() {
+        val intent = Intent(ACTION_PROVIDER_PROGRESS)
+            .setComponent(ComponentName(context, "io.dossier.app.uiTest.VisualQaFixtureReceiver"))
+
+        VisualQaFixtureReceiver().onReceive(context, intent)
+
+        val snapshot = ScanCoordinatorRuntime.snapshot.value
+        assertEquals(12, snapshot.scheduledProviderCount)
+        assertEquals(10, snapshot.startedProviderCount)
+        assertEquals(7, snapshot.completedProviderCount)
+        assertEquals(2, snapshot.unavailableProviderCount)
+    }
+
     private companion object {
         const val ACTION = "io.dossier.app.action.SEED_VISUAL_QA_FIXTURE"
+        const val ACTION_PROVIDER_PROGRESS = "io.dossier.app.action.SHOW_PROVIDER_PROGRESS_QA"
         const val FIXED_WORK_ID = "00000000-0000-4000-8000-000000000100"
         const val FIXED_CASE_ID = "00000000-0000-4000-8000-000000000200"
     }

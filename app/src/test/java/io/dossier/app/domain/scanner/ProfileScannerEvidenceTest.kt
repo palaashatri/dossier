@@ -14,7 +14,8 @@ class ProfileScannerEvidenceTest {
             platform = Platform.GitHub,
             url = url,
             matchType = UsernameMatchType.Exact,
-            confidence = 0.9f
+            confidence = 0.9f,
+            providerId = "github"
         ),
         exists = exists,
         httpStatus = 200,
@@ -52,6 +53,10 @@ class ProfileScannerEvidenceTest {
 
         // Profile observation emitted natively (not via Finding adapter).
         assertTrue(collection.evidence.any { it.kind == EvidenceKind.Profile && it.value == "https://github.com/janedoe" })
+        assertEquals(
+            "github",
+            collection.evidence.first { it.kind == EvidenceKind.Profile }.providerId
+        )
         // PII finding bridged losslessly.
         assertTrue(collection.evidence.any { it.kind == EvidenceKind.Email && it.value == "jane@example.com" })
         // Scanner-asserted username↔profile relationship.

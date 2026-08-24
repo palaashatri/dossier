@@ -58,6 +58,9 @@ fun ProviderVerificationState.toFailureOrNull(): DiscoveryFailure? = when (this)
     ProviderVerificationState.AutomationChallenged -> DiscoveryFailure.UnsupportedAutomation(
         "Provider returned a human-verification or automation challenge"
     )
+    ProviderVerificationState.RateLimited -> DiscoveryFailure.RateLimited()
+    ProviderVerificationState.Timeout -> DiscoveryFailure.Timeout()
+    ProviderVerificationState.NetworkUnavailable -> DiscoveryFailure.NetworkUnavailable()
     ProviderVerificationState.RedirectedOutsideProvider -> DiscoveryFailure.InvalidCandidate(
         "Provider redirected outside the expected public source"
     )

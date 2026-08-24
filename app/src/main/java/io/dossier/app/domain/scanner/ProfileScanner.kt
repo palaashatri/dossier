@@ -1,9 +1,16 @@
 package io.dossier.app.domain.scanner
 
 import io.dossier.app.data.platform.PLATFORMS
+import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.data.platform.resolveProfileUrl
 import io.dossier.app.data.web.PublicImageSearchService
 import io.dossier.app.data.web.PublicSearchDiscoveryService
+import io.dossier.app.domain.discovery.ProviderExecutionRuntime
+import io.dossier.app.domain.discovery.ProviderResponseClassifier
+import io.dossier.app.domain.discovery.ProviderRendererPolicy
+import io.dossier.app.domain.discovery.ProviderVerificationState
+import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
+import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceKind
@@ -40,7 +47,10 @@ class ProfileScanner(
         .readTimeout(5, TimeUnit.SECONDS)
         .build()
 
+    private val providerRuntime = ProviderExecutionRuntime(client)
+
     suspend fun scanIdentity(input: IdentityInput, deepResearch: Boolean = false): List<ProfileScanResult> {
+        val scanId = ScanCoordinatorRuntime.claimProviderScanId()
         val results = mutableListOf<ProfileScanResult>()
 
         val usernames = mutableSetOf<String>()
@@ -121,7 +131,8 @@ class ProfileScanner(
                             platform = template.platform,
                             url = profileUrl,
                             matchType = variant.type,
-                            confidence = baseConf
+                            confidence = baseConf,
+                            providerId = template.providerId
                         )
                     )
                 }
@@ -136,16 +147,11 @@ class ProfileScanner(
                     normalizedUrl = "https://$normalizedUrl"
                 }
 
-                val matchedTemplate = PLATFORMS.firstOrNull { template ->
-                    val domain = template.urlPattern
-                        .replace("https://", "")
-                        .replace("www.", "")
-                        .split("/").firstOrNull() ?: ""
-                    domain.isNotBlank() && normalizedUrl.contains(domain, ignoreCase = true)
-                }
+                val resolved = resolveProfileUrl(normalizedUrl)
                 // Unknown host → Website, never default to GitHub
-                val platform = matchedTemplate?.platform ?: Platform.Website
-                val username = normalizedUrl.split("/").lastOrNull { it.isNotBlank() } ?: "unknown"
+                val platform = resolved?.platform ?: Platform.Website
+                val username = resolved?.username ?: normalizedUrl.split("/").lastOrNull { it.isNotBlank() } ?: "unknown"
+                val providerId = resolved?.providerId
                 
                 allCandidates.add(
                     UsernameCandidate(
@@ -153,7 +159,8 @@ class ProfileScanner(
                         platform = platform,
                         url = normalizedUrl,
                         matchType = UsernameMatchType.Exact,
-                        confidence = 1.0f
+                        confidence = 1.0f,
+                        providerId = providerId
                     )
                 )
             }
@@ -167,11 +174,16 @@ class ProfileScanner(
             .sortedByDescending { it.confidence }
             .take(MAX_INITIAL_CANDIDATES)
 
+        // Queue real provider lifecycle events for catalog-backed candidates
+        uniqueCandidates.forEach { candidate ->
+            queueProviderCandidate(candidate, scanId)
+        }
+
         // ---- Pass 1: initial fan-out over name-variant / user-supplied candidates.
         val initialResults = coroutineScope {
             val deferredResults = uniqueCandidates.map { candidate ->
                 async(Dispatchers.IO) {
-                    fetchAndParse(candidate, input, provenance = null)
+                    fetchAndParse(candidate, input, provenance = null, scanId = scanId)
                 }
             }
             deferredResults.awaitAll()
@@ -192,7 +204,8 @@ class ProfileScanner(
                 alreadyScannedUrls = scanned,
                 input = input,
                 deepResearch = deepResearch,
-                remainingBudget = MAX_PIVOT_CANDIDATES
+                remainingBudget = MAX_PIVOT_CANDIDATES,
+                scanId = scanId
             )
             hop1.forEach { scanned.add(it.candidate.url.lowercase()) }
             // Hop 2: only on newly verified pivot results (soft-existence pages
@@ -206,7 +219,8 @@ class ProfileScanner(
                     alreadyScannedUrls = scanned,
                     input = input,
                     deepResearch = deepResearch,
-                    remainingBudget = remaining
+                    remainingBudget = remaining,
+                    scanId = scanId
                 )
             } else {
                 emptyList()
@@ -258,7 +272,8 @@ class ProfileScanner(
         alreadyScannedUrls: Set<String>,
         input: IdentityInput,
         deepResearch: Boolean,
-        remainingBudget: Int
+        remainingBudget: Int,
+        scanId: ScanId
     ): List<ProfileScanResult> {
         if (remainingBudget <= 0) return emptyList()
         val scannedUrls = alreadyScannedUrls.toMutableSet()
@@ -323,10 +338,12 @@ class ProfileScanner(
 
         if (pivotCandidates.isEmpty()) return emptyList()
 
+        pivotCandidates.forEach { queueProviderCandidate(it.candidate, scanId) }
+
         return coroutineScope {
             val deferredPivots = pivotCandidates.map { pc ->
                 async(Dispatchers.IO) {
-                    fetchAndParse(pc.candidate, input, provenance = pc.provenance)
+                    fetchAndParse(pc.candidate, input, provenance = pc.provenance, scanId = scanId)
                 }
             }
             deferredPivots.awaitAll()
@@ -544,29 +561,369 @@ class ProfileScanner(
                         platform = template.platform,
                         url = profileUrl,
                         matchType = variant.type,
-                        confidence = baseConfidence
+                        confidence = baseConfidence,
+                        providerId = template.providerId
                     )
                 )
             }
         }
     }
 
+    private fun queueProviderCandidate(candidate: UsernameCandidate, scanId: ScanId) {
+        val providerId = candidate.providerId ?: return
+        if (ProviderCatalogV2.findById(providerId) == null) return
+        ScanCoordinatorRuntime.onProviderQueued(providerId, scanId)
+    }
+
     /**
-     * Two-stage verification:
-     *   Stage 1 — OkHttp pre-filter: fast disqualify of *definitive* non-existence
-     *             (hard 404, strong soft-404 text, offline). Never confirms existence.
-     *   Stage 2 — WebView confirm:   the embedded browser is the authority. A profile
-     *             is reported as existing [and verified] only if its rendered DOM
-     *             survives [isProfileNotFoundPage] AND [isProfileBelongingToUser].
+     * Declarative provider execution with fallback for unmapped candidates:
+     *   1. For catalog-backed candidates, executes through [ProviderExecutionRuntime]
+     *      enforcing concurrency, interval, timeout, retries, bounded body, and lifecycle events.
+     *   2. Applies [ProviderResponseClassifier] to classify the HTTP observation.
+     *   3. Truthful state isolation:
+     *      - NotFound & SoftNotFound -> absent
+     *      - AuthenticationRequired & AutomationChallenged -> unavailable (no WebView fallback)
+     *      - RedirectedOutsideProvider -> unavailable (no adoption)
+     *      - UnexpectedStatus & InvalidResponse -> unavailable
+     *      - Present -> direct attribution or bounded SPA WebView render
      */
     private suspend fun fetchAndParse(
         candidate: UsernameCandidate,
         input: IdentityInput,
-        provenance: String? = null
+        provenance: String? = null,
+        scanId: ScanId
     ): ProfileScanResult {
-        var exists = false
-        var verified = false
-        var verificationStatus: String? = null
+        val providerId = candidate.providerId ?: resolveProfileUrl(candidate.url)?.providerId
+        val definition = providerId?.let { ProviderCatalogV2.findById(it) }
+
+        if (definition != null) {
+            val exec = providerRuntime.execute(definition, candidate.url, scanId)
+            val httpStatus = exec.statusCode
+            val decision = exec.decision
+
+            when (decision.state) {
+                ProviderVerificationState.NotFound -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "HTTP ${httpStatus ?: 404} — not found",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.NotFound
+                    )
+                }
+                ProviderVerificationState.SoftNotFound -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Not found (soft-404)",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.SoftNotFound
+                    )
+                }
+                ProviderVerificationState.AuthenticationRequired -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — public response requires authentication",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.AuthenticationRequired
+                    )
+                }
+                ProviderVerificationState.AutomationChallenged -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — automation or human verification challenge",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.AutomationChallenged
+                    )
+                }
+                ProviderVerificationState.RateLimited -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — provider rate limit is active",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.RateLimited
+                    )
+                }
+                ProviderVerificationState.Timeout -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — provider request timed out",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.Timeout
+                    )
+                }
+                ProviderVerificationState.NetworkUnavailable -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — provider network is unavailable",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.NetworkUnavailable
+                    )
+                }
+                ProviderVerificationState.RedirectedOutsideProvider -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — redirected outside provider host",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.RedirectedOutsideProvider
+                    )
+                }
+                ProviderVerificationState.UnexpectedStatus -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — unexpected status (HTTP ${httpStatus ?: "error"})",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.UnexpectedStatus
+                    )
+                }
+                ProviderVerificationState.InvalidResponse -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — ${decision.explanation}",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.InvalidResponse
+                    )
+                }
+                ProviderVerificationState.Present -> {
+                    val rawHtml = exec.bodyText
+                    val doc = Jsoup.parse(rawHtml, candidate.url)
+                    val text = doc.text()
+                    val title = doc.title()
+
+                    if (isAccessChallengePage(rawHtml, text)) {
+                        return buildResult(
+                            candidate = candidate,
+                            exists = false,
+                            verified = false,
+                            verificationStatus = "Unverifiable — automation or login challenge",
+                            httpStatus = httpStatus,
+                            adjustedConfidence = 0.0f,
+                            provenance = provenance,
+                            providerId = definition.id,
+                            providerVerificationState = ProviderVerificationState.AutomationChallenged
+                        )
+                    }
+
+                    if (text.trim().length >= 300 &&
+                        !isProfileNotFoundPage(rawHtml, text, title, candidate.username, candidate.platform)
+                    ) {
+                        if (isProfileBelongingToUser(candidate, text, title, input)) {
+                            val displayName = title.ifBlank { null }
+                            val bio = doc.select("meta[name=description]").attr("content").trim().ifBlank {
+                                doc.select("p").firstOrNull()?.text()?.take(200)
+                            }
+                            val profileImageUrl = extractProfileImageUrl(doc)
+                            val links = mutableListOf<String>()
+                            doc.select("a[href]").forEach { element ->
+                                val linkUrl = element.attr("abs:href")
+                                if (linkUrl.startsWith("http")) {
+                                    links.add(linkUrl)
+                                }
+                            }
+                            val extractedText = text
+                            val confidenceSignals = mutableListOf("Direct HTTP 200 page access — real content")
+                            return finalizeResult(
+                                candidate = candidate,
+                                exists = true,
+                                verified = true,
+                                verificationStatus = "✓ Verified (HTTP 200, direct page access)",
+                                httpStatus = httpStatus,
+                                displayName = displayName,
+                                bio = bio,
+                                profileImageUrl = profileImageUrl,
+                                links = links,
+                                extractedText = extractedText,
+                                findings = mutableListOf(),
+                                confidenceSignals = confidenceSignals,
+                                adjustedConfidenceIn = candidate.confidence,
+                                input = input,
+                                provenance = provenance,
+                                providerId = definition.id,
+                                providerVerificationState = ProviderVerificationState.Present
+                            )
+                        } else {
+                            return buildSoftExistenceResult(
+                                candidate = candidate,
+                                httpStatus = httpStatus,
+                                displayName = title.ifBlank { null },
+                                extractedText = text,
+                                verificationStatus = "Exists but not attributed to this identity — possible account",
+                                provenance = provenance,
+                                providerId = definition.id,
+                                providerVerificationState = ProviderVerificationState.Present
+                            )
+                        }
+                    }
+
+                    // Short legitimate Present SPA response -> use bounded WebView renderer
+                    check(ProviderRendererPolicy.allows(decision.state)) {
+                        "Only a directly present provider response may use the renderer"
+                    }
+                    val render: WebViewScraper.Result = try {
+                        webviewSemaphore.withPermit {
+                            WebViewScraper(context).scrape(candidate.url)
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (t: Throwable) {
+                        WebViewScraper.Result.Failed("Renderer error: ${t.localizedMessage}")
+                    }
+
+                    when (render) {
+                        is WebViewScraper.Result.ChallengeDetected -> {
+                            return buildResult(
+                                candidate = candidate,
+                                exists = false,
+                                verified = false,
+                                verificationStatus = "Unverifiable — ${render.reason}",
+                                httpStatus = httpStatus,
+                                adjustedConfidence = 0.0f,
+                                provenance = provenance,
+                                providerId = definition.id,
+                                providerVerificationState = ProviderVerificationState.AutomationChallenged
+                            )
+                        }
+                        is WebViewScraper.Result.TimedOut -> {
+                            return buildResult(
+                                candidate = candidate,
+                                exists = false,
+                                verified = false,
+                                verificationStatus = "Unverifiable — render timed out",
+                                httpStatus = httpStatus,
+                                adjustedConfidence = 0.0f,
+                                provenance = provenance,
+                                providerId = definition.id,
+                                providerVerificationState = ProviderVerificationState.InvalidResponse
+                            )
+                        }
+                        is WebViewScraper.Result.Failed -> {
+                            return buildResult(
+                                candidate = candidate,
+                                exists = false,
+                                verified = false,
+                                verificationStatus = "Unverifiable — ${render.reason}",
+                                httpStatus = httpStatus,
+                                adjustedConfidence = 0.0f,
+                                provenance = provenance,
+                                providerId = definition.id,
+                                providerVerificationState = ProviderVerificationState.InvalidResponse
+                            )
+                        }
+                        is WebViewScraper.Result.Rendered -> {
+                            val docRender = Jsoup.parse(render.html, candidate.url)
+                            val extractedText = render.text
+
+                            if (isProfileNotFoundPage(render.html, extractedText, docRender.title(), candidate.username, candidate.platform)) {
+                                return buildResult(
+                                    candidate = candidate,
+                                    exists = false,
+                                    verified = false,
+                                    verificationStatus = "Not found (rendered 404)",
+                                    httpStatus = httpStatus,
+                                    adjustedConfidence = 0.0f,
+                                    provenance = provenance,
+                                    providerId = definition.id,
+                                    providerVerificationState = ProviderVerificationState.NotFound
+                                )
+                            }
+
+                            if (isProfileBelongingToUser(candidate, extractedText, docRender.title(), input)) {
+                                val links = mutableListOf<String>()
+                                docRender.select("a[href]").forEach { element ->
+                                    val linkUrl = element.attr("abs:href")
+                                    if (linkUrl.startsWith("http")) links.add(linkUrl)
+                                }
+                                val bio = docRender.select("meta[name=description]").attr("content").trim().ifBlank {
+                                    docRender.select("p").firstOrNull()?.text()?.take(200)
+                                }
+                                return finalizeResult(
+                                    candidate = candidate,
+                                    exists = true,
+                                    verified = true,
+                                    verificationStatus = "✓ Verified in-browser",
+                                    httpStatus = httpStatus,
+                                    displayName = docRender.title().ifBlank { title },
+                                    bio = bio,
+                                    profileImageUrl = extractProfileImageUrl(docRender),
+                                    links = links,
+                                    extractedText = extractedText,
+                                    findings = mutableListOf(),
+                                    confidenceSignals = mutableListOf("Embedded browser render confirmed against DOM"),
+                                    adjustedConfidenceIn = (candidate.confidence * 0.95f).coerceAtLeast(0.3f),
+                                    input = input,
+                                    provenance = provenance,
+                                    providerId = definition.id,
+                                    providerVerificationState = ProviderVerificationState.Present
+                                )
+                            } else {
+                                return buildSoftExistenceResult(
+                                    candidate = candidate,
+                                    httpStatus = httpStatus,
+                                    displayName = docRender.title().ifBlank { title },
+                                    extractedText = extractedText,
+                                    verificationStatus = "Exists but not attributed to this identity — possible account",
+                                    provenance = provenance,
+                                    providerId = definition.id,
+                                    providerVerificationState = ProviderVerificationState.Present
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Generic fallback for candidate without a catalog-backed provider definition
+        var okhttpTitle: String? = null
+        var okhttpConfirmed = false
         var httpStatus: Int? = null
         var displayName: String? = null
         var bio: String? = null
@@ -577,14 +934,10 @@ class ProfileScanner(
         val confidenceSignals = mutableListOf<String>()
         var adjustedConfidence = candidate.confidence
 
-        // ---- Stage 1: OkHttp fetch (also a valid confirmer for substantial pages) ---
-        var okhttpTitle: String? = null
-        var okhttpConfirmed = false
-
         try {
             val request = Request.Builder()
                 .url(candidate.url)
-                .header("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0")
+                .header("User-Agent", ProviderExecutionRuntime.USER_AGENT)
                 .build()
 
             client.newCall(request).execute().use { response ->
@@ -594,36 +947,65 @@ class ProfileScanner(
                         return buildResult(
                             candidate, exists = false, verified = false,
                             verificationStatus = "HTTP 404 — not found",
-                            httpStatus = httpStatus, adjustedConfidence = 0.0f
+                            httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                            provenance = provenance
+                        )
+                    }
+                    response.code == 401 || response.code == 403 -> {
+                        return buildResult(
+                            candidate, exists = false, verified = false,
+                            verificationStatus = "Unverifiable — public response requires authentication",
+                            httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                            provenance = provenance,
+                            providerVerificationState = ProviderVerificationState.AuthenticationRequired
+                        )
+                    }
+                    response.code == 429 -> {
+                        return buildResult(
+                            candidate, exists = false, verified = false,
+                            verificationStatus = "Unverifiable — provider rate limit is active",
+                            httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                            provenance = provenance,
+                            providerVerificationState = ProviderVerificationState.RateLimited
                         )
                     }
                     response.isSuccessful -> {
-                        val html = response.body?.string() ?: ""
+                        val finalUrl = response.request.url.toString()
+                        if (!ProviderResponseClassifier.sameProviderHost(candidate.url, finalUrl)) {
+                            return buildResult(
+                                candidate, exists = false, verified = false,
+                                verificationStatus = "Unverifiable — redirected outside provider host",
+                                httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                                provenance = provenance,
+                                providerVerificationState = ProviderVerificationState.RedirectedOutsideProvider
+                            )
+                        }
+                        val html = ProviderExecutionRuntime.readBoundedBody(response.body, ProviderExecutionRuntime.MAX_BODY_CHARS)
                         val doc = Jsoup.parse(html, candidate.url)
                         val text = doc.text()
                         val title = doc.title()
-                        // Drop on strong, specific not-found phrases (reliable on raw HTML).
+                        if (isAccessChallengePage(html, text)) {
+                            return buildResult(
+                                candidate, exists = false, verified = false,
+                                verificationStatus = "Unverifiable — automation or login challenge",
+                                httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                                provenance = provenance,
+                                providerVerificationState = ProviderVerificationState.AutomationChallenged
+                            )
+                        }
                         if (isStrongNotFoundPage(text, title, candidate.platform)) {
                             return buildResult(
                                 candidate, exists = false, verified = false,
                                 verificationStatus = "Not found (soft-404)",
-                                httpStatus = httpStatus, adjustedConfidence = 0.0f
+                                httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                                provenance = provenance
                             )
                         }
                         okhttpTitle = title
 
-                        // If OkHttp already got a SUBSTANTIAL, real page (not a JS shell),
-                        // it can confirm existence + belonging directly — no WebView needed.
-                        // This is the fix for the zero-results regression: a clean HTTP 200
-                        // with real content is a legitimate confirmation (deanonymizer and
-                        // every OSINT tool use it). WebView is only the fallback for
-                        // SPA/ambiguous/blocked cases OkHttp can't resolve.
                         if (text.trim().length >= 300 &&
                             !isProfileNotFoundPage(html, text, title, candidate.username, candidate.platform)) {
                             if (isProfileBelongingToUser(candidate, text, title, input)) {
-                                exists = true
-                                verified = true
-                                verificationStatus = "✓ Verified (HTTP 200, direct page access)"
                                 displayName = title.ifBlank { null }
                                 bio = doc.select("meta[name=description]").attr("content").trim().ifBlank {
                                     doc.select("p").firstOrNull()?.text()?.take(200)
@@ -639,9 +1021,6 @@ class ProfileScanner(
                                 confidenceSignals.add("Direct HTTP 200 page access — real content")
                                 okhttpConfirmed = true
                             } else {
-                                // Soft existence: page is real but not attributed.
-                                // Surface as exists=true, verified=false so the report
-                                // can show "possible account" without high-risk PII.
                                 return buildSoftExistenceResult(
                                     candidate = candidate,
                                     httpStatus = httpStatus,
@@ -652,37 +1031,54 @@ class ProfileScanner(
                                 )
                             }
                         }
-                        // Otherwise (JS shell / short content / ambiguous) → fall through to WebView.
                     }
                     else -> {
-                        // Non-404 error (cloudflare 503, 429, 403...). Let the browser try.
+                        return buildResult(
+                            candidate, exists = false, verified = false,
+                            verificationStatus = "Unverifiable — unexpected HTTP ${response.code}",
+                            httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                            provenance = provenance,
+                            providerVerificationState = ProviderVerificationState.UnexpectedStatus
+                        )
                     }
                 }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (e: Throwable) {
-            val isOffline = e is java.net.UnknownHostException ||
-                            e is java.net.ConnectException ||
-                            e is java.net.SocketTimeoutException
-            if (isOffline) {
-                return buildResult(
-                    candidate, exists = false, verified = false,
-                    verificationStatus = "Offline — could not reach host",
-                    httpStatus = null, adjustedConfidence = 0.0f
-                )
+        } catch (e: Exception) {
+            val state = when (e) {
+                is java.net.SocketTimeoutException,
+                is java.io.InterruptedIOException -> ProviderVerificationState.Timeout
+                is java.net.UnknownHostException,
+                is java.net.ConnectException -> ProviderVerificationState.NetworkUnavailable
+                else -> ProviderVerificationState.InvalidResponse
             }
-            // Transient/other errors → fall through to browser attempt.
+            val status = when (state) {
+                ProviderVerificationState.Timeout -> "Unverifiable — provider request timed out"
+                ProviderVerificationState.NetworkUnavailable -> "Offline — could not reach host"
+                else -> "Unverifiable — provider request failed"
+            }
+            return buildResult(
+                candidate, exists = false, verified = false,
+                verificationStatus = status,
+                httpStatus = null, adjustedConfidence = 0.0f,
+                provenance = provenance,
+                providerVerificationState = state
+            )
         }
 
-        // OkHttp already confirmed — skip the (slow) WebView stage entirely and
-        // fall through to the shared confidence/PII/finding assembly below.
         if (okhttpConfirmed) {
-            return finalizeResult(candidate, exists, verified, verificationStatus, httpStatus,
-                displayName, bio, profileImageUrl, links, extractedText, findings, confidenceSignals, adjustedConfidence, input, provenance)
+            return finalizeResult(
+                candidate, exists = true, verified = true,
+                verificationStatus = "✓ Verified (HTTP 200, direct page access)",
+                httpStatus = httpStatus,
+                displayName = displayName, bio = bio, profileImageUrl = profileImageUrl,
+                links = links, extractedText = extractedText, findings = findings,
+                confidenceSignals = confidenceSignals, adjustedConfidenceIn = adjustedConfidence,
+                input = input, provenance = provenance
+            )
         }
 
-        // ---- Stage 2: WebView confirm (fallback for SPA/ambiguous/blocked) ----
         val render: WebViewScraper.Result = try {
             webviewSemaphore.withPermit {
                 WebViewScraper(context).scrape(candidate.url)
@@ -695,26 +1091,27 @@ class ProfileScanner(
 
         when (render) {
             is WebViewScraper.Result.ChallengeDetected -> {
-                // Bot-check / login wall hides the real content. The profile is
-                // *unverifiable* — never a match, never counted as not-found.
                 return buildResult(
                     candidate, exists = false, verified = false,
                     verificationStatus = "Unverifiable — ${render.reason}",
-                    httpStatus = httpStatus, adjustedConfidence = 0.0f
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance
                 )
             }
             is WebViewScraper.Result.TimedOut -> {
                 return buildResult(
                     candidate, exists = false, verified = false,
                     verificationStatus = "Unverifiable — render timed out",
-                    httpStatus = httpStatus, adjustedConfidence = 0.0f
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance
                 )
             }
             is WebViewScraper.Result.Failed -> {
                 return buildResult(
                     candidate, exists = false, verified = false,
                     verificationStatus = "Unverifiable — ${render.reason}",
-                    httpStatus = httpStatus, adjustedConfidence = 0.0f
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance
                 )
             }
             is WebViewScraper.Result.Rendered -> {
@@ -725,15 +1122,12 @@ class ProfileScanner(
                     return buildResult(
                         candidate, exists = false, verified = false,
                         verificationStatus = "Not found (rendered 404)",
-                        httpStatus = httpStatus, adjustedConfidence = 0.0f
+                        httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                        provenance = provenance
                     )
                 }
 
-                // Belonging is decided against the rendered DOM.
                 if (isProfileBelongingToUser(candidate, extractedText, doc.title(), input)) {
-                    exists = true
-                    verified = true
-                    verificationStatus = "✓ Verified in-browser"
                     displayName = doc.title().ifBlank { okhttpTitle }
                     bio = doc.select("meta[name=description]").attr("content").trim().ifBlank {
                         doc.select("p").firstOrNull()?.text()?.take(200)
@@ -747,8 +1141,16 @@ class ProfileScanner(
                     }
                     confidenceSignals.add("Embedded browser render confirmed against DOM")
                     adjustedConfidence = (adjustedConfidence * 0.95f).coerceAtLeast(0.3f)
+                    return finalizeResult(
+                        candidate, exists = true, verified = true,
+                        verificationStatus = "✓ Verified in-browser",
+                        httpStatus = httpStatus,
+                        displayName = displayName, bio = bio, profileImageUrl = profileImageUrl,
+                        links = links, extractedText = extractedText, findings = findings,
+                        confidenceSignals = confidenceSignals, adjustedConfidenceIn = adjustedConfidence,
+                        input = input, provenance = provenance
+                    )
                 } else {
-                    // Soft existence for WebView path (same policy as OkHttp path).
                     return buildSoftExistenceResult(
                         candidate = candidate,
                         httpStatus = httpStatus,
@@ -760,14 +1162,11 @@ class ProfileScanner(
                 }
             }
         }
-
-        return finalizeResult(candidate, exists, verified, verificationStatus, httpStatus,
-            displayName, bio, profileImageUrl, links, extractedText, findings, confidenceSignals, adjustedConfidence, input, provenance)
     }
 
     /**
      * Shared confidence-boost + PII + finding-assembly for a confirmed profile.
-     * Used by both the OkHttp-confirmed path and the WebView-confirmed path so
+     * Used by both the direct HTTP-confirmed path and the WebView-confirmed path so
      * they produce identical output structure.
      */
     private fun finalizeResult(
@@ -785,7 +1184,9 @@ class ProfileScanner(
         confidenceSignals: MutableList<String>,
         adjustedConfidenceIn: Float,
         input: IdentityInput,
-        provenance: String?
+        provenance: String?,
+        providerId: String? = candidate.providerId,
+        providerVerificationState: ProviderVerificationState? = null
     ): ProfileScanResult {
         var adjustedConfidence = adjustedConfidenceIn
 
@@ -828,9 +1229,7 @@ class ProfileScanner(
                     confidenceSignals.add("Username slug contains both name parts (+3%)")
                 }
             }
-        }
 
-        if (exists && extractedText.isNotBlank()) {
             val piiFindings = piiExtractor.extract(extractedText, candidate.url, input)
             findings.addAll(piiFindings)
 
@@ -867,10 +1266,6 @@ class ProfileScanner(
             )
         }
 
-        // CRITICAL: only rewrite risk/confidence for PlausibleProfileMatch.
-        // PII findings (Email/Phone/etc.) keep the extractor's original risk —
-        // overwriting them with profile confidence was elevating every email to
-        // Critical whenever the account matched well.
         val finalFindings = findings.map { finding ->
             if (finding.type == FindingType.PlausibleProfileMatch) {
                 finding.copy(
@@ -888,7 +1283,7 @@ class ProfileScanner(
         }
 
         return ProfileScanResult(
-            candidate = candidate.copy(confidence = adjustedConfidence),
+            candidate = candidate.copy(confidence = adjustedConfidence, providerId = providerId ?: candidate.providerId),
             exists = exists,
             httpStatus = httpStatus,
             displayName = displayName,
@@ -900,7 +1295,9 @@ class ProfileScanner(
             confidenceSignals = confidenceSignals,
             verified = verified,
             verificationStatus = verificationStatus,
-            provenance = provenance
+            provenance = provenance,
+            providerId = providerId ?: candidate.providerId,
+            providerVerificationState = providerVerificationState
         )
     }
 
@@ -914,7 +1311,9 @@ class ProfileScanner(
         displayName: String?,
         extractedText: String,
         verificationStatus: String,
-        provenance: String?
+        provenance: String?,
+        providerId: String? = candidate.providerId,
+        providerVerificationState: ProviderVerificationState? = null
     ): ProfileScanResult {
         val softConfidence = (candidate.confidence * 0.25f).coerceIn(0.1f, 0.35f)
         val softFinding = Finding(
@@ -927,7 +1326,7 @@ class ProfileScanner(
             remediation = "Review this possible account manually. Do not treat it as confirmed ownership."
         )
         return ProfileScanResult(
-            candidate = candidate.copy(confidence = softConfidence),
+            candidate = candidate.copy(confidence = softConfidence, providerId = providerId ?: candidate.providerId),
             exists = true,
             httpStatus = httpStatus,
             displayName = displayName,
@@ -939,7 +1338,9 @@ class ProfileScanner(
             confidenceSignals = listOf("Page exists but not attributed to identity"),
             verified = false,
             verificationStatus = verificationStatus,
-            provenance = provenance
+            provenance = provenance,
+            providerId = providerId ?: candidate.providerId,
+            providerVerificationState = providerVerificationState
         )
     }
 
@@ -951,9 +1352,11 @@ class ProfileScanner(
         verificationStatus: String,
         httpStatus: Int?,
         adjustedConfidence: Float,
-        provenance: String? = null
+        provenance: String? = null,
+        providerId: String? = candidate.providerId,
+        providerVerificationState: ProviderVerificationState? = null
     ): ProfileScanResult = ProfileScanResult(
-        candidate = candidate.copy(confidence = adjustedConfidence),
+        candidate = candidate.copy(confidence = adjustedConfidence, providerId = providerId ?: candidate.providerId),
         exists = exists,
         httpStatus = httpStatus,
         displayName = null,
@@ -965,7 +1368,9 @@ class ProfileScanner(
         confidenceSignals = emptyList(),
         verified = verified,
         verificationStatus = verificationStatus,
-        provenance = provenance
+        provenance = provenance,
+        providerId = providerId ?: candidate.providerId,
+        providerVerificationState = providerVerificationState
     )
 
     private fun extractProfileImageUrl(doc: Document): String? {
@@ -1159,25 +1564,47 @@ class ProfileScanner(
     )
 
     companion object {
+        internal fun isAccessChallengePage(html: String, text: String): Boolean {
+            val lowerHtml = html.lowercase()
+            val lowerText = text.lowercase()
+            val compactLength = text.count { !it.isWhitespace() }
+            val hardHtmlMarkers = listOf(
+                "cf-challenge",
+                "g-recaptcha",
+                "h-captcha",
+                "data-sitekey",
+                "authwall"
+            )
+            if (hardHtmlMarkers.any(lowerHtml::contains)) return true
+
+            val challengeTextMarkers = listOf(
+                "checking your browser",
+                "verify you are human",
+                "are you a robot",
+                "unusual traffic",
+                "attention required",
+                "log in to continue",
+                "sign in to continue"
+            )
+            return compactLength < 600 && challengeTextMarkers.any {
+                lowerText.contains(it) || lowerHtml.contains(it)
+            }
+        }
+
         /**
          * Pure (no Context / no network) belonging decision, extracted so it can be
          * unit-tested.
          *
-         * IMPORTANT: this is ONLY ever called after the WebView confirm stage has
-         * verified that the page actually renders real content (not a 404, not a
-         * challenge/bot wall). So unlike the old check #6 — which approved a slug
-         * match with zero page verification and manufactured hallucinations — any
-         * handle-based acceptance here operates on a verified-existing page.
+         * This is called only after direct or rendered content passes provider
+         * existence checks. Page existence remains separate from subject ownership.
          *
          * Attribution paths (any one is sufficient):
          *  - user explicitly supplied the URL
          *  - full name / both name parts appear in the rendered page
          *  - a user-supplied email / phone / alias / location / org appears in the page
-         *  - the candidate handle embeds BOTH full first and last name (e.g.
-         *    "janedoe", "jane.doe" from "Jane Doe") — such a handle
-         *    uniquely derives from this person's name, so a verified-existing page
-         *    under it is a plausible match. Weak variants (initials like "jdoe",
-         *    or single names like "jane"/"doe") do NOT qualify.
+         *
+         * A matching URL slug or username is candidate discovery evidence only.
+         * It never verifies ownership without an independent page signal.
          */
         fun belongsToUserPure(
             candidateUsername: String,
@@ -1192,57 +1619,27 @@ class ProfileScanner(
                 return true
             }
 
-            val suppliedUsernames = buildList {
-                input.primaryUsername?.takeIf { it.isNotBlank() }?.let { add(it) }
-                addAll(input.usernames.filter { it.isNotBlank() })
-            }
-            val exactUsernameMatch = suppliedUsernames.any {
-                it.equals(candidateUsername, ignoreCase = true)
-            }
-
-            // Strong identity includes explicit usernames / primaryUsername —
-            // username-only scans must be able to attribute exact handle matches.
-            val hasStrongIdentity = input.fullName.trim().split("\\s+".toRegex()).filter { it.isNotBlank() }.size > 1 ||
-                input.emails.any { it.isNotBlank() } ||
-                input.aliases.any { it.isNotBlank() } ||
-                input.profileUrls.any { it.isNotBlank() } ||
-                input.primaryUsername?.isNotBlank() == true ||
-                input.usernames.any { it.isNotBlank() }
-
-            // Exact username match on a verified-existing page is enough when the
-            // user supplied that handle (hasStrongIdentity includes usernames).
-            if (exactUsernameMatch && hasStrongIdentity) {
-                return true
-            }
-
-            if (!hasStrongIdentity) {
-                return false
-            }
-
             val text = (extractedText + " " + (displayName ?: "")).lowercase()
+            val candidateNeedle = candidateUsername.trim().lowercase()
+            val corroboratingText = if (candidateNeedle.length >= 2) {
+                text.replace(candidateNeedle, " ")
+            } else {
+                text
+            }
             val fullNameLower = input.fullName.trim().lowercase()
             val nameParts = input.fullName.trim().split("\\s+".toRegex()).filter { it.isNotBlank() }
             val isSingleWordName = nameParts.size <= 1
 
-            // Single-word name is restricted: allow only when email/alias present
-            // (handled below via page matches) OR exact username match (above).
-            // Without those, fall through carefully — name-embedding is multi-word only.
-
             // 1. Check for full name match
-            if (fullNameLower.isNotBlank() && text.contains(fullNameLower)) {
-                // Single-word name alone is too weak unless email/alias also present
-                // or exact username already matched (handled above).
+            if (fullNameLower.isNotBlank() && corroboratingText.contains(fullNameLower)) {
                 if (!isSingleWordName) return true
-                val hasEmailOrAlias = input.emails.any { it.isNotBlank() } ||
-                    input.aliases.any { it.isNotBlank() }
-                if (hasEmailOrAlias) return true
             }
 
             // 2. Check if both first and last name match (for multi-word names)
             if (nameParts.size > 1) {
                 val first = nameParts.first().lowercase()
                 val last = nameParts.last().lowercase()
-                if (text.contains(first) && text.contains(last)) {
+                if (corroboratingText.contains(first) && corroboratingText.contains(last)) {
                     return true
                 }
             }
@@ -1255,30 +1652,11 @@ class ProfileScanner(
             }
 
             // 4. Check for any of the user's supplied aliases, locations, or organizations
-            val hasMeaningfulIdentitySignals = nameParts.size > 1 ||
-                input.primaryUsername?.isNotBlank() == true ||
-                input.usernames.any { it.isNotBlank() } ||
-                input.emails.any { it.isNotBlank() } ||
-                input.aliases.any { it.isNotBlank() }
-            if (hasMeaningfulIdentitySignals) {
-                val hasMatchingAlias = input.aliases.any { it.isNotBlank() && text.contains(it.lowercase()) }
-                val hasMatchingLoc = input.locations.any { it.isNotBlank() && text.contains(it.lowercase()) }
-                val hasMatchingOrg = input.organizations.any { it.isNotBlank() && text.contains(it.lowercase()) }
-                if (hasMatchingAlias || hasMatchingLoc || hasMatchingOrg) {
-                    return true
-                }
-            }
-
-            // 5. Name-derived handle: the candidate username embeds BOTH the full first
-            //    AND last name (e.g. "janedoe", "jane.doe", "jane_doe" from
-            //    "Jane Doe"). Multi-word names only.
-            if (nameParts.size > 1) {
-                val first = nameParts.first().lowercase()
-                val last = nameParts.last().lowercase()
-                val slug = candidateUsername.lowercase()
-                if (first.length >= 3 && last.length >= 3 && slug.contains(first) && slug.contains(last)) {
-                    return true
-                }
+            val hasMatchingAlias = input.aliases.any { it.isNotBlank() && text.contains(it.lowercase()) }
+            val hasMatchingLoc = input.locations.any { it.isNotBlank() && text.contains(it.lowercase()) }
+            val hasMatchingOrg = input.organizations.any { it.isNotBlank() && text.contains(it.lowercase()) }
+            if (hasMatchingAlias || hasMatchingLoc || hasMatchingOrg) {
+                return true
             }
 
             return false
@@ -1337,7 +1715,8 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 snippet = result.displayName?.let { "Profile: $it" },
                 confidence = conf,
                 risk = if (result.verified && result.exists) RiskLevel.High else RiskLevel.Low,
-                signals = result.confidenceSignals
+                signals = result.confidenceSignals,
+                providerId = result.providerId ?: result.candidate.providerId
             )
         )
 

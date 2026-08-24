@@ -8,6 +8,9 @@ import io.dossier.app.domain.analysis.OsintPostProcessor
 import io.dossier.app.domain.case.CaseScanHistoryEntry
 import io.dossier.app.domain.case.CaseStore
 import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.discovery.ProviderVerificationState
+import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
+import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
@@ -48,6 +51,10 @@ import io.dossier.app.domain.scanner.BackgroundScanResultStore
  */
 class VisualQaFixtureReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == ACTION_PROVIDER_PROGRESS) {
+            seedProviderProgress()
+            return
+        }
         if (intent.action != ACTION_SEED) return
 
         val appContext = context.applicationContext
@@ -71,8 +78,46 @@ class VisualQaFixtureReceiver : BroadcastReceiver() {
         ) { "Unable to persist visual-QA encrypted transient result" }
     }
 
+    private fun seedProviderProgress() {
+        val scanId = ScanCoordinatorRuntime.resetCounts(ScanId(PROVIDER_PROGRESS_SCAN_ID))
+        val providers = listOf(
+            "github",
+            "gitlab",
+            "codeberg",
+            "reddit",
+            "mastodon",
+            "medium",
+            "devto",
+            "keybase",
+            "twitch",
+            "vimeo",
+            "soundcloud",
+            "behance"
+        )
+        providers.forEach { ScanCoordinatorRuntime.onProviderQueued(it, scanId) }
+        providers.take(10).forEach { ScanCoordinatorRuntime.onProviderStarted(it, scanId = scanId) }
+        providers.take(7).forEach {
+            ScanCoordinatorRuntime.onProviderCompleted(
+                it,
+                ProviderVerificationState.NotFound,
+                latencyMs = 120,
+                scanId = scanId
+            )
+        }
+        providers.drop(7).take(2).forEach {
+            ScanCoordinatorRuntime.onProviderUnavailable(
+                it,
+                ProviderVerificationState.RateLimited,
+                latencyMs = 240,
+                scanId = scanId
+            )
+        }
+    }
+
     private companion object {
         const val ACTION_SEED = "io.dossier.app.action.SEED_VISUAL_QA_FIXTURE"
+        const val ACTION_PROVIDER_PROGRESS = "io.dossier.app.action.SHOW_PROVIDER_PROGRESS_QA"
+        const val PROVIDER_PROGRESS_SCAN_ID = "00000000-0000-4000-8000-000000000300"
     }
 }
 

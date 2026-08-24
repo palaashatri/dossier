@@ -55,6 +55,35 @@ sealed interface ScanEvent {
         val stage: String
     ) : ScanEvent
 
+    data class ProviderQueued(
+        override val scanId: ScanId,
+        override val occurredAt: Instant,
+        val providerId: String
+    ) : ScanEvent
+
+    data class ProviderStarted(
+        override val scanId: ScanId,
+        override val occurredAt: Instant,
+        val providerId: String,
+        val attempt: Int = 1
+    ) : ScanEvent
+
+    data class ProviderCompleted(
+        override val scanId: ScanId,
+        override val occurredAt: Instant,
+        val providerId: String,
+        val state: ProviderVerificationState,
+        val latencyMs: Long
+    ) : ScanEvent
+
+    data class ProviderUnavailable(
+        override val scanId: ScanId,
+        override val occurredAt: Instant,
+        val providerId: String,
+        val state: ProviderVerificationState,
+        val latencyMs: Long
+    ) : ScanEvent
+
     data class ProfileBatchUpdated(
         override val scanId: ScanId,
         override val occurredAt: Instant,
@@ -164,6 +193,10 @@ data class LiveScanSnapshot(
     val mode: ScanMode = ScanMode.Standard,
     val directProfileProviders: Int = 0,
     val stage: String = "",
+    val scheduledProviderCount: Int = 0,
+    val startedProviderCount: Int = 0,
+    val completedProviderCount: Int = 0,
+    val unavailableProviderCount: Int = 0,
     val profileCount: Int = 0,
     val verifiedProfileCount: Int = 0,
     val faceComparisonCount: Int = 0,
@@ -177,15 +210,178 @@ data class LiveScanSnapshot(
  * Compatibility coordinator/event bridge for the existing mature ScanSession.
  *
  * M2 intentionally wraps, rather than rewrites, the current vertical pipeline.
- * All emitted values are observations of real ScanSession state; no provider
- * completion events are invented because the legacy scanner does not yet expose
- * per-provider callbacks. Provider-level queue/start/completion events remain an
- * explicit M2 follow-up when the scanner scheduler is migrated.
+ * All emitted values are observations of real ScanSession and provider lifecycle
+ * events; no fake completion is invented for unexecuted operations.
  */
 object ScanCoordinatorRuntime {
+    private val safeProviderIdPattern = Regex("^[a-z0-9]+(?:-[a-z0-9]+)*$")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val monitoringStarted = AtomicBoolean(false)
     private val lock = Any()
+
+    fun activeScanId(): ScanId? = activeScanId
+
+    /**
+     * Claims one stable coordinator ID at the start of provider execution.
+     * Passive lifecycle callbacks never create or adopt scans themselves.
+     */
+    fun claimProviderScanId(): ScanId {
+        ensureMonitoring()
+        return synchronized(lock) {
+            val id = activeScanId ?: requestedScanId ?: newScanId()
+            activeScanId = id
+            if (_snapshot.value.scanId != id) {
+                _snapshot.value = _snapshot.value.copy(
+                    scanId = id,
+                    scheduledProviderCount = 0,
+                    startedProviderCount = 0,
+                    completedProviderCount = 0,
+                    unavailableProviderCount = 0
+                )
+            }
+            id
+        }
+    }
+
+    fun resetCounts(scanId: ScanId = newScanId()): ScanId {
+        synchronized(lock) {
+            activeScanId = scanId
+            _snapshot.value = LiveScanSnapshot(
+                scanId = scanId,
+                state = ScanRunState.Running,
+                scheduledProviderCount = 0,
+                startedProviderCount = 0,
+                completedProviderCount = 0,
+                unavailableProviderCount = 0
+            )
+        }
+        return scanId
+    }
+
+    fun onProviderQueued(providerId: String, scanId: ScanId = requireActiveScanId()) {
+        val event = ScanEvent.ProviderQueued(scanId, Instant.now(), safeProviderId(providerId))
+        reduceProviderEvent(event)
+        emit(event)
+    }
+
+    fun onProviderStarted(
+        providerId: String,
+        attempt: Int = 1,
+        scanId: ScanId = requireActiveScanId()
+    ) {
+        val event = ScanEvent.ProviderStarted(
+            scanId,
+            Instant.now(),
+            safeProviderId(providerId),
+            attempt.coerceAtLeast(1)
+        )
+        reduceProviderEvent(event)
+        emit(event)
+    }
+
+    fun onProviderCompleted(
+        providerId: String,
+        state: ProviderVerificationState,
+        latencyMs: Long,
+        scanId: ScanId = requireActiveScanId()
+    ) {
+        val event = ScanEvent.ProviderCompleted(
+            scanId,
+            Instant.now(),
+            safeProviderId(providerId),
+            state,
+            latencyMs.coerceAtLeast(0L)
+        )
+        reduceProviderEvent(event)
+        emit(event)
+    }
+
+    fun onProviderUnavailable(
+        providerId: String,
+        state: ProviderVerificationState,
+        latencyMs: Long,
+        scanId: ScanId = requireActiveScanId()
+    ) {
+        val event = ScanEvent.ProviderUnavailable(
+            scanId,
+            Instant.now(),
+            safeProviderId(providerId),
+            state,
+            latencyMs.coerceAtLeast(0L)
+        )
+        reduceProviderEvent(event)
+        emit(event)
+    }
+
+    fun dispatch(event: ScanEvent) {
+        val safeEvent = sanitizeProviderEvent(event)
+        reduceProviderEvent(safeEvent)
+        emit(safeEvent)
+    }
+
+    private fun reduceProviderEvent(event: ScanEvent) {
+        synchronized(lock) {
+            val current = _snapshot.value
+            if (activeScanId != event.scanId || current.scanId != event.scanId) return
+            _snapshot.value = when (event) {
+                is ScanEvent.ProviderQueued -> current.copy(
+                    scheduledProviderCount = current.scheduledProviderCount + 1
+                )
+                is ScanEvent.ProviderStarted -> if (
+                    event.attempt == 1 && current.startedProviderCount < current.scheduledProviderCount
+                ) {
+                    current.copy(startedProviderCount = current.startedProviderCount + 1)
+                } else {
+                    current
+                }
+                is ScanEvent.ProviderCompleted -> if (
+                    current.completedProviderCount + current.unavailableProviderCount <
+                    current.scheduledProviderCount
+                ) {
+                    current.copy(completedProviderCount = current.completedProviderCount + 1)
+                } else {
+                    current
+                }
+                is ScanEvent.ProviderUnavailable -> if (
+                    current.completedProviderCount + current.unavailableProviderCount <
+                    current.scheduledProviderCount
+                ) {
+                    current.copy(unavailableProviderCount = current.unavailableProviderCount + 1)
+                } else {
+                    current
+                }
+                else -> current
+            }
+        }
+    }
+
+    private fun sanitizeProviderEvent(event: ScanEvent): ScanEvent = when (event) {
+        is ScanEvent.ProviderQueued -> event.copy(providerId = safeProviderId(event.providerId))
+        is ScanEvent.ProviderStarted -> event.copy(
+            providerId = safeProviderId(event.providerId),
+            attempt = event.attempt.coerceAtLeast(1)
+        )
+        is ScanEvent.ProviderCompleted -> event.copy(
+            providerId = safeProviderId(event.providerId),
+            latencyMs = event.latencyMs.coerceAtLeast(0L)
+        )
+        is ScanEvent.ProviderUnavailable -> event.copy(
+            providerId = safeProviderId(event.providerId),
+            latencyMs = event.latencyMs.coerceAtLeast(0L)
+        )
+        else -> event
+    }
+
+    private fun safeProviderId(value: String): String {
+        val normalized = value.trim().lowercase()
+        return normalized.takeIf {
+            it.length in 1..160 && safeProviderIdPattern.matches(it)
+        } ?: "unknown"
+    }
+
+    private fun requireActiveScanId(): ScanId = checkNotNull(activeScanId) {
+        "Provider lifecycle event requires an explicitly claimed active scan"
+    }
 
     private val _events = MutableSharedFlow<ScanEvent>(
         replay = 0,
@@ -219,12 +415,17 @@ object ScanCoordinatorRuntime {
                     val previous = _snapshot.value
                     if (previous.state != ScanRunState.Running || previous.scanId != id) {
                         val startedAt = Instant.now()
+                        val existingProviderCounts = previous.takeIf { it.scanId == id }
                         _snapshot.value = LiveScanSnapshot(
                             scanId = id,
                             state = ScanRunState.Running,
                             mode = mode,
                             directProfileProviders = directProviders,
-                            stage = safeCoordinatorStage(ScanSession.progressText.value)
+                            stage = safeCoordinatorStage(ScanSession.progressText.value),
+                            scheduledProviderCount = existingProviderCounts?.scheduledProviderCount ?: 0,
+                            startedProviderCount = existingProviderCounts?.startedProviderCount ?: 0,
+                            completedProviderCount = existingProviderCounts?.completedProviderCount ?: 0,
+                            unavailableProviderCount = existingProviderCounts?.unavailableProviderCount ?: 0
                         )
                         ScanHistoryRuntime.scanStarted(
                             scanId = id,
