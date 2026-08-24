@@ -13,16 +13,34 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.discovery.WhatsMyNameCatalog
+import io.dossier.app.domain.discovery.WhatsMyNameCatalogState
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.domain.username.UsernameVariantGenerator
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.theme.NeuralTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+internal fun formatModeCounts(
+    profileCount: Int,
+    executableUsernameRuleCount: Int?,
+    mode: ScanMode
+): String {
+    return if (executableUsernameRuleCount != null) {
+        val wmnCount = minOf(executableUsernameRuleCount, mode.providerLimit)
+        "$profileCount profiles • $wmnCount username rules"
+    } else {
+        "$profileCount profiles"
+    }
+}
 
 @Composable
 fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
@@ -36,12 +54,25 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
     val selectedScanMode by DiscoveryScanPreferences.selectedMode.collectAsState()
     val legacyDeepResearch by ScanSession.deepResearchEnabled.collectAsState()
 
+    val context = LocalContext.current
+    val initialWmnState = remember { WhatsMyNameCatalog.state }
+    var wmnState by remember { mutableStateOf(initialWmnState) }
+    var wmnLoadComplete by remember {
+        mutableStateOf(initialWmnState is WhatsMyNameCatalogState.Ready)
+    }
+
     // Migrate the pre-v2 Deep Research choice into the new authoritative scan
     // depth without silently losing the user's earlier intent.
     LaunchedEffect(Unit) {
         if (legacyDeepResearch && DiscoveryScanPreferences.selectedMode.value == ScanMode.Standard) {
             DiscoveryScanPreferences.setMode(ScanMode.Deep)
         }
+        val installedState = withContext(Dispatchers.IO) {
+            WhatsMyNameCatalog.install(context.applicationContext)
+            WhatsMyNameCatalog.state
+        }
+        wmnState = installedState
+        wmnLoadComplete = true
     }
 
     val generator = remember { UsernameVariantGenerator() }
@@ -255,17 +286,29 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "Provider counts below are the direct profile definitions the current scanner can actually fan out to. Search, breach, image and archive operations are reported separately as they run.",
+                    text = "Counts separate direct-profile fan-out from the pinned HTTPS username catalog. Search, breach, image and archive operations are reported separately.",
                     color = NeuralTheme.TextSecondary,
                     fontSize = 11.5.sp,
                     lineHeight = 16.sp,
                     modifier = Modifier.padding(top = 3.dp, bottom = 10.dp)
                 )
 
+                val currentWmnState = wmnState
+                if (wmnLoadComplete && currentWmnState is WhatsMyNameCatalogState.Unavailable) {
+                    Text(
+                        text = "Username rules unavailable: ${currentWmnState.reason}",
+                        color = NeuralTheme.Amber,
+                        fontSize = 11.5.sp,
+                        modifier = Modifier.padding(bottom = 10.dp)
+                    )
+                }
+
                 ScanMode.entries.forEach { mode ->
                     ScanModeOption(
                         mode = mode,
                         selected = selectedScanMode == mode,
+                        executableUsernameRuleCount =
+                            (currentWmnState as? WhatsMyNameCatalogState.Ready)?.executableCount,
                         onSelect = {
                             DiscoveryScanPreferences.setMode(mode)
                             // The v2 mode is authoritative once the user touches
@@ -357,10 +400,14 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
 private fun ScanModeOption(
     mode: ScanMode,
     selected: Boolean,
+    executableUsernameRuleCount: Int?,
     onSelect: () -> Unit
 ) {
     val profileProviderCount = remember(mode) {
         ProviderCatalogV2.legacyProfileDefinitions(mode).size
+    }
+    val countText = remember(profileProviderCount, executableUsernameRuleCount, mode) {
+        formatModeCounts(profileProviderCount, executableUsernameRuleCount, mode)
     }
     val border = if (selected) NeuralTheme.Cobalt else NeuralTheme.BorderColor
     val background = if (selected) {
@@ -397,7 +444,7 @@ private fun ScanModeOption(
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "$profileProviderCount profile providers",
+                    text = countText,
                     color = if (selected) NeuralTheme.Cobalt else NeuralTheme.TextSecondary,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium
