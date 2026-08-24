@@ -7,7 +7,7 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 - **Strict product readiness score:** **76/100**
 - **Milestone state:** M0 complete; M1–M6 and M8–M12 materially advanced but still partial; M7 and M13 remain partial
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
-- **Last validated implementation commit:** `11295bf` (`docs: record pause media and persistence validation`)
+- **Last validated implementation commit:** `8f82112` (`docs: record pause media and persistence validation`)
 - **Last validation date:** **2026-08-25**
 - **Current-session validation of the implementation plus the preserved pre-existing uiTest fixture edit:** provider and pinned-catalog audits passed; both debug and uiTest JVM suites passed 631 tests across 109 suites each; debug/uiTest APKs assembled; Android-test Kotlin compiled; lint completed with zero errors; and the connected instrumentation task reached packaging but stopped with `No connected devices!`.
 - **Documentation-only commits after the validated implementation:** may update this file/PR prose without changing the validated code claim
@@ -336,7 +336,7 @@ External OSINT imports are local/in-memory and bounded. Import parsers require e
 Validated implementation commit:
 
 ```text
-11295bf
+8f82112
 ```
 
 Validation date:
