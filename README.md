@@ -11,7 +11,7 @@ The current implementation branch is **80/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-aa25dc8
+af32e1f
 ```
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
@@ -20,15 +20,15 @@ That exact implementation passed the current final-tree build and deterministic 
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
-Debug JVM unit tests                PASS — 662 tests / 111 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 662 tests / 111 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 679 tests / 112 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 679 tests / 112 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 118,829,525 bytes
-Debug APK SHA-256                   4EB6639D84446F0FF02DE9588BBD8D3F5754881B412BFE54850F2D257570F6EA
-uiTest APK assembly                 PASS — 243,848,915 bytes
-uiTest APK SHA-256                  27F29FB07B869DAAB922CCADAFC7DB97F35485A7EF74263E30BAC9720C931DEA
-Android-test APK                    PASS — 1,051,527 bytes
-Android-test APK SHA-256             E93ACD665F5DBC7990A27A11D02560087C90ABEC01372D3BBF748C8C0D4EE70F
+Debug APK assembly                  PASS — 115,466,728 bytes
+Debug APK SHA-256                   D28339F149B69445F3EE8FF02A3FB878404C0081212CEE7E5C1CD502BF1A81D4
+uiTest APK assembly                 PASS — 242,932,153 bytes
+uiTest APK SHA-256                  08A322846BFFB6FED5FA1047632920C199D3B4614CC85265D4D198097C0644FD
+Android-test APK                    PASS — 1,005,660 bytes
+Android-test APK SHA-256             A73C0BFBA3BBDFF211319E549E81D8E81E406CA4E82C8D301411B5B45CCF3680
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
 Connected uiTest suite              PASS — 41 tests / 0 failures on API 36 `medium_phone` emulator
@@ -68,12 +68,13 @@ These captures come from the API 36 Medium Phone emulator. Analysis, report, cas
 - Direct-profile candidates execute through the declarative provider runtime with live selector-driven extraction, bounded reads, timeout/retry/cooldown policy, provider request spacing, exact/approved-host redirect checks, HTTPS-downgrade rejection and a generic non-impersonating user agent.
 - Real queued, started, completed and unavailable callbacks drive scheduled/completed/unavailable counters; planned registry breadth is not presented as completed work.
 - Persisted aggregate provider outcomes can be assessed against the exact catalog (including explicit Unvalidated, Healthy, Degraded, Unavailable and Stale states); health buckets are maintenance diagnostics, not evidence confidence or live-validation claims.
-- The username-discovery flow surfaces the persisted catalog-health report with a bounded nonhealthy preview and explicit wording that catalog membership, HTTP 200 or search hits are not live validation.
+- The username-discovery flow surfaces the persisted catalog-health report with a bounded nonhealthy preview and explicit wording that catalog membership, HTTP 200 or search hits are not live validation; internally inconsistent counters and future validation timestamps are shown as unavailable rather than healthy.
 - A deterministic no-network contract harness exercises present, absent, soft-error, redirect, challenge and malformed observations for every catalog definition; fixture outcomes are not promoted to provider health or evidence.
 - Registry validation for duplicates, malformed templates, parser drift and inventory drift.
 - Deterministic response states for present, not-found, soft-404, authentication-required, challenged, rate-limited, timed-out, network-unavailable, redirect, unexpected and invalid responses.
 - Multiple bounded public-search sources, direct source verification, retries, `Retry-After`, caches and circuit breakers.
 - Configured-depth bounded pivots (default two, hard maximum four) with admission rules: weak name/location/occupation/face-only signals do not recursively expand by themselves, and only verified results seed the next depth.
+- Evidence-backed relationship endpoints reuse one exact unique canonical graph entity when available; ambiguous or unmatched values keep a synthetic unresolved node rather than creating a fuzzy merge.
 - Exact-URL Internet Archive recovery for some deleted/replaced pages.
 
 The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCatalogV2` currently contains 78 authored definitions (70 profile templates and 8 services); the separate pinned WhatsMyName catalog contains 716 records, of which 644 are executable HTTPS username rules. Neither count is presented as registry-wide live validation.
@@ -82,7 +83,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 
 - `ScanCoordinatorRuntime` wraps the mature vertical scan pipeline.
 - Encrypted request checkpoints retain allow-listed stage names plus bounded item/verified/omitted counts for completed major stages; incomplete stage outputs remain eligible for rerun.
-- New encrypted requests also retain a sanitized mode/provider-plan fingerprint/count and allow-listed stage-order summary; it commits the plan without persisting response text, identifiers or in-flight search/image/frontier payloads.
+- New encrypted requests retain a sanitized mode/provider-plan fingerprint/count and allow-listed stage-order summary. Successful public-search and public-image retry payloads are now stored in request/plan/stage-bound encrypted envelopes with bounded size, TTL, tamper checks and scoped tombstones; response text and identifiers remain excluded, and in-flight/frontier payloads for the remaining stages are still not persisted.
 - Remediation cards expose reviewed provider-specific resources, manual-action fallback or explicit unavailable state; opening a settings page never asserts deletion and later scans remain required.
 - Saved-case comparison exposes source-scoped historical/provider changes and remediation rechecks with exact evidence IDs and only newer successful scan IDs; missing or unavailable observations are not reported as deletion.
 - Structured scan IDs, requests, run states and events.
@@ -104,7 +105,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
 - Later case edits cannot silently attach a newer scan to an older case.
 
-Recovery now covers stable initial direct-profile outcomes, the configured-depth pivot frontier, an exact-owner background pause/resume lifecycle, an encrypted mode/provider-plan/stage-order commitment, semantic stage-boundary metadata and bounded completed-stage output counts. The commitment is metadata only: a coordinator-owned parser/frontier plan, persisted search/image/frontier payloads, sole coordinator ownership and full-stage resume semantics remain incomplete. Pivot diagnostics are persisted and the background pause state is surfaced, while some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
+Recovery now covers stable initial direct-profile outcomes, the configured-depth pivot frontier, an exact-owner background pause/resume lifecycle, an encrypted mode/provider-plan/stage-order commitment, semantic stage-boundary metadata, bounded completed-stage output counts and encrypted public-search/public-image retry payloads. The payload envelopes are request/plan/stage-bound, bounded, TTL-limited, tamper-checked and cleared with request-scoped tombstones; verified profile outcomes cannot enter these public-discovery caches. A coordinator-owned parser/frontier plan, universal in-flight payload persistence, sole coordinator ownership and full-stage resume semantics remain incomplete. Pivot diagnostics are persisted and the background pause state is surfaced, while some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
 
 ## Evidence, graph and entity resolution
 
@@ -182,6 +183,7 @@ Equivalent extraction across every archive/provider source and universal archive
 - Malformed/unsupported generated output falls back to deterministic analysis instead of being displayed raw.
 - Remote processing remains opt-in and disclosed.
 - Remote graph entities and relationships carry bounded pseudonymized references to supporting and contradicting evidence from the same evidence window; raw local evidence IDs do not cross the remote boundary.
+- Evaluation fixtures are integrity-checked before use: IDs, graph endpoints, edge evidence references, remediation links and bounded corpus sizes must be unique, well-formed and internally resolvable. Remediation outcome language additionally requires an effective reviewed resource, a completed status, a later successful durable verification scan with valid chronological timestamps, and cited support evidence.
 
 A production-sized/adversarial AI evaluation corpus remains incomplete; corrected/remediation-native validation is bounded and wired on every model path.
 
@@ -197,6 +199,7 @@ A production-sized/adversarial AI evaluation corpus remains incomplete; correcte
 - Account decisions: **This is me / Not me / Unsure**.
 - Corrections affect effective analysis/graph membership without deleting raw encrypted evidence.
 - Remediation states: Not started, In progress, Submitted, Awaiting response, Completed, Rejected and Needs manual action.
+- Reviewed provider-settings resources are catalog-validated (HTTPS, provider ownership, no userinfo/query/fragment) with manual-action or unavailable fallback when no reviewed resource exists; the catalog currently covers eight providers and is not deletion proof.
 - Differential comparison classifies added, removed, changed and unchanged findings.
 - Recheck UI distinguishes **Still observed**, **Not observed in latest scan**, **Workflow status changed** and **Not rechecked**.
 - Recheck rows retain the exact observed evidence ID and only a newer successful verification scan ID; failed/cancelled scans remain **Not rechecked**.
@@ -256,7 +259,7 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - `ProviderCatalogV2` has 78 authored definitions, while the separate pinned WhatsMyName catalog has 716 records and 644 executable HTTPS username rules; this remains below the 1,000+ useful reviewed-provider target and does not establish live health.
 - Private, authenticated, blocked, never-indexed and never-archived content cannot be discovered reliably.
 - Providers can change markup, challenge requests, rate-limit or omit content.
-- Some custom resolver operations still bypass unified provider lifecycle events; the persisted coordinator plan is currently a metadata commitment rather than a general parser/frontier payload, and persisted search/image/frontier payloads remain incomplete. Background pause/resume is exact-owner bounded rather than a universal coordinator pause contract.
+- Some custom resolver operations still bypass unified provider lifecycle events; the persisted coordinator plan is currently a metadata commitment rather than a general parser/frontier payload. Public-search/public-image retry payloads are persisted with bounded encrypted envelopes, but universal in-flight stage/frontier payloads and full coordinator ownership remain incomplete. Background pause/resume is exact-owner bounded rather than a universal coordinator pause contract.
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
 - Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
 - Replacement-generation cleanup is best effort after WorkManager enqueue acknowledgement. A crash or cleanup failure in that narrow hand-off can retain an encrypted prior-request profile scope until explicit purge or later maintenance; a durable retirement ledger remains open.
