@@ -4,14 +4,15 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 
 ## Current snapshot
 
-- **Strict product readiness score:** **69/100**
+- **Strict product readiness score:** **71/100**
 - **Milestone state:** M0 complete; M1–M6 and M8–M12 materially advanced but still partial; M7 and M13 remain partial
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
-- **Last validated implementation commit:** `93db3843a1286e3946986d28f373426859c34296`
+- **Last validated implementation commit:** `d6c3f5522e280b64efb8727ce88edc8f8287aa70`
 - **Last validation date:** **2026-08-24**
-- **Current-session validation on that commit:** both debug and uiTest JVM suites passed 501 tests across 92 suites each; debug/uiTest APKs assembled; lint completed with zero errors; provider and pinned-catalog audits passed; 60 focused frontier/resolver/lifecycle tests passed; and direct API 36 x86_64 AndroidJUnitRunner instrumentation passed 23/23 tests on the exact installed uiTest APKs.
+- **Current-session validation on that commit:** provider and pinned-catalog audits passed; both debug and uiTest JVM suites passed 577 tests across 105 suites each; debug/uiTest APKs assembled; Android-test Kotlin compiled; lint completed with zero errors; and the connected instrumentation task reached packaging but stopped with `No connected devices!`.
 - **Documentation-only commits after the validated implementation:** may update this file/PR prose without changing the validated code claim
-- **Last validated device class:** Medium_Phone profile, Android API 36, x86_64 emulator
+- **Last validated device class for this commit:** none; no ADB device was connected in this session
+- **Prior device evidence:** API 36 x86_64 emulator instrumentation exists only for an earlier commit and is not promoted to this tree
 - **Real-device production validation:** not yet recorded
 - **Declarative provider definitions:** **78 authored**
 - **Pinned WhatsMyName catalog:** **716 source records; 644 executable HTTPS username rules after parser/policy filtering; 72 non-executable under current policy**
@@ -20,14 +21,14 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 
 Compilation, unit tests and emulator tests are necessary gates, but they do not substitute for live-provider validation, calibrated identity/face benchmarks, physical-device measurements, accessibility validation or release hardening.
 
-The readiness score is **69/100** after adding an encrypted request-scoped bounded pivot frontier and a deterministic, fail-closed entity-resolution benchmark/calibration path. Stable profile outcomes and pending pivot work can survive an exact-scope worker restart. This is still not full scan pause/resume: the coordinator does not own one general plan, non-profile/pivot stages remain uncheckpointed, and empirical representative calibration does not yet exist.
+The readiness score is **71/100** after making declarative extraction rules executable, hardening provider redirect classification, installing provider-health persistence for interactive scans, and replacing the fixed pivot caller with a configured-depth bounded frontier drain. The scan still defaults to conservative depth two (hard maximum four), and stable profile/pivot work can survive an exact-scope worker restart. This is still not full scan pause/resume: the coordinator does not own one general plan, non-profile/pivot stages remain uncheckpointed, and empirical representative calibration does not yet exist.
 
 ## Strict 100-point rubric
 
 | Area | Score | Truth |
 |---|---:|---|
-| Discovery breadth and reliability | **11/15** | Discovery Fabric v2 is integrated into runtime planning and direct-profile execution with 78 declarative definitions, categories, validation, bounded reads, timeout/retry/cooldown/request-spacing policy, typed truthful outcomes, provider health updates, scan modes and maintenance-audit CI. A separately pinned WhatsMyName asset contains 716 source records and 644 executable HTTPS username rules after parser/policy filtering, with mode budgets, bounded execution and fail-closed states. These rules are not additional `ProviderCatalogV2` definitions or live-validated providers. The project remains below the 1,000+ useful reviewed-provider target and lacks registry-wide live contracts. |
-| Recursive orchestration | **8/10** | The coordinator/event bridge starts and observes the mature pipeline; direct-profile work emits real lifecycle events; live UI consumes bounded event-derived counts; and real terminal scan history is captured. Production background scheduling uses encrypted two-phase request publication, exact UUID/generation ownership, startup `getWorkInfoById` reconciliation, idempotent result-aware success and terminal cancellation observation. Stable direct-profile outcomes resume by exact scope. The two-hop pivot path now persists an encrypted request-scoped frontier with queued/visited/completed state, conservative admission, loop/depth/global/per-signal budgets, bounded admission/rejection diagnostics and durable clear tombstones. True suspended pause/resume, sole coordinator ownership, a generic frontier-draining plan, UI diagnostics and external process-kill/reboot proof remain incomplete. |
+| Discovery breadth and reliability | **12/15** | Discovery Fabric v2 is integrated into runtime planning and direct-profile execution with 78 declarative definitions, live selector-driven extraction, exact/approved-host redirect checks including HTTPS-downgrade rejection, bounded reads, timeout/retry/cooldown/request-spacing policy, typed truthful outcomes, provider health updates for interactive scans, scan modes and maintenance-audit CI. A separately pinned WhatsMyName asset contains 716 source records and 644 executable HTTPS username rules after parser/policy filtering, with mode budgets, bounded execution and fail-closed states. These rules are not additional `ProviderCatalogV2` definitions or live-validated providers. The project remains below the 1,000+ useful reviewed-provider target and lacks registry-wide live contracts. |
+| Recursive orchestration | **9/10** | The coordinator/event bridge starts and observes the mature pipeline; direct-profile work emits real lifecycle events; live UI consumes bounded event-derived counts; and real terminal scan history is captured. Production background scheduling uses encrypted two-phase request publication, exact UUID/generation ownership, startup `getWorkInfoById` reconciliation, idempotent result-aware success and terminal cancellation observation. Stable direct-profile outcomes and the request-scoped frontier resume by exact scope. A generic depth-driven frontier drain now honors a configured maximum (default two, hard maximum four), shared budgets, verified-only expansion, queued/visited/completed state, conservative admission, bounded rejection diagnostics and durable clear tombstones. True suspended pause/resume, sole coordinator ownership, non-profile/image/search/breach/AI checkpoints, UI diagnostics and external process-kill/reboot proof remain incomplete. |
 | Evidence/provenance | **6/10** | Universal evidence supports provider, retrieval/observation timestamps, verification state, reliability, SHA-256, parser version and historical state. Imported third-party OSINT reports are explicitly Candidate/ThirdPartyAggregation and never become Verified merely because an external tool reported a hit. Older producers still do not populate every field universally. |
 | Entity resolution | **6/10** | An explainable multi-signal resolver is integrated into the production graph, preserves contributions and contradictions, and prevents same-username-only confirmation. A deterministic digest-bound benchmark now reports confusion-matrix counts, precision, recall, F1, FPR, FNR and unverifiable accuracy. Calibration artifacts fail closed on schema/version/digest/count/policy mismatch; synthetic artifacts cannot activate production policy, and consented artifacts must meet minimum class counts and bind to the exact evaluated corpus. No representative consented artifact or measured production calibration exists, so weights remain engineering parameters. |
 | Identity graph | **6/8** | Graph v2 adds semantic node kinds, typed relationships, evidence/contradiction IDs, node states, history fields, queries and schema versioning while preserving legacy case compatibility. GraphML, declared-attribute GEXF and NetworkX-style node-link JSON serializers provide dependency-free interoperability with Gephi/Cytoscape/NetworkX-style workflows. Some subsystems still retain parallel representations. |
@@ -38,8 +39,8 @@ The readiness score is **69/100** after adding an encrypted request-scoped bound
 | AI analyst | **4/5** | Generated factual claims must be structured, cite existing evidence IDs and survive deterministic validation; uncited/unknown identifiers are withheld and invalid output falls back locally. The validator also rejects explicit email/URL identifiers not present in the evidence actually cited. Corrected-graph/remediation-native inputs and a production evaluation corpus remain incomplete. |
 | UX/UI | **6/8** | Overview/Evidence/Connections/Actions remain coherent; live scan state is event-derived; saved Cases support persistent corrections, remediation tracking, scan-history display and share-safe export. API 36 visual QA fixed consent-footer overlap, machine-token status copy, graph-label clipping, remediation-status overlap, stale scan logs, the background/cancel action collision, ambiguous provider budgets and large-type navigation/count wrapping. The changed scan-budget and navigation states were inspected at 1.0x, 1.3x, 1.5x and 2.0x font scale. Timeline UX, graph-export UI, case-integrated image clusters and broad TalkBack/adaptive-layout/physical-device validation remain incomplete. |
 | Security/privacy | **3/4** | Keystore AES-256-GCM cases, encrypted request-scoped scan checkpoints, generation-bound exact-owner lifecycle state, opaque new WorkManager inputs, allowlisted WorkManager progress/error values, atomic encrypted result replacement, restricted evidence WebView, local visual processing defaults, opt-in remote AI, explicit deletion and pre-write share-safe export are implemented. External report imports are bounded, local/in-memory, tied to explicit audit seeds and strip/reject password/hash/cookie/token/session/credential material. Historical plaintext WorkManager rows are not forensically erased, and latest-result reads still need bounded/off-main hardening. |
-| Testing/device validation | **3/5** | Provider audit (78 definitions), pinned WhatsMyName integrity audit (716 records / 644 executable rules), both debug and uiTest JVM suites (501 tests across 92 suites each, 0 failures/errors/skips), debug/uiTest APK assembly and zero-error lint pass on the exact implementation commit above. Direct AndroidJUnitRunner instrumentation on the wiped API 36 x86_64 AVD at 4 GB RAM passed 23/23 tests, including Android Keystore profile-checkpoint tests (2/2), exact-UUID WorkManager lifecycle/crash-boundary tests (5/5) and the uiTest encrypted fixture. The Gradle UTP wrapper had aborted on the earlier 2 GB AVD, so this is direct instrumentation evidence rather than a successful UTP invocation. Fifteen canonical API 36 screenshots and changed states at 1.0x/1.3x/1.5x/2.0x font scale were inspected, but physical Samsung/Pixel/lower-memory, battery, external process-death/reboot and complete accessibility gates remain incomplete. |
-| **Total** | **69/100** | Stable direct-profile outcomes and the bounded two-hop pivot frontier are now recoverable under exact encrypted scope, and entity-resolution evaluation is reproducible and fail-closed. This does not establish full-pipeline pause/resume, process-kill/reboot acceptance, registry-wide live validation, representative empirical calibration or release hardening. |
+| Testing/device validation | **3/5** | Provider audit (78 definitions), pinned WhatsMyName integrity audit (716 records / 644 executable rules), both debug and uiTest JVM suites (577 tests across 105 suites each, 0 failures/errors/skips), debug/uiTest APK assembly, Android-test Kotlin compilation and zero-error lint pass on the exact implementation commit above. The connected AndroidJUnitRunner task reached packaging but stopped with `No connected devices!`; no current-tree emulator/device result is claimed. Physical Samsung/Pixel/lower-memory, battery, external process-death/reboot and complete accessibility gates remain incomplete. |
+| **Total** | **71/100** | Declarative provider extraction, fail-closed redirect/WebView boundaries, interactive health installation and a configured-depth bounded frontier drain are now covered by current-tree tests and builds. This does not establish full-pipeline pause/resume, process-kill/reboot acceptance, registry-wide live validation, representative empirical calibration, connected-device acceptance or release hardening. |
 
 ## M0 — Baseline audit
 
@@ -53,18 +54,18 @@ Implemented:
 
 - typed `ProviderDefinition` schema;
 - provider categories, query capabilities, source reliability and bounded request policies;
-- declarative existence/extraction rules;
+- declarative existence/extraction rules, now executed by `ProfileScanner` for direct HTTP and bounded WebView paths;
 - duplicate/template/priority/request-policy validation;
 - deterministic response classification for present, not-found, soft-404, authentication-required, automation-challenged, redirect, unexpected and invalid responses;
 - Quick / Standard / Deep / Exhaustive modes backed by actual runtime plans;
 - scan-mode persistence in resume markers;
-- process-local provider health statistics;
+- provider health statistics with persistent diagnostics installed for both background and interactive scans;
 - **78 authored provider/service definitions**;
 - a separately pinned WhatsMyName catalog from upstream commit `e62338e4fc88536a330733d355a9d33a3a1697c6`, with bundled CC BY-SA 4.0 license/notice and exact data/license SHA-256 checks;
 - strict parsing and policy filtering of 716 source records into 644 executable HTTPS username rules and 72 explicitly non-executable records;
 - Quick / Standard / Deep / Exhaustive username-rule budgets of 50 / 200 / 500 / 644 per normalized explicit handle, at most three handles, bounded concurrency and response sizes;
 - fail-closed catalog-unavailable and provider outcomes, Observed evidence only, and explicit UI separation of direct-profile counts from username-rule budgets;
-- direct-profile execution through definitions with bounded response reads, policy timeouts, retries, cooldowns, minimum request spacing and redirect enforcement;
+- direct-profile execution through definitions with bounded response reads, policy timeouts, retries, cooldowns, minimum request spacing, exact/approved-host redirect enforcement and HTTPS-downgrade rejection;
 - typed `RateLimited`, `Timeout` and `NetworkUnavailable` outcomes alongside present/not-found/auth/challenge/redirect/parser states;
 - provider IDs propagated from templates through candidates/results into evidence;
 - stable-scan-ID queued/started/completed/unavailable callbacks and persistent health outcome updates;
@@ -75,7 +76,7 @@ Implemented:
 - a public-source capability catalog separating Native, NativeEquivalent, ImportOnly, API-key-dependent, ManualOnly, Retired and Unsupported integration postures;
 - explicit truthful states for retired Google/Bing cached-page products rather than simulated support.
 
-Not complete: 1,000+ useful reviewed providers, registry-wide live present/missing/soft-404/redirect/challenge validation (including representative WhatsMyName rules), persisted provider-health history, and migration of every mature custom resolver to the declarative runtime.
+Not complete: 1,000+ useful reviewed providers, registry-wide live present/missing/soft-404/redirect/challenge validation (including representative WhatsMyName rules), durable historical health reporting across process lifetimes, and migration of every mature custom resolver to the declarative runtime.
 
 ## OSINT interoperability tranche
 
@@ -175,11 +176,11 @@ The encrypted resume record stores the seed input, selected mode, deep-scan flag
 
 ## M3 — Recursive frontier
 
-**Status: partial, integrated with the existing bounded two-hop scanner.**
+**Status: partial, integrated with a configured-depth bounded scanner.**
 
-Implemented: admission policy, visited/depth rejection, global and per-signal budgets, common-handle corroboration, weak-signal suppression and verified-only second-hop expansion. The production two-hop path uses a request-scoped Android Keystore AES-GCM frontier containing queued, visited and completed work plus bounded admission/rejection diagnostics. State is saved before execution and after each completed result; thrown or cancelled work remains pending. Storage enforces request-scoped AAD, bounded envelopes, atomic fsynced replacement, path/symlink containment and durable clear tombstones that prevent a late worker from recreating purged state.
+Implemented: admission policy, visited/depth rejection, global and per-signal budgets, common-handle corroboration, weak-signal suppression and verified-only expansion. The production path uses a request-scoped Android Keystore AES-GCM frontier containing queued, visited and completed work plus bounded admission/rejection diagnostics, then drains each configured depth in order (default two, hard maximum four). State is saved before execution and after each completed result; thrown or cancelled work remains pending. Storage enforces request-scoped AAD, bounded envelopes, atomic fsynced replacement, path/symlink containment and durable clear tombstones that prevent a late worker from recreating purged state.
 
-Not complete: one coordinator-owned generic frontier-draining plan, UI/event exposure for pivot diagnostics, cross-process file locking, eager expired-file pruning and external process-kill/reboot acceptance. The current caller still schedules a fixed two-hop flow.
+Not complete: one coordinator-owned general plan covering every scan stage, UI/event exposure for pivot diagnostics, cross-process file locking, eager expired-file pruning and external process-kill/reboot acceptance. Search/image/breach/AI stages remain outside this frontier checkpoint.
 
 ## Evidence and provenance
 
@@ -314,13 +315,13 @@ Graph interoperability serializers now exist for GraphML, GEXF and node-link JSO
 
 ## Security and privacy
 
-Implemented controls include Keystore-backed AES-256-GCM cases, versioned/atomic encrypted storage, opaque WorkManager request references, allowlisted background progress/error values, explicit deletion, restricted evidence WebView, system Photo Picker, local visual/face processing, opt-in remote AI, pre-write share-safe redaction, PII-safe scan-history binding and non-impersonating public-source HTTP identities.
+Implemented controls include Keystore-backed AES-256-GCM cases, versioned/atomic encrypted storage, opaque WorkManager request references, allowlisted background progress/error values, explicit deletion, restricted host-bound/cookie-free/non-impersonating evidence WebView rendering, system Photo Picker, local visual/face processing, opt-in remote AI, pre-write share-safe redaction, PII-safe scan-history binding and non-impersonating public-source HTTP identities.
 
 The resume record is encrypted with AES-256-GCM in AndroidKeyStore. It stores the complete identity input, scan mode, deep-scan flag and per-scan face-policy flag behind UUID-named ciphertext files plus an opaque UUID pointer, authenticates the format/request ID with AAD, enforces a 24-hour TTL and bounded reads, and uses temporary-file publication with file and parent-directory fsync, rollback and a process-local lock. Key creation is fail-closed when prior encrypted state exists. Legacy plaintext UI markers migrate through a bounded validation/encryption/deletion policy, and typed internal read/write states preserve invalid, missing, expired and storage-failure distinctions.
 
 New `BackgroundScanWorker` requests place only canonical opaque request/generation UUIDs in WorkManager input `Data`; output and relayed progress are bounded to fixed stage/error codes. The API 36 WorkManager tests inspect the current WorkSpec row and confirm the seeded identity value is absent. They do not inspect retained historical rows, SQLite WAL/free pages or prove forensic erasure. Pre-upgrade WorkManager rows may retain raw legacy `identity_json`/flags until WorkManager prunes them; the upgraded worker rejects those inputs without decoding or echoing their values.
 
-Lifecycle hardening is production-integrated but not release-complete. Scheduling atomically publishes the replacement generation before cancelling the old exact UUID, startup reconciles only the persisted exact WorkManager UUID, result publication precedes durable success, retries are idempotent for an exact matching result and cancellation remains requested until the exact row is terminal. Initial direct-profile stable results use AES-GCM with request/plan/candidate AAD, bounded reads, atomic fsynced replacement, durable request tombstones and stable-only reuse. The bounded pivot frontier also uses Android Keystore AES-GCM, request-scoped AAD, bounded envelopes, atomic fsynced replacement and durable clear tombstones. Remaining M2/M13 risks include external process-kill/relaunch and reboot proof, a crash/failed-cleanup window that can retain a prior encrypted profile scope until explicit purge or later maintenance, a wall-clock assumption in mismatched-result retirement, synchronous latest-result/purge call sites, unbounded result-envelope reads and absence of one general persisted coordinator plan.
+Lifecycle hardening is production-integrated but not release-complete. Scheduling atomically publishes the replacement generation before cancelling the old exact UUID, startup reconciles only the persisted exact WorkManager UUID, result publication precedes durable success, retries are idempotent for an exact matching result and cancellation remains requested until the exact row is terminal. Initial direct-profile stable results use AES-GCM with request/plan/candidate AAD, bounded reads, atomic fsynced replacement, durable request tombstones and stable-only reuse. The bounded pivot frontier also uses Android Keystore AES-GCM, request-scoped AAD, bounded envelopes, atomic fsynced replacement and durable clear tombstones. AI provider configuration now migrates legacy plaintext keys into encrypted storage and fails closed on unusable ciphertext; it does not expose a plaintext fallback. Remaining M2/M13 risks include external process-kill/relaunch and reboot proof, a crash/failed-cleanup window that can retain a prior encrypted profile scope until explicit purge or later maintenance, a wall-clock assumption in mismatched-result retirement, synchronous latest-result/purge call sites, unbounded result-envelope reads and absence of one general persisted coordinator plan.
 
 External OSINT imports are local/in-memory and bounded. Import parsers require explicit audit seeds appropriate to the source family and strip or reject secret-bearing fields. No newly introduced challenge bypass, credential acquisition, private-source access, hidden tracking, Tor person-crawling, authenticated social scraping or traffic-evasion behavior is permitted.
 
@@ -329,7 +330,7 @@ External OSINT imports are local/in-memory and bounded. Import parsers require e
 Validated implementation commit:
 
 ```text
-4f104115a8c60b57f71078dedf1e4528a2b19949
+d6c3f5522e280b64efb8727ce88edc8f8287aa70
 ```
 
 Validation date:
@@ -343,24 +344,24 @@ Current-session validation on that exact commit:
 ```text
 Provider registry audit       PASS — 78 definitions / 0 errors
 WhatsMyName integrity audit   PASS — 716 records / 644 executable rules / pinned hashes match
-Debug JVM unit tests          PASS — 501 tests / 92 suites / 0 failures / 0 errors / 0 skips
-uiTest JVM unit tests         PASS — 501 tests / 92 suites / 0 failures / 0 errors / 0 skips
-Focused frontier/resolver     PASS — 60 tests / 0 failures / 0 errors / 0 skips
-Debug APK                     PASS — 115,155,432 bytes / SHA-256 D207ACF47295F33E86935C973B31C4926CCEAD483B1CDA23EFAA854EC2F4EC43
-uiTest APK                    PASS — 242,555,321 bytes / SHA-256 753268BC2E60F846FBFF379EC6E173DF7B98F0A68CD29FE170458DD9423C3A8B
-Debug lint                    PASS — 0 errors / 65 warnings
-uiTest lint                   PASS — 0 errors / 68 warnings
-API 36 direct instrumentation PASS — 23/23 tests on exact installed uiTest APKs
-Visual delta                  NONE — frontier/calibration tranche does not change rendered UI
+Debug JVM unit tests          PASS — 577 tests / 105 suites / 0 failures / 0 errors / 0 skips
+uiTest JVM unit tests         PASS — 577 tests / 105 suites / 0 failures / 0 errors / 0 skips
+Android-test Kotlin compile  PASS — `compileUiTestAndroidTestKotlin`
+Debug APK                     PASS — 118,689,049 bytes / SHA-256 9863910AEA5ED580AFD4E715D6C617412AD7397FE829D2B449654A80917AB12B
+uiTest APK                    PASS — 243,286,807 bytes / SHA-256 E252F8E4517024DD8DE973C01880815362E93A2E20ED7CEADEB3632C06F49B78
+Debug lint                    PASS — 0 errors / 69 warnings
+uiTest lint                   PASS — 0 errors / 72 warnings
+Connected instrumentation    NOT RUN — `No connected devices!` after APK packaging
+Visual QA                     NOT RUN in this validation session
 ```
 
-The focused JVM gate contains 8 frontier-store tests, 5 pivot-admission tests, 11 extractor tests, 5 benchmark/calibration tests, 4 resolver tests and 27 worker tests. The API 36 WorkManager class exercises pending same-UUID reenqueuing, durable-success retry, exact terminal cancellation, stale-owner isolation and opaque WorkSpec input. Direct instrumentation completed through AndroidJUnitRunner after increasing the wiped AVD from 2 GB to 4 GB RAM; the Gradle UTP wrapper had aborted after 7/8 tests on the 2 GB configuration, so no successful UTP claim is made. The uiTest-only receiver writes deterministic `.test` data through production encrypted stores and is absent from the debug manifest. WorkManager coverage remains scoped to newly created current rows and deterministic crash states; it is not historical/WAL forensic erasure, external process-death/reboot, accessibility or physical-device evidence.
+The full JVM gate was run after the implementation commit with the declarative extractor, redirect-policy, WebView-policy, frontier-depth and AI-key tests included. The connected Android test task packaged the current APKs but could not launch AndroidJUnitRunner because no ADB device was connected. The uiTest-only receiver edit that was already present in the worktree remains uncommitted and is not part of the validated implementation commit. No current-tree emulator, physical-device, screenshot, process-death/reboot, accessibility or battery/thermal claim is made here.
 
 ## Current production blockers
 
 1. Grow Discovery Fabric beyond 78 authored definitions and the separate 716-record/644-executable-rule pinned username catalog toward the contract's 1,000+ useful reviewed providers, with automated maintenance/import and representative live provider-contract validation.
 2. Migrate remaining mature custom resolvers to the v2 runtime and persist provider health/reliability across process lifetimes.
-3. Turn the persisted fixed two-hop frontier into a coordinator-owned general plan with suspended pause/resume and surfaced pivot diagnostics, then run external process-kill/relaunch and reboot recovery validation against the production lifecycle.
+3. Extend the configured-depth frontier into a coordinator-owned general plan with suspended pause/resume, all-stage checkpoints and surfaced pivot diagnostics, then run external process-kill/relaunch and reboot recovery validation against the production lifecycle.
 4. Move latest-result decrypt/deserialize/purge work fully off the main thread, bound result-envelope reads and run large-case ANR/storage-corruption tests.
 5. Calibrate entity resolution with a representative benchmark and publish precision/recall/FPR/FNR/calibration results here.
 6. Finish universal evidence/provenance population and graph-as-sole-truth migration.

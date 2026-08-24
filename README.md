@@ -6,31 +6,32 @@ It collects public evidence, preserves provenance, separates verification from r
 
 ## Current status
 
-The current implementation branch is **69/100 under the strict production rubric**.
+The current implementation branch is **71/100 under the strict production rubric**.
 
 Validated implementation commit:
 
 ```text
-93db3843a1286e3946986d28f373426859c34296
+d6c3f5522e280b64efb8727ce88edc8f8287aa70
 ```
 
-That exact implementation passed the current final-tree validation gates:
+That exact implementation passed the current final-tree build and deterministic validation gates:
 
 ```text
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
-Debug JVM unit tests                PASS — 501 tests / 92 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 501 tests / 92 suites / 0 failures, errors, or skips
-Debug APK assembly                  PASS — 115,155,432 bytes
-Debug APK SHA-256                   D207ACF47295F33E86935C973B31C4926CCEAD483B1CDA23EFAA854EC2F4EC43
-uiTest APK assembly                 PASS — 242,555,321 bytes
-uiTest APK SHA-256                  753268BC2E60F846FBFF379EC6E173DF7B98F0A68CD29FE170458DD9423C3A8B
-Debug lint                          PASS — 0 errors / 65 warnings
-uiTest lint                         PASS — 0 errors / 68 warnings
-API 36 x86_64 instrumentation       PASS — 23/23 tests
+Debug JVM unit tests                PASS — 577 tests / 105 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 577 tests / 105 suites / 0 failures, errors, or skips
+Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
+Debug APK assembly                  PASS — 118,689,049 bytes
+Debug APK SHA-256                   9863910AEA5ED580AFD4E715D6C617412AD7397FE829D2B449654A80917AB12B
+uiTest APK assembly                 PASS — 243,286,807 bytes
+uiTest APK SHA-256                 E252F8E4517024DD8DE973C01880815362E93A2E20ED7CEADEB3632C06F49B78
+Debug lint                          PASS — 0 errors / 69 warnings
+uiTest lint                         PASS — 0 errors / 72 warnings
+Connected Android instrumentation  NOT RUN — `No connected devices!`
 ```
 
-The API 36 Medium Phone emulator run used the exact installed uiTest APKs and AndroidJUnitRunner after increasing the wiped AVD to 4 GB RAM; it completed 23/23 tests. The run included 5/5 exact-UUID WorkManager lifecycle tests, 2/2 Android Keystore-backed profile-checkpoint checks, the encrypted visual fixture and the Compose/remediation regressions. The Gradle UTP wrapper had previously aborted after 7/8 tests on the 2 GB AVD, so the recorded pass is the direct instrumentation result, not a successful UTP invocation. This proves the exercised crash-boundary states and current WorkManager rows on that emulator; it does not prove historical-row erasure, SQLite WAL/free-page sanitization, an externally killed/rebooted process, accessibility, or physical-device behavior.
+The current validation session had no connected ADB device, so the connected Android test task stopped after packaging with `No connected devices!`. Prior API 36 emulator evidence belongs to an earlier implementation commit and is not promoted to this tree. No current-tree claim is made for instrumentation, physical devices, process-death/reboot, accessibility, or battery/thermal behavior.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, historical/case-integrated image workflows, and representative physical-device/accessibility/performance validation remain release gates.
 
@@ -61,12 +62,12 @@ These captures come from the API 36 Medium Phone emulator. Analysis, report, cas
 - Developer, social, forum, gaming, creative, publishing, professional, media, commerce, education, code/package, personal-site, archive, breach and search categories.
 - Quick, Standard, Deep and Exhaustive scan modes backed by real provider plans rather than fake totals. Username-rule budgets are 50 / 200 / 500 / 644 per normalized handle, with at most three explicit handles; direct-profile counts remain separate.
 - Provider query capabilities, source-reliability classes, existence/extraction rules and request policies.
-- Direct-profile candidates execute through the declarative provider runtime with bounded reads, timeout/retry/cooldown policy, provider request spacing, redirect checks and a generic non-impersonating user agent.
+- Direct-profile candidates execute through the declarative provider runtime with live selector-driven extraction, bounded reads, timeout/retry/cooldown policy, provider request spacing, exact/approved-host redirect checks, HTTPS-downgrade rejection and a generic non-impersonating user agent.
 - Real queued, started, completed and unavailable callbacks drive scheduled/completed/unavailable counters; planned registry breadth is not presented as completed work.
 - Registry validation for duplicates, malformed templates, parser drift and inventory drift.
 - Deterministic response states for present, not-found, soft-404, authentication-required, challenged, rate-limited, timed-out, network-unavailable, redirect, unexpected and invalid responses.
 - Multiple bounded public-search sources, direct source verification, retries, `Retry-After`, caches and circuit breakers.
-- Bounded two-hop pivots with admission rules: weak name/location/occupation/face-only signals do not recursively expand by themselves.
+- Configured-depth bounded pivots (default two, hard maximum four) with admission rules: weak name/location/occupation/face-only signals do not recursively expand by themselves, and only verified results seed the next depth.
 - Exact-URL Internet Archive recovery for some deleted/replaced pages.
 
 The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCatalogV2` currently contains 78 authored definitions (70 profile templates and 8 services); the separate pinned WhatsMyName catalog contains 716 records, of which 644 are executable HTTPS username rules. Neither count is presented as registry-wide live validation.
@@ -79,7 +80,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - Direct-profile execution emits provider queued/started/completed/unavailable events with one stable scan ID; retries do not inflate unique started counts and stale callbacks are ignored.
 - Identity seeds, scan mode, deep-scan choice and per-scan face policy are stored in an Android Keystore AES-GCM resume record; new WorkManager requests receive only its opaque UUID.
 - Stable results from the initial direct-profile pass are checkpointed per request, plan and canonical candidate in Android Keystore AES-GCM storage. A restarted worker reuses only exact, unexpired stable outcomes; transient network, timeout, challenge and parser failures are fetched again.
-- The existing two-hop pivot path now uses a request-scoped encrypted frontier with queued, visited and completed state, conservative admission, global/per-signal budgets, bounded rejection diagnostics and durable clear tombstones. A cancelled or thrown pivot attempt remains pending for a later exact-scope worker retry.
+- The configured-depth pivot path now uses a request-scoped encrypted frontier with queued, visited and completed state, conservative admission, global/per-signal budgets, bounded rejection diagnostics and durable clear tombstones. A cancelled or thrown pivot attempt remains pending for a later exact-scope worker retry.
 - Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
 - Background enqueue now publishes a generation-bound lifecycle before replacing the old exact WorkManager UUID, promotes only that prepared encrypted request, and reenqueues the same UUID after an authoritative missing-row crash boundary.
 - The worker claims the exact owner/request/generation, publishes the encrypted result before durable success, and treats an exact matching result as idempotent success if WorkManager retries after the success-commit boundary.
@@ -90,7 +91,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
 - Later case edits cannot silently attach a newer scan to an older case.
 
-Recovery now covers stable initial direct-profile outcomes and the bounded two-hop pivot frontier. True suspended pause/resume, a coordinator-owned general scan plan, search/image/breach/AI checkpoints and sole coordinator ownership remain incomplete. Pivot diagnostics are not yet surfaced in the investigation UI, and the caller remains a fixed two-hop flow rather than a generic frontier-draining coordinator. Some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
+Recovery now covers stable initial direct-profile outcomes and the configured-depth pivot frontier. True suspended pause/resume, a coordinator-owned general plan, search/image/breach/AI checkpoints and sole coordinator ownership remain incomplete. Pivot diagnostics are not yet surfaced in the investigation UI, and some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
 
 ## Evidence, graph and entity resolution
 
@@ -168,7 +169,7 @@ A production AI evaluation corpus and fully corrected-graph/remediation-native m
 - Active scan state is temporary by default.
 - Explicit saves use Android Keystore-backed AES-256-GCM.
 - Versioned case schema, atomic writes and integrity verification.
-- Legacy plaintext migration without a plaintext fallback for new saves.
+- Legacy plaintext AI keys migrate into encrypted storage; unusable encrypted keys fail closed without a plaintext fallback for new reads.
 - Case schema v3 supports authorized scope, scan history, user corrections, remediation records and export records.
 - Saved-case comparison uses explicit older/newer roles.
 - Evidence decisions: **Mine / Not mine / Unsure / Ignore**.
@@ -197,7 +198,7 @@ Network-dependent operations can include public profile/source checks, search/im
 
 Local operations include reference-image processing, exact/perceptual image comparison, YuNet/SFace inference, PII parsing, graph/risk analysis, encrypted case and scan-checkpoint state, report generation and share-safe redaction.
 
-The reverse-image matcher identifies itself generically as Dossier rather than impersonating a consumer browser/device. Challenge pages and source restrictions are reported rather than bypassed.
+The reverse-image matcher and bounded WebView renderer identify themselves generically as Dossier rather than impersonating a consumer browser/device. WebView scraping is cookie-free, blocks non-HTTP(S), cross-host and HTTPS-downgrade top-level navigation, and restores the app's prior cookie setting without clearing the separate evidence browser's global storage. Challenge pages and source restrictions are reported rather than bypassed.
 
 ## Build and validation
 
@@ -233,7 +234,7 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - `ProviderCatalogV2` has 78 authored definitions, while the separate pinned WhatsMyName catalog has 716 records and 644 executable HTTPS username rules; this remains below the 1,000+ useful reviewed-provider target and does not establish live health.
 - Private, authenticated, blocked, never-indexed and never-archived content cannot be discovered reliably.
 - Providers can change markup, challenge requests, rate-limit or omit content.
-- Some custom resolver operations still bypass unified provider lifecycle events; true pause/resume, a coordinator-owned general scan plan and non-profile/pivot checkpoints remain incomplete. Pivot diagnostics are persisted but not yet exposed in the UI, and execution remains a fixed two-hop caller.
+- Some custom resolver operations still bypass unified provider lifecycle events; true pause/resume, a coordinator-owned general plan and non-profile/pivot checkpoints remain incomplete. Pivot diagnostics are persisted but not yet exposed in the UI.
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
 - Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
 - Replacement-generation cleanup is best effort after WorkManager enqueue acknowledgement. A crash or cleanup failure in that narrow hand-off can retain an encrypted prior-request profile scope until explicit purge or later maintenance; a durable retirement ledger remains open.
