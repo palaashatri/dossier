@@ -4,12 +4,12 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 
 ## Current snapshot
 
-- **Strict product readiness score:** **63/100**
+- **Strict product readiness score:** **64/100**
 - **Milestone state:** M0 complete; M1–M6 and M8–M12 materially advanced but still partial; M7 and M13 remain partial
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
-- **Last validated implementation commit:** `b79c6969be8e0732ce806ab9550ee2bd39eb0f76`
+- **Last validated implementation commit:** `22a3ff7a1162683fd7b0ccd212eda99ac5eb1a08`
 - **Last validation date:** **2026-08-24**
-- **Current-session validation on that commit:** provider-registry audit, debug and uiTest JVM tests, debug and uiTest APK assembly, lint, API 36 Compose/UI tests, Android Keystore resume tests, exact-UUID WorkManager lifecycle/crash-boundary tests and the previously inspected synthetic-data screenshot set
+- **Current-session validation on that commit:** provider-registry audit, debug and uiTest JVM tests, debug and uiTest APK assembly, lint, API 36 Compose/UI tests, Android Keystore resume tests, exact-UUID WorkManager lifecycle/crash-boundary tests, provider-runtime lifecycle tests and affected-state visual QA at normal and 1.3x font scale
 - **Documentation-only commits after the validated implementation:** may update this file/PR prose without changing the validated code claim
 - **Last validated device class:** Medium_Phone profile, Android API 36, x86_64 emulator
 - **Real-device production validation:** not yet recorded
@@ -19,14 +19,14 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 
 Compilation, unit tests and emulator tests are necessary gates, but they do not substitute for live-provider validation, calibrated identity/face benchmarks, physical-device measurements, accessibility validation or release hardening.
 
-The readiness score remains **63/100** after the production lifecycle-recovery and visual-QA tranches. Encrypted two-phase request persistence, generation-bound manager/worker/startup wiring, exact-UUID WorkManager reconciliation, terminal cancellation observation and atomic result replacement are implemented and tested. The score does not increase yet because those deterministic crash-boundary tests are not an external process-kill/relaunch or reboot campaign, and the larger coordinator/frontier, provider, calibration and physical-device gates remain open.
+The readiness score is **64/100** after the declarative provider-execution tranche. Direct-profile candidates now execute through provider definitions with bounded request policy, typed truthful outcomes, provider identity in evidence and real lifecycle counters. Discovery gains one point because this closes a production execution gap; scale, registry-wide live validation, remaining custom-resolver migration, persisted frontier/health, calibration and physical-device gates remain open.
 
 ## Strict 100-point rubric
 
 | Area | Score | Truth |
 |---|---:|---|
-| Discovery breadth and reliability | **9/15** | Discovery Fabric v2 is integrated into runtime scan planning with 78 declarative definitions, categories, validation, health primitives, scan modes, maintenance-audit CI and compatibility execution. A broad OSINT capability catalog and bounded report-interoperability layer now cover many additional tool families, but most external frameworks are import/manual integrations rather than native live providers. The project remains far below the 1,000+ reviewed/live-validated target. |
-| Recursive orchestration | **5/10** | The coordinator/event bridge starts and observes the mature pipeline; live UI consumes real event-derived state; two-hop discovery has admission/visited/depth/budget rules; real terminal scan history is captured. Production background scheduling now uses encrypted two-phase request publication, an exact UUID/generation lifecycle, startup `getWorkInfoById` reconciliation, idempotent result-aware success and terminal cancellation observation. True in-flight pause/resume, sole coordinator ownership, per-provider lifecycle events, a general persisted frontier/plan and external process-kill/reboot proof remain incomplete. |
+| Discovery breadth and reliability | **10/15** | Discovery Fabric v2 is integrated into runtime planning and direct-profile execution with 78 declarative definitions, categories, validation, bounded reads, timeout/retry/cooldown/request-spacing policy, typed truthful outcomes, provider health updates, scan modes and maintenance-audit CI. A broad OSINT capability catalog and bounded report-interoperability layer cover additional tool families, but most external frameworks are import/manual integrations rather than native live providers. The project remains far below the 1,000+ reviewed/live-validated target and lacks registry-wide live contracts. |
+| Recursive orchestration | **5/10** | The coordinator/event bridge starts and observes the mature pipeline; direct-profile work emits real queued/started/completed/unavailable events under a stable scan ID; live UI consumes bounded event-derived counts; two-hop discovery has admission/visited/depth/budget rules; real terminal scan history is captured. Production background scheduling uses encrypted two-phase request publication, exact UUID/generation ownership, startup `getWorkInfoById` reconciliation, idempotent result-aware success and terminal cancellation observation. True in-flight pause/resume, sole coordinator ownership, a general persisted frontier/plan and external process-kill/reboot proof remain incomplete. |
 | Evidence/provenance | **6/10** | Universal evidence supports provider, retrieval/observation timestamps, verification state, reliability, SHA-256, parser version and historical state. Imported third-party OSINT reports are explicitly Candidate/ThirdPartyAggregation and never become Verified merely because an external tool reported a hit. Older producers still do not populate every field universally. |
 | Entity resolution | **5/10** | An explainable multi-signal resolver is integrated into the production graph, preserves contributions and contradictions, and prevents same-username-only confirmation. Direct profile verification now keeps handle-only/name-only matches below the attribution threshold unless independently corroborated or explicitly supplied. Weights remain engineering parameters rather than benchmark-calibrated probabilities. |
 | Identity graph | **6/8** | Graph v2 adds semantic node kinds, typed relationships, evidence/contradiction IDs, node states, history fields, queries and schema versioning while preserving legacy case compatibility. GraphML, declared-attribute GEXF and NetworkX-style node-link JSON serializers provide dependency-free interoperability with Gephi/Cytoscape/NetworkX-style workflows. Some subsystems still retain parallel representations. |
@@ -35,10 +35,10 @@ The readiness score remains **63/100** after the production lifecycle-recovery a
 | Historical evidence | **3/6** | Exact-URL Wayback recovery, bounded CDX history discovery, selected-snapshot re-fetching and best-effort archive.today fallback exist. Historical captures remain explicitly historical and cannot masquerade as proof of current account existence. Universal historical extraction/change tracking and production timeline UI remain incomplete. |
 | Breach intelligence | **4/5** | HIBP authoritative coverage remains separate from general public exposure; privacy-preserving range flows are used where supported; breach/provider/retrieval/date metadata is preserved. LeakCheck/DeHashed/Breach-Parse/Buster/BreachFinder interoperability is summary-only and rejects credential/secret-bearing records. Coverage remains externally dependent. |
 | AI analyst | **4/5** | Generated factual claims must be structured, cite existing evidence IDs and survive deterministic validation; uncited/unknown identifiers are withheld and invalid output falls back locally. The validator also rejects explicit email/URL identifiers not present in the evidence actually cited. Corrected-graph/remediation-native inputs and a production evaluation corpus remain incomplete. |
-| UX/UI | **6/8** | Overview/Evidence/Connections/Actions remain coherent; live scan state is event-derived; saved Cases support persistent corrections, remediation tracking, scan-history display and share-safe export. API 36 visual QA fixed consent-footer overlap, machine-token status copy, graph-label clipping and remediation-status overlap, and records synthetic-data screenshots. Timeline UX, graph-export UI, case-integrated image clusters and broad accessibility/adaptive-layout/physical-device validation remain incomplete. |
+| UX/UI | **6/8** | Overview/Evidence/Connections/Actions remain coherent; live scan state is event-derived; saved Cases support persistent corrections, remediation tracking, scan-history display and share-safe export. API 36 visual QA fixed consent-footer overlap, machine-token status copy, graph-label clipping, remediation-status overlap, stale scan logs and the background/cancel action collision; provider counters remain readable at 1.3x font scale. Timeline UX, graph-export UI, case-integrated image clusters and broad accessibility/adaptive-layout/physical-device validation remain incomplete. |
 | Security/privacy | **3/4** | Keystore AES-256-GCM cases, encrypted request-scoped scan checkpoints, generation-bound exact-owner lifecycle state, opaque new WorkManager inputs, allowlisted WorkManager progress/error values, atomic encrypted result replacement, restricted evidence WebView, local visual processing defaults, opt-in remote AI, explicit deletion and pre-write share-safe export are implemented. External report imports are bounded, local/in-memory, tied to explicit audit seeds and strip/reject password/hash/cookie/token/session/credential material. Historical plaintext WorkManager rows are not forensically erased, and latest-result reads still need bounded/off-main hardening. |
-| Testing/device validation | **3/5** | Provider audit (78 definitions), both debug and uiTest JVM suites (430 tests across 84 suites each, 0 failures/errors/skips), debug/uiTest APK assembly, lint and API 36 Compose/instrumentation (20/20), including Android Keystore resume tests (2/2), exact-UUID WorkManager lifecycle/crash-boundary tests (5/5) and the uiTest-only encrypted visual fixture (1/1), pass on the exact implementation commit above. Fifteen API 36 screenshots were inspected, but physical Samsung/Pixel/lower-memory, battery, external process-death/reboot, font-scale and accessibility gates remain incomplete. |
-| **Total** | **63/100** | A materially integrated contract tranche is validated. External-tool interoperability does not substitute for native/live provider validation, empirical calibration, provider scale or release hardening. |
+| Testing/device validation | **3/5** | Provider audit (78 definitions), both debug and uiTest JVM suites (448 tests across 85 suites each, 0 failures/errors/skips), debug/uiTest APK assembly, lint and a clean-state API 36 Compose/instrumentation run (21/21), including Android Keystore resume tests (2/2), exact-UUID WorkManager lifecycle/crash-boundary tests (5/5) and uiTest-only encrypted-data/provider-progress fixtures (2/2), pass on the exact implementation commit above. Fifteen canonical API 36 screenshots and the affected scan state at normal/1.3x font scale were inspected, but physical Samsung/Pixel/lower-memory, battery, external process-death/reboot and complete accessibility gates remain incomplete. |
+| **Total** | **64/100** | Declarative provider execution is now production-wired and validated. This does not substitute for registry-wide live validation, empirical calibration, provider scale or release hardening. |
 
 ## M0 — Baseline audit
 
@@ -59,6 +59,10 @@ Implemented:
 - scan-mode persistence in resume markers;
 - process-local provider health statistics;
 - **78 authored provider/service definitions**;
+- direct-profile execution through definitions with bounded response reads, policy timeouts, retries, cooldowns, minimum request spacing and redirect enforcement;
+- typed `RateLimited`, `Timeout` and `NetworkUnavailable` outcomes alongside present/not-found/auth/challenge/redirect/parser states;
+- provider IDs propagated from templates through candidates/results into evidence;
+- stable-scan-ID queued/started/completed/unavailable callbacks and persistent health outcome updates;
 - legacy `PLATFORMS` compatibility generated from the v2 registry;
 - deterministic provider-registry audit tool and CI;
 - audit parser-drift detection and canonical TRUTH count enforcement;
@@ -66,7 +70,7 @@ Implemented:
 - a public-source capability catalog separating Native, NativeEquivalent, ImportOnly, API-key-dependent, ManualOnly, Retired and Unsupported integration postures;
 - explicit truthful states for retired Google/Bing cached-page products rather than simulated support.
 
-Not complete: 1,000+ useful reviewed sources, registry-wide live present/missing/soft-404/redirect/challenge validation, universal v2 per-provider rate/concurrency/cooldown scheduling, persisted provider-health history, and migration of every mature custom resolver.
+Not complete: 1,000+ useful reviewed sources, registry-wide live present/missing/soft-404/redirect/challenge validation, persisted provider-health history, and migration of every mature custom resolver to the declarative runtime.
 
 ## OSINT interoperability tranche
 
@@ -143,8 +147,8 @@ Implemented in the current production path:
 - `ScanId`, `ScanRequest`, `ScanRunState`, `ScanEvent`, `LiveScanSnapshot`;
 - coordinator start/cancel wrapper around the mature `ScanSession`;
 - real stage/profile/face/breach/graph/analysis/completion/cancellation observations;
-- production live UI counters from real session state;
-- no invented provider-completion events;
+- production live UI counters from real session and provider-execution state;
+- real direct-profile provider queued/started/completed/unavailable events with bounded counter semantics, retry isolation and stale-scan callback rejection;
 - real scan lifecycle metadata including start/end, mode, provider-plan size, terminal counts and cancellation state;
 - PII-safe SHA-256 seed fingerprint binding for associating a completed scan with an initial explicit case save;
 - later correction/remediation edits cannot silently graft a newer scan onto an older case;
@@ -159,7 +163,7 @@ Implemented in the current production path:
 
 Supporting lifecycle stores use encrypted request `prepare` / exact-ID load / `promote` / discard operations, durable deletion guards, immutable generation/owner/request records, safe error codes and full-snapshot compare-and-transition operations. Reconciliation distinguishes authoritative missing work from an unavailable lookup and never adopts a unique-work-list result by ordering.
 
-Not complete: true suspended pause/resume, provider queued/started/completed/unavailable events, sole coordinator ownership, a persisted plan/parser/frontier generation and external process-kill/relaunch plus reboot recovery proof.
+Not complete: true suspended pause/resume, sole coordinator ownership, a persisted plan/parser/frontier generation, migration of remaining custom resolver work to provider lifecycle events and external process-kill/relaunch plus reboot recovery proof.
 
 The encrypted resume record stores the seed input, selected mode, deep-scan flag and per-scan strong-face-policy flag. New WorkManager rows receive only opaque request/generation UUID references. Prepared/current generations are still request checkpoints, not a persisted scan plan/parser/frontier fingerprint, and deterministic crash-boundary/instrumentation coverage does not by itself constitute process-death or reboot acceptance.
 
@@ -272,7 +276,7 @@ Implemented/preserved:
 - remediation action/value/status rows that remain separate when action copy wraps;
 - a deterministic uiTest-only `.test` fixture that exercises the production encrypted case/transient-result stores and is absent from the debug manifest.
 
-Visual QA on the API 36 Medium Phone emulator produced and inspected 15 canonical screenshots covering consent, identity validation, username review, scan configuration/queued handoff, analysis, all report tabs, saved cases, corrections and remediation. The accepted captures fixed consent copy under the sticky CTA, the raw `SuspiciousSimilarity` token, the clipped `jane@example.tes` graph label and remediation-status collision. The screenshots contain synthetic/non-personal test data only. One minor defect remains visible in `07-scan-progress.png`: the overlaid Continue-in-background and Cancel controls have insufficient vertical separation at this viewport. It is deferred and excluded from the README gallery. This is one viewport and does not establish TalkBack, font/display scaling, reduced motion, landscape/tablet or physical-device acceptance.
+Visual QA on the API 36 Medium Phone emulator produced and inspected 15 canonical screenshots covering consent, identity validation, username review, scan configuration/progress, analysis, all report tabs, saved cases, corrections and remediation. The accepted captures fixed consent copy under the sticky CTA, the raw `SuspiciousSimilarity` token, the clipped `jane@example.tes` graph label, remediation-status collision, stale scan-complete log and the Continue-in-background/Cancel overlap. `07-scan-progress.png` now shows unobstructed logs, separate action bounds and real scheduled/completed/unavailable counter semantics; the affected screen also remained readable at 1.3x font scale. The provider-progress values are a deterministic uiTest-only lifecycle fixture and are not claimed as a live-network scan. Screenshots contain synthetic/non-personal test data only. This remains one viewport and one affected font-scale check; it does not establish TalkBack, full font/display scaling, reduced motion, landscape/tablet or physical-device acceptance.
 
 Not complete: production timeline, graph-export UI, case-integrated/cross-account image cluster review, corrections directly on every live Evidence card, mature tablet/landscape adaptation, localization/RTL and complete accessibility validation.
 
@@ -319,7 +323,7 @@ External OSINT imports are local/in-memory and bounded. Import parsers require e
 Validated implementation commit:
 
 ```text
-b79c6969be8e0732ce806ab9550ee2bd39eb0f76
+22a3ff7a1162683fd7b0ccd212eda99ac5eb1a08
 ```
 
 Validation date:
@@ -332,19 +336,19 @@ Current-session validation on that exact commit:
 
 ```text
 Provider registry audit       PASS — 78 definitions (70 profile templates + 8 services)
-Debug JVM test suite          PASS — 430 tests / 84 suites / 0 failures / 0 errors / 0 skips
-uiTest JVM test suite         PASS — 430 tests / 84 suites / 0 failures / 0 errors / 0 skips
-Debug APK assembly            PASS — 118,240,288 bytes
-Debug APK SHA-256             F7860FDCDF38E9B7952EF6EC67161174E130759D024B9A9417FB98565FEED681
+Debug JVM test suite          PASS — 448 tests / 85 suites / 0 failures / 0 errors / 0 skips
+uiTest JVM test suite         PASS — 448 tests / 85 suites / 0 failures / 0 errors / 0 skips
+Debug APK assembly            PASS — 115,014,478 bytes
+Debug APK SHA-256             17A627D1FF3AC916E0B6DA2FAA44382FEF69A9AFDC442F0C3D4F33449C67C993
 Debug lint                    PASS — 0 errors / 65 warnings / 6 hints
-uiTest APK assembly           PASS — 242,963,519 bytes
-uiTest APK SHA-256            1532A965FC076F4442BA282089DC8E1886B3696B326DA588CDB4B1764F5601F9
+uiTest APK assembly           PASS — 242,449,051 bytes
+uiTest APK SHA-256            AE079F82D6486F36887F913AFA6CE33126C6B9C2753D772CD0764D940ED9B3A8
 uiTest lint                   PASS — 0 errors / 68 warnings / 6 hints
-API 36 Medium_Phone suite     PASS — 20/20 on x86_64 emulator
+API 36 Medium_Phone suite     PASS — 21/21 on x86_64 emulator after exact package-data reset
 Android Keystore resume       PASS — 2/2 within the full emulator suite
 WorkManager lifecycle         PASS — 5/5 within the full emulator suite
-Encrypted visual fixture      PASS — 1/1 within the full emulator suite
-Manual visual QA              RECORDED — 15 inspected API 36 screenshots; synthetic data only
+Visual QA fixture receiver    PASS — 2/2 (encrypted case/result + provider lifecycle counters)
+Manual visual QA              RECORDED — 15 canonical API 36 screenshots plus affected scan state at 1.3x font scale; synthetic data only
 ```
 
 The unit suite includes regressions for external OSINT authorization boundaries, secret-bearing breach reports, Numverify phone scoping, graph interoperability, encrypted two-phase checkpoint persistence/deletion guards, generation-bound lifecycle transitions/startup retry, atomic result replacement, opaque WorkManager transport, fixed progress/error codes, graph-label placement, status copy and cancellation propagation. The API 36 WorkManager class exercises pending same-UUID reenqueuing, durable-success retry, exact terminal cancellation, stale-owner isolation and opaque WorkSpec input. The Compose harness validates one-time onboarding persistence across activity recreation, isolates onboarding state between tests and checks wrapped remediation/status bounds. The uiTest-only receiver writes deterministic `.test` data through the production encrypted stores and is absent from the debug manifest. WorkManager coverage remains scoped to newly created current rows and deterministic crash states; it is not historical/WAL forensic erasure, external process-death/reboot, accessibility or physical-device evidence.
@@ -352,7 +356,7 @@ The unit suite includes regressions for external OSINT authorization boundaries,
 ## Current production blockers
 
 1. Grow Discovery Fabric from 78 definitions toward the contract's 1,000+ useful reviewed providers with automated maintenance/import and live provider-contract validation.
-2. Make v2 scheduling universal: per-provider rate policy, provider-level lifecycle events and persisted health.
+2. Migrate remaining mature custom resolvers to the v2 runtime and persist provider health/reliability across process lifetimes.
 3. Implement true coordinator-owned pause/resume and a persisted general recursive frontier/plan, then run external process-kill/relaunch and reboot recovery validation against the production lifecycle.
 4. Move latest-result decrypt/deserialize/purge work fully off the main thread, bound result-envelope reads and run large-case ANR/storage-corruption tests.
 5. Calibrate entity resolution with a representative benchmark and publish precision/recall/FPR/FNR/calibration results here.

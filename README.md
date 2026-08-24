@@ -6,27 +6,27 @@ It collects public evidence, preserves provenance, separates verification from r
 
 ## Current status
 
-The current implementation branch is **63/100 under the strict production rubric**.
+The current implementation branch is **64/100 under the strict production rubric**.
 
 Validated implementation commit:
 
 ```text
-b79c6969be8e0732ce806ab9550ee2bd39eb0f76
+22a3ff7a1162683fd7b0ccd212eda99ac5eb1a08
 ```
 
 That exact implementation passed the current final-tree validation gates:
 
 ```text
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
-Debug JVM unit tests                PASS — 430 tests / 84 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 430 tests / 84 suites / 0 failures, errors, or skips
-Debug APK assembly                  PASS — 118,240,288 bytes
-Debug APK SHA-256                   F7860FDCDF38E9B7952EF6EC67161174E130759D024B9A9417FB98565FEED681
-uiTest APK assembly                 PASS — 242,963,519 bytes
-uiTest APK SHA-256                  1532A965FC076F4442BA282089DC8E1886B3696B326DA588CDB4B1764F5601F9
+Debug JVM unit tests                PASS — 448 tests / 85 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 448 tests / 85 suites / 0 failures, errors, or skips
+Debug APK assembly                  PASS — 115,014,478 bytes
+Debug APK SHA-256                   17A627D1FF3AC916E0B6DA2FAA44382FEF69A9AFDC442F0C3D4F33449C67C993
+uiTest APK assembly                 PASS — 242,449,051 bytes
+uiTest APK SHA-256                  AE079F82D6486F36887F913AFA6CE33126C6B9C2753D772CD0764D940ED9B3A8
 Debug lint                          PASS — 0 errors / 65 warnings / 6 hints
 uiTest lint                         PASS — 0 errors / 68 warnings / 6 hints
-API 36 x86_64 instrumentation       PASS — 20/20 tests
+API 36 x86_64 instrumentation       PASS — 21/21 tests
 ```
 
 The API 36 Medium Phone emulator run included 5/5 exact-UUID WorkManager lifecycle tests: opaque work input, pending-generation reenqueuing under the same UUID, idempotent retry after durable result publication, cancellation that waits for the exact terminal row, and stale-owner isolation/cleanup. It also included 2/2 Android Keystore-backed resume-store checks, the uiTest-only encrypted visual fixture, and the Compose/remediation regressions. This proves the exercised crash-boundary states and current WorkManager rows on that emulator; it does not prove historical-row erasure, SQLite WAL/free-page sanitization, an externally killed/rebooted process, accessibility, or physical-device behavior.
@@ -37,16 +37,19 @@ See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the
 
 ## Visual walkthrough
 
-These captures come from the API 36 Medium Phone emulator. Analysis, report and case screens use a deterministic **uiTest-only** fixture written through the production encrypted stores; all identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish TalkBack, large-font, reduced-motion, adaptive-layout or physical-device acceptance.
+These captures come from the API 36 Medium Phone emulator. Analysis, report, case and provider-progress states use deterministic **uiTest-only** fixtures; case data is written through the production encrypted stores and provider counters are emitted through the production coordinator callbacks. All identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish TalkBack, full large-font, reduced-motion, adaptive-layout or physical-device acceptance.
 
 | Consent and input validation | Scan configuration |
 |---|---|
 | <img src="docs/screenshots/01-onboarding.png" width="320" alt="Dossier one-time usage notice with all consent copy clear of the Continue button"> | <img src="docs/screenshots/06-scan-configuration.png" width="320" alt="Scan depth configuration showing real direct-profile provider counts"> |
-| <img src="docs/screenshots/03-identity-invalid-email.png" width="320" alt="Identity form showing an invalid email message and disabled Continue button"> | <img src="docs/screenshots/08-analysis.png" width="320" alt="Background analysis with readable presence states and bounded supporting analysis"> |
+| <img src="docs/screenshots/03-identity-invalid-email.png" width="320" alt="Identity form showing an invalid email message and disabled Continue button"> | <img src="docs/screenshots/07-scan-progress.png" width="320" alt="Live scan showing scheduled, completed and unavailable provider counters with separate background and cancel actions"> |
 
-| Evidence-oriented report | Explainable connections |
+| Background analysis | Evidence-oriented report |
 |---|---|
-| <img src="docs/screenshots/09-report-overview.png" width="320" alt="Privacy audit report overview with exposure priority and coverage counts"> | <img src="docs/screenshots/10-report-evidence.png" width="320" alt="Evidence tab with provenance URL, attribution confidence and suggested action"> |
+| <img src="docs/screenshots/08-analysis.png" width="320" alt="Background analysis with readable presence states and bounded supporting analysis"> | <img src="docs/screenshots/09-report-overview.png" width="320" alt="Privacy audit report overview with exposure priority and coverage counts"> |
+
+| Explainable connections | Remediation tracking |
+|---|---|
 | <img src="docs/screenshots/11-report-connections.png" width="320" alt="Connections tab with a visual identity graph and complete email label"> | <img src="docs/screenshots/15-remediation.png" width="320" alt="Saved-case remediation tracking with long actions and status labels on separate rows"> |
 
 ## Discovery Fabric
@@ -55,8 +58,10 @@ These captures come from the API 36 Medium Phone emulator. Analysis, report and 
 - Developer, social, forum, gaming, creative, publishing, professional, media, commerce, education, code/package, personal-site, archive, breach and search categories.
 - Quick, Standard, Deep and Exhaustive scan modes backed by real provider plans rather than fake totals.
 - Provider query capabilities, source-reliability classes, existence/extraction rules and request policies.
+- Direct-profile candidates execute through the declarative provider runtime with bounded reads, timeout/retry/cooldown policy, provider request spacing, redirect checks and a generic non-impersonating user agent.
+- Real queued, started, completed and unavailable callbacks drive scheduled/completed/unavailable counters; planned registry breadth is not presented as completed work.
 - Registry validation for duplicates, malformed templates, parser drift and inventory drift.
-- Deterministic response states for present, not-found, soft-404, authentication-required, challenged, redirect, unexpected and invalid responses.
+- Deterministic response states for present, not-found, soft-404, authentication-required, challenged, rate-limited, timed-out, network-unavailable, redirect, unexpected and invalid responses.
 - Multiple bounded public-search sources, direct source verification, retries, `Retry-After`, caches and circuit breakers.
 - Bounded two-hop pivots with admission rules: weak name/location/occupation/face-only signals do not recursively expand by themselves.
 - Exact-URL Internet Archive recovery for some deleted/replaced pages.
@@ -68,7 +73,7 @@ The long-term contract calls for 1,000+ useful reviewed definitions. The current
 - `ScanCoordinatorRuntime` wraps the mature vertical scan pipeline.
 - Structured scan IDs, requests, run states and events.
 - Live UI state derives from real scan-stage/profile/face/breach/graph/analysis observations.
-- Cancellation is supported; Dossier does not invent provider-level completion events while the underlying scheduler lacks callbacks.
+- Direct-profile execution emits provider queued/started/completed/unavailable events with one stable scan ID; retries do not inflate unique started counts and stale callbacks are ignored.
 - Identity seeds, scan mode, deep-scan choice and per-scan face policy are stored in an Android Keystore AES-GCM resume record; new WorkManager requests receive only its opaque UUID.
 - Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
 - Background enqueue now publishes a generation-bound lifecycle before replacing the old exact WorkManager UUID, promotes only that prepared encrypted request, and reenqueues the same UUID after an authoritative missing-row crash boundary.
@@ -80,7 +85,7 @@ The long-term contract calls for 1,000+ useful reviewed definitions. The current
 - A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
 - Later case edits cannot silently attach a newer scan to an older case.
 
-True suspended pause/resume, provider-level queue/start/completion events, persisted general frontier/plan checkpoints and sole coordinator ownership remain incomplete. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
+True suspended pause/resume, persisted general frontier/plan checkpoints and sole coordinator ownership remain incomplete. Some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
 
 ## Evidence, graph and entity resolution
 
