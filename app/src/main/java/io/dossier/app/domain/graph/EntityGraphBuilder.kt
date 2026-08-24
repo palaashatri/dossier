@@ -2,8 +2,10 @@ package io.dossier.app.domain.graph
 
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.HistoricalAttributeKind
 import io.dossier.app.domain.identity.EntityResolverV2
 import io.dossier.app.domain.identity.ResolutionBand
 import io.dossier.app.domain.model.BreachDigest
@@ -354,9 +356,57 @@ object EntityGraphBuilder {
     ) {
         val value = ev.value.trim()
         if (value.isBlank()) return
-        val type = evidenceKindToEntityType(ev.kind) ?: return
-        val id = entityId(type, value)
         val timestamp = ev.observedAtEpochMillis ?: ev.retrievedAtEpochMillis
+        val historicalArchive = ev.historical && ev.reliability == EvidenceReliability.ArchiveSnapshot
+        val sourceId = if (historicalArchive && ev.attributeKind != null) {
+            ev.sourceUrl?.trim()?.takeIf(String::isNotBlank)?.let { sourceUrl ->
+                val id = entityId(EntityType.Website, sourceUrl)
+                // Attribute records are observations about the archived page, not
+                // standalone current profiles. Keep the archive source node
+                // historical and attach the attribute evidence to it.
+                putEntity(
+                    DossierEntity(
+                        id = id,
+                        type = EntityType.Website,
+                        label = sourceUrl,
+                        confidence = ev.confidence.coerceIn(0f, 1f),
+                        sourceUrls = listOf(sourceUrl),
+                        state = ev.state.toGraphState(),
+                        evidenceIds = listOf(ev.id),
+                        historical = historicalArchive,
+                        firstObservedAtEpochMillis = timestamp,
+                        lastObservedAtEpochMillis = timestamp
+                    )
+                )
+                id
+            }
+        } else {
+            null
+        }
+
+        // Display names and bios are textual claims. Retain them as evidence
+        // on the archived source node but never turn the text into a Profile
+        // entity or a direct subject-ownership edge.
+        if (ev.attributeKind == HistoricalAttributeKind.DisplayName ||
+            ev.attributeKind == HistoricalAttributeKind.Bio
+        ) {
+            sourceId?.let { archiveId ->
+                link(subjectId, archiveId, if (historicalArchive) "archived_as" else "mentions", ev.snippet)
+            }
+            return
+        }
+
+        val type = when (ev.attributeKind) {
+            HistoricalAttributeKind.ExternalLink -> EntityType.Website
+            HistoricalAttributeKind.AvatarUrl -> EntityType.Image
+            HistoricalAttributeKind.Username -> EntityType.Username
+            HistoricalAttributeKind.Organization -> EntityType.Organization
+            HistoricalAttributeKind.Location -> EntityType.Location
+            null -> evidenceKindToEntityType(ev.kind)
+            else -> evidenceKindToEntityType(ev.kind)
+        } ?: return
+
+        val id = entityId(type, value)
         putEntity(
             DossierEntity(
                 id = id,
@@ -371,10 +421,29 @@ object EntityGraphBuilder {
                 lastObservedAtEpochMillis = timestamp
             )
         )
-        link(subjectId, id, relationFor(type), ev.snippet)
-        if (ev.sourceUrl != null) {
-            val profileId = entityId(EntityType.Profile, ev.sourceUrl)
-            link(profileId, id, "mentions", ev.snippet)
+        if (sourceId != null && historicalArchive) {
+            val relation = when (ev.attributeKind) {
+                HistoricalAttributeKind.ExternalLink -> "links_to"
+                HistoricalAttributeKind.AvatarUrl -> "uses_avatar"
+                HistoricalAttributeKind.Username -> "claims_identity"
+                HistoricalAttributeKind.Organization,
+                HistoricalAttributeKind.Location -> "mentions"
+                else -> "mentions"
+            }
+            link(sourceId, id, relation, ev.snippet)
+        } else {
+            val subjectRelation = if (historicalArchive && ev.attributeKind == null) {
+                "archived_as"
+            } else {
+                relationFor(type)
+            }
+            link(subjectId, id, subjectRelation, ev.snippet)
+            if (!historicalArchive) {
+                ev.sourceUrl?.let { sourceUrl ->
+                    val profileId = entityId(EntityType.Profile, sourceUrl)
+                    link(profileId, id, "mentions", ev.snippet)
+                }
+            }
         }
     }
 

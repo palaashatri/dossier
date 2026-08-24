@@ -60,8 +60,24 @@ data class Evidence(
     val reliability: EvidenceReliability = EvidenceReliability.Unknown,
     val contentHashSha256: String? = null,
     val parserVersion: String? = null,
-    val historical: Boolean = false
+    val historical: Boolean = false,
+    val attributeKind: HistoricalAttributeKind? = null
 )
+
+/**
+ * Explicit semantic attribute kind for historical profile/snapshot metadata.
+ * Kept optional on [Evidence] so non-attribute evidence is unaffected.
+ */
+@Serializable
+enum class HistoricalAttributeKind {
+    DisplayName,
+    Bio,
+    Username,
+    AvatarUrl,
+    ExternalLink,
+    Organization,
+    Location
+}
 
 /** Product-contract name for the stable evidence representation. */
 typealias EvidenceRecord = Evidence

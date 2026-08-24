@@ -329,10 +329,19 @@ enum class RelationshipType {
             "has_profile", "owns_profile", "possible_profile", "candidate_profile", "related_profile" -> USES_ACCOUNT
             "affiliated_with" -> AFFILIATED_WITH
             "associated_with_location" -> LOCATED_IN
-            "linked_website" -> LINKS_TO
+            "linked_website", "links_to" -> LINKS_TO
             "mentions" -> MENTIONS
-            "related_image", "image_of_profile" -> USES_AVATAR
-            "face_similar_to" -> VISUALLY_SIMILAR_TO
+            "related_image", "image_of_profile", "uses_avatar" -> USES_AVATAR
+            "owns_domain" -> OWNS_DOMAIN
+            "located_in" -> LOCATED_IN
+            "archived_as" -> ARCHIVED_AS
+            "same_image_as", "same_image_content" -> SAME_IMAGE_AS
+            "similar_image_to", "perceptual_near_duplicate" -> SIMILAR_IMAGE_TO
+            "face_similar_to", "visually_similar_to" -> VISUALLY_SIMILAR_TO
+            "redirects_to" -> REDIRECTS_TO
+            "claims_identity" -> CLAIMS_IDENTITY
+            "cross_links_account" -> CROSS_LINKS_ACCOUNT
+            "derived_from" -> DERIVED_FROM
             "exposed_in", "has_breach_exposure" -> APPEARED_IN_BREACH
             else -> OTHER
         }

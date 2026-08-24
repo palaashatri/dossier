@@ -4,6 +4,7 @@ import io.dossier.app.data.web.WaybackHistoryPlugin
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.HistoricalAttributeKind
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -161,6 +162,57 @@ class WaybackHistoryPluginTest {
         )
 
         assertTrue(result.evidence.isEmpty())
+    }
+
+    @Test
+    fun directlyRefetchedSnapshotEmitsHistoricalAttributesWithCaptureTimestamp() = runBlocking {
+        val cdx = """
+            [["timestamp","original","digest","statuscode","mimetype"],
+             ["20240102030405","https://example.com/profile","ABC","200","text/html"]]
+        """.trimIndent()
+        val html = """
+            <html><head>
+              <meta property="og:title" content="Archived Alice">
+              <meta name="profile:username" content="@alice-archive">
+              <meta name="description" content="Historical profile bio">
+              <meta property="og:image" content="https://cdn.example/avatar.png">
+            </head><body>
+              <a rel="me" href="https://alice.example/about">About</a>
+            </body></html>
+        """.trimIndent()
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val body = if (request.url.encodedPath.contains("/cdx/")) cdx else html
+                Response.Builder()
+                    .request(request)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val result = WaybackHistoryPlugin(client).scan(
+            IdentityInput(fullName = "Authorized subject", profileUrls = listOf("https://example.com/profile"))
+        )
+
+        val snapshot = result.evidence.first { it.providerId == "wayback-snapshot" && it.attributeKind == null }
+        val attributes = result.evidence.filter { it.attributeKind != null }
+        assertTrue(attributes.isNotEmpty())
+        assertTrue(attributes.any { it.attributeKind == HistoricalAttributeKind.DisplayName && it.value == "Archived Alice" })
+        assertTrue(attributes.any { it.attributeKind == HistoricalAttributeKind.Username && it.value == "alice-archive" })
+        assertTrue(attributes.any { it.attributeKind == HistoricalAttributeKind.Bio && it.value == "Historical profile bio" })
+        assertTrue(attributes.any { it.attributeKind == HistoricalAttributeKind.AvatarUrl && it.value == "https://cdn.example/avatar.png" })
+        assertTrue(attributes.any { it.attributeKind == HistoricalAttributeKind.ExternalLink && it.value == "https://alice.example/about" })
+        attributes.forEach { attribute ->
+            assertTrue(attribute.historical)
+            assertEquals(EvidenceReliability.ArchiveSnapshot, attribute.reliability)
+            assertEquals(EvidenceState.Verified, attribute.state)
+            assertEquals(snapshot.observedAtEpochMillis, attribute.observedAtEpochMillis)
+            assertTrue(attribute.signals.any { it.contains("Historical observation only") })
+        }
     }
 
     @Test

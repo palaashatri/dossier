@@ -14,6 +14,7 @@ import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ReverseImageLookupResult
+import io.dossier.app.domain.place.MediaIntelligenceSnapshot
 import io.dossier.app.domain.place.MediaIntelligenceSession
 import org.junit.After
 import org.junit.Assert.assertFalse
@@ -159,6 +160,71 @@ class CaseStoreExactSaveTest {
         val otherCase = target.copy(caseId = "unbound-media-case", input = targetInput)
         assertTrue(store.save(otherCase))
         assertTrue(requireNotNull(store.load(otherCase.caseId)).mediaIntelligence.isEmpty)
+    }
+
+    @Test
+    fun encryptedCaseRoundTripPreservesImageProvenanceAndClusterGraphEvidence() {
+        val candidate = ReverseImageLookupResult.ImageCandidateProvenance(
+            id = "imgcandidate:round-trip",
+            title = "Public avatar copy",
+            imageUrl = "https://images.example.test/avatar-copy.jpg",
+            sourcePageUrl = "https://public.example.test/profile",
+            source = "Fixture public index",
+            acquisitionQuery = "authorized subject avatar",
+            comparedImageUrl = "https://images.example.test/avatar-thumb.jpg",
+            retrievedAtEpochMillis = 1_787_000_000_000L,
+            contentSha256 = "b".repeat(64),
+            perceptualHashHex = "0000000000000001",
+            comparisonScore = 0.88f,
+            exactBytes = false,
+            state = ReverseImageLookupResult.ImageCandidateState.Matched,
+            clusterId = "imgcluster:round-trip"
+        )
+        val cluster = ReverseImageLookupResult.ImageCluster(
+            id = "imgcluster:round-trip",
+            type = ReverseImageLookupResult.ImageClusterType.PerceptualNearDuplicate,
+            representativeCandidateId = candidate.id,
+            memberCandidateIds = listOf(candidate.id, "imgcandidate:second")
+        )
+        val secondCandidate = candidate.copy(
+            id = "imgcandidate:second",
+            title = "Public avatar near-duplicate",
+            imageUrl = "https://images.example.test/avatar-second.jpg",
+            contentSha256 = "c".repeat(64),
+            comparisonScore = 0.81f,
+            state = ReverseImageLookupResult.ImageCandidateState.ComparedNoMatch
+        )
+        val result = ReverseImageLookupResult(
+            gps = null,
+            extractedText = null,
+            labels = emptyList(),
+            faceDetected = false,
+            faceWarning = null,
+            resolvedLocation = null,
+            mapsUrl = null,
+            webEvidence = emptyList(),
+            visualMatches = emptyList(),
+            visualCandidates = listOf(candidate, secondCandidate),
+            visualClusters = listOf(cluster),
+            visualSearchNote = "Whole-image near-duplicate comparison only; no facial identification."
+        )
+        val original = DossierCase(
+            caseId = "media-provenance-round-trip",
+            createdAt = "2026-08-24 00:00",
+            subjectName = "Media Provenance Subject",
+            input = IdentityInput(fullName = "Media Provenance Subject"),
+            mediaIntelligence = MediaIntelligenceSnapshot(imageResults = listOf(result))
+        )
+
+        assertTrue(store.save(original))
+        val loaded = requireNotNull(store.load(original.caseId))
+        val loadedResult = loaded.mediaIntelligence.imageResults.single()
+
+        assertEquals(candidate, loadedResult.visualCandidates.first { it.id == candidate.id })
+        assertEquals(secondCandidate, loadedResult.visualCandidates.first { it.id == secondCandidate.id })
+        assertEquals(cluster, loadedResult.visualClusters.single())
+        assertTrue(loaded.entityGraph.entities.any { it.id == "media-image:${candidate.id}" })
+        assertTrue(loaded.entityGraph.edges.any { it.relation == "PERCEPTUAL_NEAR_DUPLICATE" })
     }
 
     @Test

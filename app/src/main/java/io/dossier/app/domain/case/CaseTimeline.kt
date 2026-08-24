@@ -4,6 +4,7 @@ import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.HistoricalAttributeKind
 import io.dossier.app.domain.discovery.sanitizeTerminalFailureCode
 import kotlinx.serialization.Serializable
 import java.time.Instant
@@ -463,14 +464,15 @@ object CaseTimelineBuilder {
         val historical = evidence.historical
         val kind = if (historical) TimelineEventKind.HistoricalEvidence else TimelineEventKind.ObservedEvidence
         val rawAuditOnly = correctionReason != null
+        val attributeLabel = evidence.attributeKind?.timelineLabel()
         return TimelineEvent(
             timestampEpochMillis = timestamp,
             kind = kind,
             title = when {
-                rawAuditOnly -> "REJECTED · RAW AUDIT · ${evidence.kind.name}"
-                historical -> "Historical observation · ${evidence.kind.name}"
-                observed -> "Observed · ${evidence.kind.name}"
-                else -> "Evidence · ${evidence.kind.name}"
+                rawAuditOnly -> "REJECTED · RAW AUDIT · ${attributeLabel ?: evidence.kind.name}"
+                historical -> "Historical observation · ${attributeLabel ?: evidence.kind.name}"
+                observed -> "Observed · ${attributeLabel ?: evidence.kind.name}"
+                else -> "Evidence · ${attributeLabel ?: evidence.kind.name}"
             },
             detail = buildString {
                 if (rawAuditOnly) {
@@ -478,6 +480,7 @@ object CaseTimelineBuilder {
                     append(correctionReason.label)
                     append(" · ")
                 }
+                attributeLabel?.let { append("Historical attribute: $it · ") }
                 evidence.providerId?.let { append(it) }
                 if (isNotEmpty()) append(" · ")
                 append(if (rawAuditOnly) EvidenceState.Rejected.name else evidence.state.name)
@@ -528,7 +531,9 @@ object CaseTimelineBuilder {
      * safely share the Profile comparison group with the live observation; the
      * source context still has to match before a change candidate is shown.
      */
-    private fun evidenceGroupKey(evidence: Evidence): String = if (
+    private fun evidenceGroupKey(evidence: Evidence): String = if (evidence.attributeKind != null) {
+        evidence.attributeKind.name
+    } else if (
         evidence.historical &&
         evidence.reliability == EvidenceReliability.ArchiveSnapshot &&
         canonicalArchiveTarget(evidence.sourceUrl ?: evidence.value).startsWith("http")
@@ -576,5 +581,15 @@ object CaseTimelineBuilder {
         EvidenceKind.PublicImageEvidence.name,
         EvidenceKind.ImageConsistency.name,
         EvidenceKind.SensitiveSnippet.name
-    )
+    ) + HistoricalAttributeKind.entries.map(HistoricalAttributeKind::name)
+
+    private fun HistoricalAttributeKind.timelineLabel(): String = when (this) {
+        HistoricalAttributeKind.DisplayName -> "Display name"
+        HistoricalAttributeKind.Bio -> "Bio"
+        HistoricalAttributeKind.Username -> "Username"
+        HistoricalAttributeKind.AvatarUrl -> "Avatar URL"
+        HistoricalAttributeKind.ExternalLink -> "External link"
+        HistoricalAttributeKind.Organization -> "Organization"
+        HistoricalAttributeKind.Location -> "Location"
+    }
 }

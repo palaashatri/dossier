@@ -77,6 +77,15 @@ class GraphSchemaV2Test {
     }
 
     @Test
+    fun legacyRelationshipNamesMapToTypedV2Relationships() {
+        assertEquals(RelationshipType.ARCHIVED_AS, RelationshipType.fromLegacy("archived_as"))
+        assertEquals(RelationshipType.SAME_IMAGE_AS, RelationshipType.fromLegacy("same_image_content"))
+        assertEquals(RelationshipType.SIMILAR_IMAGE_TO, RelationshipType.fromLegacy("perceptual_near_duplicate"))
+        assertEquals(RelationshipType.CLAIMS_IDENTITY, RelationshipType.fromLegacy("claims_identity"))
+        assertEquals(RelationshipType.LINKS_TO, RelationshipType.fromLegacy("links_to"))
+    }
+
+    @Test
     fun v2GraphMetadataRoundTrips() {
         val graph = EntityGraph(
             entities = listOf(

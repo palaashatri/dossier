@@ -6,6 +6,7 @@ import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.HistoricalAttributeKind
 import io.dossier.app.domain.evidence.ScannerPlugin
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
@@ -56,7 +57,7 @@ class WaybackHistoryPlugin(
                 val captures = discover(originalUrl).take(MAX_CAPTURES_PER_URL)
                 for ((index, capture) in captures.withIndex()) {
                     val snapshotUrl = snapshotUrl(capture)
-                    val fetched = if (index < MAX_DIRECT_FETCHES_PER_URL) fetchSnapshot(snapshotUrl) else null
+                    val fetched = if (index < MAX_DIRECT_FETCHES_PER_URL) fetchSnapshot(snapshotUrl, originalUrl) else null
                     val state = if (fetched != null) EvidenceState.Verified else EvidenceState.Observed
                     val snippet = fetched?.let { page ->
                         buildList {
@@ -65,6 +66,9 @@ class WaybackHistoryPlugin(
                             if (page.text.isNotBlank()) add(page.text.take(700))
                         }.joinToString(" — ").take(MAX_SNIPPET_CHARS)
                     } ?: "Wayback CDX capture ${capture.timestamp} for $originalUrl"
+
+                    val now = System.currentTimeMillis()
+                    val observedTimestamp = timestampMillis(capture.timestamp)
 
                     evidence += Evidence(
                         id = "wayback:${sha256("$originalUrl|${capture.timestamp}|${capture.digest}").take(32)}",
@@ -82,8 +86,8 @@ class WaybackHistoryPlugin(
                             else add("CDX-indexed historical capture; snapshot body was not re-fetched within the verification budget")
                         },
                         providerId = if (fetched != null) "wayback-snapshot" else "wayback-cdx",
-                        retrievedAtEpochMillis = System.currentTimeMillis(),
-                        observedAtEpochMillis = timestampMillis(capture.timestamp),
+                        retrievedAtEpochMillis = now,
+                        observedAtEpochMillis = observedTimestamp,
                         state = state,
                         reliability = EvidenceReliability.ArchiveSnapshot,
                         contentHashSha256 = fetched?.let { sha256(it.text) },
@@ -96,6 +100,185 @@ class WaybackHistoryPlugin(
                         relation = "ARCHIVED_AS",
                         evidence = "Wayback capture ${ArchivePageResolver.displayTimestamp(capture.timestamp)}"
                     )
+
+                    if (fetched != null) {
+                        val meta = fetched.metadata
+                        meta.displayName?.let { name ->
+                            evidence += Evidence(
+                                id = "wayback:attr:${sha256("$originalUrl|${capture.timestamp}|DisplayName|$name").take(32)}",
+                                kind = EvidenceKind.Profile,
+                                attributeKind = HistoricalAttributeKind.DisplayName,
+                                value = name,
+                                sourceUrl = snapshotUrl,
+                                snippet = "Historical display name extracted from Wayback capture ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                confidence = VERIFIED_SNAPSHOT_CONFIDENCE,
+                                risk = RiskLevel.Low,
+                                signals = listOf(
+                                    "Historical display name extracted from directly re-fetched Wayback snapshot",
+                                    "Observed in historical capture dated ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                    "Historical observation only; does not prove current identity or active account ownership"
+                                ),
+                                providerId = "wayback-snapshot",
+                                retrievedAtEpochMillis = now,
+                                observedAtEpochMillis = observedTimestamp,
+                                state = EvidenceState.Verified,
+                                reliability = EvidenceReliability.ArchiveSnapshot,
+                                contentHashSha256 = sha256(fetched.text),
+                                parserVersion = PARSER_VERSION,
+                                historical = true
+                            )
+                        }
+                        meta.bio?.let { bio ->
+                            evidence += Evidence(
+                                id = "wayback:attr:${sha256("$originalUrl|${capture.timestamp}|Bio|$bio").take(32)}",
+                                kind = EvidenceKind.Profile,
+                                attributeKind = HistoricalAttributeKind.Bio,
+                                value = bio,
+                                sourceUrl = snapshotUrl,
+                                snippet = "Historical bio extracted from Wayback capture ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                confidence = VERIFIED_SNAPSHOT_CONFIDENCE,
+                                risk = RiskLevel.Low,
+                                signals = listOf(
+                                    "Historical bio extracted from directly re-fetched Wayback snapshot",
+                                    "Observed in historical capture dated ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                    "Historical observation only; does not prove current identity or active account ownership"
+                                ),
+                                providerId = "wayback-snapshot",
+                                retrievedAtEpochMillis = now,
+                                observedAtEpochMillis = observedTimestamp,
+                                state = EvidenceState.Verified,
+                                reliability = EvidenceReliability.ArchiveSnapshot,
+                                contentHashSha256 = sha256(fetched.text),
+                                parserVersion = PARSER_VERSION,
+                                historical = true
+                            )
+                        }
+                        meta.username?.let { username ->
+                            evidence += Evidence(
+                                id = "wayback:attr:${sha256("$originalUrl|${capture.timestamp}|Username|$username").take(32)}",
+                                kind = EvidenceKind.Username,
+                                attributeKind = HistoricalAttributeKind.Username,
+                                value = username,
+                                sourceUrl = snapshotUrl,
+                                snippet = "Historical username extracted from Wayback capture ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                confidence = VERIFIED_SNAPSHOT_CONFIDENCE,
+                                risk = RiskLevel.Low,
+                                signals = listOf(
+                                    "Historical username extracted from directly re-fetched Wayback snapshot",
+                                    "Observed in historical capture dated ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                    "Historical observation only; does not prove current identity or active account ownership"
+                                ),
+                                providerId = "wayback-snapshot",
+                                retrievedAtEpochMillis = now,
+                                observedAtEpochMillis = observedTimestamp,
+                                state = EvidenceState.Verified,
+                                reliability = EvidenceReliability.ArchiveSnapshot,
+                                contentHashSha256 = sha256(fetched.text),
+                                parserVersion = PARSER_VERSION,
+                                historical = true
+                            )
+                        }
+                        meta.avatarUrl?.let { avatarUrl ->
+                            evidence += Evidence(
+                                id = "wayback:attr:${sha256("$originalUrl|${capture.timestamp}|AvatarUrl|$avatarUrl").take(32)}",
+                                kind = EvidenceKind.PublicImageEvidence,
+                                attributeKind = HistoricalAttributeKind.AvatarUrl,
+                                value = avatarUrl,
+                                sourceUrl = snapshotUrl,
+                                snippet = "Historical avatar URL extracted from Wayback capture ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                confidence = VERIFIED_SNAPSHOT_CONFIDENCE,
+                                risk = RiskLevel.Low,
+                                signals = listOf(
+                                    "Historical avatar URL extracted from directly re-fetched Wayback snapshot",
+                                    "Observed in historical capture dated ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                    "Historical observation only; does not prove current identity or active account ownership"
+                                ),
+                                providerId = "wayback-snapshot",
+                                retrievedAtEpochMillis = now,
+                                observedAtEpochMillis = observedTimestamp,
+                                state = EvidenceState.Verified,
+                                reliability = EvidenceReliability.ArchiveSnapshot,
+                                contentHashSha256 = sha256(fetched.text),
+                                parserVersion = PARSER_VERSION,
+                                historical = true
+                            )
+                        }
+                        meta.organization?.let { org ->
+                            evidence += Evidence(
+                                id = "wayback:attr:${sha256("$originalUrl|${capture.timestamp}|Organization|$org").take(32)}",
+                                kind = EvidenceKind.Organization,
+                                attributeKind = HistoricalAttributeKind.Organization,
+                                value = org,
+                                sourceUrl = snapshotUrl,
+                                snippet = "Historical organization extracted from Wayback capture ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                confidence = VERIFIED_SNAPSHOT_CONFIDENCE,
+                                risk = RiskLevel.Low,
+                                signals = listOf(
+                                    "Historical organization extracted from directly re-fetched Wayback snapshot",
+                                    "Observed in historical capture dated ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                    "Historical observation only; does not prove current identity or active account ownership"
+                                ),
+                                providerId = "wayback-snapshot",
+                                retrievedAtEpochMillis = now,
+                                observedAtEpochMillis = observedTimestamp,
+                                state = EvidenceState.Verified,
+                                reliability = EvidenceReliability.ArchiveSnapshot,
+                                contentHashSha256 = sha256(fetched.text),
+                                parserVersion = PARSER_VERSION,
+                                historical = true
+                            )
+                        }
+                        meta.location?.let { loc ->
+                            evidence += Evidence(
+                                id = "wayback:attr:${sha256("$originalUrl|${capture.timestamp}|Location|$loc").take(32)}",
+                                kind = EvidenceKind.Location,
+                                attributeKind = HistoricalAttributeKind.Location,
+                                value = loc,
+                                sourceUrl = snapshotUrl,
+                                snippet = "Historical location extracted from Wayback capture ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                confidence = VERIFIED_SNAPSHOT_CONFIDENCE,
+                                risk = RiskLevel.Low,
+                                signals = listOf(
+                                    "Historical location extracted from directly re-fetched Wayback snapshot",
+                                    "Observed in historical capture dated ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                    "Historical observation only; does not prove current identity or active account ownership"
+                                ),
+                                providerId = "wayback-snapshot",
+                                retrievedAtEpochMillis = now,
+                                observedAtEpochMillis = observedTimestamp,
+                                state = EvidenceState.Verified,
+                                reliability = EvidenceReliability.ArchiveSnapshot,
+                                contentHashSha256 = sha256(fetched.text),
+                                parserVersion = PARSER_VERSION,
+                                historical = true
+                            )
+                        }
+                        for (link in meta.externalLinks) {
+                            evidence += Evidence(
+                                id = "wayback:attr:${sha256("$originalUrl|${capture.timestamp}|ExternalLink|$link").take(32)}",
+                                kind = EvidenceKind.PublicSearchEvidence,
+                                attributeKind = HistoricalAttributeKind.ExternalLink,
+                                value = link,
+                                sourceUrl = snapshotUrl,
+                                snippet = "Historical external link extracted from Wayback capture ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                confidence = VERIFIED_SNAPSHOT_CONFIDENCE,
+                                risk = RiskLevel.Low,
+                                signals = listOf(
+                                    "Historical external link extracted from directly re-fetched Wayback snapshot",
+                                    "Observed in historical capture dated ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                                    "Historical observation only; does not prove current identity or active account ownership"
+                                ),
+                                providerId = "wayback-snapshot",
+                                retrievedAtEpochMillis = now,
+                                observedAtEpochMillis = observedTimestamp,
+                                state = EvidenceState.Verified,
+                                reliability = EvidenceReliability.ArchiveSnapshot,
+                                contentHashSha256 = sha256(fetched.text),
+                                parserVersion = PARSER_VERSION,
+                                historical = true
+                            )
+                        }
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -135,9 +318,14 @@ class WaybackHistoryPlugin(
         return parseCdx(body, originalUrl)
     }
 
-    private data class ParsedPage(val title: String, val description: String, val text: String)
+    private data class ParsedPage(
+        val title: String,
+        val description: String,
+        val text: String,
+        val metadata: ExtractedSnapshotMetadata = ExtractedSnapshotMetadata()
+    )
 
-    private fun fetchSnapshot(url: String): ParsedPage? {
+    private fun fetchSnapshot(url: String, originalUrl: String): ParsedPage? {
         val body = fetchText(url, "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.3") ?: return null
         if (body.isBlank() || DiscoveryHttpPolicy.looksBlocked(body)) return null
         val doc = Jsoup.parse(body, url)
@@ -147,8 +335,9 @@ class WaybackHistoryPlugin(
             .select("meta[name=description],meta[property=og:description],meta[name=twitter:description]")
             .firstOrNull()?.attr("content")?.trim().orEmpty()
         val text = doc.body()?.text()?.trim().orEmpty().take(MAX_PAGE_TEXT_CHARS)
-        if (title.isBlank() && description.isBlank() && text.isBlank()) return null
-        return ParsedPage(title, description, text)
+        val metadata = ArchiveSnapshotExtractor.extract(body, url, originalUrl)
+        if (title.isBlank() && description.isBlank() && text.isBlank() && metadata.isEmpty) return null
+        return ParsedPage(title, description, text, metadata)
     }
 
     private fun fetchText(url: String, accept: String, failOnError: Boolean = false): String? {
@@ -218,7 +407,7 @@ class WaybackHistoryPlugin(
     companion object {
         private const val CDX_ENDPOINT = "https://web.archive.org/cdx/search/cdx"
         private const val USER_AGENT = "Dossier/0.1 authorized-public-self-audit"
-        private const val PARSER_VERSION = "wayback-history-v1"
+        private const val PARSER_VERSION = "wayback-history-v2-attributes"
         private const val MAX_PROFILE_URLS = 4
         private const val MAX_CDX_ROWS = 12
         private const val MAX_CAPTURES_PER_URL = 6

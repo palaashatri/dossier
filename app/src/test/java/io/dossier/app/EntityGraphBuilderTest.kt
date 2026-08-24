@@ -2,7 +2,10 @@ package io.dossier.app
 
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationship
+import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.HistoricalAttributeKind
 import io.dossier.app.domain.graph.EntityGraphBuilder
 import io.dossier.app.domain.model.BreachDigest
 import io.dossier.app.domain.model.EntityType
@@ -199,5 +202,68 @@ class EntityGraphBuilderTest {
 
         // Scanner-asserted relationship seeds a direct edge.
         assertTrue(graph.edges.any { it.relation == "username_on_profile" })
+    }
+
+    @Test
+    fun historicalAttributesAttachToArchiveSourceWithoutCurrentOwnershipEdges() {
+        val snapshotUrl = "https://web.archive.org/web/20240102030405id_/https://example.com/profile"
+        val archiveEvidence = Evidence(
+            id = "archive",
+            kind = EvidenceKind.PublicSearchEvidence,
+            value = snapshotUrl,
+            sourceUrl = snapshotUrl,
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.ArchiveSnapshot,
+            observedAtEpochMillis = 1_000L,
+            historical = true
+        )
+        val displayName = Evidence(
+            id = "archive-name",
+            kind = EvidenceKind.Profile,
+            attributeKind = HistoricalAttributeKind.DisplayName,
+            value = "Archived Alice",
+            sourceUrl = snapshotUrl,
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.ArchiveSnapshot,
+            observedAtEpochMillis = 1_000L,
+            historical = true
+        )
+        val username = Evidence(
+            id = "archive-username",
+            kind = EvidenceKind.Username,
+            attributeKind = HistoricalAttributeKind.Username,
+            value = "alice-archive",
+            sourceUrl = snapshotUrl,
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.ArchiveSnapshot,
+            observedAtEpochMillis = 1_000L,
+            historical = true
+        )
+
+        val graph = EntityGraphBuilder.build(
+            input = IdentityInput(fullName = "Authorized subject"),
+            evidence = listOf(archiveEvidence, displayName, username)
+        )
+
+        assertTrue(graph.entities.any { it.type == EntityType.Website && it.label == snapshotUrl && it.historical })
+        assertTrue(graph.entities.any { it.type == EntityType.Username && it.label == "alice-archive" && it.historical })
+        assertTrue(graph.entities.none { it.type == EntityType.Profile && it.label == "Archived Alice" })
+        assertTrue(
+            graph.edges.any {
+                it.relation == "archived_as" &&
+                    it.historical &&
+                    "archive-name" in it.evidenceIds
+            }
+        )
+        assertTrue(
+            graph.edges.any {
+                it.relation == "claims_identity" &&
+                    it.historical &&
+                    it.evidenceIds.contains("archive-username")
+            }
+        )
+        val subjectId = graph.entities.first { it.type == EntityType.Person }.id
+        val usernameId = graph.entities.first { it.type == EntityType.Username && it.label == "alice-archive" }.id
+        assertTrue(graph.edges.none { it.fromId == subjectId && it.toId == usernameId })
     }
 }

@@ -8,6 +8,7 @@ import io.dossier.app.domain.discovery.sanitizeTerminalFailureCode
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.place.MediaIntelligenceSession
+import io.dossier.app.domain.place.MediaIntelligenceSnapshotPolicy
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -275,9 +276,11 @@ class CaseStore(private val context: Context) {
      */
     internal fun normalizeCase(case: DossierCase): DossierCase {
         val migrated = CaseEvidenceIdMigration.migrate(case)
-        val mediaGraph = MediaGraphEnricher.enrich(migrated.entityGraph, migrated.mediaIntelligence)
+        val normalizedMedia = MediaIntelligenceSnapshotPolicy.normalize(migrated.mediaIntelligence)
+        val mediaGraph = MediaGraphEnricher.enrich(migrated.entityGraph, normalizedMedia)
         return migrated.copy(
             entityGraph = mediaGraph,
+            mediaIntelligence = normalizedMedia,
             scanHistory = migrated.scanHistory.map(::normalizePersistedScanHistoryEntry)
         )
     }
