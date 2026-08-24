@@ -6,12 +6,12 @@ It collects public evidence, preserves provenance, separates verification from r
 
 ## Current status
 
-The current implementation branch is **71/100 under the strict production rubric**.
+The current implementation branch is **75/100 under the strict production rubric**.
 
 Validated implementation commit:
 
 ```text
-c0e9d91d8928ede91620e130dd2a8ebef8c8fc1f
+e88654c896d1ae079cf081bdd943bb8f1b914d6c
 ```
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
@@ -19,13 +19,13 @@ That exact implementation passed the current final-tree build and deterministic 
 ```text
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
-Debug JVM unit tests                PASS — 579 tests / 105 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 579 tests / 105 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 599 tests / 107 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 599 tests / 107 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 118,693,225 bytes
-Debug APK SHA-256                   8F194C661BDAE3357B96BE85421523F4C24A431E78ECB39A9ED5FC1C40B100B8
-uiTest APK assembly                 PASS — 243,286,807 bytes
-uiTest APK SHA-256                 0763D51678DC917C9DBACE19F89E5EA4A49EB24DEFF806F6FC9A87BA3E25F57D
+Debug APK assembly                  PASS — 118,714,016 bytes
+Debug APK SHA-256                   8B24C39FA3C3AF3FEC80CE5D2ADC2A3A574D24DD445B4ED0CCA0FECB1E814FC2
+uiTest APK assembly                 PASS — 243,287,114 bytes
+uiTest APK SHA-256                 B4E6215C110F6261AB046542A68B770D562B43C46532739B331074734FF2475B
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
 Connected Android instrumentation  NOT RUN — `No connected devices!`
@@ -33,7 +33,7 @@ Connected Android instrumentation  NOT RUN — `No connected devices!`
 
 The current validation session had no connected ADB device, so the connected Android test task stopped after packaging with `No connected devices!`. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Prior API 36 emulator evidence belongs to an earlier implementation commit and is not promoted to this tree. No current-tree claim is made for instrumentation, physical devices, process-death/reboot, accessibility, or battery/thermal behavior.
 
-This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, historical/case-integrated image workflows, and representative physical-device/accessibility/performance validation remain release gates.
+This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, cross-account historical image workflows, and representative physical-device/accessibility/performance validation remain release gates.
 
 See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the target product contract.
 
@@ -122,6 +122,9 @@ Implemented whole-image duplicate/repost analysis:
 - exact-copy, near-identical, resized/recompressed and modest-crop detection;
 - stable candidate IDs;
 - per-candidate provenance containing source, source page, acquisition query, compared URL, retrieval timestamp, content/perceptual hashes, dimensions, comparison score and outcome;
+- bounded encrypted case persistence for image results, candidate provenance and duplicate clusters;
+- case-load normalization that deduplicates IDs, removes orphan clusters and strips dangling or mislinked references;
+- graph enrichment that connects persisted image candidates/clusters to matching public account pages without making identity claims;
 - truthful candidate states for unavailable download, decode failure, compared/no-match and match;
 - deterministic exact-content and perceptual-near-duplicate clusters with stable IDs;
 - Reverse Media UI for candidate-state totals, cluster summaries, hash/dimension details and source drill-down.
@@ -130,7 +133,7 @@ Whole-image clusters mean **duplicate/reposted image content**. They do not mean
 
 Optional local cross-photo face support uses pinned YuNet/SFace models with exact size/SHA-256 verification, deterministic preprocessing, five-landmark alignment, ambiguity/quality rejection and cosine scoring. Face similarity remains supporting evidence; release thresholds are not advertised as measured identity probabilities until a representative benchmark exists.
 
-Image candidate/cluster objects are not yet persisted into encrypted cases or the primary identity graph across the normal investigation workflow.
+Cross-case/cross-account cluster history and a polished saved-case cluster review workflow remain incomplete. Whole-image similarity and face similarity are supporting evidence, not identity proof.
 
 ## Historical evidence
 
@@ -139,8 +142,9 @@ Image candidate/cluster objects are not yet persisted into encrypted cases or th
 - Historical confidence is capped.
 - Timeline construction uses only real evidence timestamps or provider breach dates.
 - Untimestamped observations are omitted rather than assigned fabricated dates.
+- Directly re-fetched Wayback HTML is parsed with bounded fail-soft rules for explicit historical display name, bio, username, avatar URL, external links, organization and location attributes. These retain archive reliability, capture timestamps, historical state and semantic attribute labels in the timeline and graph.
 
-Broad historical extraction and production timeline UI remain incomplete.
+Equivalent extraction across every archive/provider source and complete change-diff UX remain incomplete.
 
 ## Breach checks
 
@@ -240,11 +244,11 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
 - Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
 - Replacement-generation cleanup is best effort after WorkManager enqueue acknowledgement. A crash or cleanup failure in that narrow hand-off can retain an encrypted prior-request profile scope until explicit purge or later maintenance; a durable retirement ledger remains open.
-- Latest-result decrypt/deserialize and purge paths still include synchronous call sites, and result-envelope reads are not yet size-bounded; large-case ANR/storage-corruption hardening remains open.
+- Latest-result decrypt/deserialize and purge paths still include synchronous call sites; background result envelopes now enforce bounded file, metadata, IV, ciphertext and plaintext sizes before allocation/decryption. Large-case ANR/storage-corruption testing remains open.
 - Entity resolution has deterministic metrics and a fail-closed calibration-artifact path, but still needs a consented representative corpus and published measured calibration before weights can be treated as empirically fitted.
-- Image provenance/clusters are not yet persisted into encrypted cases/identity graph for cross-account or cross-scan investigation.
+- Cross-account/cross-scan image-cluster correlation and the polished saved-case cluster review workflow remain open; bounded candidate/cluster provenance persistence and graph enrichment are implemented.
 - Cross-photo face correlation still requires measured ROC/FAR/FRR and representative physical-device validation.
-- Historical extraction and timeline UX are incomplete.
+- Historical extraction is currently strongest for directly re-fetched Wayback HTML; archive/provider-wide change extraction remains incomplete.
 - HIBP email coverage depends on user-supplied supported access and provider availability.
 - Share-safe redaction reduces disclosure but cannot guarantee anonymity.
 - Visual QA currently covers one API 36 emulator viewport with synthetic data. The changed scan-budget and bottom-navigation states were checked at 1.0x, 1.3x, 1.5x and 2.0x font scale, but this does not establish whole-product accessibility, landscape/tablet or physical-device acceptance.
