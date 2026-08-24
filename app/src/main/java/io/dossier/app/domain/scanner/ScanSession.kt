@@ -317,6 +317,18 @@ object ScanSession {
         return if (ok) case else null
     }
 
+    /**
+     * Persists an encrypted case away from the Compose/main dispatcher. Case
+     * serialization, Keystore access and atomic file replacement can all block
+     * long enough to cause UI jank on large investigations.
+     */
+    suspend fun saveCaseAsync(
+        context: Context,
+        dispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO
+    ): DossierCase? = withContext(dispatcher) {
+        saveCase(context)
+    }
+
     suspend fun executeScan(
         context: Context,
         input: IdentityInput,

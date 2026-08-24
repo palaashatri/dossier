@@ -293,10 +293,12 @@ fun ReportScreen(
                     remediationTips = remediationTips,
                     actionMessage = actionMessage,
                     onSaveCase = {
-                        actionMessage = if (ScanSession.saveCase(context) != null) {
-                            "Encrypted case saved locally."
-                        } else {
-                            "The case could not be saved. No plaintext fallback was used."
+                        purgeScope.launch {
+                            actionMessage = if (ScanSession.saveCaseAsync(context) != null) {
+                                "Encrypted case saved locally."
+                            } else {
+                                "The case could not be saved. No plaintext fallback was used."
+                            }
                         }
                     },
                     onExport = {

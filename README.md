@@ -6,12 +6,12 @@ It collects public evidence, preserves provenance, separates verification from r
 
 ## Current status
 
-The current implementation branch is **75/100 under the strict production rubric**.
+The current implementation branch is **76/100 under the strict production rubric**.
 
 Validated implementation commit:
 
 ```text
-e88654c896d1ae079cf081bdd943bb8f1b914d6c
+11295bf
 ```
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
@@ -19,13 +19,13 @@ That exact implementation passed the current final-tree build and deterministic 
 ```text
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
-Debug JVM unit tests                PASS — 599 tests / 107 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 599 tests / 107 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 631 tests / 109 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 631 tests / 109 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 118,714,016 bytes
-Debug APK SHA-256                   8B24C39FA3C3AF3FEC80CE5D2ADC2A3A574D24DD445B4ED0CCA0FECB1E814FC2
-uiTest APK assembly                 PASS — 243,287,114 bytes
-uiTest APK SHA-256                 B4E6215C110F6261AB046542A68B770D562B43C46532739B331074734FF2475B
+Debug APK assembly                  PASS — 118,765,332 bytes
+Debug APK SHA-256                   CA265E42599AFCA880394F8E70ED9CA2F9596CA48EDBEB63D32B8964CEEEB61D
+uiTest APK assembly                 PASS — 243,319,762 bytes
+uiTest APK SHA-256                  B07A6CFD4F02CAB0339FE74B115F6FEE0DD83518921DD15F21BAA1C39BEEC945
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
 Connected Android instrumentation  NOT RUN — `No connected devices!`
@@ -33,7 +33,7 @@ Connected Android instrumentation  NOT RUN — `No connected devices!`
 
 The current validation session had no connected ADB device, so the connected Android test task stopped after packaging with `No connected devices!`. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Prior API 36 emulator evidence belongs to an earlier implementation commit and is not promoted to this tree. No current-tree claim is made for instrumentation, physical devices, process-death/reboot, accessibility, or battery/thermal behavior.
 
-This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, cross-account historical image workflows, and representative physical-device/accessibility/performance validation remain release gates.
+This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, verified-account image correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
 See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the target product contract.
 
@@ -82,6 +82,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - Stable results from the initial direct-profile pass are checkpointed per request, plan and canonical candidate in Android Keystore AES-GCM storage. A restarted worker reuses only exact, unexpired stable outcomes; transient network, timeout, challenge and parser failures are fetched again.
 - New encrypted scan requests commit a deterministic SHA-256 fingerprint of the selected declarative provider plan plus a bounded ordered provider-ID summary; older request records remain explicitly resumable without being assigned a retroactive plan.
 - The configured-depth pivot path now uses a request-scoped encrypted frontier with queued, visited and completed state, conservative admission, global/per-signal budgets, bounded rejection diagnostics and durable clear tombstones. A cancelled or thrown pivot attempt remains pending for a later exact-scope worker retry.
+- Background WorkManager scans now expose exact-owner `Pausing`/`Paused` lifecycle states, retain encrypted checkpoints through terminal cancellation, resume with a fresh work UUID bound to the same request/generation, and surface pause/resume controls in Background analysis.
 - Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
 - Background enqueue now publishes a generation-bound lifecycle before replacing the old exact WorkManager UUID, promotes only that prepared encrypted request, and reenqueues the same UUID after an authoritative missing-row crash boundary.
 - The worker claims the exact owner/request/generation, publishes the encrypted result before durable success, and treats an exact matching result as idempotent success if WorkManager retries after the success-commit boundary.
@@ -92,7 +93,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
 - Later case edits cannot silently attach a newer scan to an older case.
 
-Recovery now covers stable initial direct-profile outcomes and the configured-depth pivot frontier. True suspended pause/resume, a coordinator-owned general plan, search/image/breach/AI checkpoints and sole coordinator ownership remain incomplete. Pivot diagnostics are not yet surfaced in the investigation UI, and some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
+Recovery now covers stable initial direct-profile outcomes, the configured-depth pivot frontier and an exact-owner background pause/resume lifecycle. A coordinator-owned general plan, search/image/breach/AI checkpoints, sole coordinator ownership and full-stage pause semantics remain incomplete. Pivot diagnostics are persisted and the background pause state is surfaced, while some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
 
 ## Evidence, graph and entity resolution
 
@@ -128,12 +129,14 @@ Implemented whole-image duplicate/repost analysis:
 - truthful candidate states for unavailable download, decode failure, compared/no-match and match;
 - deterministic exact-content and perceptual-near-duplicate clusters with stable IDs;
 - Reverse Media UI for candidate-state totals, cluster summaries, hash/dimension details and source drill-down.
+- bounded saved-case whole-image cluster history groups repeated fingerprints across saved cases while retaining case/cluster/source/retrieval provenance;
+- accessible review wording explicitly states that repeated whole-image content does not establish shared account or person identity.
 
 Whole-image clusters mean **duplicate/reposted image content**. They do not mean two different photos depict the same person.
 
 Optional local cross-photo face support uses pinned YuNet/SFace models with exact size/SHA-256 verification, deterministic preprocessing, five-landmark alignment, ambiguity/quality rejection and cosine scoring. Face similarity remains supporting evidence; release thresholds are not advertised as measured identity probabilities until a representative benchmark exists.
 
-Cross-case/cross-account cluster history and a polished saved-case cluster review workflow remain incomplete. Whole-image similarity and face similarity are supporting evidence, not identity proof.
+Verified-account correlation and independent visual acceptance remain incomplete. Whole-image similarity and face similarity are supporting evidence, not identity proof.
 
 ## Historical evidence
 
@@ -240,13 +243,13 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - `ProviderCatalogV2` has 78 authored definitions, while the separate pinned WhatsMyName catalog has 716 records and 644 executable HTTPS username rules; this remains below the 1,000+ useful reviewed-provider target and does not establish live health.
 - Private, authenticated, blocked, never-indexed and never-archived content cannot be discovered reliably.
 - Providers can change markup, challenge requests, rate-limit or omit content.
-- Some custom resolver operations still bypass unified provider lifecycle events; true pause/resume, a coordinator-owned general plan and non-profile/pivot checkpoints remain incomplete. Pivot diagnostics are persisted but not yet exposed in the UI.
+- Some custom resolver operations still bypass unified provider lifecycle events; a coordinator-owned general plan and non-profile/image/search/breach/AI checkpoints remain incomplete. Background pause/resume is exact-owner bounded rather than a universal coordinator pause contract.
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
 - Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
 - Replacement-generation cleanup is best effort after WorkManager enqueue acknowledgement. A crash or cleanup failure in that narrow hand-off can retain an encrypted prior-request profile scope until explicit purge or later maintenance; a durable retirement ledger remains open.
-- Latest-result decrypt/deserialize and purge paths still include synchronous call sites; background result envelopes now enforce bounded file, metadata, IV, ciphertext and plaintext sizes before allocation/decryption. Large-case ANR/storage-corruption testing remains open.
+- UI latest-result reads, purge and case-save actions now use IO dispatchers; lower-level synchronous helpers remain for controlled lifecycle paths. Background result envelopes enforce bounded file, metadata, IV, ciphertext and plaintext sizes before allocation/decryption. Large-case ANR/storage-corruption testing remains open.
 - Entity resolution has deterministic metrics and a fail-closed calibration-artifact path, but still needs a consented representative corpus and published measured calibration before weights can be treated as empirically fitted.
-- Cross-account/cross-scan image-cluster correlation and the polished saved-case cluster review workflow remain open; bounded candidate/cluster provenance persistence and graph enrichment are implemented.
+- Verified-account correlation and richer cross-scan image change workflows remain open; bounded candidate/cluster provenance persistence and saved-case fingerprint history review are implemented.
 - Cross-photo face correlation still requires measured ROC/FAR/FRR and representative physical-device validation.
 - Historical extraction is currently strongest for directly re-fetched Wayback HTML; archive/provider-wide change extraction remains incomplete.
 - HIBP email coverage depends on user-supplied supported access and provider availability.
