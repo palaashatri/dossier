@@ -275,6 +275,119 @@ class BackgroundScanWorkManagerAndroidTest {
     }
 
     @Test
+    fun pauseRetainsCheckpointAndResumeUsesFreshOwnerForSameGeneration() {
+        // A blank seed produces no profile candidates, while still exercising
+        // the encrypted request/checkpoint path. The first WorkSpec is delayed
+        // so the pause assertion cannot race a network-backed worker.
+        val checkpoint = ScanResumeStore(context).saveRequestDetailed(
+            input = IdentityInput(fullName = ""),
+            deepResearch = false,
+            strongFaceCorrelation = false
+        ) as ResumeWriteState.Saved
+        val requestId = checkpoint.point.requestId
+        val generation = UUID.randomUUID().toString()
+        val owner = UUID.randomUUID()
+        ownerIds += owner.toString()
+        val enqueuedLifecycle = ScanLifecycleRecord(
+            ownerId = owner.toString(),
+            requestId = requestId,
+            generation = generation,
+            phase = ScanLifecyclePhase.Enqueued,
+            updatedAtEpochMillis = System.currentTimeMillis(),
+            resultReady = false,
+            errorCode = null
+        )
+        assertEquals(
+            ScanLifecycleWriteResult.Saved,
+            ScanLifecycleStore(context).publish(enqueuedLifecycle)
+        )
+
+        val delayed = OneTimeWorkRequestBuilder<BackgroundScanWorker>()
+            .setId(owner)
+            .setInitialDelay(1, TimeUnit.HOURS)
+            .setInputData(BackgroundScanWorker.secureInputData(requestId, generation))
+            .addTag(BackgroundScanWorker.WORK_TAG)
+            .build()
+        createdWorkIds += owner
+        workManager.enqueueUniqueWork(
+            TEST_PAUSE_RESUME_WORK,
+            ExistingWorkPolicy.REPLACE,
+            delayed
+        ).result.get(10, TimeUnit.SECONDS)
+        assertEquals(WorkInfo.State.ENQUEUED, waitForWorkInfoCreated(owner).state)
+
+        assertTrue(BackgroundScanManager.pause(context))
+        val pausedWork = waitForFinished(owner)
+        assertEquals(WorkInfo.State.CANCELLED, pausedWork.state)
+        val pausedLifecycle = waitForLifecycleRecord { record ->
+            record.ownerId == owner.toString() && record.phase == ScanLifecyclePhase.Paused
+        }
+        assertEquals(requestId, pausedLifecycle.requestId)
+        assertEquals(generation, pausedLifecycle.generation)
+        val retained = ScanResumeStore(context).loadRequestDetailed(requestId)
+        assertEquals(ResumeReadState.Available(checkpoint.point), retained)
+
+        assertTrue(BackgroundScanManager.resume(context))
+        val resumedLifecycle = waitForLifecycleOwnerChange(owner.toString())
+        val resumedOwner = UUID.fromString(resumedLifecycle.ownerId)
+        ownerIds += resumedLifecycle.ownerId
+        createdWorkIds += resumedOwner
+        assertTrue(resumedOwner != owner)
+        assertEquals(requestId, resumedLifecycle.requestId)
+        assertEquals(generation, resumedLifecycle.generation)
+        assertTrue(
+            resumedLifecycle.phase in setOf(
+                ScanLifecyclePhase.EnqueuePending,
+                ScanLifecyclePhase.Enqueued,
+                ScanLifecyclePhase.Running,
+                ScanLifecyclePhase.Succeeded
+            )
+        )
+
+        val resumedWork = waitForWorkInfoCreated(resumedOwner)
+        assertEquals(resumedOwner, resumedWork.id)
+        openWorkDatabase().use { database ->
+            database.query(
+                "workspec",
+                arrayOf("input"),
+                "id = ?",
+                arrayOf(resumedOwner.toString()),
+                null,
+                null,
+                null
+            ).use { cursor ->
+                assertTrue("Expected resumed WorkSpec row", cursor.moveToFirst())
+                val input = Data.fromByteArray(cursor.getBlob(0))
+                assertEquals(requestId, input.getString(BackgroundScanWorker.KEY_REQUEST_ID))
+                assertEquals(generation, input.getString(BackgroundScanWorker.KEY_GENERATION))
+            }
+        }
+
+        // The resumed request is cancelled immediately if it is still active;
+        // the blank seed means no provider/network work is required. The
+        // shared teardown removes any retained encrypted state after these
+        // lifecycle assertions complete.
+        if (!resumedWork.state.isFinished) {
+            BackgroundScanManager.cancel(context)
+            val terminalWork = waitForFinished(resumedOwner)
+            assertTrue(
+                "Resume cleanup must cancel the exact owner unless the empty local scan wins the race",
+                terminalWork.state == WorkInfo.State.CANCELLED || terminalWork.state == WorkInfo.State.SUCCEEDED
+            )
+            val terminalLifecycle = waitForLifecycleRecord { record ->
+                record.ownerId == resumedLifecycle.ownerId &&
+                    record.requestId == requestId &&
+                    record.generation == generation &&
+                    record.phase in setOf(ScanLifecyclePhase.Cancelled, ScanLifecyclePhase.Succeeded)
+            }
+            assertTrue(
+                terminalLifecycle.phase == ScanLifecyclePhase.Cancelled ||
+                    terminalLifecycle.phase == ScanLifecyclePhase.Succeeded
+            )
+        }
+    }
+
+    @Test
     fun persistedWorkSpecContainsOnlyOpaqueRequestReference() {
         val secretSentinel = "identity-seed-${UUID.randomUUID()}@example.invalid"
         val checkpoint = ScanResumeStore(context).saveRequestDetailed(
@@ -417,6 +530,22 @@ class BackgroundScanWorkManagerAndroidTest {
         throw AssertionError("Lifecycle never reached $phase; latest=$latest")
     }
 
+    private fun waitForLifecycleRecord(
+        predicate: (ScanLifecycleRecord) -> Boolean
+    ): ScanLifecycleRecord {
+        var latest: ScanLifecycleReadResult = ScanLifecycleReadResult.Missing
+        repeat(200) {
+            latest = ScanLifecycleStore(context).read()
+            val record = (latest as? ScanLifecycleReadResult.Available)?.record
+            if (record != null && predicate(record)) return record
+            SystemClock.sleep(25)
+        }
+        throw AssertionError("Lifecycle predicate was never satisfied; latest=$latest")
+    }
+
+    private fun waitForLifecycleOwnerChange(previousOwner: String): ScanLifecycleRecord =
+        waitForLifecycleRecord { record -> record.ownerId != previousOwner }
+
     private fun clearLifecyclePreferences() {
         assertTrue(
             context.getSharedPreferences("dossier-background-work", Context.MODE_PRIVATE)
@@ -446,5 +575,6 @@ class BackgroundScanWorkManagerAndroidTest {
         const val TEST_MISSING_WORK = "dossier-test-missing-work"
         const val TEST_DURABLE_SUCCESS_WORK = "dossier-test-durable-success-work"
         const val TEST_CANCEL_WORK = "dossier-test-cancel-work"
+        const val TEST_PAUSE_RESUME_WORK = "dossier-test-pause-resume-work"
     }
 }
