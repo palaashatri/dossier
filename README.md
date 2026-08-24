@@ -30,10 +30,10 @@ Android-test APK                    PASS — 1,020,897 bytes
 Android-test APK SHA-256             B90DF4FDDB291154044F8E07B89B5B4EB82BF09621D08DA43B59C96A85B4EEE6
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
-Connected pause/resume test         PASS — 8 tests / 0 failures on API 36 `medium_phone` emulator
+Connected uiTest suite              PASS — 40 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The focused Android pause/resume test ran on the API 36 `medium_phone` emulator. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Full connected coverage, physical devices, process-death/reboot, accessibility, and battery/thermal behavior remain unvalidated.
+The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the 8 WorkManager pause/resume tests. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Physical devices, process-death/reboot, accessibility, and battery/thermal behavior remain unvalidated.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, verified-account image correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
