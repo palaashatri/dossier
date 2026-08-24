@@ -3,12 +3,14 @@ package io.dossier.app.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -55,49 +57,98 @@ fun CoordinatedScanScreen(
         )
 
         if (snapshot.state == ScanRunState.Running) {
-            Row(
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .safeDrawingPadding()
-                    .padding(top = 8.dp, end = 12.dp)
-                    .background(
-                        NeuralTheme.CardBackground.copy(alpha = 0.94f),
-                        RoundedCornerShape(9.dp)
+                    .padding(top = 8.dp, end = 12.dp),
+                horizontalAlignment = Alignment.End
+            ) {
+                Row(
+                    modifier = Modifier
+                        .background(
+                            NeuralTheme.CardBackground.copy(alpha = 0.94f),
+                            RoundedCornerShape(9.dp)
+                        )
+                        .border(1.dp, NeuralTheme.BorderColor, RoundedCornerShape(9.dp))
+                        .semantics {
+                            contentDescription = buildString {
+                                append("${snapshot.mode.name} scan. ")
+                                append("Providers scheduled: ${snapshot.scheduledProviderCount}. ")
+                                append("Providers completed: ${snapshot.completedProviderCount}. ")
+                                append("Providers unavailable: ${snapshot.unavailableProviderCount}. ")
+                                append("Profile results: ${snapshot.profileCount}. ")
+                                append("Graph entities: ${snapshot.entityCount}. ")
+                                append("Findings: ${snapshot.findingCount}. ")
+                                append("Pivots admitted: ${snapshot.pivotAdmittedCount}. ")
+                                append("Pivots rejected: ${snapshot.pivotRejectedCount}. ")
+                                append("Pivots pending: ${snapshot.pivotPendingCount}.")
+                                snapshot.pivotLastDecision?.let { decision ->
+                                    append(" Last pivot ${if (decision.admitted) "admitted" else "rejected"}. ")
+                                    append("${decision.signalType} at depth ${decision.depth}: ${decision.reason}.")
+                                }
+                            }
+                        }
+                        .padding(horizontal = 9.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = snapshot.mode.name.uppercase(),
+                        color = NeuralTheme.Cobalt,
+                        fontSize = 9.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
                     )
-                    .border(1.dp, NeuralTheme.BorderColor, RoundedCornerShape(9.dp))
-                    .semantics {
-                        contentDescription = buildString {
-                            append("${snapshot.mode.name} scan. ")
-                            append("Providers scheduled: ${snapshot.scheduledProviderCount}. ")
-                            append("Providers completed: ${snapshot.completedProviderCount}. ")
-                            append("Providers unavailable: ${snapshot.unavailableProviderCount}. ")
-                            append("Profile results: ${snapshot.profileCount}. ")
-                            append("Graph entities: ${snapshot.entityCount}. ")
-                            append("Findings: ${snapshot.findingCount}.")
+                    Spacer(Modifier.width(7.dp))
+                    LiveMetric("SCH", snapshot.scheduledProviderCount)
+                    Spacer(Modifier.width(5.dp))
+                    LiveMetric("DONE", snapshot.completedProviderCount)
+                    Spacer(Modifier.width(5.dp))
+                    LiveMetric("UNAV", snapshot.unavailableProviderCount)
+                    Spacer(Modifier.width(5.dp))
+                    LiveMetric("RES", snapshot.profileCount)
+                    Spacer(Modifier.width(5.dp))
+                    LiveMetric("G", snapshot.entityCount)
+                    Spacer(Modifier.width(5.dp))
+                    LiveMetric("E", snapshot.findingCount)
+                }
+
+                if (snapshot.pivotMaxDepth > 0) {
+                    val pendingByDepth = snapshot.pivotPendingByDepth
+                        .mapIndexed { index, count -> "d${index + 1}:$count" }
+                        .joinToString(" ")
+                    val latest = snapshot.pivotLastDecision
+                    val diagnosticText = buildString {
+                        append("PIVOTS  +${snapshot.pivotAdmittedCount} admitted  ")
+                        append("-${snapshot.pivotRejectedCount} rejected  ")
+                        append("${snapshot.pivotPendingCount} pending")
+                        if (pendingByDepth.isNotBlank()) append(" ($pendingByDepth)")
+                        latest?.let { decision ->
+                            append(" | [${if (decision.admitted) "ADMITTED" else "REJECTED"}] ")
+                            append("${decision.signalType} d${decision.depth}: ${decision.reason}")
                         }
                     }
-                    .padding(horizontal = 9.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = snapshot.mode.name.uppercase(),
-                    color = NeuralTheme.Cobalt,
-                    fontSize = 9.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-                Spacer(Modifier.width(7.dp))
-                LiveMetric("SCH", snapshot.scheduledProviderCount)
-                Spacer(Modifier.width(5.dp))
-                LiveMetric("DONE", snapshot.completedProviderCount)
-                Spacer(Modifier.width(5.dp))
-                LiveMetric("UNAV", snapshot.unavailableProviderCount)
-                Spacer(Modifier.width(5.dp))
-                LiveMetric("RES", snapshot.profileCount)
-                Spacer(Modifier.width(5.dp))
-                LiveMetric("G", snapshot.entityCount)
-                Spacer(Modifier.width(5.dp))
-                LiveMetric("E", snapshot.findingCount)
+                    Text(
+                        text = diagnosticText,
+                        color = NeuralTheme.TextSecondary,
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 3,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .widthIn(max = 360.dp)
+                            .padding(top = 4.dp)
+                            .background(
+                                NeuralTheme.CardBackground.copy(alpha = 0.94f),
+                                RoundedCornerShape(7.dp)
+                            )
+                            .border(1.dp, NeuralTheme.BorderColor, RoundedCornerShape(7.dp))
+                            .semantics {
+                                contentDescription = diagnosticText
+                            }
+                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                    )
+                }
             }
         }
     }

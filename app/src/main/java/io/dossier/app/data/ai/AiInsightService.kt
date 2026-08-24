@@ -5,6 +5,8 @@ import io.dossier.app.domain.ai.AiAnalysisResult
 import io.dossier.app.domain.ai.AiAnalysisSnapshot
 import io.dossier.app.domain.ai.AiProviderConfig
 import io.dossier.app.domain.ai.AiProviderType
+import io.dossier.app.domain.ai.AiRemediationLink
+import io.dossier.app.domain.ai.AiRemediationLinkState
 import io.dossier.app.domain.ai.EvidenceGroundedAiValidator
 import io.dossier.app.domain.ai.LocalAiModelType
 import io.dossier.app.domain.case.DossierCase
@@ -598,31 +600,68 @@ class AiInsightService(private val context: Context) {
         }.trim()
 
         private fun remediationPromptLines(snapshot: AiAnalysisSnapshot, remoteRedacted: Boolean): String = buildString {
-            if (snapshot.remediationRecords.isEmpty()) {
+            val links = if (snapshot.remediationLinks.isNotEmpty()) {
+                snapshot.remediationLinks
+            } else {
+                snapshot.remediationRecords.map { record ->
+                    AiRemediationLink(
+                        record = record,
+                        evidenceId = null,
+                        effective = false,
+                        state = AiRemediationLinkState.Unmatched
+                    )
+                }
+            }
+            if (links.isEmpty()) {
                 append("- no tracked remediation actions")
                 return@buildString
             }
-            val displayedRecords = snapshot.remediationRecords.take(RemoteAiRedaction.MAX_PROMPT_REMEDIATION_RECORDS)
-            displayedRecords.forEach { record ->
+            val displayedLinks = links.take(RemoteAiRedaction.MAX_PROMPT_REMEDIATION_RECORDS)
+            displayedLinks.forEach { link ->
+                val record = link.record
                 if (remoteRedacted) {
                     val findingType = remoteFindingType(record.findingKey)
+                    val evidenceRef = remediationEvidenceRef(snapshot, link.evidenceId, remoteRedacted = true)
                     appendLine(
                         "- findingType=$findingType status=${record.status} provider=${record.providerId?.takeIf { it.isNotBlank() }?.let(RemoteAiRedaction::providerId) ?: "unspecified"} " +
+                            "evidenceRefs=[$evidenceRef] effective=${link.effective} state=${link.state} " +
                             "verifiedByScan=${record.verifiedByScanId != null} source=[redacted] action=[redacted] note=[redacted]"
                     )
                 } else {
+                    val evidenceRef = remediationEvidenceRef(snapshot, link.evidenceId, remoteRedacted = false)
                     appendLine(
                         "- finding=${safeField(record.findingKey)} status=${record.status} provider=${safeField(record.providerId ?: "unspecified")} " +
                             "source=${safeField(record.sourceUrl ?: "none")} action=${safeField(record.action)} " +
+                            "evidence=$evidenceRef effective=${link.effective} state=${link.state} " +
                             "verifiedByScan=${safeField(record.verifiedByScanId ?: "none")} note=${safeField(record.verificationNote.orEmpty())}"
                     )
                 }
             }
-            val omittedRecords = (snapshot.remediationRecords.size - displayedRecords.size).coerceAtLeast(0)
+            val omittedRecords = (links.size - displayedLinks.size).coerceAtLeast(0)
             if (omittedRecords > 0) {
                 appendLine("- $omittedRecords remediation record(s) omitted from the model input.")
             }
         }.trim()
+
+        private fun remediationEvidenceRef(
+            snapshot: AiAnalysisSnapshot,
+            evidenceId: String?,
+            remoteRedacted: Boolean
+        ): String {
+            if (evidenceId.isNullOrBlank()) return "none"
+            if (remoteRedacted) {
+                val visible = snapshot.evidence
+                    .take(RemoteAiRedaction.MAX_PROMPT_EVIDENCE_RECORDS)
+                    .any { it.id == evidenceId }
+                return if (visible) {
+                    RemoteAiRedaction.evidenceId(evidenceId)
+                } else {
+                    "none (+1 omitted)"
+                }
+            } else {
+                return safeField(evidenceId)
+            }
+        }
 
         private fun contextPromptLines(snapshot: AiAnalysisSnapshot, remoteRedacted: Boolean): String = buildString {
             appendLine("Context-only metadata; it cannot support a claim without an evidence ID:")

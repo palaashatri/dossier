@@ -4,6 +4,7 @@ import android.content.Context
 import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.scanner.BackgroundScanWorker
+import io.dossier.app.domain.scanner.PivotFrontierConfig
 import io.dossier.app.domain.scanner.ScanLifecycleErrors
 import io.dossier.app.domain.scanner.ScanSession
 import kotlinx.coroutines.CoroutineScope
@@ -36,6 +37,20 @@ enum class ScanRunState {
     Cancelled,
     Failed
 }
+
+/**
+ * Safe, evidence-free metadata about the most recent bounded pivot decision.
+ *
+ * The summary deliberately omits URLs, usernames, and source text.  Pivot
+ * reasons are policy explanations (for example, a depth or budget rejection),
+ * not identity evidence, and are bounded/sanitized at the coordinator edge.
+ */
+data class PivotDecisionSummary(
+    val admitted: Boolean,
+    val signalType: String,
+    val depth: Int,
+    val reason: String
+)
 
 sealed interface ScanEvent {
     val scanId: ScanId
@@ -119,6 +134,24 @@ sealed interface ScanEvent {
         val hasAiSummary: Boolean
     ) : ScanEvent
 
+    /**
+     * A real bounded-frontier observation emitted by ProfileScanner after a
+     * pivot admission/rejection or queue mutation.  Counts and pending depths
+     * are supplied by the request-scoped frontier; no UI counter is inferred.
+     */
+    data class PivotDiagnosticsUpdated(
+        override val scanId: ScanId,
+        override val occurredAt: Instant,
+        val decision: PivotDecisionSummary?,
+        val pendingCount: Int,
+        val pendingByDepth: List<Int>,
+        val admittedCount: Int,
+        val rejectedCount: Int,
+        val visitedCount: Int,
+        val maxDepth: Int,
+        val maxTotalPivots: Int
+    ) : ScanEvent
+
     data class ScanCompleted(
         override val scanId: ScanId,
         override val occurredAt: Instant,
@@ -149,6 +182,11 @@ internal data class TerminalScanClassification(
 
 private const val STAGE_CANCELLED = "SCAN_CANCELLED"
 private const val GENERIC_SCAN_FAILURE = "SCAN_FAILED"
+private const val MAX_SAFE_PIVOT_DECISIONS = 4_096
+private const val MAX_SAFE_PIVOT_VISITED = 4_096
+private const val MAX_SAFE_PIVOT_SIGNAL_LENGTH = 64
+private const val MAX_SAFE_PIVOT_REASON_LENGTH = 256
+private val SAFE_PIVOT_SIGNAL_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]{0,63}$")
 private val SAFE_TERMINAL_FAILURE_CODES =
     BackgroundScanWorker.SAFE_ERROR_CODES +
         ScanLifecycleErrors.SAFE_ERROR_CODES +
@@ -203,7 +241,15 @@ data class LiveScanSnapshot(
     val breachRecordCount: Int = 0,
     val entityCount: Int = 0,
     val relationshipCount: Int = 0,
-    val findingCount: Int = 0
+    val findingCount: Int = 0,
+    val pivotPendingCount: Int = 0,
+    val pivotPendingByDepth: List<Int> = emptyList(),
+    val pivotAdmittedCount: Int = 0,
+    val pivotRejectedCount: Int = 0,
+    val pivotVisitedCount: Int = 0,
+    val pivotMaxDepth: Int = 0,
+    val pivotMaxTotalPivots: Int = 0,
+    val pivotLastDecision: PivotDecisionSummary? = null
 )
 
 /**
@@ -236,7 +282,15 @@ object ScanCoordinatorRuntime {
                     scheduledProviderCount = 0,
                     startedProviderCount = 0,
                     completedProviderCount = 0,
-                    unavailableProviderCount = 0
+                    unavailableProviderCount = 0,
+                    pivotPendingCount = 0,
+                    pivotPendingByDepth = emptyList(),
+                    pivotAdmittedCount = 0,
+                    pivotRejectedCount = 0,
+                    pivotVisitedCount = 0,
+                    pivotMaxDepth = 0,
+                    pivotMaxTotalPivots = 0,
+                    pivotLastDecision = null
                 )
             }
             id
@@ -313,8 +367,41 @@ object ScanCoordinatorRuntime {
         emit(event)
     }
 
+    /**
+     * Publishes bounded pivot state directly from [ProfileScanner]'s frontier.
+     * The optional decision is policy metadata only; identity values and URLs
+     * are intentionally not part of the coordinator/UI boundary.
+     */
+    fun onPivotDiagnostics(
+        scanId: ScanId,
+        decision: PivotDecisionSummary?,
+        pendingCount: Int,
+        pendingByDepth: List<Int>,
+        admittedCount: Int,
+        rejectedCount: Int,
+        visitedCount: Int,
+        maxDepth: Int,
+        maxTotalPivots: Int
+    ) {
+        val event = ScanEvent.PivotDiagnosticsUpdated(
+            scanId = scanId,
+            occurredAt = Instant.now(),
+            decision = decision,
+            pendingCount = pendingCount,
+            pendingByDepth = pendingByDepth,
+            admittedCount = admittedCount,
+            rejectedCount = rejectedCount,
+            visitedCount = visitedCount,
+            maxDepth = maxDepth,
+            maxTotalPivots = maxTotalPivots
+        )
+        val safeEvent = sanitizeEvent(event)
+        reduceProviderEvent(safeEvent)
+        emit(safeEvent)
+    }
+
     fun dispatch(event: ScanEvent) {
-        val safeEvent = sanitizeProviderEvent(event)
+        val safeEvent = sanitizeEvent(event)
         reduceProviderEvent(safeEvent)
         emit(safeEvent)
     }
@@ -350,12 +437,22 @@ object ScanCoordinatorRuntime {
                 } else {
                     current
                 }
+                is ScanEvent.PivotDiagnosticsUpdated -> current.copy(
+                    pivotPendingCount = event.pendingCount,
+                    pivotPendingByDepth = event.pendingByDepth,
+                    pivotAdmittedCount = event.admittedCount,
+                    pivotRejectedCount = event.rejectedCount,
+                    pivotVisitedCount = event.visitedCount,
+                    pivotMaxDepth = event.maxDepth,
+                    pivotMaxTotalPivots = event.maxTotalPivots,
+                    pivotLastDecision = event.decision ?: current.pivotLastDecision
+                )
                 else -> current
             }
         }
     }
 
-    private fun sanitizeProviderEvent(event: ScanEvent): ScanEvent = when (event) {
+    private fun sanitizeEvent(event: ScanEvent): ScanEvent = when (event) {
         is ScanEvent.ProviderQueued -> event.copy(providerId = safeProviderId(event.providerId))
         is ScanEvent.ProviderStarted -> event.copy(
             providerId = safeProviderId(event.providerId),
@@ -369,8 +466,38 @@ object ScanCoordinatorRuntime {
             providerId = safeProviderId(event.providerId),
             latencyMs = event.latencyMs.coerceAtLeast(0L)
         )
+        is ScanEvent.PivotDiagnosticsUpdated -> event.copy(
+            decision = event.decision?.let(::sanitizePivotDecision),
+            pendingCount = event.pendingCount.coerceIn(0, PivotFrontierConfig.MAX_ALLOWED_TOTAL_PIVOTS),
+            pendingByDepth = event.pendingByDepth
+                .take(PivotAdmissionPolicy.MAX_ALLOWED_DEPTH)
+                .map { it.coerceIn(0, PivotFrontierConfig.MAX_ALLOWED_TOTAL_PIVOTS) },
+            admittedCount = event.admittedCount.coerceIn(0, PivotFrontierConfig.MAX_ALLOWED_TOTAL_PIVOTS),
+            // Rejections are intentionally not limited to the admission budget;
+            // a noisy page may yield many policy decisions. Keep the state
+            // bounded while preserving all normal frontier observations.
+            rejectedCount = event.rejectedCount.coerceIn(0, MAX_SAFE_PIVOT_DECISIONS),
+            visitedCount = event.visitedCount.coerceIn(0, MAX_SAFE_PIVOT_VISITED),
+            maxDepth = event.maxDepth.coerceIn(0, PivotAdmissionPolicy.MAX_ALLOWED_DEPTH),
+            maxTotalPivots = event.maxTotalPivots.coerceIn(0, PivotFrontierConfig.MAX_ALLOWED_TOTAL_PIVOTS)
+        )
         else -> event
     }
+
+    private fun sanitizePivotDecision(decision: PivotDecisionSummary): PivotDecisionSummary =
+        decision.copy(
+            signalType = decision.signalType
+                .trim()
+                .take(MAX_SAFE_PIVOT_SIGNAL_LENGTH)
+                .takeIf { SAFE_PIVOT_SIGNAL_PATTERN.matches(it) }
+                ?: "Unknown",
+            depth = decision.depth.coerceIn(0, PivotAdmissionPolicy.MAX_ALLOWED_DEPTH),
+            reason = decision.reason
+                .replace(Regex("[\\r\\n\\t]+"), " ")
+                .trim()
+                .take(MAX_SAFE_PIVOT_REASON_LENGTH)
+                .ifBlank { "No policy explanation supplied" }
+        )
 
     private fun safeProviderId(value: String): String {
         val normalized = value.trim().lowercase()
@@ -425,7 +552,15 @@ object ScanCoordinatorRuntime {
                             scheduledProviderCount = existingProviderCounts?.scheduledProviderCount ?: 0,
                             startedProviderCount = existingProviderCounts?.startedProviderCount ?: 0,
                             completedProviderCount = existingProviderCounts?.completedProviderCount ?: 0,
-                            unavailableProviderCount = existingProviderCounts?.unavailableProviderCount ?: 0
+                            unavailableProviderCount = existingProviderCounts?.unavailableProviderCount ?: 0,
+                            pivotPendingCount = existingProviderCounts?.pivotPendingCount ?: 0,
+                            pivotPendingByDepth = existingProviderCounts?.pivotPendingByDepth ?: emptyList(),
+                            pivotAdmittedCount = existingProviderCounts?.pivotAdmittedCount ?: 0,
+                            pivotRejectedCount = existingProviderCounts?.pivotRejectedCount ?: 0,
+                            pivotVisitedCount = existingProviderCounts?.pivotVisitedCount ?: 0,
+                            pivotMaxDepth = existingProviderCounts?.pivotMaxDepth ?: 0,
+                            pivotMaxTotalPivots = existingProviderCounts?.pivotMaxTotalPivots ?: 0,
+                            pivotLastDecision = existingProviderCounts?.pivotLastDecision
                         )
                         ScanHistoryRuntime.scanStarted(
                             scanId = id,

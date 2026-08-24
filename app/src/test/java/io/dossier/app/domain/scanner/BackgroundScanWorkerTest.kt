@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.work.Data
 import androidx.work.WorkInfo
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Before
 import org.junit.Assert.assertEquals
@@ -14,6 +16,8 @@ import org.junit.Test
 import java.lang.reflect.Proxy
 import java.io.File
 import java.time.Instant
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 import java.util.UUID
 
 class BackgroundScanWorkerTest {
@@ -68,6 +72,90 @@ class BackgroundScanWorkerTest {
         assertEquals(data.keyValueMap, decoded.keyValueMap)
         assertFalse(BackgroundScanWorker.hasLegacyWorkData(data))
         assertFalse(serialized.toString(Charsets.UTF_8).contains("identity_json"))
+    }
+
+    @Test
+    fun latestResultAsyncRunsEncryptedLoadOnSuppliedDispatcher() {
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "dossier-result-io-test")
+        }
+        val dispatcher = executor.asCoroutineDispatcher()
+        val observedThread = AtomicReference<String>()
+        BackgroundScanManager.resultStoreProvider = {
+            observedThread.set(Thread.currentThread().name)
+            throw AsyncAccessMarkerException()
+        }
+
+        try {
+            assertThrows(AsyncAccessMarkerException::class.java) {
+                runBlocking {
+                    BackgroundScanManager.latestResultAsync(
+                        fakeContext(FakePreferences()),
+                        dispatcher
+                    )
+                }
+            }
+            assertTrue(observedThread.get().startsWith("dossier-result-io-test"))
+        } finally {
+            dispatcher.close()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun clearLatestResultAsyncRunsEncryptedPurgeOnSuppliedDispatcher() {
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "dossier-result-purge-io-test")
+        }
+        val dispatcher = executor.asCoroutineDispatcher()
+        val observedThread = AtomicReference<String>()
+        BackgroundScanManager.resultStoreProvider = {
+            observedThread.set(Thread.currentThread().name)
+            throw AsyncAccessMarkerException()
+        }
+
+        try {
+            assertThrows(AsyncAccessMarkerException::class.java) {
+                runBlocking {
+                    BackgroundScanManager.clearLatestResultAsync(
+                        fakeContext(FakePreferences()),
+                        dispatcher
+                    )
+                }
+            }
+            assertTrue(observedThread.get().startsWith("dossier-result-purge-io-test"))
+        } finally {
+            dispatcher.close()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun hasActiveMarkerAsyncRunsEncryptedLifecycleReadOnSuppliedDispatcher() {
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "dossier-lifecycle-io-test")
+        }
+        val dispatcher = executor.asCoroutineDispatcher()
+        val observedThread = AtomicReference<String>()
+        BackgroundScanManager.lifecycleStoreProvider = {
+            observedThread.set(Thread.currentThread().name)
+            throw AsyncAccessMarkerException()
+        }
+
+        try {
+            assertThrows(AsyncAccessMarkerException::class.java) {
+                runBlocking {
+                    BackgroundScanManager.hasActiveMarkerAsync(
+                        fakeContext(FakePreferences()),
+                        dispatcher
+                    )
+                }
+            }
+            assertTrue(observedThread.get().startsWith("dossier-lifecycle-io-test"))
+        } finally {
+            dispatcher.close()
+            executor.shutdownNow()
+        }
     }
 
     @Test
@@ -841,6 +929,8 @@ class BackgroundScanWorkerTest {
     }
 
     private fun fakeContext(prefs: SharedPreferences): Context = FakeContext(prefs)
+
+    private class AsyncAccessMarkerException : RuntimeException()
 
     private class FakeContext(private val prefs: SharedPreferences) : android.content.ContextWrapper(null) {
         private val files = File(

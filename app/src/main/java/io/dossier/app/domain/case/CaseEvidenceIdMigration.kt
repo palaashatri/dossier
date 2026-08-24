@@ -23,10 +23,14 @@ object CaseEvidenceIdMigration {
                     .distinct()
             )
         }
+        val migratedRemediation = case.remediationRecords.map { record ->
+            record.copy(evidenceId = record.evidenceId?.let(EvidenceIdPolicy::migrate))
+        }
         return case.copy(
             schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION,
             evidenceRecords = migratedEvidence,
             userCorrections = migratedCorrections,
+            remediationRecords = migratedRemediation,
             entityGraph = case.entityGraph.copy(
                 entities = migratedEntities,
                 edges = migratedEdges

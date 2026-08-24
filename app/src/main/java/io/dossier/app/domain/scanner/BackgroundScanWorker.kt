@@ -27,6 +27,7 @@ import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.UsernameSurfaceRuntimeCache
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Instant
 import java.util.UUID
@@ -719,6 +721,13 @@ object BackgroundScanManager {
         }
     }
 
+    suspend fun latestResultAsync(
+        context: Context,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): BackgroundScanResultStore.Snapshot? = withContext(dispatcher) {
+        latestResult(context)
+    }
+
     /**
      * A saved file is not yet a published result. Hide the narrow
      * save-before-marker crash window and every owner mismatch from UI/report
@@ -881,6 +890,13 @@ object BackgroundScanManager {
         }
     }
 
+    suspend fun clearLatestResultAsync(
+        context: Context,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): Boolean = withContext(dispatcher) {
+        clearLatestResult(context)
+    }
+
     internal fun isResultSafeToRetire(
         resultWorkId: String,
         completedAtUtc: String,
@@ -925,6 +941,18 @@ object BackgroundScanManager {
                 return@synchronized false
             }
         }
+    }
+
+    /**
+     * Reads the encrypted lifecycle marker without performing keystore/file
+     * work on a caller's UI thread. The synchronous form remains internal to
+     * lifecycle code that already owns its dispatcher/lock boundary.
+     */
+    suspend fun hasActiveMarkerAsync(
+        context: Context,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): Boolean = withContext(dispatcher) {
+        hasActiveMarker(context)
     }
 
     internal fun claimActive(context: Context, workerId: String): Boolean =

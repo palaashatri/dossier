@@ -35,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -60,6 +61,8 @@ import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.domain.remediation.RemediationItem
 import io.dossier.app.domain.scanner.ScanSession
+import io.dossier.app.export.ExportRedactionMode
+import io.dossier.app.export.GraphExportService
 import io.dossier.app.export.ReportExporter
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.labels.userFacingStatusLabel
@@ -68,6 +71,7 @@ import io.dossier.app.ui.theme.DossierCardShape
 import io.dossier.app.ui.theme.NeuralTheme
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.launch
 
 private enum class ReportView(val label: String) {
     Overview("Overview"),
@@ -108,11 +112,22 @@ fun ReportScreen(
         mutableStateOf(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")))
     }
     val exporter = remember { ReportExporter(context) }
+    val graphExporter = remember(context) { GraphExportService(context) }
+    val purgeScope = rememberCoroutineScope()
 
     val subject = input?.fullName?.trim().orEmpty()
         .ifBlank { input?.primaryUsername?.let { "@$it" }.orEmpty() }
         .ifBlank { input?.emails?.firstOrNull().orEmpty() }
         .ifBlank { "Unnamed subject" }
+    val onShareSafeGraphExport: (() -> Unit)? = if (entityGraph.entities.isNotEmpty()) {
+        {
+            graphExporter.share(
+                graph = entityGraph,
+                label = subject,
+                redactionMode = ExportRedactionMode.ShareSafe
+            )
+        }
+    } else null
     val verifiedProfiles = profileResults.count { it.exists && it.verified }
     val reviewProfiles = profileResults.count { it.exists && !it.verified }
     val unavailableProfiles = profileResults.count {
@@ -168,8 +183,10 @@ fun ReportScreen(
                 TextButton(
                     onClick = {
                         confirmSessionDelete = false
-                        ScanSession.purgeSession(context)
-                        onReset()
+                        purgeScope.launch {
+                            ScanSession.purgeSessionAsync(context)
+                            onReset()
+                        }
                     }
                 ) {
                     Text("Delete session", color = NeuralTheme.Crimson, fontWeight = FontWeight.SemiBold)
@@ -267,7 +284,8 @@ fun ReportScreen(
                     modifier = Modifier.weight(1f),
                     entityGraph = entityGraph,
                     relationshipConfidence = relationshipConfidence,
-                    attackPaths = attackPaths
+                    attackPaths = attackPaths,
+                    onShareSafeGraphExport = onShareSafeGraphExport
                 )
                 ReportView.Actions -> ActionsReport(
                     modifier = Modifier.weight(1f),
@@ -293,10 +311,13 @@ fun ReportScreen(
                             riskLevel = riskLevel.name
                         )
                     },
+                    onShareSafeGraphExport = if (entityGraph.entities.isNotEmpty()) onShareSafeGraphExport else null,
                     onDeepResearch = onDeepResearch,
                     onNewAudit = {
-                        ScanSession.purgeSession(context)
-                        onReset()
+                        purgeScope.launch {
+                            ScanSession.purgeSessionAsync(context)
+                            onReset()
+                        }
                     },
                     onDeleteSession = { confirmSessionDelete = true }
                 )
@@ -550,7 +571,8 @@ private fun ConnectionsReport(
     modifier: Modifier,
     entityGraph: EntityGraph,
     relationshipConfidence: Map<String, io.dossier.app.domain.evidence.RelationshipConfidence>,
-    attackPaths: List<AttackPathFinder.AttackPath>
+    attackPaths: List<AttackPathFinder.AttackPath>,
+    onShareSafeGraphExport: (() -> Unit)? = null
 ) {
     LazyColumn(
         modifier = modifier.fillMaxWidth(),
@@ -561,6 +583,37 @@ private fun ConnectionsReport(
             SectionHeading("Relationships", "Connections are evidence paths, not proof that two accounts share an owner.")
             ReportCard {
                 EntityGraphView(graph = entityGraph, confidenceByEdge = relationshipConfidence)
+            }
+        }
+        if (entityGraph.entities.isNotEmpty() && onShareSafeGraphExport != null) {
+            item {
+                SectionHeading(
+                    "Graph export",
+                    "Export topological structure for Gephi/Cytoscape analysis. Shared exports are redacted to prevent identity leakage."
+                )
+                ReportCard {
+                    Text(
+                        "Share-safe graph export",
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "Redacts subject labels, account names, source URLs, and evidence IDs while deterministically preserving graph topology, relationship types, and node states. Graph connections do not prove identity.",
+                        color = NeuralTheme.TextSecondary,
+                        fontSize = 11.5.sp,
+                        lineHeight = 16.sp,
+                        modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
+                    )
+                    OutlinedButton(
+                        onClick = onShareSafeGraphExport,
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = DossierButtonShape,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt)
+                    ) {
+                        Text("Share-safe graph export (GraphML + CSV + JSON)", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                    }
+                }
             }
         }
         item {
@@ -586,6 +639,7 @@ private fun ActionsReport(
     actionMessage: String?,
     onSaveCase: () -> Unit,
     onExport: () -> Unit,
+    onShareSafeGraphExport: (() -> Unit)? = null,
     onDeepResearch: () -> Unit,
     onNewAudit: () -> Unit,
     onDeleteSession: () -> Unit
@@ -626,6 +680,14 @@ private fun ActionsReport(
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt)
             ) { Text("Export PDF + evidence JSON", fontWeight = FontWeight.SemiBold) }
             Spacer(modifier = Modifier.height(10.dp))
+            if (onShareSafeGraphExport != null) {
+                OutlinedButton(
+                    onClick = onShareSafeGraphExport,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt)
+                ) { Text("Share-safe graph export (GraphML + CSV + JSON)", fontWeight = FontWeight.SemiBold) }
+                Spacer(modifier = Modifier.height(10.dp))
+            }
             OutlinedButton(
                 onClick = onDeepResearch,
                 modifier = Modifier.fillMaxWidth().height(52.dp),

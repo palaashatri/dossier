@@ -21,8 +21,28 @@ import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.place.MediaIntelligenceSnapshot
 import kotlinx.serialization.Serializable
+import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.model.FindingType
 import java.security.MessageDigest
 import java.util.Locale
+
+@Serializable
+enum class AiRemediationLinkState {
+    Effective,
+    Excluded,
+    Unavailable,
+    Unmatched
+}
+
+@Serializable
+data class AiRemediationLink(
+    val record: RemediationRecord,
+    val evidenceId: String? = null,
+    val effective: Boolean = true,
+    val state: AiRemediationLinkState = AiRemediationLinkState.Effective
+) {
+    val remediationRecord: RemediationRecord get() = record
+}
 
 /**
  * Deterministic, corrected view of a saved investigation supplied to an AI
@@ -47,7 +67,8 @@ data class AiAnalysisSnapshot(
     val remediationRecords: List<RemediationRecord> = emptyList(),
     val excludedEvidenceIds: List<String> = emptyList(),
     val confirmedEntityIds: List<String> = emptyList(),
-    val rejectedEntityIds: List<String> = emptyList()
+    val rejectedEntityIds: List<String> = emptyList(),
+    val remediationLinks: List<AiRemediationLink> = emptyList()
 ) {
     init {
         require(schemaVersion == CURRENT_SCHEMA_VERSION) { "Unsupported AI snapshot schema." }
@@ -208,6 +229,17 @@ data class AiAnalysisSnapshot(
             val normalizedCorrections = orderedCorrections.map { correction ->
                 correction.copy(evidenceId = correction.evidenceId?.let(::normalizedEvidenceId))
             }
+            val remediationLinks = resolveRemediationLinks(
+                remediationRecords = remediationRecords,
+                rawEvidence = evidence,
+                effectiveEvidence = effective.evidence,
+                normalizedEvidenceId = ::normalizedEvidenceId,
+                excludedProvenanceIds = excludedProvenanceIds,
+                excludedEvidenceKeys = excludedEvidenceKeys,
+                rejectedEntityProvenanceIds = rejectedEntityProvenanceIds,
+                rejectedEntityEvidenceKeys = rejectedEntityEvidenceKeys,
+                unusableEvidenceIds = unusableEvidenceIds
+            )
             return AiAnalysisSnapshot(
                 input = input,
                 profileResults = effectiveProfiles.sortedBy { it.candidate.url.lowercase() },
@@ -224,13 +256,11 @@ data class AiAnalysisSnapshot(
                 mediaIntelligence = mediaIntelligence,
                 scanHistory = scanHistory.take(MAX_CONTEXT_RECORDS),
                 corrections = normalizedCorrections,
-                remediationRecords = remediationRecords.sortedWith(
-                    compareBy<RemediationRecord> { it.findingKey }
-                        .thenBy { it.remediationId }
-                ),
+                remediationRecords = remediationLinks.map { it.record },
                 excludedEvidenceIds = effective.excludedEvidenceIds.map(::normalizedEvidenceId).sorted(),
                 confirmedEntityIds = effective.confirmedEntityIds.toList().sorted(),
-                rejectedEntityIds = effective.rejectedEntityIds.toList().sorted()
+                rejectedEntityIds = effective.rejectedEntityIds.toList().sorted(),
+                remediationLinks = remediationLinks
             )
         }
 
@@ -375,6 +405,135 @@ data class AiAnalysisSnapshot(
                 else -> emptyList()
             }
             return suppliedValues.any { comparable(it) == comparable(entity.label) }
+        }
+
+        private fun resolveRemediationLinks(
+            remediationRecords: List<RemediationRecord>,
+            rawEvidence: List<Evidence>,
+            effectiveEvidence: List<Evidence>,
+            normalizedEvidenceId: (String) -> String,
+            excludedProvenanceIds: Set<String>,
+            excludedEvidenceKeys: Set<EvidenceMatchKey>,
+            rejectedEntityProvenanceIds: Set<String>,
+            rejectedEntityEvidenceKeys: Set<EvidenceMatchKey>,
+            unusableEvidenceIds: Set<String>
+        ): List<AiRemediationLink> {
+            val allEvidence = (effectiveEvidence + rawEvidence).distinctBy(Evidence::id)
+            return remediationRecords.sortedWith(
+                compareBy<RemediationRecord> { it.findingKey }.thenBy { it.remediationId }
+            ).map { record ->
+                val matched = findMatchingEvidence(record, allEvidence, normalizedEvidenceId)
+                if (matched != null) {
+                    val localEvidenceId = normalizedEvidenceId(matched.id)
+                    val isExcluded = matched.id in excludedProvenanceIds ||
+                        evidenceMatchKey(matched) in excludedEvidenceKeys ||
+                        matched.id in rejectedEntityProvenanceIds ||
+                        evidenceMatchKey(matched) in rejectedEntityEvidenceKeys ||
+                        matched.state == EvidenceState.Rejected
+                    val isUnavailable = matched.state == EvidenceState.Unavailable ||
+                        matched.id in unusableEvidenceIds
+                    val linkState = when {
+                        isExcluded -> AiRemediationLinkState.Excluded
+                        isUnavailable -> AiRemediationLinkState.Unavailable
+                        else -> AiRemediationLinkState.Effective
+                    }
+                    AiRemediationLink(
+                        record = record.copy(
+                            evidenceId = record.evidenceId?.let(normalizedEvidenceId)
+                        ),
+                        evidenceId = localEvidenceId,
+                        effective = linkState == AiRemediationLinkState.Effective,
+                        state = linkState
+                    )
+                } else {
+                    AiRemediationLink(
+                        record = record.copy(
+                            evidenceId = record.evidenceId?.let(normalizedEvidenceId)
+                        ),
+                        evidenceId = null,
+                        effective = false,
+                        state = AiRemediationLinkState.Unmatched
+                    )
+                }
+            }
+        }
+
+        private fun findMatchingEvidence(
+            record: RemediationRecord,
+            candidates: List<Evidence>,
+            normalizedEvidenceId: (String) -> String
+        ): Evidence? {
+            if (!record.evidenceId.isNullOrBlank()) {
+                val targetId = record.evidenceId
+                val targetNorm = normalizedEvidenceId(targetId)
+                val migratedTarget = EvidenceIdPolicy.migrate(targetId)
+                val directMatch = candidates.firstOrNull { candidate ->
+                    candidate.id == targetId ||
+                        normalizedEvidenceId(candidate.id) == targetNorm ||
+                        EvidenceIdPolicy.migrate(candidate.id) == migratedTarget
+                }
+                if (directMatch != null) return directMatch
+            }
+            val parsedKey = parseFindingKey(record.findingKey)
+            return if (parsedKey != null) {
+                candidates.firstOrNull { candidate ->
+                    findingKeyMatchesEvidence(parsedKey, candidate)
+                }
+            } else {
+                candidates.firstOrNull { candidate ->
+                    exactFindingKeyMatchesEvidence(record.findingKey, record.sourceUrl, candidate)
+                }
+            }
+        }
+
+        private data class ParsedFindingKey(
+            val typeName: String,
+            val value: String,
+            val sourceUrl: String
+        )
+
+        private fun parseFindingKey(findingKey: String): ParsedFindingKey? {
+            val parts = findingKey.split('|', limit = 3)
+            if (parts.size < 3) return null
+            return ParsedFindingKey(
+                typeName = parts[0].trim(),
+                value = parts[1].trim(),
+                sourceUrl = parts[2].trim()
+            )
+        }
+
+        private fun findingKeyMatchesEvidence(parsed: ParsedFindingKey, evidence: Evidence): Boolean {
+            val expectedKind = findingTypeNameToEvidenceKind(parsed.typeName) ?: return false
+            return evidence.kind == expectedKind &&
+                comparable(evidence.value) == comparable(parsed.value) &&
+                comparable(evidence.sourceUrl.orEmpty()) == comparable(parsed.sourceUrl)
+        }
+
+        private fun exactFindingKeyMatchesEvidence(findingKey: String, sourceUrl: String?, evidence: Evidence): Boolean {
+            val target = comparable(findingKey)
+            val matchesVal = comparable(evidence.value) == target || (evidence.kind.name + ":" + evidence.value).equals(findingKey, ignoreCase = true)
+            val matchesSource = sourceUrl == null || comparable(evidence.sourceUrl.orEmpty()) == comparable(sourceUrl)
+            return matchesVal && matchesSource
+        }
+
+        private fun findingTypeNameToEvidenceKind(typeName: String): EvidenceKind? {
+            val findingType = FindingType.entries.firstOrNull { it.name.equals(typeName, ignoreCase = true) }
+            return when (findingType) {
+                FindingType.Email -> EvidenceKind.Email
+                FindingType.Phone -> EvidenceKind.Phone
+                FindingType.Address -> EvidenceKind.Address
+                FindingType.Location -> EvidenceKind.Location
+                FindingType.Username -> EvidenceKind.Username
+                FindingType.Profile -> EvidenceKind.Profile
+                FindingType.Organization -> EvidenceKind.Organization
+                FindingType.UsernameReuse -> EvidenceKind.UsernameReuse
+                FindingType.PlausibleProfileMatch -> EvidenceKind.PlausibleProfileMatch
+                FindingType.PublicSearchEvidence -> EvidenceKind.PublicSearchEvidence
+                FindingType.PublicImageEvidence -> EvidenceKind.PublicImageEvidence
+                FindingType.ImageConsistency -> EvidenceKind.ImageConsistency
+                FindingType.SensitiveSnippet -> EvidenceKind.SensitiveSnippet
+                null -> EvidenceKind.entries.firstOrNull { it.name.equals(typeName, ignoreCase = true) }
+            }
         }
 
         private fun normalizeEvidenceId(id: String): String = when {

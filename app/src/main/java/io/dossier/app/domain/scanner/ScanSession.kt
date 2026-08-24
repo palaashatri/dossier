@@ -507,6 +507,15 @@ object ScanSession {
         ProfileImageDownloader(context).clearCache()
     }
 
+    /**
+     * Purges transient encrypted/background state from an IO dispatcher. UI
+     * callers must use this suspend entry point so keystore/file cleanup does
+     * not block composition or input handling.
+     */
+    suspend fun purgeSessionAsync(context: Context) = withContext(Dispatchers.IO) {
+        purgeSession(context)
+    }
+
     private suspend fun runBreachChecks(
         context: Context,
         emails: List<String>,

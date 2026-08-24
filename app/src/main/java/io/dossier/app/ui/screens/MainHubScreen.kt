@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -176,13 +177,24 @@ private fun DossierNavGraph(
     onNavigateToBrowser: (String) -> Unit
 ) {
     val context = LocalContext.current
-    val initialRoute = remember(context) {
-        if (
-            BackgroundScanManager.hasActiveMarker(context) ||
-            BackgroundScanManager.latestResult(context) != null
-        ) "analysis" else "identity"
+    var initialRoute by remember(context) { mutableStateOf<String?>(null) }
+    LaunchedEffect(context) {
+        val hasActiveMarker = BackgroundScanManager.hasActiveMarkerAsync(context)
+        val hasLatestResult = BackgroundScanManager.latestResultAsync(context) != null
+        initialRoute = if (hasActiveMarker || hasLatestResult) "analysis" else "identity"
     }
-    NavHost(navController = navController, startDestination = initialRoute) {
+    if (initialRoute == null) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Text(
+                text = "Restoring local scan state…",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(24.dp)
+            )
+        }
+        return
+    }
+    NavHost(navController = navController, startDestination = initialRoute!!) {
         composable("identity") {
             IdentityScreen(onNext = { navController.navigate("username_discovery") })
         }

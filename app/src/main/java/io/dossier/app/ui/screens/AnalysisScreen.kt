@@ -38,6 +38,7 @@ import io.dossier.app.domain.analysis.PresenceState
 import io.dossier.app.domain.case.CaseTimelineBuilder
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.scanner.BackgroundScanManager
+import io.dossier.app.domain.scanner.BackgroundScanResultStore
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.export.GraphExportService
 import io.dossier.app.ui.components.AnimatedObsidianBackground
@@ -62,7 +63,7 @@ fun AnalysisScreen(
     val findingCount by ScanSession.findings.collectAsState()
     val entityGraph by ScanSession.entityGraph.collectAsState()
 
-    var snapshot by remember { mutableStateOf(BackgroundScanManager.latestResult(context)) }
+    var snapshot by remember { mutableStateOf<BackgroundScanResultStore.Snapshot?>(null) }
     val latestInfo = BackgroundScanManager.selectRelevantWorkInfo(
         context = context,
         workInfos = workInfos,
@@ -70,9 +71,13 @@ fun AnalysisScreen(
     )
     val status = latestInfo?.let(BackgroundScanManager::toStatus)
 
+    LaunchedEffect(Unit) {
+        snapshot = BackgroundScanManager.latestResultAsync(context)
+    }
+
     LaunchedEffect(latestInfo?.state, latestInfo?.id) {
         if (latestInfo?.state == WorkInfo.State.SUCCEEDED) {
-            snapshot = BackgroundScanManager.latestResult(context)
+            snapshot = BackgroundScanManager.latestResultAsync(context)
             snapshot?.dossierCase?.let(ScanSession::restoreFromCase)
         }
     }

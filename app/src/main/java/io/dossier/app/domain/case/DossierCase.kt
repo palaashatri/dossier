@@ -58,7 +58,8 @@ data class RemediationRecord(
     val createdAtUtc: String,
     val updatedAtUtc: String,
     val verificationNote: String? = null,
-    val verifiedByScanId: String? = null
+    val verifiedByScanId: String? = null,
+    val evidenceId: String? = null
 )
 
 @Serializable
@@ -77,7 +78,6 @@ data class CaseScanHistoryEntry(
     val failed: Boolean = false,
     val failureCode: String? = null
 )
-
 @Serializable
 data class CaseExportRecord(
     val exportId: String = UUID.randomUUID().toString(),

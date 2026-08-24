@@ -200,6 +200,7 @@ class ProfileScanner(
         val pivotFrontier = frontierStore?.load(frontierConfig)
             ?: BoundedPivotFrontier(frontierRequestId, frontierConfig)
         pivotFrontier.markVisited(uniqueCandidates.map { it.url })
+        publishPivotDiagnostics(scanId, pivotFrontier)
 
         // ---- Pass 2: bounded recursive pivot discovery. For every profile
         // confirmed in the preceding depth, read its rendered content/links for
@@ -328,6 +329,11 @@ class ProfileScanner(
                         signalType = rejection.signalType,
                         reason = rejection.reason
                     )
+                    publishPivotDiagnostics(
+                        scanId = scanId,
+                        frontier = frontier,
+                        decision = frontier.decisionDiagnostics.lastOrNull()
+                    )
                 }
             )
             pivots.forEach { pc ->
@@ -340,6 +346,14 @@ class ProfileScanner(
                     sourceUrl = confirmed.candidate.url,
                     provenance = pc.provenance,
                     admissionExplanation = pc.admissionExplanation
+                )
+                publishPivotDiagnostics(
+                    scanId = scanId,
+                    frontier = frontier,
+                    decision = when (offer) {
+                        is PivotOffer.Admitted -> frontier.decisionDiagnostics.lastOrNull()
+                        is PivotOffer.Rejected -> offer.diagnostic
+                    }
                 )
                 if (offer is PivotOffer.Admitted) {
                     scannedUrls += offer.entry.key
@@ -383,6 +397,11 @@ class ProfileScanner(
                                     signalType = rejection.signalType,
                                     reason = rejection.reason
                                 )
+                                publishPivotDiagnostics(
+                                    scanId = scanId,
+                                    frontier = frontier,
+                                    decision = frontier.decisionDiagnostics.lastOrNull()
+                                )
                             }
                         )
                         sitePivots.forEach { pc ->
@@ -395,6 +414,14 @@ class ProfileScanner(
                                 sourceUrl = siteUrl,
                                 provenance = pc.provenance,
                                 admissionExplanation = pc.admissionExplanation
+                            )
+                            publishPivotDiagnostics(
+                                scanId = scanId,
+                                frontier = frontier,
+                                decision = when (offer) {
+                                    is PivotOffer.Admitted -> frontier.decisionDiagnostics.lastOrNull()
+                                    is PivotOffer.Rejected -> offer.diagnostic
+                                }
                             )
                             if (offer is PivotOffer.Admitted) {
                                 scannedUrls += offer.entry.key
@@ -430,6 +457,7 @@ class ProfileScanner(
                 val (entry, scanResult) = deferred.await()
                 frontier.complete(entry.key)
                 frontierStore?.save(frontier)
+                publishPivotDiagnostics(scanId, frontier)
                 scanResult
             }
         }
@@ -1943,6 +1971,36 @@ internal object DeclarativeProfileExtractor {
     private const val MAX_BIO_CHARS = 2_000
     private const val MAX_URL_CHARS = 4_096
     private const val MAX_LINKS = 256
+}
+
+/**
+ * Bridges only bounded frontier metadata to the coordinator. The diagnostic
+ * intentionally excludes candidate/source URLs and normalized handles so the
+ * live scan surface cannot become a second evidence store.
+ */
+private fun publishPivotDiagnostics(
+    scanId: ScanId,
+    frontier: BoundedPivotFrontier,
+    decision: PivotDecisionDiagnostic? = null
+) {
+    ScanCoordinatorRuntime.onPivotDiagnostics(
+        scanId = scanId,
+        decision = decision?.let {
+            io.dossier.app.domain.discovery.PivotDecisionSummary(
+                admitted = it.admitted,
+                signalType = it.signalType.name,
+                depth = it.depth,
+                reason = it.reason
+            )
+        },
+        pendingCount = frontier.pendingCount,
+        pendingByDepth = frontier.pendingByDepth,
+        admittedCount = frontier.admittedCount,
+        rejectedCount = frontier.rejectedCount,
+        visitedCount = frontier.visitedCount,
+        maxDepth = frontier.config.maxDepth,
+        maxTotalPivots = frontier.config.maxTotalPivots
+    )
 }
 
 /**

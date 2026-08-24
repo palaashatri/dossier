@@ -124,6 +124,7 @@ class PivotFrontierTest {
         )
         assertTrue(overBudget is PivotOffer.Rejected)
         assertTrue((overBudget as PivotOffer.Rejected).diagnostic.reason.contains("budget"))
+        assertEquals(listOf(1, 1, 1), frontier.pendingByDepth)
 
         (1..3).forEach { depth ->
             val pending = frontier.pendingAtDepth(maxEntries = 1, depth = depth)
@@ -132,6 +133,7 @@ class PivotFrontierTest {
             frontier.complete(pending.single().key)
         }
         assertEquals(0, frontier.pendingCount)
+        assertEquals(listOf(0, 0, 0), frontier.pendingByDepth)
     }
 
     @Test

@@ -187,6 +187,9 @@ internal class BoundedPivotFrontier internal constructor(
     }
 
     val pendingCount: Int get() = queue.size
+    /** Number of queued entries at each configured depth (index 0 = depth 1). */
+    val pendingByDepth: List<Int>
+        get() = (1..config.maxDepth).map { depth -> queue.count { it.depth == depth } }
     val visitedCount: Int get() = visitedKeys.size
     val admittedCount: Int get() = admittedBySignal.values.sum()
     val rejectedCount: Int get() = diagnostics.count { !it.admitted }
