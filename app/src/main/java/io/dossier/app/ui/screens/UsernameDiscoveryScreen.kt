@@ -432,24 +432,19 @@ private fun ScanModeOption(
         )
         Spacer(modifier = Modifier.width(8.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = mode.name,
-                    color = NeuralTheme.TextPrimary,
-                    fontSize = 13.5.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = countText,
-                    color = if (selected) NeuralTheme.Cobalt else NeuralTheme.TextSecondary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
+            Text(
+                text = mode.name,
+                color = NeuralTheme.TextPrimary,
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = countText,
+                color = if (selected) NeuralTheme.Cobalt else NeuralTheme.TextSecondary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(top = 2.dp)
+            )
             Text(
                 text = scanModeDescription(mode),
                 color = NeuralTheme.TextSecondary,

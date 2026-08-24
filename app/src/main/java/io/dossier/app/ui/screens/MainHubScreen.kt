@@ -109,9 +109,22 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
                                 )
                             },
                             label = {
+                                val fontScale = androidx.compose.ui.platform.LocalDensity.current.fontScale
+                                val isHighFont = fontScale >= 1.5f
+                                val labelText = if (isHighFont) {
+                                    when (tab) {
+                                        HubTab.DOSSIER -> "Audit"
+                                        HubTab.IMAGE_LOOKUP -> "Media"
+                                        HubTab.BREACH -> "Breach"
+                                        HubTab.CASES -> "Cases"
+                                        HubTab.MODELS -> "Tools"
+                                    }
+                                } else {
+                                    tab.label
+                                }
                                 Text(
-                                    tab.label,
-                                    fontSize = 11.sp,
+                                    labelText,
+                                    fontSize = if (isHighFont) 10.sp else 11.sp,
                                     maxLines = 1,
                                     softWrap = false,
                                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
