@@ -11,7 +11,7 @@ The current implementation branch is **71/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-d6c3f5522e280b64efb8727ce88edc8f8287aa70
+c0e9d91d8928ede91620e130dd2a8ebef8c8fc1f
 ```
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
@@ -19,13 +19,13 @@ That exact implementation passed the current final-tree build and deterministic 
 ```text
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
-Debug JVM unit tests                PASS — 577 tests / 105 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 577 tests / 105 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 579 tests / 105 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 579 tests / 105 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 118,689,049 bytes
-Debug APK SHA-256                   9863910AEA5ED580AFD4E715D6C617412AD7397FE829D2B449654A80917AB12B
+Debug APK assembly                  PASS — 118,693,225 bytes
+Debug APK SHA-256                   8F194C661BDAE3357B96BE85421523F4C24A431E78ECB39A9ED5FC1C40B100B8
 uiTest APK assembly                 PASS — 243,286,807 bytes
-uiTest APK SHA-256                 E252F8E4517024DD8DE973C01880815362E93A2E20ED7CEADEB3632C06F49B78
+uiTest APK SHA-256                 0763D51678DC917C9DBACE19F89E5EA4A49EB24DEFF806F6FC9A87BA3E25F57D
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
 Connected Android instrumentation  NOT RUN — `No connected devices!`
@@ -80,6 +80,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - Direct-profile execution emits provider queued/started/completed/unavailable events with one stable scan ID; retries do not inflate unique started counts and stale callbacks are ignored.
 - Identity seeds, scan mode, deep-scan choice and per-scan face policy are stored in an Android Keystore AES-GCM resume record; new WorkManager requests receive only its opaque UUID.
 - Stable results from the initial direct-profile pass are checkpointed per request, plan and canonical candidate in Android Keystore AES-GCM storage. A restarted worker reuses only exact, unexpired stable outcomes; transient network, timeout, challenge and parser failures are fetched again.
+- New encrypted scan requests commit a deterministic SHA-256 fingerprint of the selected declarative provider plan plus a bounded ordered provider-ID summary; older request records remain explicitly resumable without being assigned a retroactive plan.
 - The configured-depth pivot path now uses a request-scoped encrypted frontier with queued, visited and completed state, conservative admission, global/per-signal budgets, bounded rejection diagnostics and durable clear tombstones. A cancelled or thrown pivot attempt remains pending for a later exact-scope worker retry.
 - Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
 - Background enqueue now publishes a generation-bound lifecycle before replacing the old exact WorkManager UUID, promotes only that prepared encrypted request, and reenqueues the same UUID after an authoritative missing-row crash boundary.
@@ -161,6 +162,7 @@ Broad historical extraction and production timeline UI remain incomplete.
 - Contradiction can downgrade a generated high-confidence claim.
 - Malformed/unsupported generated output falls back to deterministic analysis instead of being displayed raw.
 - Remote processing remains opt-in and disclosed.
+- Remote graph entities and relationships carry bounded pseudonymized references to supporting and contradicting evidence from the same evidence window; raw local evidence IDs do not cross the remote boundary.
 
 A production AI evaluation corpus and fully corrected-graph/remediation-native model inputs remain incomplete.
 

@@ -7,9 +7,9 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 - **Strict product readiness score:** **71/100**
 - **Milestone state:** M0 complete; M1–M6 and M8–M12 materially advanced but still partial; M7 and M13 remain partial
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
-- **Last validated implementation commit:** `d6c3f5522e280b64efb8727ce88edc8f8287aa70`
+- **Last validated implementation commit:** `c0e9d91d8928ede91620e130dd2a8ebef8c8fc1f`
 - **Last validation date:** **2026-08-24**
-- **Current-session validation on that commit:** provider and pinned-catalog audits passed; both debug and uiTest JVM suites passed 577 tests across 105 suites each; debug/uiTest APKs assembled; Android-test Kotlin compiled; lint completed with zero errors; and the connected instrumentation task reached packaging but stopped with `No connected devices!`.
+- **Current-session validation on that commit:** provider and pinned-catalog audits passed; both debug and uiTest JVM suites passed 579 tests across 105 suites each; debug/uiTest APKs assembled; Android-test Kotlin compiled; lint completed with zero errors; and the connected instrumentation task reached packaging but stopped with `No connected devices!`.
 - **Documentation-only commits after the validated implementation:** may update this file/PR prose without changing the validated code claim
 - **Last validated device class for this commit:** none; no ADB device was connected in this session
 - **Prior device evidence:** API 36 x86_64 emulator instrumentation exists only for an earlier commit and is not promoted to this tree
@@ -21,14 +21,14 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 
 Compilation, unit tests and emulator tests are necessary gates, but they do not substitute for live-provider validation, calibrated identity/face benchmarks, physical-device measurements, accessibility validation or release hardening.
 
-The readiness score is **71/100** after making declarative extraction rules executable, hardening provider redirect classification, installing provider-health persistence for interactive scans, and replacing the fixed pivot caller with a configured-depth bounded frontier drain. The scan still defaults to conservative depth two (hard maximum four), and stable profile/pivot work can survive an exact-scope worker restart. This is still not full scan pause/resume: the coordinator does not own one general plan, non-profile/pivot stages remain uncheckpointed, and empirical representative calibration does not yet exist.
+The readiness score is **71/100** after making declarative extraction rules executable, hardening provider redirect classification, installing provider-health persistence for interactive scans, replacing the fixed pivot caller with a configured-depth bounded frontier drain, binding encrypted requests to a deterministic provider-plan fingerprint, and preserving bounded pseudonymized graph provenance at the remote-AI boundary. The scan still defaults to conservative depth two (hard maximum four), and stable profile/pivot work can survive an exact-scope worker restart. This is still not full scan pause/resume: the coordinator does not own one general plan, non-profile/pivot stages remain uncheckpointed, and empirical representative calibration does not yet exist.
 
 ## Strict 100-point rubric
 
 | Area | Score | Truth |
 |---|---:|---|
 | Discovery breadth and reliability | **12/15** | Discovery Fabric v2 is integrated into runtime planning and direct-profile execution with 78 declarative definitions, live selector-driven extraction, exact/approved-host redirect checks including HTTPS-downgrade rejection, bounded reads, timeout/retry/cooldown/request-spacing policy, typed truthful outcomes, provider health updates for interactive scans, scan modes and maintenance-audit CI. A separately pinned WhatsMyName asset contains 716 source records and 644 executable HTTPS username rules after parser/policy filtering, with mode budgets, bounded execution and fail-closed states. These rules are not additional `ProviderCatalogV2` definitions or live-validated providers. The project remains below the 1,000+ useful reviewed-provider target and lacks registry-wide live contracts. |
-| Recursive orchestration | **9/10** | The coordinator/event bridge starts and observes the mature pipeline; direct-profile work emits real lifecycle events; live UI consumes bounded event-derived counts; and real terminal scan history is captured. Production background scheduling uses encrypted two-phase request publication, exact UUID/generation ownership, startup `getWorkInfoById` reconciliation, idempotent result-aware success and terminal cancellation observation. Stable direct-profile outcomes and the request-scoped frontier resume by exact scope. A generic depth-driven frontier drain now honors a configured maximum (default two, hard maximum four), shared budgets, verified-only expansion, queued/visited/completed state, conservative admission, bounded rejection diagnostics and durable clear tombstones. True suspended pause/resume, sole coordinator ownership, non-profile/image/search/breach/AI checkpoints, UI diagnostics and external process-kill/reboot proof remain incomplete. |
+| Recursive orchestration | **9/10** | The coordinator/event bridge starts and observes the mature pipeline; direct-profile work emits real lifecycle events; live UI consumes bounded event-derived counts; and real terminal scan history is captured. Production background scheduling uses encrypted two-phase request publication, exact UUID/generation ownership, startup `getWorkInfoById` reconciliation, idempotent result-aware success and terminal cancellation observation. Stable direct-profile outcomes and the request-scoped frontier resume by exact scope. A generic depth-driven frontier drain now honors a configured maximum (default two, hard maximum four), shared budgets, verified-only expansion, queued/visited/completed state, conservative admission, bounded rejection diagnostics and durable clear tombstones. Encrypted request metadata also commits the exact declarative provider plan fingerprint and bounded ordered IDs, while older records remain explicitly uncommitted to a plan. True suspended pause/resume, sole coordinator ownership, non-profile/image/search/breach/AI checkpoints, UI diagnostics and external process-kill/reboot proof remain incomplete. |
 | Evidence/provenance | **6/10** | Universal evidence supports provider, retrieval/observation timestamps, verification state, reliability, SHA-256, parser version and historical state. Imported third-party OSINT reports are explicitly Candidate/ThirdPartyAggregation and never become Verified merely because an external tool reported a hit. Older producers still do not populate every field universally. |
 | Entity resolution | **6/10** | An explainable multi-signal resolver is integrated into the production graph, preserves contributions and contradictions, and prevents same-username-only confirmation. A deterministic digest-bound benchmark now reports confusion-matrix counts, precision, recall, F1, FPR, FNR and unverifiable accuracy. Calibration artifacts fail closed on schema/version/digest/count/policy mismatch; synthetic artifacts cannot activate production policy, and consented artifacts must meet minimum class counts and bind to the exact evaluated corpus. No representative consented artifact or measured production calibration exists, so weights remain engineering parameters. |
 | Identity graph | **6/8** | Graph v2 adds semantic node kinds, typed relationships, evidence/contradiction IDs, node states, history fields, queries and schema versioning while preserving legacy case compatibility. GraphML, declared-attribute GEXF and NetworkX-style node-link JSON serializers provide dependency-free interoperability with Gephi/Cytoscape/NetworkX-style workflows. Some subsystems still retain parallel representations. |
@@ -36,11 +36,11 @@ The readiness score is **71/100** after making declarative extraction rules exec
 | Face-correlation validation | **3/6** | YuNet/SFace artifacts are pinned and integrity checked; preprocessing, alignment, quality rejection and calibration tooling exist and its runtime check passes CI. `face_recognition` and DeepFace are catalogued as alternative ecosystems rather than embedded dependencies because Dossier already has a local consented pipeline. Representative measured FAR/FRR/ROC results and physical-device inference validation do not exist yet. |
 | Historical evidence | **3/6** | Exact-URL Wayback recovery, bounded CDX history discovery, selected-snapshot re-fetching and best-effort archive.today fallback exist. Historical captures remain explicitly historical and cannot masquerade as proof of current account existence. Universal historical extraction/change tracking and production timeline UI remain incomplete. |
 | Breach intelligence | **4/5** | HIBP authoritative coverage remains separate from general public exposure; privacy-preserving range flows are used where supported; breach/provider/retrieval/date metadata is preserved. LeakCheck/DeHashed/Breach-Parse/Buster/BreachFinder interoperability is summary-only and rejects credential/secret-bearing records. Coverage remains externally dependent. |
-| AI analyst | **4/5** | Generated factual claims must be structured, cite existing evidence IDs and survive deterministic validation; uncited/unknown identifiers are withheld and invalid output falls back locally. The validator also rejects explicit email/URL identifiers not present in the evidence actually cited. Corrected-graph/remediation-native inputs and a production evaluation corpus remain incomplete. |
+| AI analyst | **4/5** | Generated factual claims must be structured, cite existing evidence IDs and survive deterministic validation; uncited/unknown identifiers are withheld and invalid output falls back locally. The validator also rejects explicit email/URL identifiers not present in the evidence actually cited. Remote graph entities and relationships now carry only pseudonymized references to evidence inside the same bounded prompt window, with omitted provenance counted. Corrected-graph/remediation-native inputs beyond this bounded seam and a production evaluation corpus remain incomplete. |
 | UX/UI | **6/8** | Overview/Evidence/Connections/Actions remain coherent; live scan state is event-derived; saved Cases support persistent corrections, remediation tracking, scan-history display and share-safe export. API 36 visual QA fixed consent-footer overlap, machine-token status copy, graph-label clipping, remediation-status overlap, stale scan logs, the background/cancel action collision, ambiguous provider budgets and large-type navigation/count wrapping. The changed scan-budget and navigation states were inspected at 1.0x, 1.3x, 1.5x and 2.0x font scale. Timeline UX, graph-export UI, case-integrated image clusters and broad TalkBack/adaptive-layout/physical-device validation remain incomplete. |
 | Security/privacy | **3/4** | Keystore AES-256-GCM cases, encrypted request-scoped scan checkpoints, generation-bound exact-owner lifecycle state, opaque new WorkManager inputs, allowlisted WorkManager progress/error values, atomic encrypted result replacement, restricted evidence WebView, local visual processing defaults, opt-in remote AI, explicit deletion and pre-write share-safe export are implemented. External report imports are bounded, local/in-memory, tied to explicit audit seeds and strip/reject password/hash/cookie/token/session/credential material. Historical plaintext WorkManager rows are not forensically erased, and latest-result reads still need bounded/off-main hardening. |
-| Testing/device validation | **3/5** | Provider audit (78 definitions), pinned WhatsMyName integrity audit (716 records / 644 executable rules), both debug and uiTest JVM suites (577 tests across 105 suites each, 0 failures/errors/skips), debug/uiTest APK assembly, Android-test Kotlin compilation and zero-error lint pass on the exact implementation commit above. The connected AndroidJUnitRunner task reached packaging but stopped with `No connected devices!`; no current-tree emulator/device result is claimed. Physical Samsung/Pixel/lower-memory, battery, external process-death/reboot and complete accessibility gates remain incomplete. |
-| **Total** | **71/100** | Declarative provider extraction, fail-closed redirect/WebView boundaries, interactive health installation and a configured-depth bounded frontier drain are now covered by current-tree tests and builds. This does not establish full-pipeline pause/resume, process-kill/reboot acceptance, registry-wide live validation, representative empirical calibration, connected-device acceptance or release hardening. |
+| Testing/device validation | **3/5** | Provider audit (78 definitions), pinned WhatsMyName integrity audit (716 records / 644 executable rules), both debug and uiTest JVM suites (579 tests across 105 suites each, 0 failures/errors/skips), debug/uiTest APK assembly, Android-test Kotlin compilation and zero-error lint pass on the exact implementation commit above. The connected AndroidJUnitRunner task reached packaging but stopped with `No connected devices!`; no current-tree emulator/device result is claimed. Physical Samsung/Pixel/lower-memory, battery, external process-death/reboot and complete accessibility gates remain incomplete. |
+| **Total** | **71/100** | Declarative provider extraction, fail-closed redirect/WebView boundaries, interactive health installation, a configured-depth bounded frontier drain, deterministic plan binding and bounded graph-provenance redaction are now covered by current-tree tests and builds. This does not establish full-pipeline pause/resume, process-kill/reboot acceptance, registry-wide live validation, representative empirical calibration, connected-device acceptance or release hardening. |
 
 ## M0 — Baseline audit
 
@@ -160,6 +160,7 @@ Implemented in the current production path:
 - later correction/remediation edits cannot silently graft a newer scan onto an older case;
 - request-scoped encrypted seed, mode, deep-scan and per-scan face-policy restoration through a canonical opaque WorkManager UUID;
 - request/plan/candidate-scoped encrypted checkpoints for stable initial direct-profile outcomes, miss-only continuation, deterministic output ordering and no synthetic provider events for restored hits;
+- deterministic SHA-256 binding of each encrypted request to the selected declarative provider plan, with a bounded ordered ID summary and explicit backward-compatible uncommitted state for pre-plan records;
 - stable allowlisted WorkManager progress/failure values, fail-closed legacy-input handling and exact current-owner result publication;
 - atomic old-generation to pending-generation lifecycle replacement, followed by exact prepared-request promotion and fixed-UUID WorkRequest publication;
 - generation/owner/request-bound worker claim, result publication before lifecycle success and idempotent retry after a durable-success/WorkManager-commit crash boundary;
@@ -172,7 +173,7 @@ Supporting lifecycle stores use encrypted request `prepare` / exact-ID load / `p
 
 Not complete: true suspended pause/resume, sole coordinator ownership, persisted search/image/breach/AI work, a general coordinator-owned plan/parser/frontier loop, migration of remaining custom resolver work to provider lifecycle events and external process-kill/relaunch plus reboot recovery proof.
 
-The encrypted resume record stores the seed input, selected mode, deep-scan flag and per-scan strong-face-policy flag. New WorkManager rows receive only opaque request/generation UUID references. Prepared/current generations are still request checkpoints, not a persisted scan plan/parser/frontier fingerprint, and deterministic crash-boundary/instrumentation coverage does not by itself constitute process-death or reboot acceptance.
+The encrypted resume record stores the seed input, selected mode, deep-scan flag, per-scan strong-face-policy flag and (for new requests) the selected plan fingerprint plus bounded provider IDs. New WorkManager rows receive only opaque request/generation UUID references. Prepared/current generations are still request checkpoints rather than a general scan plan/parser/frontier state, and deterministic crash-boundary/instrumentation coverage does not by itself constitute process-death or reboot acceptance.
 
 ## M3 — Recursive frontier
 
@@ -256,9 +257,9 @@ Third-party breach-tool interoperability is intentionally summary-only. Credenti
 
 **Status: partial, production-integrated.**
 
-Implemented: deterministic structured evidence snapshot, structured claim/result contract, evidence-ID validation, uncited factual-claim rejection, unsupported email/URL identifier rejection, contradiction downgrade, output bounds, raw-prose rejection and deterministic local fallback.
+Implemented: deterministic structured evidence snapshot, structured claim/result contract, evidence-ID validation, uncited factual-claim rejection, unsupported email/URL identifier rejection, contradiction downgrade, output bounds, raw-prose rejection and deterministic local fallback. Remote graph entities and relationships retain bounded pseudonymized references to evidence and contradicting evidence from the same remote evidence window; raw local IDs remain excluded.
 
-Not complete: corrected graph/remediation-native input for every model path, production evaluation fixtures/corpus and stronger remote-input redaction controls.
+Not complete: corrected graph/remediation-native input for every model path, production evaluation fixtures/corpus and evaluation of the bounded remote provenance contract under adversarial/large graph inputs.
 
 ## M11 — Investigation UX
 
@@ -330,7 +331,7 @@ External OSINT imports are local/in-memory and bounded. Import parsers require e
 Validated implementation commit:
 
 ```text
-d6c3f5522e280b64efb8727ce88edc8f8287aa70
+c0e9d91d8928ede91620e130dd2a8ebef8c8fc1f
 ```
 
 Validation date:
@@ -344,18 +345,18 @@ Current-session validation on that exact commit:
 ```text
 Provider registry audit       PASS — 78 definitions / 0 errors
 WhatsMyName integrity audit   PASS — 716 records / 644 executable rules / pinned hashes match
-Debug JVM unit tests          PASS — 577 tests / 105 suites / 0 failures / 0 errors / 0 skips
-uiTest JVM unit tests         PASS — 577 tests / 105 suites / 0 failures / 0 errors / 0 skips
+Debug JVM unit tests          PASS — 579 tests / 105 suites / 0 failures / 0 errors / 0 skips
+uiTest JVM unit tests         PASS — 579 tests / 105 suites / 0 failures / 0 errors / 0 skips
 Android-test Kotlin compile  PASS — `compileUiTestAndroidTestKotlin`
-Debug APK                     PASS — 118,689,049 bytes / SHA-256 9863910AEA5ED580AFD4E715D6C617412AD7397FE829D2B449654A80917AB12B
-uiTest APK                    PASS — 243,286,807 bytes / SHA-256 E252F8E4517024DD8DE973C01880815362E93A2E20ED7CEADEB3632C06F49B78
+Debug APK                     PASS — 118,693,225 bytes / SHA-256 8F194C661BDAE3357B96BE85421523F4C24A431E78ECB39A9ED5FC1C40B100B8
+uiTest APK                    PASS — 243,286,807 bytes / SHA-256 0763D51678DC917C9DBACE19F89E5EA4A49EB24DEFF806F6FC9A87BA3E25F57D
 Debug lint                    PASS — 0 errors / 69 warnings
 uiTest lint                   PASS — 0 errors / 72 warnings
 Connected instrumentation    NOT RUN — `No connected devices!` after APK packaging
 Visual QA                     NOT RUN in this validation session
 ```
 
-The full JVM gate was run after the implementation commit with the declarative extractor, redirect-policy, WebView-policy, frontier-depth and AI-key tests included. The connected Android test task packaged the current APKs but could not launch AndroidJUnitRunner because no ADB device was connected. The uiTest-only receiver edit that was already present in the worktree remains uncommitted and is not part of the validated implementation commit. No current-tree emulator, physical-device, screenshot, process-death/reboot, accessibility or battery/thermal claim is made here.
+The full JVM gate was run after the implementation commit with the declarative extractor, redirect-policy, WebView-policy, frontier-depth, AI-key, encrypted-plan-fingerprint and remote graph-provenance tests included. The connected Android test task packaged the current APKs but could not launch AndroidJUnitRunner because no ADB device was connected. The uiTest-only receiver edit that was already present in the worktree remains uncommitted and is not part of the validated implementation commit. No current-tree emulator, physical-device, screenshot, process-death/reboot, accessibility or battery/thermal claim is made here.
 
 ## Current production blockers
 
