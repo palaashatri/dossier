@@ -365,8 +365,8 @@ object BackgroundScanManager {
     internal var lifecycleStoreProvider: (Context) -> ScanLifecycleStore = { ScanLifecycleStore(it) }
     internal var resumeStoreProvider: (Context) -> ScanResumeStore = { ScanResumeStore(it) }
     internal var resultStoreProvider: (Context) -> BackgroundScanResultStore = { BackgroundScanResultStore(it) }
-    internal var profileCheckpointClearer: (Context, String) -> Boolean = { ctx, reqId -> ProfileScanCheckpointStore.clearRequest(ctx, reqId) }
-    internal var profileCheckpointAllClearer: (Context) -> Boolean = { ProfileScanCheckpointStore.clearAll(it) }
+    internal var profileCheckpointClearer: (Context, String) -> Boolean = ::clearRequestRecoveryState
+    internal var profileCheckpointAllClearer: (Context) -> Boolean = ::clearAllRecoveryState
     internal var resumeStateAllClearer: (Context) -> Boolean = { ScanResumeStore(it).clear() }
     // Operation callbacks can synchronously invoke an already-completed
     // Future. Keep their default executor off the UI thread because
@@ -384,8 +384,8 @@ object BackgroundScanManager {
         lifecycleStoreProvider = { ScanLifecycleStore(it) }
         resumeStoreProvider = { ScanResumeStore(it) }
         resultStoreProvider = { BackgroundScanResultStore(it) }
-        profileCheckpointClearer = { ctx, reqId -> ProfileScanCheckpointStore.clearRequest(ctx, reqId) }
-        profileCheckpointAllClearer = { ProfileScanCheckpointStore.clearAll(it) }
+        profileCheckpointClearer = ::clearRequestRecoveryState
+        profileCheckpointAllClearer = ::clearAllRecoveryState
         resumeStateAllClearer = { ScanResumeStore(it).clear() }
         directExecutor = backgroundExecutor
     }
@@ -832,6 +832,18 @@ object BackgroundScanManager {
             Instant.parse(completedAtUtc).toEpochMilli()
         }.getOrNull() ?: return false
         return completedAtEpochMillis <= lifecycle.updatedAtEpochMillis
+    }
+
+    private fun clearRequestRecoveryState(context: Context, requestId: String): Boolean {
+        val profilesCleared = ProfileScanCheckpointStore.clearRequest(context, requestId)
+        val frontierCleared = PivotFrontierStore.clearRequest(context, requestId)
+        return profilesCleared && frontierCleared
+    }
+
+    private fun clearAllRecoveryState(context: Context): Boolean {
+        val profilesCleared = ProfileScanCheckpointStore.clearAll(context)
+        val frontiersCleared = PivotFrontierStore.clearAll(context)
+        return profilesCleared && frontiersCleared
     }
 
     fun hasActiveMarker(context: Context): Boolean = synchronized(LIFECYCLE_LOCK) {

@@ -31,7 +31,6 @@ import android.content.Context
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -183,6 +182,21 @@ class ProfileScanner(
             deepResearch = deepResearch
         )
 
+        // The recursive pass is backed by a request-scoped encrypted frontier
+        // when WorkManager supplied a canonical request ID. A process-local
+        // frontier keeps direct interactive scans bounded without inventing
+        // persistence for requests that cannot be resumed safely.
+        val frontierConfig = PivotFrontierConfig.forScan(deepResearch)
+        val frontierRequestId = requestId
+            ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
+            ?: EPHEMERAL_FRONTIER_REQUEST_ID
+        val frontierStore = requestId
+            ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
+            ?.let { runCatching { PivotFrontierStore(context, it) }.getOrNull() }
+        val pivotFrontier = frontierStore?.load(frontierConfig)
+            ?: BoundedPivotFrontier(frontierRequestId, frontierConfig)
+        pivotFrontier.markVisited(uniqueCandidates.map { it.url })
+
         // ---- Pass 2 (+ hop 2): multi-hop pivot discovery. For every profile
         // confirmed in pass 1, read its rendered content/links for OTHER handles
         // the user self-disclosed, and check those as new candidates. A second
@@ -199,9 +213,14 @@ class ProfileScanner(
                 input = input,
                 deepResearch = deepResearch,
                 remainingBudget = MAX_PIVOT_CANDIDATES,
-                scanId = scanId
+                scanId = scanId,
+                frontier = pivotFrontier,
+                frontierStore = frontierStore,
+                depth = 1
             )
-            hop1.forEach { scanned.add(it.candidate.url.lowercase()) }
+            hop1.forEach {
+                BoundedPivotFrontier.canonicalUrlKey(it.candidate.url)?.let(scanned::add)
+            }
             // Hop 2: only on newly verified pivot results (soft-existence pages
             // with verified=false do not seed further pivots). Shared budget across hops.
             val usedBudget = hop1.size
@@ -214,7 +233,10 @@ class ProfileScanner(
                     input = input,
                     deepResearch = deepResearch,
                     remainingBudget = remaining,
-                    scanId = scanId
+                    scanId = scanId,
+                    frontier = pivotFrontier,
+                    frontierStore = frontierStore,
+                    depth = 2
                 )
             } else {
                 emptyList()
@@ -225,6 +247,10 @@ class ProfileScanner(
         } catch (_: Throwable) {
             emptyList()
         }
+
+        // Keep bounded admission/rejection diagnostics and any interrupted
+        // queue entries available for a later request-scoped resume.
+        frontierStore?.save(pivotFrontier)
 
         // ---- Pass 3: public-search discovery. This broadens coverage beyond
         // deterministic username templates by querying public indexes for the
@@ -294,25 +320,49 @@ class ProfileScanner(
         input: IdentityInput,
         deepResearch: Boolean,
         remainingBudget: Int,
-        scanId: ScanId
+        scanId: ScanId,
+        frontier: BoundedPivotFrontier,
+        frontierStore: PivotFrontierStore?,
+        depth: Int
     ): List<ProfileScanResult> {
         if (remainingBudget <= 0) return emptyList()
-        val scannedUrls = alreadyScannedUrls.toMutableSet()
-        val pivotCandidates = mutableListOf<HandleExtractor.PivotCandidate>()
+        val scannedUrls = alreadyScannedUrls.mapNotNull(BoundedPivotFrontier::canonicalUrlKey).toMutableSet()
+        frontier.markVisited(scannedUrls)
         seedResults.filter { it.exists && it.verified }.forEach { confirmed ->
-            if (pivotCandidates.size >= remainingBudget) return@forEach
+            if (frontier.pending(remainingBudget, depth).size >= remainingBudget) return@forEach
             val sourceLabel = confirmed.candidate.platform.name
             val pivots = HandleExtractor.extract(
                 profileText = confirmed.extractedText,
                 profileLinks = confirmed.links,
                 sourceUrl = confirmed.candidate.url,
-                alreadyScannedUrls = scannedUrls,
-                sourcePlatformLabel = sourceLabel
+                alreadyScannedUrls = scannedUrls + frontier.visitedUrls,
+                sourcePlatformLabel = sourceLabel,
+                depth = depth,
+                onRejected = { rejection ->
+                    frontier.recordRejected(
+                        key = rejection.candidateUrl?.let(BoundedPivotFrontier::canonicalUrlKey).orEmpty(),
+                        normalizedValue = rejection.normalizedValue,
+                        candidateUrl = rejection.candidateUrl,
+                        sourceUrl = confirmed.candidate.url,
+                        depth = depth,
+                        signalType = rejection.signalType,
+                        reason = rejection.reason
+                    )
+                }
             )
             pivots.forEach { pc ->
-                if (pc.candidate.url.lowercase() !in scannedUrls && pivotCandidates.size < remainingBudget) {
-                    pivotCandidates.add(pc)
-                    scannedUrls.add(pc.candidate.url.lowercase())
+                if (frontier.pending(remainingBudget, depth).size >= remainingBudget) return@forEach
+                val offer = frontier.offer(
+                    candidate = pc.candidate,
+                    depth = depth,
+                    signalType = pc.signalType,
+                    confidence = pc.candidate.confidence,
+                    sourceUrl = confirmed.candidate.url,
+                    provenance = pc.provenance,
+                    admissionExplanation = pc.admissionExplanation
+                )
+                if (offer is PivotOffer.Admitted) {
+                    scannedUrls += offer.entry.key
                 }
             }
 
@@ -320,7 +370,7 @@ class ProfileScanner(
             // profile, read their pages for MORE handles, and pivot from those
             // too. (deanonymizer's website link-follower.) Bounded to keep
             // runtime sane.
-            if (deepResearch && pivotCandidates.size < remainingBudget) {
+            if (deepResearch && frontier.pending(remainingBudget, depth).size < remainingBudget) {
                 val websiteFollower = io.dossier.app.data.web.WebsiteLinkFollower(context)
                 val personalSites = confirmed.links
                     .filter { link ->
@@ -339,13 +389,34 @@ class ProfileScanner(
                             profileText = followed.text,
                             profileLinks = followed.links,
                             sourceUrl = siteUrl,
-                            alreadyScannedUrls = scannedUrls,
-                            sourcePlatformLabel = "$sourceLabel → website"
+                            alreadyScannedUrls = scannedUrls + frontier.visitedUrls,
+                            sourcePlatformLabel = "$sourceLabel → website",
+                            depth = depth,
+                            onRejected = { rejection ->
+                                frontier.recordRejected(
+                                    key = rejection.candidateUrl?.let(BoundedPivotFrontier::canonicalUrlKey).orEmpty(),
+                                    normalizedValue = rejection.normalizedValue,
+                                    candidateUrl = rejection.candidateUrl,
+                                    sourceUrl = siteUrl,
+                                    depth = depth,
+                                    signalType = rejection.signalType,
+                                    reason = rejection.reason
+                                )
+                            }
                         )
                         sitePivots.forEach { pc ->
-                            if (pc.candidate.url.lowercase() !in scannedUrls && pivotCandidates.size < remainingBudget) {
-                                pivotCandidates.add(pc)
-                                scannedUrls.add(pc.candidate.url.lowercase())
+                            if (frontier.pending(remainingBudget, depth).size >= remainingBudget) return@forEach
+                            val offer = frontier.offer(
+                                candidate = pc.candidate,
+                                depth = depth,
+                                signalType = pc.signalType,
+                                confidence = pc.candidate.confidence,
+                                sourceUrl = siteUrl,
+                                provenance = pc.provenance,
+                                admissionExplanation = pc.admissionExplanation
+                            )
+                            if (offer is PivotOffer.Admitted) {
+                                scannedUrls += offer.entry.key
                             }
                         }
                     } catch (cancelled: CancellationException) {
@@ -357,17 +428,29 @@ class ProfileScanner(
             }
         }
 
-        if (pivotCandidates.isEmpty()) return emptyList()
+        frontierStore?.save(frontier)
+        val pending = frontier.pending(remainingBudget, depth)
+        if (pending.isEmpty()) return emptyList()
 
-        pivotCandidates.forEach { queueProviderCandidate(it.candidate, scanId) }
+        pending.forEach { queueProviderCandidate(it.candidate, scanId) }
 
         return coroutineScope {
-            val deferredPivots = pivotCandidates.map { pc ->
+            val deferredPivots = pending.map { entry ->
                 async(Dispatchers.IO) {
-                    fetchAndParse(pc.candidate, input, provenance = pc.provenance, scanId = scanId)
+                    entry to fetchAndParse(
+                        entry.candidate,
+                        input,
+                        provenance = entry.provenance,
+                        scanId = scanId
+                    )
                 }
             }
-            deferredPivots.awaitAll()
+            deferredPivots.map { deferred ->
+                val (entry, scanResult) = deferred.await()
+                frontier.complete(entry.key)
+                frontierStore?.save(frontier)
+                scanResult
+            }
         }
     }
 
@@ -562,6 +645,7 @@ class ProfileScanner(
 
     // Bounds total pivot candidates across hops so the pass can't run away.
     private val MAX_PIVOT_CANDIDATES = 30
+    private val EPHEMERAL_FRONTIER_REQUEST_ID = "00000000-0000-4000-8000-000000000000"
     // Bounds the Deep Research website link-following per confirmed profile.
     private val MAX_WEBSITE_FOLLOWS = 5
     // Bounds the initial fan-out (name-variants × platforms) so a long name with

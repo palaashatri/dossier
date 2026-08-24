@@ -1,10 +1,13 @@
 package io.dossier.app.domain.discovery
 
+import kotlinx.serialization.Serializable
+
 /**
  * Signal types that may enter the bounded recursive discovery path.
  * This policy is intentionally conservative because a false pivot can multiply
  * into many false profile candidates on the next hop.
  */
+@Serializable
 enum class PivotSignalType {
     ExplicitProfileLink,
     ExplicitPlatformMention,

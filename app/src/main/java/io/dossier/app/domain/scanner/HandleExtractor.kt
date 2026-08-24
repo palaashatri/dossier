@@ -33,10 +33,12 @@ object HandleExtractor {
         profileLinks: List<String>,
         sourceUrl: String,
         alreadyScannedUrls: Set<String>,
-        sourcePlatformLabel: String
+        sourcePlatformLabel: String,
+        depth: Int = 1,
+        onRejected: ((PivotRejection) -> Unit)? = null
     ): List<PivotCandidate> {
         val found = mutableMapOf<String, PivotCandidate>()
-        val scanned = alreadyScannedUrls.map(String::lowercase).toSet() + sourceUrl.lowercase()
+        val scanned = (alreadyScannedUrls.map(String::lowercase) + sourceUrl.lowercase()).toMutableSet()
         val fromPersonalWebsite = sourcePlatformLabel.contains("website", ignoreCase = true)
 
         val urlCandidates = (profileLinks + extractUrlsFromText(profileText))
@@ -52,6 +54,7 @@ object HandleExtractor {
 
         urlCandidates.forEach { resolved ->
             val urlLower = resolved.url.lowercase()
+            if (!scanned.add(urlLower)) return@forEach
             val signalType = if (fromPersonalWebsite) {
                 PivotSignalType.PersonalWebsiteCrossLink
             } else {
@@ -62,11 +65,24 @@ object HandleExtractor {
                     signalType = signalType,
                     normalizedValue = resolved.username,
                     confidence = 0.70f,
-                    depth = 1,
-                    alreadyVisited = urlLower in scanned
+                    depth = depth,
+                    alreadyVisited = false
                 )
             )
-            val admitted = decision as? PivotAdmissionDecision.Admit ?: return@forEach
+            val admitted = decision as? PivotAdmissionDecision.Admit
+                ?: run {
+                    (decision as? PivotAdmissionDecision.Reject)?.let { rejected ->
+                        onRejected?.invoke(
+                            PivotRejection(
+                                normalizedValue = resolved.username,
+                                candidateUrl = resolved.url,
+                                signalType = signalType,
+                                reason = rejected.explanation
+                            )
+                        )
+                    }
+                    return@forEach
+                }
             found.putIfAbsent(
                 urlLower,
                 PivotCandidate(
@@ -79,7 +95,8 @@ object HandleExtractor {
                         providerId = resolved.providerId
                     ),
                     provenance = "discovered via $sourcePlatformLabel profile; ${admitted.explanation}",
-                    admissionExplanation = admitted.explanation
+                    admissionExplanation = admitted.explanation,
+                    signalType = signalType
                 )
             )
         }
@@ -91,17 +108,31 @@ object HandleExtractor {
             val url = template.urlPattern.replace("{username}", handle)
             val urlLower = url.lowercase()
             if (urlLower in scanned || urlLower in found.keys) return@forEach
+            scanned += urlLower
 
             val decision = PivotAdmissionPolicy.decide(
                 PivotAdmissionRequest(
                     signalType = PivotSignalType.ExplicitPlatformMention,
                     normalizedValue = handle,
                     confidence = 0.60f,
-                    depth = 1,
+                    depth = depth,
                     alreadyVisited = false
                 )
             )
-            val admitted = decision as? PivotAdmissionDecision.Admit ?: return@forEach
+            val admitted = decision as? PivotAdmissionDecision.Admit
+                ?: run {
+                    (decision as? PivotAdmissionDecision.Reject)?.let { rejected ->
+                        onRejected?.invoke(
+                            PivotRejection(
+                                normalizedValue = handle,
+                                candidateUrl = url,
+                                signalType = PivotSignalType.ExplicitPlatformMention,
+                                reason = rejected.explanation
+                            )
+                        )
+                    }
+                    return@forEach
+                }
             found[urlLower] = PivotCandidate(
                 candidate = UsernameCandidate(
                     username = handle,
@@ -112,7 +143,8 @@ object HandleExtractor {
                     providerId = template.providerId
                 ),
                 provenance = "discovered via $sourcePlatformLabel profile; ${admitted.explanation}",
-                admissionExplanation = admitted.explanation
+                admissionExplanation = admitted.explanation,
+                signalType = PivotSignalType.ExplicitPlatformMention
             )
         }
 
@@ -205,6 +237,14 @@ object HandleExtractor {
     data class PivotCandidate(
         val candidate: UsernameCandidate,
         val provenance: String,
-        val admissionExplanation: String = ""
+        val admissionExplanation: String = "",
+        val signalType: PivotSignalType = PivotSignalType.ExplicitProfileLink
+    )
+
+    data class PivotRejection(
+        val normalizedValue: String,
+        val candidateUrl: String?,
+        val signalType: PivotSignalType,
+        val reason: String
     )
 }
