@@ -237,6 +237,30 @@ class ScanLifecycleTest {
     }
 
     @Test
+    fun terminalWorkFailureCanCloseCancellationPhasesTruthfully() {
+        for (phase in listOf(
+            ScanLifecyclePhase.CancelRequested,
+            ScanLifecyclePhase.CancelFailed
+        )) {
+            val current = record(phase, resultReady = false)
+            val transition = ScanLifecycleReducer.reduce(
+                current = current,
+                expectedGeneration = generation,
+                transition = ScanLifecycleTransition.MarkFailed(
+                    ScanLifecycleErrors.WORK_FINISHED_WITHOUT_LIFECYCLE
+                ),
+                nowEpochMillis = 101L
+            ) as ScanLifecycleTransitionResult.Applied
+
+            assertEquals(ScanLifecyclePhase.Failed, transition.record.phase)
+            assertEquals(
+                ScanLifecycleErrors.WORK_FINISHED_WITHOUT_LIFECYCLE,
+                transition.record.errorCode
+            )
+        }
+    }
+
+    @Test
     fun terminalWorkInfoTakesPrecedenceOverCheckpointFailure() {
         val active = record(ScanLifecyclePhase.Running, resultReady = false)
         assertEquals(

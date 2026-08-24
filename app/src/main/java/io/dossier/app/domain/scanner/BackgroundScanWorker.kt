@@ -5,28 +5,38 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import io.dossier.app.data.face.FaceCorrelationSessionPolicy
+import io.dossier.app.domain.analysis.OsintAnalysisBundle
 import io.dossier.app.domain.analysis.OsintPostProcessor
 import io.dossier.app.domain.analysis.UsernameSurfaceAnalysis
 import io.dossier.app.domain.case.AuthorizedScope
+import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.UsernameSurfaceRuntimeCache
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /** Durable WorkManager-owned assessment execution. */
 class BackgroundScanWorker(
@@ -55,24 +65,52 @@ class BackgroundScanWorker(
             return@coroutineScope Result.failure(failureData(ERROR_LEGACY_WORK_DATA_UNSUPPORTED))
         }
         val requestId = inputData.getString(KEY_REQUEST_ID)
-        if (requestId.isNullOrBlank()) {
+        val generation = inputData.getString(KEY_GENERATION)
+        if (requestId.isNullOrBlank() || !isCanonicalUuid(requestId)) {
             BackgroundScanManager.finishOwner(
                 applicationContext,
                 workerId,
-                BackgroundScanCompletion.Failed(ERROR_MISSING_REQUEST_REFERENCE)
+                BackgroundScanCompletion.Failed(ERROR_MISSING_REQUEST_REFERENCE),
+                generation
+            )
+            return@coroutineScope Result.failure(failureData(ERROR_MISSING_REQUEST_REFERENCE))
+        }
+        if (generation != null && !isCanonicalUuid(generation)) {
+            BackgroundScanManager.finishOwner(
+                applicationContext,
+                workerId,
+                BackgroundScanCompletion.Failed(ERROR_MISSING_REQUEST_REFERENCE),
+                generation
             )
             return@coroutineScope Result.failure(failureData(ERROR_MISSING_REQUEST_REFERENCE))
         }
 
-        if (!BackgroundScanManager.claimActive(applicationContext, workerId)) {
+        // WorkManager can rerun an exact UUID after a process death that
+        // happened after durable success but before its own SUCCEEDED row was
+        // committed. The result/lifecycle pair is authoritative for this
+        // idempotent retry; do not require the checkpoint or claim a terminal
+        // generation as Running again.
+        if (BackgroundScanManager.isDurableSuccessForWorker(
+                context = applicationContext,
+                workerId = workerId,
+                requestId = requestId,
+                generation = generation
+            )
+        ) {
+            FaceCorrelationSessionPolicy.useBasicMatching()
+            return@coroutineScope Result.success(workDataOf(KEY_STAGE to STAGE_COMPLETE))
+        }
+
+        if (!BackgroundScanManager.claimRunning(applicationContext, workerId, generation, requestId)) {
             return@coroutineScope Result.failure(failureData(ERROR_STALE_WORK_REQUEST))
         }
 
         var progressRelay: Job? = null
         var completion: BackgroundScanCompletion? = null
         fun terminalFailure(code: String): Result {
-            completion = BackgroundScanCompletion.Failed(code)
-            return Result.failure(failureData(code))
+            val safeCode = if (code in SAFE_ERROR_CODES) code else ERROR_SCAN_EXECUTION_FAILED
+            completion = BackgroundScanCompletion.Failed(safeCode)
+            return Result.failure(failureData(safeCode))
         }
         try {
             val requestPoint = when (val state = ScanResumeStore(applicationContext).loadRequestDetailed(requestId)) {
@@ -95,7 +133,7 @@ class BackgroundScanWorker(
             setProgress(workDataOf(KEY_STAGE to STAGE_STARTING))
             progressRelay = launch {
                 ScanSession.progressText.collect { stage ->
-                    if (stage.isNotBlank() && BackgroundScanManager.isCurrentOwner(applicationContext, workerId)) {
+                    if (stage.isNotBlank() && BackgroundScanManager.isCurrentOwner(applicationContext, workerId, generation)) {
                         setProgress(safeProgressData(stage))
                     }
                 }
@@ -103,7 +141,7 @@ class BackgroundScanWorker(
 
             ScanSession.executeScan(applicationContext, input, deepResearch)
 
-            if (!BackgroundScanManager.isCurrentOwner(applicationContext, workerId)) {
+            if (!BackgroundScanManager.isCurrentOwner(applicationContext, workerId, generation)) {
                 return@coroutineScope Result.failure(failureData(ERROR_STALE_WORK_REQUEST))
             }
 
@@ -130,38 +168,69 @@ class BackgroundScanWorker(
             if (snapshot == null) {
                 return@coroutineScope terminalFailure(ERROR_SNAPSHOT_UNAVAILABLE)
             }
+
+            // Persist the encrypted result before publishing the lifecycle
+            // marker. A marker is an assertion that this exact generation's
+            // result exists; publishing it first would leave a durable
+            // success claim after a power loss between the two writes.
             val saved = BackgroundScanManager.saveResultIfOwner(
                 context = applicationContext,
                 workId = id.toString(),
                 dossierCase = snapshot,
-                analysis = analysis
+                analysis = analysis,
+                generation = generation
             )
             if (!saved) {
-                val code = if (BackgroundScanManager.isCurrentOwner(applicationContext, workerId)) {
+                val code = if (BackgroundScanManager.isCurrentOwner(applicationContext, workerId, generation)) {
                     ERROR_RESULT_PERSISTENCE_FAILED
                 } else {
                     ERROR_STALE_WORK_REQUEST
                 }
                 return@coroutineScope terminalFailure(code)
             }
+
+            val published = BackgroundScanManager.publishResultIfOwner(
+                context = applicationContext,
+                workerId = workerId,
+                generation = generation
+            )
+            if (!published) {
+                val code = if (BackgroundScanManager.isCurrentOwner(applicationContext, workerId, generation)) {
+                    ERROR_RESULT_PERSISTENCE_FAILED
+                } else {
+                    ERROR_STALE_WORK_REQUEST
+                }
+                return@coroutineScope terminalFailure(code)
+            }
+
+            val markedSucceeded = BackgroundScanManager.markSucceededIfOwner(
+                context = applicationContext,
+                workerId = workerId,
+                generation = generation
+            )
+            if (!markedSucceeded) {
+                val code = if (BackgroundScanManager.isCurrentOwner(applicationContext, workerId, generation)) {
+                    ERROR_RESULT_PERSISTENCE_FAILED
+                } else {
+                    ERROR_STALE_WORK_REQUEST
+                }
+                return@coroutineScope terminalFailure(code)
+            }
+
             setProgress(workDataOf(KEY_STAGE to STAGE_COMPLETE))
             completion = BackgroundScanCompletion.Succeeded
             Result.success(
                 workDataOf(KEY_STAGE to STAGE_COMPLETE)
             )
         } catch (cancelled: CancellationException) {
-            // A WorkManager runtime stop can be rescheduled with this same UUID.
-            // Preserve its durable owner/checkpoint so the next attempt can claim it.
             throw cancelled
         } catch (_: Exception) {
             terminalFailure(ERROR_SCAN_EXECUTION_FAILED)
         } finally {
-            // Job.cancel is deliberately non-suspending. A cancelled parent must
-            // not skip owner/face-policy cleanup while trying to join this relay.
             progressRelay?.cancel()
             FaceCorrelationSessionPolicy.useBasicMatching()
             completion?.let { outcome ->
-                BackgroundScanManager.finishOwner(applicationContext, workerId, outcome)
+                BackgroundScanManager.finishOwner(applicationContext, workerId, outcome, generation)
             }
         }
     }
@@ -179,6 +248,7 @@ class BackgroundScanWorker(
         const val STAGE_CANCELLED = "BACKGROUND_SCAN_CANCELLED"
 
         internal const val KEY_REQUEST_ID = "request_id"
+        internal const val KEY_GENERATION = "generation"
         private const val LEGACY_KEY_IDENTITY_JSON = "identity_json"
         private const val LEGACY_KEY_DEEP_RESEARCH = "deep_research"
         private const val LEGACY_KEY_STRONG_FACE_CORRELATION = "strong_face_correlation"
@@ -188,29 +258,21 @@ class BackgroundScanWorker(
         private const val MAX_SNAPSHOT_EVIDENCE = 10_000
         private val SCAN_EXECUTION_MUTEX = Mutex()
 
-        internal const val ERROR_LEGACY_WORK_DATA_UNSUPPORTED = "LEGACY_WORK_DATA_UNSUPPORTED"
-        internal const val ERROR_MISSING_REQUEST_REFERENCE = "MISSING_SECURE_REQUEST_REFERENCE"
-        internal const val ERROR_REQUEST_RECORD_MISSING = "SECURE_REQUEST_RECORD_MISSING"
-        internal const val ERROR_REQUEST_RECORD_EXPIRED = "SECURE_REQUEST_RECORD_EXPIRED"
-        internal const val ERROR_REQUEST_RECORD_INVALID = "SECURE_REQUEST_RECORD_INVALID"
-        internal const val ERROR_REQUEST_STORAGE_UNAVAILABLE = "SECURE_REQUEST_STORAGE_UNAVAILABLE"
-        internal const val ERROR_STALE_WORK_REQUEST = "STALE_WORK_REQUEST"
-        internal const val ERROR_SNAPSHOT_UNAVAILABLE = "SNAPSHOT_UNAVAILABLE"
-        internal const val ERROR_RESULT_PERSISTENCE_FAILED = "RESULT_PERSISTENCE_FAILED"
-        internal const val ERROR_SCAN_EXECUTION_FAILED = "SCAN_EXECUTION_FAILED"
+        internal const val ERROR_LEGACY_WORK_DATA_UNSUPPORTED = ScanLifecycleErrors.LEGACY_WORK_DATA_UNSUPPORTED
+        internal const val ERROR_MISSING_REQUEST_REFERENCE = ScanLifecycleErrors.MISSING_SECURE_REQUEST_REFERENCE
+        internal const val ERROR_REQUEST_RECORD_MISSING = ScanLifecycleErrors.SECURE_REQUEST_RECORD_MISSING
+        internal const val ERROR_REQUEST_RECORD_EXPIRED = ScanLifecycleErrors.SECURE_REQUEST_RECORD_EXPIRED
+        internal const val ERROR_REQUEST_RECORD_INVALID = ScanLifecycleErrors.SECURE_REQUEST_RECORD_INVALID
+        internal const val ERROR_REQUEST_STORAGE_UNAVAILABLE = ScanLifecycleErrors.SECURE_REQUEST_STORAGE_UNAVAILABLE
+        internal const val ERROR_STALE_WORK_REQUEST = ScanLifecycleErrors.STALE_WORK_REQUEST
+        internal const val ERROR_SNAPSHOT_UNAVAILABLE = ScanLifecycleErrors.SNAPSHOT_UNAVAILABLE
+        internal const val ERROR_RESULT_PERSISTENCE_FAILED = ScanLifecycleErrors.RESULT_PERSISTENCE_FAILED
+        internal const val ERROR_SCAN_EXECUTION_FAILED = ScanLifecycleErrors.SCAN_EXECUTION_FAILED
+        internal const val ERROR_REQUEST_PERSISTENCE_FAILED = ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE
+        internal const val ERROR_ACTIVE_MARKER_FAILED = ScanLifecycleErrors.ACTIVE_MARKER_PERSISTENCE_FAILED
+        internal const val ERROR_ENQUEUE_FAILED = ScanLifecycleErrors.WORK_ENQUEUE_FAILED
 
-        internal val SAFE_ERROR_CODES = setOf(
-            ERROR_LEGACY_WORK_DATA_UNSUPPORTED,
-            ERROR_MISSING_REQUEST_REFERENCE,
-            ERROR_REQUEST_RECORD_MISSING,
-            ERROR_REQUEST_RECORD_EXPIRED,
-            ERROR_REQUEST_RECORD_INVALID,
-            ERROR_REQUEST_STORAGE_UNAVAILABLE,
-            ERROR_STALE_WORK_REQUEST,
-            ERROR_SNAPSHOT_UNAVAILABLE,
-            ERROR_RESULT_PERSISTENCE_FAILED,
-            ERROR_SCAN_EXECUTION_FAILED
-        )
+        internal val SAFE_ERROR_CODES = ScanLifecycleErrors.SAFE_ERROR_CODES
 
         private val SAFE_PROGRESS_STAGES = setOf(
             STAGE_STARTING,
@@ -231,11 +293,21 @@ class BackgroundScanWorker(
             STAGE_CANCELLED
         )
 
-        internal fun secureInputData(requestId: String): Data {
-            require(runCatching { UUID.fromString(requestId).toString() == requestId }.getOrDefault(false)) {
+        internal fun isCanonicalUuid(value: String): Boolean =
+            ScanLifecycleRecord.isCanonicalUuid(value)
+
+        internal fun secureInputData(requestId: String, generation: String? = null): Data {
+            require(isCanonicalUuid(requestId)) {
                 "Secure request reference must be a canonical UUID"
             }
-            return workDataOf(KEY_REQUEST_ID to requestId)
+            require(generation == null || isCanonicalUuid(generation)) {
+                "Secure generation reference must be a canonical UUID"
+            }
+            val builder = Data.Builder().putString(KEY_REQUEST_ID, requestId)
+            if (generation != null) {
+                builder.putString(KEY_GENERATION, generation)
+            }
+            return builder.build()
         }
 
         internal fun hasLegacyWorkData(data: Data): Boolean = listOf(
@@ -265,7 +337,6 @@ class BackgroundScanWorker(
             }
             return workDataOf(KEY_STAGE to persistedStage)
         }
-
     }
 }
 
@@ -287,6 +358,31 @@ object BackgroundScanManager {
         val complete: Boolean get() = state == WorkInfo.State.SUCCEEDED
     }
 
+    internal var nowEpochMillis: () -> Long = { System.currentTimeMillis() }
+    internal var uuidGenerator: () -> UUID = { UUID.randomUUID() }
+    internal var generationGenerator: () -> UUID = { UUID.randomUUID() }
+    internal var lifecycleStoreProvider: (Context) -> ScanLifecycleStore = { ScanLifecycleStore(it) }
+    internal var resumeStoreProvider: (Context) -> ScanResumeStore = { ScanResumeStore(it) }
+    internal var resultStoreProvider: (Context) -> BackgroundScanResultStore = { BackgroundScanResultStore(it) }
+    // Operation callbacks can synchronously invoke an already-completed
+    // Future. Keep their default executor off the UI thread because
+    // cancellation reconciliation performs an exact WorkManager lookup.
+    private val backgroundExecutor: Executor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "dossier-scan-lifecycle").apply { isDaemon = true }
+    }
+    private val lifecycleScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    internal var directExecutor: Executor = backgroundExecutor
+
+    internal fun resetSeams() {
+        nowEpochMillis = { System.currentTimeMillis() }
+        uuidGenerator = { UUID.randomUUID() }
+        generationGenerator = { UUID.randomUUID() }
+        lifecycleStoreProvider = { ScanLifecycleStore(it) }
+        resumeStoreProvider = { ScanResumeStore(it) }
+        resultStoreProvider = { BackgroundScanResultStore(it) }
+        directExecutor = backgroundExecutor
+    }
+
     fun enqueue(
         context: Context,
         input: IdentityInput,
@@ -295,18 +391,86 @@ object BackgroundScanManager {
     ): UUID {
         val appContext = context.applicationContext
         synchronized(LIFECYCLE_LOCK) {
-            val resumeStore = ScanResumeStore(appContext)
-            val saved = resumeStore.saveRequestDetailed(input, deepResearch, strongFaceCorrelation)
-            val requestId = (saved as? ResumeWriteState.Saved)?.point?.requestId
-                ?: throw BackgroundScanSchedulingException(ERROR_REQUEST_PERSISTENCE_FAILED)
-            BackgroundScanResultStore(appContext).clear()
+            val resumeStore = resumeStoreProvider(appContext)
+            val lifecycleStore = lifecycleStoreProvider(appContext)
+            val resultStore = resultStoreProvider(appContext)
 
-            val request = buildRequest(requestId)
-            val ownerId = request.id.toString()
-            if (!setActiveOwner(appContext, ownerId)) {
-                resumeStore.clearRequest(requestId)
-                throw BackgroundScanSchedulingException(ERROR_ACTIVE_MARKER_FAILED)
+            val saved = resumeStore.prepareRequestDetailed(input, deepResearch, strongFaceCorrelation)
+            val requestId = (saved as? ResumeWriteState.Saved)?.point?.requestId
+                ?: throw BackgroundScanSchedulingException(BackgroundScanWorker.ERROR_REQUEST_PERSISTENCE_FAILED)
+
+            val ownerUuid = uuidGenerator()
+            val ownerId = ownerUuid.toString()
+            val generationUuid = generationGenerator()
+            val generation = generationUuid.toString()
+            val request = buildRequest(requestId = requestId, generation = generation, ownerUuid = ownerUuid)
+            val lifecycleRead = lifecycleStore.read()
+            val existingLifecycle = (lifecycleRead as? ScanLifecycleReadResult.Available)?.record
+            val legacyOwner = if (lifecycleRead == ScanLifecycleReadResult.Missing) {
+                activeOwner(appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE))
+            } else {
+                null
             }
+
+            val pendingRecord = ScanLifecycleRecord(
+                ownerId = ownerId,
+                requestId = requestId,
+                generation = generation,
+                phase = ScanLifecyclePhase.EnqueuePending,
+                updatedAtEpochMillis = nowEpochMillis(),
+                resultReady = false,
+                errorCode = null
+            )
+            val publishResult = when (lifecycleRead) {
+                is ScanLifecycleReadResult.Invalid,
+                ScanLifecycleReadResult.StorageFailure -> {
+                    resumeStore.discardPreparedRequest(requestId)
+                    throw BackgroundScanSchedulingException(ScanLifecycleErrors.LIFECYCLE_STORAGE_FAILURE)
+                }
+                is ScanLifecycleReadResult.Available -> lifecycleStore.replace(existingLifecycle!!, pendingRecord)
+                ScanLifecycleReadResult.Missing -> lifecycleStore.publish(pendingRecord)
+            }
+            if (publishResult !is ScanLifecycleWriteResult.Saved) {
+                resumeStore.discardPreparedRequest(requestId)
+                throw BackgroundScanSchedulingException(BackgroundScanWorker.ERROR_ACTIVE_MARKER_FAILED)
+            }
+
+            // The replacement lifecycle is now durable. Cancel only the old
+            // exact WorkManager UUID after that atomic hand-off; never clear A
+            // before B is represented durably.
+            val replacedOwnerId = existingLifecycle?.ownerId ?: legacyOwner
+            replacedOwnerId
+                ?.takeIf { it != ownerId }
+                ?.let { oldOwnerId ->
+                    runCatching { UUID.fromString(oldOwnerId) }.getOrNull()?.let { oldOwnerUuid ->
+                        runCatching {
+                            WorkManager.getInstance(appContext).cancelWorkById(oldOwnerUuid)
+                        }
+                    }
+                }
+
+            val promoted = resumeStore.promotePreparedRequestDetailed(requestId)
+            if (promoted !is ResumeReadState.Available) {
+                // Keep pending B + its prepared record for startup recovery on
+                // a transient promotion/storage failure. Invalid/expired B is
+                // surfaced as a lifecycle failure without touching A's files.
+                val failureCode = when (promoted) {
+                    ResumeReadState.Expired,
+                    ResumeReadState.Missing -> ScanLifecycleErrors.CHECKPOINT_MISSING
+                    is ResumeReadState.Invalid -> ScanLifecycleErrors.CHECKPOINT_INVALID
+                    is ResumeReadState.StorageFailure -> ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE
+                    is ResumeReadState.Available -> ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE
+                }
+                if (promoted !is ResumeReadState.StorageFailure) {
+                    lifecycleStore.transition(
+                        expected = pendingRecord,
+                        transition = ScanLifecycleTransition.MarkFailed(failureCode),
+                        nowEpochMillis = nowEpochMillis()
+                    )
+                }
+                throw BackgroundScanSchedulingException(BackgroundScanWorker.ERROR_REQUEST_PERSISTENCE_FAILED)
+            }
+
             ScanSession.markBackgroundScheduled(input, deepResearch)
             try {
                 val operation = WorkManager.getInstance(appContext).enqueueUniqueWork(
@@ -314,11 +478,22 @@ object BackgroundScanManager {
                     ExistingWorkPolicy.REPLACE,
                     request
                 )
-                monitorEnqueue(operation, appContext, ownerId, requestId)
+                monitorEnqueue(
+                    operation = operation,
+                    context = appContext,
+                    pendingRecord = pendingRecord,
+                    priorOwnerId = replacedOwnerId
+                )
             } catch (_: Exception) {
-                clearActiveOwner(appContext, ownerId)
+                FaceCorrelationSessionPolicy.useBasicMatching()
+                ScanSession.markBackgroundFailure(BackgroundScanWorker.ERROR_ENQUEUE_FAILED)
+                lifecycleStore.transition(
+                    expected = pendingRecord,
+                    transition = ScanLifecycleTransition.MarkFailed(BackgroundScanWorker.ERROR_ENQUEUE_FAILED),
+                    nowEpochMillis = nowEpochMillis()
+                )
                 resumeStore.clearRequest(requestId)
-                throw BackgroundScanSchedulingException(ERROR_ENQUEUE_FAILED)
+                throw BackgroundScanSchedulingException(BackgroundScanWorker.ERROR_ENQUEUE_FAILED)
             }
             return request.id
         }
@@ -327,18 +502,71 @@ object BackgroundScanManager {
     fun cancel(context: Context) {
         val appContext = context.applicationContext
         synchronized(LIFECYCLE_LOCK) {
-            val ownerId = activeOwner(appContext)
-            val ownerUuid = ownerId?.let { value ->
-                runCatching { UUID.fromString(value) }.getOrNull()
+            val lifecycleStore = lifecycleStoreProvider(appContext)
+            var legacyCancellation = false
+            when (val readResult = lifecycleStore.read()) {
+                is ScanLifecycleReadResult.Available -> {
+                    val record = readResult.record
+                    val requested = lifecycleStore.transition(
+                        expected = record,
+                        transition = ScanLifecycleTransition.RequestCancel,
+                        nowEpochMillis = nowEpochMillis()
+                    )
+                    if (requested !is ScanLifecycleWriteResult.Saved) return@synchronized
+                    val cancelling = (lifecycleStore.read() as? ScanLifecycleReadResult.Available)?.record
+                        ?.takeIf { it.ownerId == record.ownerId && it.requestId == record.requestId && it.generation == record.generation }
+                        ?: return@synchronized
+                    val ownerUuid = runCatching { UUID.fromString(record.ownerId) }.getOrNull()
+                    if (ownerUuid != null) {
+                        try {
+                            monitorCancellation(
+                                operation = WorkManager.getInstance(appContext).cancelWorkById(ownerUuid),
+                                context = appContext,
+                                expected = cancelling
+                            )
+                        } catch (_: Exception) {
+                            lifecycleStore.transition(
+                                expected = cancelling,
+                                transition = ScanLifecycleTransition.MarkCancelFailed(),
+                                nowEpochMillis = nowEpochMillis()
+                            )
+                            ScanSession.markBackgroundFailure(ScanLifecycleErrors.CANCEL_REQUEST_FAILED)
+                        }
+                    } else {
+                        lifecycleStore.transition(
+                            expected = cancelling,
+                            transition = ScanLifecycleTransition.MarkCancelFailed(),
+                            nowEpochMillis = nowEpochMillis()
+                        )
+                    }
+                    FaceCorrelationSessionPolicy.useBasicMatching()
+                }
+                ScanLifecycleReadResult.Missing -> {
+                    legacyCancellation = true
+                    val legacyOwner = activeOwner(appContext)
+                    val ownerUuid = legacyOwner?.let { value ->
+                        runCatching { UUID.fromString(value) }.getOrNull()
+                    }
+                    if (ownerUuid != null) {
+                        WorkManager.getInstance(appContext).cancelWorkById(ownerUuid)
+                    } else {
+                        WorkManager.getInstance(appContext).cancelUniqueWork(BackgroundScanWorker.UNIQUE_WORK_NAME)
+                    }
+                    clearActiveOwner(appContext, legacyOwner)
+                }
+                is ScanLifecycleReadResult.Invalid,
+                ScanLifecycleReadResult.StorageFailure -> {
+                    // There is no trustworthy owner to cancel. Never fall
+                    // back to unique-work cancellation, which could target a
+                    // replacement generation.
+                    ScanSession.markBackgroundFailure(ScanLifecycleErrors.LIFECYCLE_STORAGE_FAILURE)
+                    return@synchronized
+                }
             }
-            if (ownerUuid != null) {
-                WorkManager.getInstance(appContext).cancelWorkById(ownerUuid)
-            } else {
-                WorkManager.getInstance(appContext).cancelUniqueWork(BackgroundScanWorker.UNIQUE_WORK_NAME)
-            }
-            FaceCorrelationSessionPolicy.useBasicMatching()
-            ScanSession.markBackgroundCancelled()
-            clearActiveOwner(appContext, ownerId)
+            // MarkCancelled is published by monitorCancellation only after an
+            // exact WorkInfo row confirms terminal cancellation. Legacy work
+            // has no lifecycle row, so retain its historical immediate state.
+            if (legacyCancellation) ScanSession.markBackgroundCancelled()
         }
     }
 
@@ -403,29 +631,362 @@ object BackgroundScanManager {
             ?.takeIf { it in BackgroundScanWorker.SAFE_ERROR_CODES }
     )
 
-    fun latestResult(context: Context): BackgroundScanResultStore.Snapshot? =
-        BackgroundScanResultStore(context.applicationContext).load()
+    fun latestResult(context: Context): BackgroundScanResultStore.Snapshot? = synchronized(LIFECYCLE_LOCK) {
+        val appContext = context.applicationContext
+        val snapshot = resultStoreProvider(appContext).load() ?: return@synchronized null
+        return@synchronized if (isResultVisible(
+                lifecycle = lifecycleStoreProvider(appContext).read(),
+                resultOwnerId = snapshot.workId
+            )
+        ) {
+            snapshot
+        } else {
+            null
+        }
+    }
+
+    /**
+     * A saved file is not yet a published result. Hide the narrow
+     * save-before-marker crash window and every owner mismatch from UI/report
+     * consumers. Missing lifecycle is the valid post-success cleanup state.
+     */
+    internal fun isResultVisible(
+        lifecycle: ScanLifecycleReadResult,
+        resultOwnerId: String
+    ): Boolean = when (lifecycle) {
+        ScanLifecycleReadResult.Missing -> BackgroundScanWorker.isCanonicalUuid(resultOwnerId)
+        is ScanLifecycleReadResult.Available ->
+            lifecycle.record.ownerId == resultOwnerId &&
+                lifecycle.record.resultReady &&
+                lifecycle.record.phase in setOf(
+                    ScanLifecyclePhase.Running,
+                    ScanLifecyclePhase.Succeeded
+                )
+        is ScanLifecycleReadResult.Invalid,
+        ScanLifecycleReadResult.StorageFailure -> false
+    }
+
+    /**
+     * Idempotent retry guard for the narrow success-commit crash window. A
+     * matching encrypted result proves this exact WorkManager UUID completed;
+     * a lifecycle Succeeded row additionally binds request and generation.
+     * Missing lifecycle is accepted only with the matching result owner,
+     * representing automatic post-success lifecycle cleanup.
+     */
+    internal fun isDurableSuccessForWorker(
+        context: Context,
+        workerId: String,
+        requestId: String,
+        generation: String?
+    ): Boolean = synchronized(LIFECYCLE_LOCK) {
+        val lifecycleRead = lifecycleStoreProvider(context.applicationContext).read()
+        val resultWorkId = resultStoreProvider(context.applicationContext).load()?.workId
+        isDurableSuccess(
+            lifecycle = lifecycleRead,
+            resultWorkId = resultWorkId,
+            workerId = workerId,
+            requestId = requestId,
+            generation = generation
+        )
+    }
+
+    internal fun isDurableSuccess(
+        lifecycle: ScanLifecycleReadResult,
+        resultWorkId: String?,
+        workerId: String,
+        requestId: String,
+        generation: String?
+    ): Boolean {
+        if (resultWorkId != workerId) return false
+        return when (lifecycle) {
+            ScanLifecycleReadResult.Missing -> true
+            is ScanLifecycleReadResult.Available -> {
+                val record = lifecycle.record
+                record.ownerId == workerId &&
+                    record.requestId == requestId &&
+                    (generation == null || record.generation == generation) &&
+                    record.phase == ScanLifecyclePhase.Succeeded &&
+                    record.resultReady
+            }
+            is ScanLifecycleReadResult.Invalid,
+            ScanLifecycleReadResult.StorageFailure -> false
+        }
+    }
 
     fun clearLatestResult(context: Context): Boolean = synchronized(LIFECYCLE_LOCK) {
-        BackgroundScanResultStore(context.applicationContext).clear()
+        val appContext = context.applicationContext
+        val lifecycleStore = lifecycleStoreProvider(appContext)
+        val resultStore = resultStoreProvider(appContext)
+        when (val readResult = lifecycleStore.read()) {
+            is ScanLifecycleReadResult.Available -> {
+                val record = readResult.record
+                val retainCancellationLifecycle = record.phase in setOf(
+                    ScanLifecyclePhase.CancelRequested,
+                    ScanLifecyclePhase.CancelFailed
+                )
+                val cleanupRecord = when {
+                    record.phase in setOf(
+                        ScanLifecyclePhase.Succeeded,
+                        ScanLifecyclePhase.Failed,
+                        ScanLifecyclePhase.Cancelled
+                    ) -> {
+                        val transitioned = lifecycleStore.transition(
+                            expected = record,
+                            transition = ScanLifecycleTransition.BeginCleanup,
+                            nowEpochMillis = nowEpochMillis()
+                        )
+                        if (transitioned !is ScanLifecycleWriteResult.Saved) return@synchronized false
+                        (lifecycleStore.read() as? ScanLifecycleReadResult.Available)?.record
+                            ?.takeIf { it.ownerId == record.ownerId && it.requestId == record.requestId && it.generation == record.generation }
+                    }
+                    record.phase == ScanLifecyclePhase.CleanupPending -> record
+                    retainCancellationLifecycle -> record
+                    else -> return@synchronized false
+                } ?: return@synchronized false
+
+                val snapshot = resultStore.load()
+                if (snapshot != null && snapshot.workId != cleanupRecord.ownerId) {
+                    // Preserve a newer generation's result.
+                    return@synchronized false
+                }
+                val resumeStore = runCatching { resumeStoreProvider(appContext) }.getOrNull()
+                    ?: return@synchronized false
+                val resultCleared = snapshot == null || resultStore.clear()
+                val requestCleared = resumeStore.clearRequest(cleanupRecord.requestId)
+                if (!resultCleared || !requestCleared) {
+                    ScanSession.markBackgroundFailure(ScanLifecycleErrors.CLEANUP_FAILED)
+                    return@synchronized false
+                }
+                // purgeSession calls cancel before this method. Once durable
+                // cancel intent exists, the encrypted checkpoint/result can
+                // be removed immediately; retain only the non-sensitive UUID
+                // lifecycle until the exact WorkInfo row becomes terminal.
+                if (retainCancellationLifecycle) return@synchronized true
+                if (!isExactLifecycle(lifecycleStore, cleanupRecord)) return@synchronized false
+                return@synchronized lifecycleStore.clear(cleanupRecord) is ScanLifecycleWriteResult.Cleared
+            }
+            ScanLifecycleReadResult.Missing -> {
+                // With no lifecycle owner, only clear an existing result by
+                // the opaque owner embedded in that result; never infer a
+                // generation from unique-work list ordering.
+                return@synchronized resultStore.load()?.let { resultStore.clear() } ?: true
+            }
+            is ScanLifecycleReadResult.Invalid,
+            ScanLifecycleReadResult.StorageFailure -> {
+                ScanSession.markBackgroundFailure(ScanLifecycleErrors.LIFECYCLE_STORAGE_FAILURE)
+                return@synchronized false
+            }
+        }
     }
 
     fun hasActiveMarker(context: Context): Boolean = synchronized(LIFECYCLE_LOCK) {
-        activeOwner(context.applicationContext) != null
+        when (val lifecycleRead = lifecycleStoreProvider(context.applicationContext).read()) {
+            is ScanLifecycleReadResult.Available -> {
+                val lifecycle = lifecycleRead.record
+                return@synchronized lifecycle.phase in setOf(
+                    ScanLifecyclePhase.EnqueuePending,
+                    ScanLifecyclePhase.Enqueued,
+                    ScanLifecyclePhase.Running,
+                    ScanLifecyclePhase.CancelRequested,
+                    ScanLifecyclePhase.CancelFailed
+                )
+            }
+            ScanLifecycleReadResult.Missing -> {
+                return@synchronized activeOwner(context.applicationContext) != null
+            }
+            is ScanLifecycleReadResult.Invalid,
+            ScanLifecycleReadResult.StorageFailure -> {
+                return@synchronized false
+            }
+        }
     }
 
-    internal fun claimActive(context: Context, workerId: String): Boolean = synchronized(LIFECYCLE_LOCK) {
-        activeOwner(context.applicationContext) == workerId
+    internal fun claimActive(context: Context, workerId: String): Boolean =
+        claimRunning(context, workerId)
+
+    internal fun claimRunning(
+        context: Context,
+        workerId: String,
+        generation: String? = null,
+        requestId: String? = null
+    ): Boolean = synchronized(LIFECYCLE_LOCK) {
+        val appContext = context.applicationContext
+        val lifecycleStore = lifecycleStoreProvider(appContext)
+        when (val readResult = lifecycleStore.read()) {
+            is ScanLifecycleReadResult.Available -> {
+                val record = readResult.record
+                if (record.ownerId != workerId) return@synchronized false
+                if (generation != null && record.generation != generation) return@synchronized false
+                if (requestId != null && record.requestId != requestId) return@synchronized false
+                if (record.phase == ScanLifecyclePhase.Running) return@synchronized true
+                if (record.phase in setOf(ScanLifecyclePhase.EnqueuePending, ScanLifecyclePhase.Enqueued)) {
+                    val transitionResult = lifecycleStore.transition(
+                        expected = record,
+                        transition = ScanLifecycleTransition.MarkRunning,
+                        nowEpochMillis = nowEpochMillis()
+                    )
+                    return@synchronized transitionResult is ScanLifecycleWriteResult.Saved
+                }
+                return@synchronized false
+            }
+            ScanLifecycleReadResult.Missing -> {
+                if (requestId != null && BackgroundScanWorker.isCanonicalUuid(requestId)) {
+                    val migGen = generation ?: generationGenerator().toString()
+                    val mig = lifecycleStore.migrateLegacyActiveOwner(
+                        currentEncryptedRequestId = requestId,
+                        generation = migGen,
+                        updatedAtEpochMillis = nowEpochMillis()
+                    )
+                    if (mig is ScanLifecycleWriteResult.Saved) {
+                        val migRecord = (lifecycleStore.read() as? ScanLifecycleReadResult.Available)?.record
+                        if (migRecord != null && migRecord.ownerId == workerId) {
+                            val res = lifecycleStore.transition(
+                                expected = migRecord,
+                                transition = ScanLifecycleTransition.MarkRunning,
+                                nowEpochMillis = nowEpochMillis()
+                            )
+                            return@synchronized res is ScanLifecycleWriteResult.Saved
+                        }
+                    }
+                }
+                return@synchronized activeOwner(appContext) == workerId
+            }
+            is ScanLifecycleReadResult.Invalid,
+            ScanLifecycleReadResult.StorageFailure -> false
+        }
     }
 
-    internal fun isCurrentOwner(context: Context, workerId: String): Boolean = synchronized(LIFECYCLE_LOCK) {
-        activeOwner(context.applicationContext) == workerId
+    internal fun isCurrentOwner(
+        context: Context,
+        workerId: String,
+        generation: String? = null
+    ): Boolean = synchronized(LIFECYCLE_LOCK) {
+        val appContext = context.applicationContext
+        val lifecycleStore = lifecycleStoreProvider(appContext)
+        when (val readResult = lifecycleStore.read()) {
+            is ScanLifecycleReadResult.Available -> {
+                val record = readResult.record
+                if (record.ownerId != workerId) return@synchronized false
+                if (generation != null && record.generation != generation) return@synchronized false
+                return@synchronized record.phase in setOf(
+                    ScanLifecyclePhase.EnqueuePending,
+                    ScanLifecyclePhase.Enqueued,
+                    ScanLifecyclePhase.Running
+                )
+            }
+            ScanLifecycleReadResult.Missing -> activeOwner(appContext) == workerId
+            is ScanLifecycleReadResult.Invalid,
+            ScanLifecycleReadResult.StorageFailure -> false
+        }
     }
 
-    internal fun markFailureIfOwner(context: Context, workerId: String, code: String) {
+    internal fun publishResultIfOwner(
+        context: Context,
+        workerId: String,
+        generation: String? = null
+    ): Boolean = synchronized(LIFECYCLE_LOCK) {
+        val appContext = context.applicationContext
+        val lifecycleStore = lifecycleStoreProvider(appContext)
+        when (val readResult = lifecycleStore.read()) {
+            is ScanLifecycleReadResult.Available -> {
+                val record = readResult.record
+                if (record.ownerId != workerId) return@synchronized false
+                if (generation != null && record.generation != generation) return@synchronized false
+                if (record.phase != ScanLifecyclePhase.Running) return@synchronized false
+                if (record.resultReady) return@synchronized true
+                val transitionResult = lifecycleStore.transition(
+                    expected = record,
+                    transition = ScanLifecycleTransition.PublishResult,
+                    nowEpochMillis = nowEpochMillis()
+                )
+                return@synchronized transitionResult is ScanLifecycleWriteResult.Saved
+            }
+            ScanLifecycleReadResult.Missing -> activeOwner(appContext) == workerId
+            is ScanLifecycleReadResult.Invalid,
+            ScanLifecycleReadResult.StorageFailure -> false
+        }
+    }
+
+    internal fun markSucceededIfOwner(
+        context: Context,
+        workerId: String,
+        generation: String? = null
+    ): Boolean = synchronized(LIFECYCLE_LOCK) {
+        val appContext = context.applicationContext
+        val lifecycleStore = lifecycleStoreProvider(appContext)
+        when (val readResult = lifecycleStore.read()) {
+            is ScanLifecycleReadResult.Available -> {
+                var record = readResult.record
+                if (record.ownerId != workerId) return@synchronized false
+                if (generation != null && record.generation != generation) return@synchronized false
+                if (record.phase == ScanLifecyclePhase.Succeeded) return@synchronized true
+                if (record.phase != ScanLifecyclePhase.Running) return@synchronized false
+                if (!record.resultReady) {
+                    val pub = lifecycleStore.transition(
+                        expected = record,
+                        transition = ScanLifecycleTransition.PublishResult,
+                        nowEpochMillis = nowEpochMillis()
+                    )
+                    if (pub !is ScanLifecycleWriteResult.Saved) return@synchronized false
+                    record = (lifecycleStore.read() as? ScanLifecycleReadResult.Available)?.record
+                        ?: return@synchronized false
+                }
+                val transitionResult = lifecycleStore.transition(
+                    expected = record,
+                    transition = ScanLifecycleTransition.MarkSucceeded,
+                    nowEpochMillis = nowEpochMillis()
+                )
+                return@synchronized transitionResult is ScanLifecycleWriteResult.Saved
+            }
+            ScanLifecycleReadResult.Missing -> activeOwner(appContext) == workerId
+            is ScanLifecycleReadResult.Invalid,
+            ScanLifecycleReadResult.StorageFailure -> false
+        }
+    }
+
+    internal fun markFailureIfOwner(
+        context: Context,
+        workerId: String,
+        code: String,
+        generation: String? = null
+    ) {
         synchronized(LIFECYCLE_LOCK) {
-            if (activeOwner(context.applicationContext) == workerId) {
-                ScanSession.markBackgroundFailure(code)
+            val appContext = context.applicationContext
+            val lifecycleStore = lifecycleStoreProvider(appContext)
+            when (val readResult = lifecycleStore.read()) {
+                is ScanLifecycleReadResult.Available -> {
+                    val record = readResult.record
+                    if (record.ownerId == workerId && (generation == null || record.generation == generation)) {
+                        val safeCode = if (code in ScanLifecycleErrors.SAFE_ERROR_CODES) code else ScanLifecycleErrors.SCAN_EXECUTION_FAILED
+                        ScanSession.markBackgroundFailure(safeCode)
+                        if (record.phase in setOf(
+                                ScanLifecyclePhase.EnqueuePending,
+                                ScanLifecyclePhase.Enqueued,
+                                ScanLifecyclePhase.Running
+                            )
+                        ) {
+                            lifecycleStore.transition(
+                                expected = record,
+                                transition = ScanLifecycleTransition.MarkFailed(safeCode),
+                                nowEpochMillis = nowEpochMillis()
+                            )
+                        }
+                    }
+                }
+                ScanLifecycleReadResult.Missing -> {
+                    if (activeOwner(appContext) == workerId) {
+                        val safeCode = if (code in ScanLifecycleErrors.SAFE_ERROR_CODES) {
+                            code
+                        } else {
+                            ScanLifecycleErrors.SCAN_EXECUTION_FAILED
+                        }
+                        ScanSession.markBackgroundFailure(safeCode)
+                    }
+                }
+                is ScanLifecycleReadResult.Invalid,
+                ScanLifecycleReadResult.StorageFailure -> {
+                    ScanSession.markBackgroundFailure(ScanLifecycleErrors.LIFECYCLE_STORAGE_FAILURE)
+                }
             }
         }
     }
@@ -433,42 +994,526 @@ object BackgroundScanManager {
     internal fun saveResultIfOwner(
         context: Context,
         workId: String,
-        dossierCase: io.dossier.app.domain.case.DossierCase,
-        analysis: io.dossier.app.domain.analysis.OsintAnalysisBundle
+        dossierCase: DossierCase,
+        analysis: OsintAnalysisBundle,
+        generation: String? = null
     ): Boolean = synchronized(LIFECYCLE_LOCK) {
-        if (activeOwner(context.applicationContext) != workId) return@synchronized false
-        BackgroundScanResultStore(context.applicationContext).save(workId, dossierCase, analysis)
+        if (!isCurrentOwner(context, workId, generation)) return@synchronized false
+        resultStoreProvider(context.applicationContext).save(workId, dossierCase, analysis)
     }
 
     internal fun finishOwner(
         context: Context,
         workerId: String,
-        completion: BackgroundScanCompletion? = null
+        completion: BackgroundScanCompletion? = null,
+        generation: String? = null
     ) {
         synchronized(LIFECYCLE_LOCK) {
-            if (activeOwner(context.applicationContext) == workerId) {
-                FaceCorrelationSessionPolicy.useBasicMatching()
-                when (completion) {
-                    BackgroundScanCompletion.Succeeded -> ScanSession.markBackgroundSucceeded()
-                    is BackgroundScanCompletion.Failed -> ScanSession.markBackgroundFailure(completion.code)
-                    null -> ScanSession.markBackgroundFinished()
+            val appContext = context.applicationContext
+            val lifecycleStore = lifecycleStoreProvider(appContext)
+            when (val readResult = lifecycleStore.read()) {
+                is ScanLifecycleReadResult.Available -> {
+                    val record = readResult.record
+                    if (record.ownerId != workerId || (generation != null && record.generation != generation)) {
+                        return@synchronized
+                    }
+                    FaceCorrelationSessionPolicy.useBasicMatching()
+                    when (completion) {
+                        BackgroundScanCompletion.Succeeded -> {
+                            if (record.phase == ScanLifecyclePhase.Succeeded || record.resultReady) {
+                                if (record.phase == ScanLifecyclePhase.Running) {
+                                    lifecycleStore.transition(
+                                        expected = record,
+                                        transition = ScanLifecycleTransition.MarkSucceeded,
+                                        nowEpochMillis = nowEpochMillis()
+                                    )
+                                }
+                                ScanSession.markBackgroundSucceeded()
+                            } else if (record.phase == ScanLifecyclePhase.Running) {
+                                // Do not manufacture a result marker in a
+                                // terminal cleanup callback. The worker must
+                                // persist the encrypted snapshot and publish
+                                // it explicitly before claiming success.
+                                ScanSession.markBackgroundFailure(ScanLifecycleErrors.RESULT_MISSING)
+                                lifecycleStore.transition(
+                                    expected = record,
+                                    transition = ScanLifecycleTransition.MarkFailed(
+                                        ScanLifecycleErrors.RESULT_MISSING
+                                    ),
+                                    nowEpochMillis = nowEpochMillis()
+                                )
+                            }
+                        }
+                        is BackgroundScanCompletion.Failed -> {
+                            val safeCode = if (completion.code in ScanLifecycleErrors.SAFE_ERROR_CODES) {
+                                completion.code
+                            } else {
+                                ScanLifecycleErrors.SCAN_EXECUTION_FAILED
+                            }
+                            ScanSession.markBackgroundFailure(safeCode)
+                            if (record.phase in setOf(
+                                    ScanLifecyclePhase.EnqueuePending,
+                                    ScanLifecyclePhase.Enqueued,
+                                    ScanLifecyclePhase.Running
+                                )
+                            ) {
+                                lifecycleStore.transition(
+                                    expected = record,
+                                    transition = ScanLifecycleTransition.MarkFailed(safeCode),
+                                    nowEpochMillis = nowEpochMillis()
+                                )
+                            }
+                        }
+                        null -> ScanSession.markBackgroundFinished()
+                    }
+                    clearActiveOwner(appContext, workerId)
                 }
-                clearActiveOwner(context.applicationContext, workerId)
+                ScanLifecycleReadResult.Missing -> {
+                    if (activeOwner(appContext) == workerId) {
+                        FaceCorrelationSessionPolicy.useBasicMatching()
+                        when (completion) {
+                            BackgroundScanCompletion.Succeeded -> ScanSession.markBackgroundSucceeded()
+                            is BackgroundScanCompletion.Failed -> ScanSession.markBackgroundFailure(completion.code)
+                            null -> ScanSession.markBackgroundFinished()
+                        }
+                        clearActiveOwner(appContext, workerId)
+                    }
+                }
+                is ScanLifecycleReadResult.Invalid,
+                ScanLifecycleReadResult.StorageFailure -> Unit
             }
         }
     }
 
-    internal fun buildRequest(requestId: String) = OneTimeWorkRequestBuilder<BackgroundScanWorker>()
-        .setInputData(BackgroundScanWorker.secureInputData(requestId))
-        .addTag(BackgroundScanWorker.WORK_TAG)
-        .build()
+    internal fun buildRequest(requestId: String) =
+        buildRequest(requestId = requestId, generation = null, ownerUuid = uuidGenerator())
+
+    internal fun buildRequest(
+        requestId: String,
+        generation: String? = null,
+        ownerUuid: UUID = uuidGenerator()
+    ): OneTimeWorkRequest {
+        require(BackgroundScanWorker.isCanonicalUuid(requestId)) {
+            "Secure request reference must be a canonical UUID"
+        }
+        require(generation == null || BackgroundScanWorker.isCanonicalUuid(generation)) {
+            "Secure generation reference must be a canonical UUID"
+        }
+        return OneTimeWorkRequestBuilder<BackgroundScanWorker>()
+            .setId(ownerUuid)
+            .setInputData(BackgroundScanWorker.secureInputData(requestId, generation))
+            .addTag(BackgroundScanWorker.WORK_TAG)
+            .build()
+    }
+
+    private fun lookupWorkInfo(context: Context, ownerId: String): ScanWorkInfoLookup {
+        val ownerUuid = runCatching { UUID.fromString(ownerId) }.getOrNull()
+            ?: return ScanWorkInfoLookup.Missing
+        return try {
+            val info = WorkManager.getInstance(context.applicationContext)
+                .getWorkInfoById(ownerUuid)
+                .get(WORK_INFO_LOOKUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            if (info == null) {
+                ScanWorkInfoLookup.Missing
+            } else {
+                val state = when (info.state) {
+                    WorkInfo.State.ENQUEUED -> ScanWorkState.Enqueued
+                    WorkInfo.State.RUNNING -> ScanWorkState.Running
+                    WorkInfo.State.BLOCKED -> ScanWorkState.Blocked
+                    WorkInfo.State.SUCCEEDED -> ScanWorkState.Succeeded
+                    WorkInfo.State.FAILED -> ScanWorkState.Failed
+                    WorkInfo.State.CANCELLED -> ScanWorkState.Cancelled
+                }
+                // Trust the UUID returned by the exact lookup, not the
+                // lifecycle row that requested it.
+                ScanWorkInfoLookup.Available(ScanWorkInfoSummary(info.id.toString(), state))
+            }
+        } catch (_: Exception) {
+            ScanWorkInfoLookup.Unavailable
+        }
+    }
+
+    fun reconcile(context: Context): ScanReconciliationAction = synchronized(LIFECYCLE_LOCK) {
+        val appContext = context.applicationContext
+        val lifecycleStore = lifecycleStoreProvider(appContext)
+        val resumeStore = resumeStoreProvider(appContext)
+        val resultStore = resultStoreProvider(appContext)
+
+        var preloadedWorkInfo: ScanWorkInfoLookup? = null
+        val lifecycleRecord = when (val readResult = lifecycleStore.read()) {
+            is ScanLifecycleReadResult.Available -> readResult.record
+            ScanLifecycleReadResult.Missing -> {
+                val legacyOwner = activeOwner(appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE))
+                if (legacyOwner != null) {
+                    // Probe the exact legacy UUID before migrating the marker.
+                    // An unavailable lookup is a zero-mutation outcome; do
+                    // not publish a lifecycle row that startup cannot yet
+                    // reconcile.
+                    val legacyLookup = lookupWorkInfo(appContext, legacyOwner)
+                    if (legacyLookup is ScanWorkInfoLookup.Unavailable) {
+                        return@synchronized ScanReconciliationAction.RetryLegacyLookup
+                    }
+                    preloadedWorkInfo = legacyLookup
+                    val activeId = (resumeStore.loadDetailed() as? ResumeReadState.Available)?.point?.requestId
+                    if (activeId != null) {
+                        val mig = lifecycleStore.migrateLegacyActiveOwner(
+                            currentEncryptedRequestId = activeId,
+                            generation = generationGenerator().toString(),
+                            updatedAtEpochMillis = nowEpochMillis()
+                        )
+                        if (mig is ScanLifecycleWriteResult.Saved) {
+                            (lifecycleStore.read() as? ScanLifecycleReadResult.Available)?.record
+                        } else null
+                    } else null
+                } else null
+            }
+            is ScanLifecycleReadResult.Invalid,
+            ScanLifecycleReadResult.StorageFailure -> {
+                ScanSession.markBackgroundFailure(ScanLifecycleErrors.LIFECYCLE_STORAGE_FAILURE)
+                return@synchronized ScanReconciliationAction.DoNotAdopt
+            }
+        }
+
+        if (lifecycleRecord == null) {
+            return@synchronized ScanReconciliationAction.DoNotAdopt
+        }
+
+        val workInfoLookup = preloadedWorkInfo ?: lookupWorkInfo(appContext, lifecycleRecord.ownerId)
+        // An unavailable exact lookup proves neither presence nor absence. Do
+        // not read/clean checkpoints or results after this point; retry with
+        // the same durable lifecycle snapshot instead.
+        if (workInfoLookup is ScanWorkInfoLookup.Unavailable) {
+            return@synchronized ScanReconciliationAction.RetryReconciliation(lifecycleRecord)
+        }
+
+        val activeCheckpoint = resumeStore.loadRequestDetailed(lifecycleRecord.requestId)
+        val checkpointAvailability = when (activeCheckpoint) {
+            is ResumeReadState.Available -> ScanCheckpointAvailability.Available
+            ResumeReadState.Missing -> {
+                // EnqueuePending is the only phase allowed to recover a
+                // prepared B record. The lifecycle publication intentionally
+                // precedes pointer promotion, so a crash in that window leaves
+                // loadRequestDetailed(B) missing while B remains encrypted and
+                // explicitly marked prepared.
+                if (lifecycleRecord.phase == ScanLifecyclePhase.EnqueuePending) {
+                    when (resumeStore.loadPreparedRequestDetailed(lifecycleRecord.requestId)) {
+                        is ResumeReadState.Available -> ScanCheckpointAvailability.Available
+                        ResumeReadState.Missing,
+                        ResumeReadState.Expired -> ScanCheckpointAvailability.Missing
+                        is ResumeReadState.Invalid -> ScanCheckpointAvailability.Invalid
+                        is ResumeReadState.StorageFailure -> ScanCheckpointAvailability.StorageFailure
+                    }
+                } else {
+                    ScanCheckpointAvailability.Missing
+                }
+            }
+            ResumeReadState.Expired -> ScanCheckpointAvailability.Missing
+            is ResumeReadState.Invalid -> ScanCheckpointAvailability.Invalid
+            is ResumeReadState.StorageFailure -> ScanCheckpointAvailability.StorageFailure
+        }
+
+        val resultWorkId = resultStore.load()?.workId
+
+        return@synchronized ScanLifecycleReconciler.plan(
+            lifecycle = lifecycleRecord,
+            workInfo = workInfoLookup,
+            checkpoint = checkpointAvailability,
+            resultWorkId = resultWorkId
+        )
+    }
+
+    fun executeReconciliation(context: Context, action: ScanReconciliationAction): ScanReconciliationAction = synchronized(LIFECYCLE_LOCK) {
+        val appContext = context.applicationContext
+        val lifecycleStore = lifecycleStoreProvider(appContext)
+        val resumeStore = resumeStoreProvider(appContext)
+        val resultStore = resultStoreProvider(appContext)
+        val now = nowEpochMillis()
+
+        when (action) {
+            is ScanReconciliationAction.DoNotAdopt -> action
+            is ScanReconciliationAction.RetryLegacyLookup -> action
+            is ScanReconciliationAction.RetryReconciliation -> action
+            is ScanReconciliationAction.KeepOrRecover -> action
+            is ScanReconciliationAction.TruthfulFailurePreserve -> {
+                // The result is intentionally retained for inspection. Keep a
+                // safe failure visible to the session without attempting any
+                // generation-blind cleanup or replacing the evidence.
+                if (isExactLifecycle(lifecycleStore, action.expected)) {
+                    ScanSession.markBackgroundFailure(action.errorCode)
+                }
+                action
+            }
+            is ScanReconciliationAction.CleanupTerminal -> {
+                completeCleanupIfExact(
+                    expected = action.expected,
+                    lifecycleStore = lifecycleStore,
+                    resumeStore = resumeStore,
+                    resultStore = resultStore
+                )
+                action
+            }
+            is ScanReconciliationAction.ReenqueueSameUuid -> {
+                // Reconciliation actions are snapshots. Re-read the exact
+                // record before enqueueing so a stale startup callback cannot
+                // resurrect an older UUID after a replacement was published.
+                val current = lifecycleStore.read()
+                if (current !is ScanLifecycleReadResult.Available || current.record != action.expected) {
+                    return@synchronized action
+                }
+                when (val checkpoint = resumeStore.loadRequestDetailed(action.expected.requestId)) {
+                    is ResumeReadState.Available -> Unit
+                    // Crash recovery for the lifecycle-before-promotion
+                    // window: promote only the exact prepared generation B,
+                    // never a timestamp-selected/orphaned record.
+                    ResumeReadState.Missing -> {
+                        val prepared = resumeStore.loadPreparedRequestDetailed(action.expected.requestId)
+                        val promoted = if (prepared is ResumeReadState.Available) {
+                            resumeStore.promotePreparedRequestDetailed(action.expected.requestId)
+                        } else {
+                            prepared
+                        }
+                        if (promoted !is ResumeReadState.Available) {
+                            val errorCode = when (promoted) {
+                                ResumeReadState.Missing,
+                                ResumeReadState.Expired -> ScanLifecycleErrors.CHECKPOINT_MISSING
+                                is ResumeReadState.Invalid -> ScanLifecycleErrors.CHECKPOINT_INVALID
+                                is ResumeReadState.StorageFailure ->
+                                    ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE
+                                is ResumeReadState.Available ->
+                                    ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE
+                            }
+                            lifecycleStore.transition(
+                                expected = action.expected,
+                                transition = ScanLifecycleTransition.MarkFailed(errorCode),
+                                nowEpochMillis = now
+                            )
+                            return@synchronized action
+                        }
+                    }
+                    ResumeReadState.Expired,
+                    is ResumeReadState.Invalid,
+                    is ResumeReadState.StorageFailure -> {
+                        lifecycleStore.transition(
+                            expected = action.expected,
+                            transition = ScanLifecycleTransition.MarkFailed(
+                                when (checkpoint) {
+                                    ResumeReadState.Expired -> ScanLifecycleErrors.CHECKPOINT_MISSING
+                                    is ResumeReadState.Invalid -> ScanLifecycleErrors.CHECKPOINT_INVALID
+                                    is ResumeReadState.StorageFailure -> ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE
+                                    else -> ScanLifecycleErrors.CHECKPOINT_MISSING
+                                }
+                            ),
+                            nowEpochMillis = now
+                        )
+                        return@synchronized action
+                    }
+                }
+                val ownerUuid = runCatching { UUID.fromString(action.expected.ownerId) }.getOrNull()
+                if (ownerUuid != null) {
+                    val request = buildRequest(
+                        requestId = action.expected.requestId,
+                        generation = action.expected.generation,
+                        ownerUuid = ownerUuid
+                    )
+                    try {
+                        val operation = WorkManager.getInstance(appContext).enqueueUniqueWork(
+                            BackgroundScanWorker.UNIQUE_WORK_NAME,
+                            ExistingWorkPolicy.REPLACE,
+                            request
+                        )
+                        monitorEnqueue(operation, appContext, action.expected, priorOwnerId = null)
+                    } catch (_: Exception) {
+                        lifecycleStore.transition(
+                            expected = action.expected,
+                            transition = ScanLifecycleTransition.MarkFailed(BackgroundScanWorker.ERROR_ENQUEUE_FAILED),
+                            nowEpochMillis = now
+                        )
+                    }
+                }
+                action
+            }
+            is ScanReconciliationAction.RetryCancellation -> {
+                val current = lifecycleStore.read()
+                if (current !is ScanLifecycleReadResult.Available || current.record != action.expected) {
+                    return@synchronized action
+                }
+                val ownerUuid = runCatching { UUID.fromString(action.expected.ownerId) }.getOrNull()
+                if (ownerUuid != null) {
+                    try {
+                        monitorCancellation(
+                            operation = WorkManager.getInstance(appContext).cancelWorkById(ownerUuid),
+                            context = appContext,
+                            expected = action.expected
+                        )
+                    } catch (_: Exception) {
+                        lifecycleStore.transition(
+                            expected = action.expected,
+                            transition = ScanLifecycleTransition.MarkCancelFailed(),
+                            nowEpochMillis = now
+                        )
+                        ScanSession.markBackgroundFailure(ScanLifecycleErrors.CANCEL_REQUEST_FAILED)
+                    }
+                }
+                action
+            }
+            is ScanReconciliationAction.RecoverSucceeded -> {
+                if (!isExactLifecycle(lifecycleStore, action.expected)) return@synchronized action
+                lifecycleStore.transition(
+                    expected = action.expected,
+                    transition = ScanLifecycleTransition.RecoverSucceeded,
+                    nowEpochMillis = now
+                )
+                action
+            }
+            is ScanReconciliationAction.CompleteCleanup -> {
+                completeCleanupIfExact(
+                    expected = action.expected,
+                    lifecycleStore = lifecycleStore,
+                    resumeStore = resumeStore,
+                    resultStore = resultStore
+                )
+                action
+            }
+            is ScanReconciliationAction.FailedTerminal -> {
+                if (!isExactLifecycle(lifecycleStore, action.expected)) return@synchronized action
+                if (action.expected.phase != ScanLifecyclePhase.Failed) {
+                    lifecycleStore.transition(
+                        expected = action.expected,
+                        transition = ScanLifecycleTransition.MarkFailed(action.errorCode),
+                        nowEpochMillis = now
+                    )
+                }
+                ScanSession.markBackgroundFailure(action.errorCode)
+                action
+            }
+            is ScanReconciliationAction.CancelledTerminal -> {
+                if (!isExactLifecycle(lifecycleStore, action.expected)) return@synchronized action
+                if (action.expected.phase != ScanLifecyclePhase.Cancelled) {
+                    lifecycleStore.transition(
+                        expected = action.expected,
+                        transition = ScanLifecycleTransition.MarkCancelled,
+                        nowEpochMillis = now
+                    )
+                }
+                ScanSession.markBackgroundCancelled()
+                action
+            }
+            is ScanReconciliationAction.FailNoRetry -> {
+                if (!isExactLifecycle(lifecycleStore, action.expected)) return@synchronized action
+                lifecycleStore.transition(
+                    expected = action.expected,
+                    transition = ScanLifecycleTransition.MarkFailed(action.errorCode),
+                    nowEpochMillis = now
+                )
+                ScanSession.markBackgroundFailure(action.errorCode)
+                action
+            }
+        }
+    }
+
+    /** Exact CAS guard used by every mutating reconciliation action. */
+    private fun isExactLifecycle(
+        lifecycleStore: ScanLifecycleStore,
+        expected: ScanLifecycleRecord
+    ): Boolean = (lifecycleStore.read() as? ScanLifecycleReadResult.Available)?.record == expected
+
+    /**
+     * Complete terminal cleanup only after the exact lifecycle snapshot has
+     * entered CleanupPending.  The result is checked by owner UUID before the
+     * global result-file unlink, and the lifecycle is cleared only after both
+     * exact request cleanup and result cleanup succeed.
+     */
+    private fun completeCleanupIfExact(
+        expected: ScanLifecycleRecord,
+        lifecycleStore: ScanLifecycleStore,
+        resumeStore: ScanResumeStore,
+        resultStore: BackgroundScanResultStore
+    ): Boolean {
+        val current = lifecycleStore.read()
+        if (current !is ScanLifecycleReadResult.Available || current.record != expected) {
+            return false
+        }
+
+        // Startup reconciliation is not a user purge. Preserve the encrypted
+        // latest result so process-death restore and the Analysis screen can
+        // still inspect it; only remove the exact checkpoint and lifecycle
+        // row after verifying that matching result exists.
+        if (expected.phase == ScanLifecyclePhase.Succeeded) {
+            val snapshot = resultStore.load()
+            if (snapshot == null) {
+                ScanSession.markBackgroundFailure(ScanLifecycleErrors.RESULT_MISSING)
+                return false
+            }
+            if (snapshot.workId != expected.ownerId) {
+                ScanSession.markBackgroundFailure(ScanLifecycleErrors.RESULT_MISMATCH)
+                return false
+            }
+            if (!resumeStore.clearRequest(expected.requestId)) {
+                ScanSession.markBackgroundFailure(ScanLifecycleErrors.CLEANUP_FAILED)
+                return false
+            }
+            val after = resultStore.load()
+            if (after == null || after.workId != expected.ownerId) {
+                ScanSession.markBackgroundFailure(
+                    if (after == null) ScanLifecycleErrors.RESULT_MISSING
+                    else ScanLifecycleErrors.RESULT_MISMATCH
+                )
+                return false
+            }
+            if (!isExactLifecycle(lifecycleStore, expected)) return false
+            return lifecycleStore.clear(expected) is ScanLifecycleWriteResult.Cleared
+        }
+
+        val cleanupRecord = if (expected.phase == ScanLifecyclePhase.CleanupPending) {
+            expected
+        } else {
+            val begun = lifecycleStore.transition(
+                expected = expected,
+                transition = ScanLifecycleTransition.BeginCleanup,
+                nowEpochMillis = nowEpochMillis()
+            )
+            if (begun !is ScanLifecycleWriteResult.Saved) return false
+            (lifecycleStore.read() as? ScanLifecycleReadResult.Available)?.record
+                ?.takeIf {
+                    it.ownerId == expected.ownerId &&
+                        it.requestId == expected.requestId &&
+                        it.generation == expected.generation &&
+                        it.phase == ScanLifecyclePhase.CleanupPending
+                }
+                ?: return false
+        }
+
+        // A succeeded generation must retain a matching durable result. For a
+        // failed/cancelled generation no result is expected, but an orphan
+        // result is still cleared only when it belongs to this owner.
+        val snapshot = resultStore.load()
+        if (snapshot != null && snapshot.workId != expected.ownerId) {
+            ScanSession.markBackgroundFailure(
+                ScanLifecycleErrors.RESULT_MISMATCH
+            )
+            return false
+        }
+
+        // CleanupPending is durable proof of an explicit purge. A missing
+        // result can therefore mean an earlier unlink completed before a
+        // crash; treat it as already cleared and continue the exact cleanup.
+        val resultCleared = snapshot == null || resultStore.clear()
+        val requestCleared = resumeStore.clearRequest(expected.requestId)
+        if (!resultCleared || !requestCleared) {
+            ScanSession.markBackgroundFailure(ScanLifecycleErrors.CLEANUP_FAILED)
+            return false
+        }
+
+        // Re-check the full snapshot after external file operations so a
+        // replacement callback cannot be erased by an old cleanup action.
+        if (!isExactLifecycle(lifecycleStore, cleanupRecord)) return false
+        return lifecycleStore.clear(cleanupRecord) is ScanLifecycleWriteResult.Cleared
+    }
 
     @SuppressLint("ApplySharedPref", "UseKtx")
     internal fun setActiveOwner(context: Context, ownerId: String): Boolean {
-        require(isCanonicalUuid(ownerId)) { "Background owner must be a canonical UUID" }
+        require(BackgroundScanWorker.isCanonicalUuid(ownerId)) { "Background owner must be a canonical UUID" }
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        // Synchronous commit is intentional: the worker must never start from an
-        // owner marker that existed only in memory when power/process loss occurs.
         val committed = prefs
             .edit()
             .putString(KEY_ACTIVE_OWNER, ownerId)
@@ -484,31 +1529,123 @@ object BackgroundScanManager {
         if (ownerId == null) return
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (activeOwner(prefs) == ownerId) {
-            // Match owner publication semantics so terminal cleanup is durable.
             prefs.edit().remove(KEY_ACTIVE_OWNER).commit()
         }
     }
 
-    private fun activeOwner(context: Context): String? = activeOwner(
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    )
+    internal fun activeOwner(context: Context): String? {
+        return when (val lifecycleRead = lifecycleStoreProvider(context.applicationContext).read()) {
+            is ScanLifecycleReadResult.Available -> lifecycleRead.record.ownerId
+            ScanLifecycleReadResult.Missing -> activeOwner(
+                context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            )
+            is ScanLifecycleReadResult.Invalid,
+            ScanLifecycleReadResult.StorageFailure -> null
+        }
+    }
 
     private fun activeOwner(prefs: android.content.SharedPreferences): String? =
         runCatching { prefs.getString(KEY_ACTIVE_OWNER, null) }
             .getOrNull()
-            ?.takeIf(::isCanonicalUuid)
-
-    private fun isCanonicalUuid(value: String): Boolean =
-        runCatching { UUID.fromString(value).toString() == value }.getOrDefault(false)
+            ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
 
     private const val PREFS = "dossier-background-work"
     private const val KEY_ACTIVE_OWNER = "active_owner"
     private val LIFECYCLE_LOCK = Any()
+
     private fun monitorEnqueue(
         operation: androidx.work.Operation,
         context: Context,
-        ownerId: String,
-        requestId: String
+        pendingRecord: ScanLifecycleRecord,
+        priorOwnerId: String?
+    ) {
+        operation.result.addListener(
+            {
+                try {
+                    operation.result.get()
+                    synchronized(LIFECYCLE_LOCK) {
+                        val lifecycleStore = lifecycleStoreProvider(context)
+                        val current = lifecycleStore.read()
+                        if (current !is ScanLifecycleReadResult.Available ||
+                            !isSameLifecycleGeneration(current.record, pendingRecord)
+                        ) {
+                            return@synchronized
+                        }
+                        if (current.record.phase == ScanLifecyclePhase.EnqueuePending) {
+                            lifecycleStore.transition(
+                                expected = current.record,
+                                transition = ScanLifecycleTransition.MarkEnqueued,
+                                nowEpochMillis = nowEpochMillis()
+                            )
+                        }
+                        if (priorOwnerId != null) {
+                            // Do not discard a completed result until the new
+                            // WorkSpec enqueue has been acknowledged. The
+                            // result itself remains owner-bound, so a stale
+                            // callback cannot remove a replacement snapshot.
+                            val resultStore = resultStoreProvider(context.applicationContext)
+                            if (shouldClearPriorResult(
+                                    current = current.record,
+                                    pending = pendingRecord,
+                                    priorOwnerId = priorOwnerId,
+                                    resultOwnerId = resultStore.load()?.workId
+                                )
+                            ) {
+                                resultStore.clear()
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    synchronized(LIFECYCLE_LOCK) {
+                        val lifecycleStore = lifecycleStoreProvider(context)
+                        val current = lifecycleStore.read()
+                        if (current is ScanLifecycleReadResult.Available &&
+                            current.record.ownerId == pendingRecord.ownerId &&
+                            current.record.requestId == pendingRecord.requestId &&
+                            current.record.generation == pendingRecord.generation
+                        ) {
+                            FaceCorrelationSessionPolicy.useBasicMatching()
+                            ScanSession.markBackgroundFailure(BackgroundScanWorker.ERROR_ENQUEUE_FAILED)
+                            lifecycleStore.transition(
+                                expected = current.record,
+                                transition = ScanLifecycleTransition.MarkFailed(BackgroundScanWorker.ERROR_ENQUEUE_FAILED),
+                                nowEpochMillis = nowEpochMillis()
+                            )
+                            resumeStoreProvider(context).clearRequest(pendingRecord.requestId)
+                        }
+                    }
+                }
+            },
+            directExecutor
+        )
+    }
+
+    internal fun isSameLifecycleGeneration(
+        current: ScanLifecycleRecord,
+        expected: ScanLifecycleRecord
+    ): Boolean = current.ownerId == expected.ownerId &&
+        current.requestId == expected.requestId &&
+        current.generation == expected.generation
+
+    internal fun shouldClearPriorResult(
+        current: ScanLifecycleRecord,
+        pending: ScanLifecycleRecord,
+        priorOwnerId: String?,
+        resultOwnerId: String?
+    ): Boolean = priorOwnerId != null &&
+        resultOwnerId == priorOwnerId &&
+        isSameLifecycleGeneration(current, pending)
+
+    /**
+     * Cancellation is a two-step truth: a successful Operation acknowledges
+     * the request, while WorkInfo.CANCELLED is the terminal execution state.
+     * Keep CancelRequested durable until the exact WorkManager row confirms
+     * cancellation; an Operation failure becomes the safe CancelFailed code.
+     */
+    private fun monitorCancellation(
+        operation: androidx.work.Operation,
+        context: Context,
+        expected: ScanLifecycleRecord
     ) {
         operation.result.addListener(
             {
@@ -516,23 +1653,64 @@ object BackgroundScanManager {
                     operation.result.get()
                 } catch (_: Exception) {
                     synchronized(LIFECYCLE_LOCK) {
-                        if (activeOwner(context) == ownerId) {
-                            FaceCorrelationSessionPolicy.useBasicMatching()
-                            ScanSession.markBackgroundFailure(ERROR_ENQUEUE_FAILED)
-                            clearActiveOwner(context, ownerId)
-                            ScanResumeStore(context).clearRequest(requestId)
+                        val lifecycleStore = lifecycleStoreProvider(context.applicationContext)
+                        val current = lifecycleStore.read()
+                        if (current is ScanLifecycleReadResult.Available && current.record == expected) {
+                            lifecycleStore.transition(
+                                expected = expected,
+                                transition = ScanLifecycleTransition.MarkCancelFailed(),
+                                nowEpochMillis = nowEpochMillis()
+                            )
+                            ScanSession.markBackgroundFailure(ScanLifecycleErrors.CANCEL_REQUEST_FAILED)
                         }
+                    }
+                    return@addListener
+                }
+
+                // Operation success acknowledges the request, but the exact
+                // WorkInfo row is the terminal truth. Observe it off-main so
+                // a worker that is still unwinding cannot strand the durable
+                // lifecycle in CancelRequested.
+                lifecycleScope.launch {
+                    val ownerUuid = UUID.fromString(expected.ownerId)
+                    val observed = runCatching {
+                        withTimeoutOrNull(CANCEL_OBSERVATION_TIMEOUT_MILLIS) {
+                            true to WorkManager.getInstance(context.applicationContext)
+                                .getWorkInfoByIdFlow(ownerUuid)
+                                .first { info -> info == null || info.state.isFinished }
+                        }
+                    }.getOrNull() ?: return@launch
+                    val terminal = observed.second
+
+                    if (terminal == null || terminal.state == WorkInfo.State.CANCELLED) {
+                        synchronized(LIFECYCLE_LOCK) {
+                            val lifecycleStore = lifecycleStoreProvider(context.applicationContext)
+                            val current = lifecycleStore.read()
+                            if (current is ScanLifecycleReadResult.Available && current.record == expected) {
+                                lifecycleStore.transition(
+                                    expected = expected,
+                                    transition = ScanLifecycleTransition.MarkCancelled,
+                                    nowEpochMillis = nowEpochMillis()
+                                )
+                                ScanSession.markBackgroundCancelled()
+                            }
+                        }
+                    } else {
+                        // Completion may win the race with cancellation. Feed
+                        // the exact terminal row back through the ordinary
+                        // result-aware reconciler rather than asserting that
+                        // the work was cancelled.
+                        val action = reconcile(context.applicationContext)
+                        executeReconciliation(context.applicationContext, action)
                     }
                 }
             },
-            DIRECT_EXECUTOR
+            directExecutor
         )
     }
 
-    private val DIRECT_EXECUTOR = Executor { command -> command.run() }
-    private const val ERROR_REQUEST_PERSISTENCE_FAILED = "SECURE_REQUEST_PERSISTENCE_FAILED"
-    private const val ERROR_ACTIVE_MARKER_FAILED = "ACTIVE_MARKER_PERSISTENCE_FAILED"
-    private const val ERROR_ENQUEUE_FAILED = "WORK_ENQUEUE_FAILED"
+    private const val CANCEL_OBSERVATION_TIMEOUT_MILLIS = 30_000L
+    private const val WORK_INFO_LOOKUP_TIMEOUT_SECONDS = 10L
 }
 
 internal class BackgroundScanSchedulingException(val code: String) : IllegalStateException(code)

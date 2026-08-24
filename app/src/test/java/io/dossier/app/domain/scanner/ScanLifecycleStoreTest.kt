@@ -51,12 +51,57 @@ class ScanLifecycleStoreTest {
     }
 
     @Test
+    fun replaceSwapsExactSnapshotInOneCommitAndRejectsStaleCallbacks() {
+        val preferences = FakePreferences()
+        val store = ScanLifecycleStore(preferences)
+        val old = record(phase = ScanLifecyclePhase.Running, updatedAt = 100L)
+        val replacement = ScanLifecycleRecord(
+            ownerId = otherOwner,
+            requestId = otherRequest,
+            generation = nextGeneration,
+            phase = ScanLifecyclePhase.EnqueuePending,
+            updatedAtEpochMillis = 101L,
+            resultReady = false,
+            errorCode = null
+        )
+        assertEquals(ScanLifecycleWriteResult.Saved, store.publish(old))
+        val commitsBefore = preferences.commitCount
+
+        assertEquals(ScanLifecycleWriteResult.Saved, store.replace(old, replacement))
+        assertEquals(commitsBefore + 1, preferences.commitCount)
+        assertEquals(ScanLifecycleReadResult.Available(replacement), store.read())
+
+        // A stale callback cannot erase or rebind the replacement generation.
+        assertEquals(ScanLifecycleWriteResult.GenerationMismatch, store.replace(old, old))
+        assertEquals(ScanLifecycleReadResult.Available(replacement), store.read())
+    }
+
+    @Test
     fun commitFalseIsExposedAndDoesNotPretendToSave() {
         val preferences = FakePreferences().apply { commitResult = false }
         val store = ScanLifecycleStore(preferences)
 
         assertEquals(ScanLifecycleWriteResult.CommitFailed, store.publish(record()))
         assertEquals(ScanLifecycleReadResult.Missing, store.read())
+    }
+
+    @Test
+    fun replaceCommitFailureLeavesOriginalLifecycleIntact() {
+        val preferences = FakePreferences()
+        val store = ScanLifecycleStore(preferences)
+        val old = record(phase = ScanLifecyclePhase.Running, updatedAt = 100L)
+        val replacement = record(
+            phase = ScanLifecyclePhase.EnqueuePending,
+            generationId = nextGeneration,
+            ownerId = otherOwner,
+            requestId = otherRequest,
+            updatedAt = 101L
+        )
+        assertEquals(ScanLifecycleWriteResult.Saved, store.publish(old))
+        preferences.commitResult = false
+
+        assertEquals(ScanLifecycleWriteResult.CommitFailed, store.replace(old, replacement))
+        assertEquals(ScanLifecycleReadResult.Available(old), store.read())
     }
 
     @Test

@@ -79,6 +79,31 @@ internal class ScanLifecycleStore internal constructor(
     fun save(record: ScanLifecycleRecord): ScanLifecycleWriteResult = publish(record)
 
     /**
+     * Atomically swaps one exact lifecycle snapshot for a replacement.
+     *
+     * Background enqueue uses this for the A -> B hand-off: the new pending
+     * generation becomes durable in the same SharedPreferences commit that
+     * removes the old marker.  A stale callback cannot replace a newer record,
+     * because the full expected snapshot (not just its generation) is checked
+     * while holding the store lock.
+     */
+    internal fun replace(
+        expected: ScanLifecycleRecord,
+        replacement: ScanLifecycleRecord
+    ): ScanLifecycleWriteResult = synchronized(STORE_LOCK) {
+        when (val current = readLocked()) {
+            ScanLifecycleReadResult.Missing -> ScanLifecycleWriteResult.Missing
+            is ScanLifecycleReadResult.Invalid -> ScanLifecycleWriteResult.Invalid(current.reason)
+            ScanLifecycleReadResult.StorageFailure -> ScanLifecycleWriteResult.StorageFailure
+            is ScanLifecycleReadResult.Available -> when {
+                current.record.generation != expected.generation -> ScanLifecycleWriteResult.GenerationMismatch
+                current.record != expected -> ScanLifecycleWriteResult.RecordMismatch
+                else -> publishLocked(replacement)
+            }
+        }
+    }
+
+    /**
      * Applies one reducer transition to the exact expected lifecycle record.
      *
      * The store never accepts an arbitrary replacement record.  The reducer

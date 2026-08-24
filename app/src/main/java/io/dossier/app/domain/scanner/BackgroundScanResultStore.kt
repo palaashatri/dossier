@@ -11,10 +11,14 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.Base64
+import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -27,7 +31,15 @@ import javax.crypto.spec.GCMParameterSpec
  * never silently creates a user-saved case. The latest result can be restored into
  * ScanSession and promoted only after an explicit Save action.
  */
-class BackgroundScanResultStore(private val context: Context) {
+class BackgroundScanResultStore internal constructor(
+    private val context: Context,
+    private val directorySyncer: DirectorySyncer
+) {
+    constructor(context: Context) : this(
+        context.applicationContext,
+        AndroidDirectorySyncer()
+    )
+
     @Serializable
     data class Snapshot(
         val workId: String,
@@ -72,7 +84,7 @@ class BackgroundScanResultStore(private val context: Context) {
             ciphertextBase64 = Base64.getEncoder().encodeToString(ciphertext),
             plaintextSha256 = sha256(plaintext)
         )
-        atomicWrite(resultFile(), json.encodeToString(envelope))
+        writeEnvelopeAtomically(resultFile(), json.encodeToString(envelope))
         true
     }.getOrDefault(false)
 
@@ -97,17 +109,38 @@ class BackgroundScanResultStore(private val context: Context) {
 
     private fun resultFile(): File = File(context.filesDir, FILE_NAME)
 
-    private fun atomicWrite(target: File, content: String) {
-        val temp = File(target.parentFile, "${target.name}.tmp")
-        FileOutputStream(temp).use { output ->
-            output.write(content.toByteArray(Charsets.UTF_8))
-            output.fd.sync()
+    /**
+     * Atomically replaces the encrypted envelope without unlinking the last
+     * known-good result first. The file and its parent directory are both
+     * synced so a reported success survives power loss.
+     */
+    internal fun writeEnvelopeAtomically(target: File, content: String) {
+        val parent = target.parentFile ?: throw IOException("Missing result parent")
+        if (!parent.exists() && !parent.mkdirs() && !parent.isDirectory) {
+            throw IOException("Unable to create result directory")
         }
-        if (target.exists() && !target.delete()) error("Unable to replace background scan snapshot")
-        if (!temp.renameTo(target)) {
-            temp.delete()
-            error("Unable to commit background scan snapshot")
+        val temp = File(parent, "${target.name}.${UUID.randomUUID()}.tmp")
+        var failure: Exception? = null
+        try {
+            FileOutputStream(temp).use { output ->
+                output.write(content.toByteArray(Charsets.UTF_8))
+                output.fd.sync()
+            }
+            Files.move(
+                temp.toPath(),
+                target.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+            directorySyncer.sync(parent)
+        } catch (error: Exception) {
+            failure = error
         }
+        if (temp.exists() && !temp.delete()) {
+            val cleanup = IOException("Unable to remove temporary result file")
+            if (failure == null) failure = cleanup else failure?.addSuppressed(cleanup)
+        }
+        failure?.let { throw it }
     }
 
     private fun getOrCreateKey(): SecretKey {

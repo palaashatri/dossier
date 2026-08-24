@@ -376,7 +376,9 @@ object ScanLifecycleReducer {
                     current.phase in setOf(
                         ScanLifecyclePhase.EnqueuePending,
                         ScanLifecyclePhase.Enqueued,
-                        ScanLifecyclePhase.Running
+                        ScanLifecyclePhase.Running,
+                        ScanLifecyclePhase.CancelRequested,
+                        ScanLifecyclePhase.CancelFailed
                     ) -> applied(
                         ScanLifecyclePhase.Failed,
                         errorCode = transition.errorCode
@@ -506,6 +508,15 @@ enum class ScanCheckpointAvailability {
 sealed interface ScanReconciliationAction {
     /** There is no persisted owner, so no WorkInfo may be adopted. */
     data object DoNotAdopt : ScanReconciliationAction
+
+    /**
+     * An exact WorkManager lookup for a canonical legacy owner was
+     * unavailable before a generation-bound lifecycle record could be
+     * published.  Startup must retry without reading or mutating checkpoint
+     * state; unlike [RetryReconciliation], there is deliberately no invented
+     * lifecycle snapshot to bind here.
+     */
+    data object RetryLegacyLookup : ScanReconciliationAction
 
     /** Every mutating/reconciliation action is bound to the exact snapshot it observed. */
     sealed interface Bound : ScanReconciliationAction {

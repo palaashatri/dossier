@@ -133,7 +133,9 @@ fun ScanScreen(
         liveLogs.add(visualMode)
         liveLogs.add("Starting scan…")
         if (deepResearch) liveLogs.add("Deep Research enabled — following linked sites")
-        ScanSession.startScan(context, input, deepResearch = deepResearch)
+        coroutineScope.launch {
+            ScanSession.startScan(context, input, deepResearch = deepResearch)
+        }
     }
 
     LaunchedEffect(progressText) {

@@ -422,7 +422,7 @@ object ScanCoordinatorRuntime {
      * is still observed truthfully by [ensureMonitoring] until face-consent flow
      * is migrated in a later M2 tranche.
      */
-    fun start(context: Context, request: ScanRequest): ScanId {
+    suspend fun start(context: Context, request: ScanRequest): ScanId {
         ensureMonitoring()
         val id = newScanId()
         synchronized(lock) {

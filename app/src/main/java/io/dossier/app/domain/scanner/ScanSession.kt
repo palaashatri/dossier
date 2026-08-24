@@ -114,23 +114,25 @@ object ScanSession {
      * Enqueues one unique durable scan. Navigating away from the scan screen no
      * longer cancels work; Android/WorkManager owns execution and restart policy.
      */
-    fun startScan(context: Context, input: IdentityInput, deepResearch: Boolean = false) {
-        val appContext = context.applicationContext
-        scanApplicationContext = appContext
+    suspend fun startScan(context: Context, input: IdentityInput, deepResearch: Boolean = false) {
+        withContext(Dispatchers.IO) {
+            val appContext = context.applicationContext
+            scanApplicationContext = appContext
 
-        runCatching {
-            BackgroundScanManager.enqueue(
-                context = appContext,
-                input = input,
-                deepResearch = deepResearch,
-                strongFaceCorrelation = FaceCorrelationSessionPolicy.isStrongCorrelationEnabled()
-            )
-        }.onFailure { error ->
-            FaceCorrelationSessionPolicy.useBasicMatching()
-            val code = (error as? BackgroundScanSchedulingException)?.code
-                ?: "WORK_SCHEDULING_FAILED"
-            _progressText.value = "${BackgroundScanWorker.STAGE_FAILED}: $code"
-            _isScanning.value = false
+            runCatching {
+                BackgroundScanManager.enqueue(
+                    context = appContext,
+                    input = input,
+                    deepResearch = deepResearch,
+                    strongFaceCorrelation = FaceCorrelationSessionPolicy.isStrongCorrelationEnabled()
+                )
+            }.onFailure { error ->
+                FaceCorrelationSessionPolicy.useBasicMatching()
+                val code = (error as? BackgroundScanSchedulingException)?.code
+                    ?: "WORK_SCHEDULING_FAILED"
+                _progressText.value = "${BackgroundScanWorker.STAGE_FAILED}: $code"
+                _isScanning.value = false
+            }
         }
     }
 
