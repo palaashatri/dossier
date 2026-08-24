@@ -149,6 +149,97 @@ class ScanResumeStoreTest {
     }
 
     @Test
+    fun coordinatorCheckpointBindsOwnerAndPersistsCompletedBoundaries() {
+        val fixture = fixture()
+        val store = store(fixture)
+        val saved = store.saveRequestDetailed(
+            input = completeInput(),
+            deepResearch = true,
+            strongFaceCorrelation = false
+        ) as ResumeWriteState.Saved
+
+        assertTrue(
+            store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+                is ResumeCheckpointWriteState.Saved
+        )
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.DiscoveringUsernames,
+                completed = false
+            ) is ResumeCheckpointWriteState.Saved
+        )
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.DiscoveringUsernames,
+                completed = true
+            ) is ResumeCheckpointWriteState.Saved
+        )
+
+        val loaded = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertEquals(ScanCheckpointStage.DiscoveringUsernames, loaded.point.checkpointStage)
+        assertEquals(listOf(ScanCheckpointStage.DiscoveringUsernames), loaded.point.completedCheckpointStages)
+        assertEquals(OWNER_ONE, loaded.point.checkpointOwnerId)
+        assertTrue(loaded.point.updatedAtEpochMillis >= loaded.point.createdAtEpochMillis)
+    }
+
+    @Test
+    fun staleCheckpointOwnerCannotOverwriteNewOwnerOrRegressStage() {
+        val fixture = fixture()
+        val store = store(fixture)
+        val saved = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+        store.advanceCheckpoint(
+            requestId = saved.point.requestId,
+            ownerId = OWNER_ONE,
+            stage = ScanCheckpointStage.BuildingEntityGraph,
+            completed = true
+        )
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_TWO)
+
+        assertEquals(
+            ResumeCheckpointWriteState.StaleOwner,
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.Completed,
+                completed = true
+            )
+        )
+        val retained = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertEquals(OWNER_TWO, retained.point.checkpointOwnerId)
+        assertEquals(ScanCheckpointStage.Queued, retained.point.checkpointStage)
+        assertEquals(listOf(ScanCheckpointStage.BuildingEntityGraph), retained.point.completedCheckpointStages)
+    }
+
+    @Test
+    fun outOfOrderCheckpointDoesNotRegressCurrentStage() {
+        val fixture = fixture()
+        val store = store(fixture)
+        val saved = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+        store.advanceCheckpoint(
+            requestId = saved.point.requestId,
+            ownerId = OWNER_ONE,
+            stage = ScanCheckpointStage.CompilingExposureScores,
+            completed = false
+        )
+        store.advanceCheckpoint(
+            requestId = saved.point.requestId,
+            ownerId = OWNER_ONE,
+            stage = ScanCheckpointStage.ComparingFaceConsistency,
+            completed = true
+        )
+
+        val retained = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertEquals(ScanCheckpointStage.CompilingExposureScores, retained.point.checkpointStage)
+        assertTrue(ScanCheckpointStage.ComparingFaceConsistency in retained.point.completedCheckpointStages)
+    }
+
+    @Test
     fun requestScopedLoadRejectsSupersededPointer() {
         val fixture = fixture()
         val store = store(fixture, ids = listOf(ID_ONE, ID_TWO))
@@ -188,6 +279,9 @@ class ScanResumeStoreTest {
         assertEquals(null, loaded.point.planFingerprint)
         assertTrue(loaded.point.plannedProviderIds.isEmpty())
         assertEquals(0, loaded.point.plannedProviderCount)
+        assertEquals(ScanCheckpointStage.Queued, loaded.point.checkpointStage)
+        assertTrue(loaded.point.completedCheckpointStages.isEmpty())
+        assertEquals(null, loaded.point.checkpointOwnerId)
     }
 
     @Test
@@ -1063,6 +1157,8 @@ class ScanResumeStoreTest {
         const val ID_ONE = "123e4567-e89b-12d3-a456-426614174000"
         const val ID_TWO = "123e4567-e89b-12d3-a456-426614174001"
         const val ID_C = "123e4567-e89b-12d3-a456-426614174002"
+        const val OWNER_ONE = "223e4567-e89b-42d3-a456-426614174000"
+        const val OWNER_TWO = "223e4567-e89b-42d3-a456-426614174001"
     }
 }
 

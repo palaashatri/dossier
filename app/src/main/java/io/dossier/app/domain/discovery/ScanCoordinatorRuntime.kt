@@ -3,9 +3,13 @@ package io.dossier.app.domain.discovery
 import android.content.Context
 import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.scanner.BackgroundScanManager
 import io.dossier.app.domain.scanner.BackgroundScanWorker
 import io.dossier.app.domain.scanner.PivotFrontierConfig
+import io.dossier.app.domain.scanner.ResumeCheckpointWriteState
+import io.dossier.app.domain.scanner.ScanCheckpointStage
 import io.dossier.app.domain.scanner.ScanLifecycleErrors
+import io.dossier.app.domain.scanner.ScanResumeStore
 import io.dossier.app.domain.scanner.ScanSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -167,6 +171,14 @@ sealed interface ScanEvent {
         val findingCount: Int
     ) : ScanEvent
 
+    /** Durable request-scoped stage boundary written by the exact worker owner. */
+    data class CheckpointUpdated(
+        override val scanId: ScanId,
+        override val occurredAt: Instant,
+        val stage: String,
+        val completedStages: List<String>
+    ) : ScanEvent
+
     data class ScanPaused(
         override val scanId: ScanId,
         override val occurredAt: Instant,
@@ -261,7 +273,9 @@ data class LiveScanSnapshot(
     val pivotVisitedCount: Int = 0,
     val pivotMaxDepth: Int = 0,
     val pivotMaxTotalPivots: Int = 0,
-    val pivotLastDecision: PivotDecisionSummary? = null
+    val pivotLastDecision: PivotDecisionSummary? = null,
+    val checkpointStage: String = ScanCheckpointStage.Queued.wireName,
+    val completedCheckpointStages: List<String> = emptyList()
 )
 
 /**
@@ -322,6 +336,60 @@ object ScanCoordinatorRuntime {
             )
         }
         return scanId
+    }
+
+    /** Binds an exact WorkManager owner before stage writes begin. */
+    internal fun bindCheckpointOwner(
+        context: Context,
+        requestId: String,
+        ownerId: String,
+        generation: String
+    ): ResumeCheckpointWriteState =
+        BackgroundScanManager.bindCheckpointOwner(
+            context = context,
+            workerId = ownerId,
+            generation = generation,
+            requestId = requestId
+        ).also(::publishCheckpointState)
+
+    /** Writes a semantic stage boundary through the lifecycle-owned store. */
+    internal fun recordCheckpoint(
+        context: Context,
+        requestId: String,
+        ownerId: String,
+        generation: String,
+        stage: ScanCheckpointStage,
+        completed: Boolean
+    ): ResumeCheckpointWriteState =
+        BackgroundScanManager.advanceCheckpointIfOwner(
+            context = context,
+            workerId = ownerId,
+            generation = generation,
+            requestId = requestId,
+            stage = stage,
+            completed = completed
+        ).also(::publishCheckpointState)
+
+    private fun publishCheckpointState(state: ResumeCheckpointWriteState) {
+        val point = (state as? ResumeCheckpointWriteState.Saved)?.point ?: return
+        val id = ScanId(point.requestId)
+        synchronized(lock) {
+            if (activeScanId != id || _snapshot.value.scanId != id) return
+            val current = _snapshot.value.copy(
+                checkpointStage = point.checkpointStage.wireName,
+                completedCheckpointStages = point.completedCheckpointStages
+                    .map(ScanCheckpointStage::wireName)
+            )
+            _snapshot.value = current
+            emit(
+                ScanEvent.CheckpointUpdated(
+                    scanId = id,
+                    occurredAt = Instant.now(),
+                    stage = current.checkpointStage,
+                    completedStages = current.completedCheckpointStages
+                )
+            )
+        }
     }
 
     fun onProviderQueued(providerId: String, scanId: ScanId = requireActiveScanId()) {
@@ -459,6 +527,10 @@ object ScanCoordinatorRuntime {
                     pivotMaxTotalPivots = event.maxTotalPivots,
                     pivotLastDecision = event.decision ?: current.pivotLastDecision
                 )
+                is ScanEvent.CheckpointUpdated -> current.copy(
+                    checkpointStage = event.stage,
+                    completedCheckpointStages = event.completedStages
+                )
                 else -> current
             }
         }
@@ -492,6 +564,14 @@ object ScanCoordinatorRuntime {
             visitedCount = event.visitedCount.coerceIn(0, MAX_SAFE_PIVOT_VISITED),
             maxDepth = event.maxDepth.coerceIn(0, PivotAdmissionPolicy.MAX_ALLOWED_DEPTH),
             maxTotalPivots = event.maxTotalPivots.coerceIn(0, PivotFrontierConfig.MAX_ALLOWED_TOTAL_PIVOTS)
+        )
+        is ScanEvent.CheckpointUpdated -> event.copy(
+            stage = ScanCheckpointStage.fromWire(event.stage)?.wireName
+                ?: ScanCheckpointStage.Queued.wireName,
+            completedStages = event.completedStages
+                .mapNotNull { ScanCheckpointStage.fromWire(it)?.wireName }
+                .distinct()
+                .take(ScanResumeStore.MAX_CHECKPOINT_STAGES)
         )
         else -> event
     }

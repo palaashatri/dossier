@@ -32,6 +32,24 @@ class PersistentProviderHealthStore(context: Context) {
     ) {
         val successRate: Double
             get() = if (attempts <= 0L) 0.0 else successes.toDouble() / attempts.toDouble()
+
+        /** Convert persisted aggregate diagnostics into the framework-free assessment model. */
+        fun toHealthSample(): ProviderHealthSample = ProviderHealthSample(
+            providerId = providerId,
+            attempts = attempts,
+            successes = successes,
+            notFound = notFound,
+            softNotFound = softNotFound,
+            timeouts = timeouts,
+            rateLimited = rateLimited,
+            authenticationRequired = authenticationRequired,
+            unsupportedAutomation = unsupportedAutomation,
+            providerChanged = providerChanged,
+            parseFailures = parseFailures,
+            networkFailures = networkFailures,
+            latencyMs = latencyEwmaMs?.toLong(),
+            lastValidatedAt = lastValidatedAtUtc?.let { runCatching { Instant.parse(it) }.getOrNull() }
+        )
     }
 
     private val prefs = context.applicationContext
@@ -80,6 +98,22 @@ class PersistentProviderHealthStore(context: Context) {
         .sortedWith(compareByDescending<Record> { it.attempts }.thenBy { it.providerId })
         .toList()
 
+    /**
+     * Return deterministic freshness/reliability buckets for a known catalog.
+     * Orphaned preference entries are ignored by [ProviderHealthAssessmentRules].
+     */
+    @Synchronized
+    fun report(
+        knownProviderIds: Collection<String>,
+        now: Instant = Instant.now(),
+        staleAfter: java.time.Duration = ProviderHealthAssessmentRules.DEFAULT_STALE_AFTER
+    ): ProviderHealthReport = ProviderHealthAssessmentRules.report(
+        knownProviderIds = knownProviderIds,
+        samples = snapshot().map(Record::toHealthSample),
+        now = now,
+        staleAfter = staleAfter
+    )
+
     @Synchronized
     fun clear() {
         val editor = prefs.edit()
@@ -115,6 +149,13 @@ object ProviderDiagnosticsRuntime {
     }
 
     fun snapshot(): List<PersistentProviderHealthStore.Record> = store?.snapshot().orEmpty()
+
+    fun report(
+        knownProviderIds: Collection<String>,
+        now: Instant = Instant.now(),
+        staleAfter: java.time.Duration = ProviderHealthAssessmentRules.DEFAULT_STALE_AFTER
+    ): ProviderHealthReport = store?.report(knownProviderIds, now, staleAfter)
+        ?: ProviderHealthAssessmentRules.report(knownProviderIds, emptyList(), now, staleAfter)
 
     fun clear() {
         store?.clear()

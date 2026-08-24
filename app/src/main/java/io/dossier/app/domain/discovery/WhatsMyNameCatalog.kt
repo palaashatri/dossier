@@ -12,6 +12,8 @@ import kotlinx.serialization.json.intOrNull
 import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.security.MessageDigest
+import java.time.Duration
+import java.time.Instant
 import java.util.Locale
 
 enum class WhatsMyNameExclusionReason {
@@ -90,6 +92,22 @@ sealed class WhatsMyNameCatalogState {
             require(executableCount == sites.size)
             require(excludedCount == excluded.size)
         }
+
+        /**
+         * Assess only the executable, policy-filtered username surfaces in this
+         * pinned catalog. The report is diagnostic metadata, not identity
+         * evidence, and unknown records cannot inflate its coverage.
+         */
+        fun healthReport(
+            samples: Collection<ProviderHealthSample>,
+            now: Instant = Instant.now(),
+            staleAfter: Duration = ProviderHealthAssessmentRules.DEFAULT_STALE_AFTER
+        ): ProviderHealthReport = ProviderHealthAssessmentRules.report(
+            knownProviderIds = sites.map(WhatsMyNameSite::id),
+            samples = samples,
+            now = now,
+            staleAfter = staleAfter
+        )
     }
 
     data class Unavailable(val reason: String) : WhatsMyNameCatalogState()

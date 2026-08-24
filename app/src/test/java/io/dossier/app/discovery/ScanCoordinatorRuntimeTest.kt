@@ -152,6 +152,37 @@ class ScanCoordinatorRuntimeTest {
     }
 
     @Test
+    fun checkpointEventIsAllowlistedAndReflectedInLiveSnapshot() = runBlocking {
+        val scanId = ScanId("checkpoint-event")
+        ScanCoordinatorRuntime.resetCounts(scanId)
+        val nextEvent = async(start = CoroutineStart.UNDISPATCHED) {
+            ScanCoordinatorRuntime.events.first { it is ScanEvent.CheckpointUpdated }
+        }
+
+        ScanCoordinatorRuntime.dispatch(
+            ScanEvent.CheckpointUpdated(
+                scanId = scanId,
+                occurredAt = java.time.Instant.now(),
+                stage = "private-token=do-not-emit",
+                completedStages = listOf(
+                    "DISCOVERING_USERNAMES",
+                    "private-token=do-not-emit",
+                    "BUILDING_ENTITY_GRAPH"
+                )
+            )
+        )
+
+        val event = nextEvent.await() as ScanEvent.CheckpointUpdated
+        assertEquals("QUEUED_BACKGROUND_SCAN", event.stage)
+        assertEquals(
+            listOf("DISCOVERING_USERNAMES", "BUILDING_ENTITY_GRAPH"),
+            event.completedStages
+        )
+        assertEquals("QUEUED_BACKGROUND_SCAN", ScanCoordinatorRuntime.snapshot.value.checkpointStage)
+        assertEquals(event.completedStages, ScanCoordinatorRuntime.snapshot.value.completedCheckpointStages)
+    }
+
+    @Test
     fun terminalFailureIsNotReportedAsCompleted() {
         val classified = classifyTerminalStage(
             "${BackgroundScanWorker.STAGE_FAILED}: SECURE_REQUEST_RECORD_MISSING"

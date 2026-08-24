@@ -22,6 +22,7 @@ import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ScanHistoryRuntime
 import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
+import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.UsernameSurfaceRuntimeCache
@@ -120,6 +121,44 @@ class BackgroundScanWorker(
             return Result.failure(failureData(safeCode))
         }
         try {
+            fun checkpointFailure(stage: ScanCheckpointStage, completed: Boolean): String? {
+                val generationRef = generation ?: return null
+                return when (
+                    ScanCoordinatorRuntime.recordCheckpoint(
+                        context = applicationContext,
+                        requestId = requestId,
+                        ownerId = workerId,
+                        generation = generationRef,
+                        stage = stage,
+                        completed = completed
+                    )
+                ) {
+                    is ResumeCheckpointWriteState.Saved -> null
+                    ResumeCheckpointWriteState.StaleOwner,
+                    ResumeCheckpointWriteState.Missing -> ERROR_STALE_WORK_REQUEST
+                    is ResumeCheckpointWriteState.Invalid,
+                    is ResumeCheckpointWriteState.StorageFailure -> ERROR_REQUEST_STORAGE_UNAVAILABLE
+                }
+            }
+
+            fun bindCheckpointFailure(): String? {
+                val generationRef = generation ?: return null
+                return when (
+                    ScanCoordinatorRuntime.bindCheckpointOwner(
+                        context = applicationContext,
+                        requestId = requestId,
+                        ownerId = workerId,
+                        generation = generationRef
+                    )
+                ) {
+                    is ResumeCheckpointWriteState.Saved -> null
+                    ResumeCheckpointWriteState.StaleOwner,
+                    ResumeCheckpointWriteState.Missing -> ERROR_STALE_WORK_REQUEST
+                    is ResumeCheckpointWriteState.Invalid,
+                    is ResumeCheckpointWriteState.StorageFailure -> ERROR_REQUEST_STORAGE_UNAVAILABLE
+                }
+            }
+
             val requestPoint = when (val state = ScanResumeStore(applicationContext).loadRequestDetailed(requestId)) {
                 is ResumeReadState.Available -> state.point
                 ResumeReadState.Missing -> return@coroutineScope terminalFailure(ERROR_REQUEST_RECORD_MISSING)
@@ -146,6 +185,7 @@ class BackgroundScanWorker(
                 deepResearch = deepResearch,
                 scanId = durableScanId
             )
+            bindCheckpointFailure()?.let { return@coroutineScope terminalFailure(it) }
             val historyBound = ScanHistoryRuntime.ensureStarted(
                 scanId = durableScanId,
                 input = input,
@@ -168,13 +208,22 @@ class BackgroundScanWorker(
                 }
             }
 
-            ScanSession.executeScan(applicationContext, input, deepResearch, requestId = requestId)
+            ScanSession.executeScan(
+                context = applicationContext,
+                input = input,
+                deepResearch = deepResearch,
+                requestId = requestId,
+                checkpointOwnerId = workerId,
+                checkpointGeneration = generation
+            )
 
             if (!BackgroundScanManager.isCurrentOwner(applicationContext, workerId, generation)) {
                 return@coroutineScope Result.failure(failureData(ERROR_STALE_WORK_REQUEST))
             }
 
             setProgress(workDataOf(KEY_STAGE to STAGE_POST_PROCESSING))
+            checkpointFailure(ScanCheckpointStage.PostProcessing, completed = false)
+                ?.let { return@coroutineScope terminalFailure(it) }
             val evidenceCollection = EvidenceRuntimeCache.collection.value
             val baseAnalysis = OsintPostProcessor.analyze(
                 input = input,
@@ -187,6 +236,8 @@ class BackgroundScanWorker(
                     observations = UsernameSurfaceRuntimeCache.observations.value
                 )
             )
+            checkpointFailure(ScanCheckpointStage.PostProcessing, completed = true)
+                ?.let { return@coroutineScope terminalFailure(it) }
 
             // The coordinator normally records terminal history when the
             // worker publishes its terminal lifecycle state. Persist the exact
@@ -248,6 +299,9 @@ class BackgroundScanWorker(
                 return@coroutineScope terminalFailure(code)
             }
 
+            checkpointFailure(ScanCheckpointStage.Completed, completed = true)
+                ?.let { return@coroutineScope terminalFailure(it) }
+
             val markedSucceeded = BackgroundScanManager.markSucceededIfOwner(
                 context = applicationContext,
                 workerId = workerId,
@@ -269,6 +323,11 @@ class BackgroundScanWorker(
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (error: ScanExecutionException) {
+            terminalFailure(
+                if (error.failureCode in SAFE_ERROR_CODES) error.failureCode
+                else ERROR_SCAN_EXECUTION_FAILED
+            )
         } catch (_: Exception) {
             terminalFailure(ERROR_SCAN_EXECUTION_FAILED)
         } finally {
@@ -1153,6 +1212,63 @@ object BackgroundScanManager {
             is ScanLifecycleReadResult.Invalid,
             ScanLifecycleReadResult.StorageFailure -> false
         }
+    }
+
+    /**
+     * Binds the exact WorkManager owner before any stage checkpoint is written.
+     * Lifecycle and encrypted request state are checked under one manager lock
+     * so a replaced generation cannot rebind the prior request record.
+     */
+    internal fun bindCheckpointOwner(
+        context: Context,
+        workerId: String,
+        generation: String,
+        requestId: String
+    ): ResumeCheckpointWriteState = synchronized(LIFECYCLE_LOCK) {
+        val appContext = context.applicationContext
+        val lifecycle = (lifecycleStoreProvider(appContext).read()
+            as? ScanLifecycleReadResult.Available)?.record
+            ?: return@synchronized ResumeCheckpointWriteState.Missing
+        if (lifecycle.ownerId != workerId ||
+            lifecycle.generation != generation ||
+            lifecycle.requestId != requestId ||
+            lifecycle.phase !in setOf(ScanLifecyclePhase.Running, ScanLifecyclePhase.Pausing)
+        ) {
+            return@synchronized ResumeCheckpointWriteState.StaleOwner
+        }
+        resumeStoreProvider(appContext).bindCheckpointOwner(requestId, workerId)
+    }
+
+    /**
+     * Writes one semantic boundary only while the same owner/generation is
+     * still active.  The request store performs a second owner compare before
+     * atomically replacing its encrypted record.
+     */
+    internal fun advanceCheckpointIfOwner(
+        context: Context,
+        workerId: String,
+        generation: String,
+        requestId: String,
+        stage: ScanCheckpointStage,
+        completed: Boolean
+    ): ResumeCheckpointWriteState = synchronized(LIFECYCLE_LOCK) {
+        val appContext = context.applicationContext
+        val lifecycle = (lifecycleStoreProvider(appContext).read()
+            as? ScanLifecycleReadResult.Available)?.record
+            ?: return@synchronized ResumeCheckpointWriteState.Missing
+        if (lifecycle.ownerId != workerId ||
+            lifecycle.generation != generation ||
+            lifecycle.requestId != requestId ||
+            lifecycle.phase !in setOf(ScanLifecyclePhase.Running, ScanLifecyclePhase.Pausing)
+        ) {
+            return@synchronized ResumeCheckpointWriteState.StaleOwner
+        }
+        resumeStoreProvider(appContext).advanceCheckpoint(
+            requestId = requestId,
+            ownerId = workerId,
+            stage = stage,
+            completed = completed
+        )
     }
 
     internal fun isCurrentOwner(

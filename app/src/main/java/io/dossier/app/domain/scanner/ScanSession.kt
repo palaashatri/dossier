@@ -58,7 +58,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 
-internal class ScanExecutionException : Exception()
+internal class ScanExecutionException(
+    val failureCode: String = ScanLifecycleErrors.SCAN_EXECUTION_FAILED
+) : Exception()
 
 /**
  * Observable scan/session state shared by the Compose UI and durable WorkManager
@@ -343,7 +345,9 @@ object ScanSession {
         context: Context,
         input: IdentityInput,
         deepResearch: Boolean = false,
-        requestId: String? = null
+        requestId: String? = null,
+        checkpointOwnerId: String? = null,
+        checkpointGeneration: String? = null
     ) = withContext(Dispatchers.IO) {
         ProviderDiagnosticsRuntime.install(context.applicationContext)
         val inputToUse = input
@@ -370,6 +374,14 @@ object ScanSession {
         cache.clearAll()
 
         try {
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.DiscoveringUsernames,
+                completed = false
+            )
             _progressText.value = "DISCOVERING_USERNAMES..."
             WhatsMyNameCatalog.install(context)
             val piiExtractor = PiiExtractor()
@@ -379,16 +391,48 @@ object ScanSession {
             val scanResults = profileScanner.scanIdentity(inputToUse, deepResearch = deepResearch, requestId = requestId)
             currentCoroutineContext().ensureActive()
             _profileScanResults.value = scanResults
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.DiscoveringUsernames,
+                completed = true
+            )
 
             val allFindings = mutableListOf<Finding>()
             scanResults.filter { it.exists }.forEach { allFindings.addAll(it.findings) }
 
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.ComparingFaceConsistency,
+                completed = false
+            )
             _progressText.value = "COMPARING_FACE_CONSISTENCY..."
             val faceMatches = runFaceConsistency(context, inputToUse, scanResults)
             currentCoroutineContext().ensureActive()
             _faceConsistencyMatches.value = faceMatches
             allFindings.addAll(faceFindingsFromMatches(faceMatches))
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.ComparingFaceConsistency,
+                completed = true
+            )
 
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.CheckingBreachExposure,
+                completed = false
+            )
             _progressText.value = "CHECKING_BREACH_EXPOSURE..."
             val digests = runBreachChecks(
                 context = context,
@@ -398,7 +442,23 @@ object ScanSession {
             )
             currentCoroutineContext().ensureActive()
             _breachDigests.value = digests
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.CheckingBreachExposure,
+                completed = true
+            )
 
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.BuildingEntityGraph,
+                completed = false
+            )
             _progressText.value = "BUILDING_ENTITY_GRAPH..."
             val pluginCollection = runPlugins(inputToUse)
             currentCoroutineContext().ensureActive()
@@ -422,7 +482,23 @@ object ScanSession {
                 relationships = relationships
             )
             _entityGraph.value = graph
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.BuildingEntityGraph,
+                completed = true
+            )
 
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.ScoringRelationshipConfidence,
+                completed = false
+            )
             _progressText.value = "SCORING_RELATIONSHIP_CONFIDENCE..."
             val usernameSeeds = (listOfNotNull(inputToUse.primaryUsername) + inputToUse.usernames)
                 .filter { it.isNotBlank() }
@@ -436,16 +512,64 @@ object ScanSession {
                     SharedDomainContributor()
                 )
             ).score(graph, evidence)
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.ScoringRelationshipConfidence,
+                completed = true
+            )
 
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.TracingAttackPaths,
+                completed = false
+            )
             _progressText.value = "TRACING_ATTACK_PATHS..."
             _attackPaths.value = AttackPathFinder().findPaths(graph, _relationshipConfidence.value)
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.TracingAttackPaths,
+                completed = true
+            )
 
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.CompilingExposureLevels,
+                completed = false
+            )
             _progressText.value = "COMPILING_EXPOSURE_LEVELS..."
             _riskLevel.value = RiskScorer().score(allFindings)
             val remediationProvider = RemediationProvider()
             _remediationTips.value = remediationProvider.getGlobalTips(allFindings)
             _remediationItems.value = remediationProvider.getStructuredTips(allFindings)
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.CompilingExposureLevels,
+                completed = true
+            )
 
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.CompilingExposureScores,
+                completed = false
+            )
             _progressText.value = "COMPILING_EXPOSURE_SCORES..."
             _exposure.value = ExposureEngine().score(allFindings, digests)
 
@@ -456,7 +580,23 @@ object ScanSession {
             if (capped.droppedCount > 0) {
                 _progressText.value = "MEMORY_LIMIT: ${capped.droppedCount} findings omitted (cap ${MemoryGuard.MAX_FINDINGS})"
             }
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.CompilingExposureScores,
+                completed = true
+            )
 
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.GeneratingAiSummary,
+                completed = false
+            )
             _progressText.value = "GENERATING_AI_SUMMARY..."
             val summary = try {
                 // A configured-and-enabled provider is the explicit persisted
@@ -489,12 +629,58 @@ object ScanSession {
             }
             currentCoroutineContext().ensureActive()
             _aiSummary.value = summary
+            checkpointStage(
+                context,
+                requestId,
+                checkpointOwnerId,
+                checkpointGeneration,
+                ScanCheckpointStage.GeneratingAiSummary,
+                completed = true
+            )
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (execution: ScanExecutionException) {
+            throw execution
         } catch (_: Exception) {
             throw ScanExecutionException()
         } finally {
             cache.close()
+        }
+    }
+
+    /**
+     * Persists only allow-listed semantic boundaries for durable workers. A
+     * foreground/direct caller without an opaque owner has no request ledger,
+     * so it retains the historical in-memory behavior. Stale workers cancel
+     * cooperatively; storage corruption/failure is surfaced as an execution
+     * failure rather than silently claiming resumability.
+     */
+    private fun checkpointStage(
+        context: Context,
+        requestId: String?,
+        ownerId: String?,
+        generation: String?,
+        stage: ScanCheckpointStage,
+        completed: Boolean
+    ) {
+        if (requestId == null || ownerId == null || generation == null) return
+        when (
+            val result = ScanCoordinatorRuntime.recordCheckpoint(
+                context = context,
+                requestId = requestId,
+                ownerId = ownerId,
+                generation = generation,
+                stage = stage,
+                completed = completed
+            )
+        ) {
+            is ResumeCheckpointWriteState.Saved -> Unit
+            ResumeCheckpointWriteState.StaleOwner,
+            ResumeCheckpointWriteState.Missing -> throw CancellationException()
+            is ResumeCheckpointWriteState.Invalid,
+            is ResumeCheckpointWriteState.StorageFailure -> throw ScanExecutionException(
+                ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE
+            )
         }
     }
 

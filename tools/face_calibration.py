@@ -20,6 +20,9 @@ Example:
 
 The emitted JSON is accepted by FaceCorrelationCalibrationStore only when both
 model hashes and the preprocessing pipeline version match Android exactly.
+The command also requires an explicit consent/legal-distribution attestation;
+the emitted artifact records that attestation alongside the identity-disjoint
+split check.
 """
 
 from __future__ import annotations
@@ -106,6 +109,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bootstrap-samples", type=int, default=2_000)
     parser.add_argument("--seed", type=int, default=20260803)
     parser.add_argument("--allow-unpinned-models", action="store_true")
+    parser.add_argument(
+        "--consent-confirmed",
+        action="store_true",
+        help=(
+            "Confirm that every image is consented or legally distributable. "
+            "Required to emit a measured artifact."
+        ),
+    )
     parser.add_argument(
         "--max-rejection-rate",
         type=float,
@@ -564,6 +575,11 @@ def main() -> int:
     )
     pairs = load_manifest(args.manifest, args.root)
     assert_identity_disjoint(pairs)
+    if not args.consent_confirmed:
+        raise SystemExit(
+            "Refusing to emit measured calibration without "
+            "--consent-confirmed."
+        )
 
     pipeline = Pipeline(args.yunet, args.sface)
     scored, rejections = score_pairs(pipeline, pairs)
@@ -633,6 +649,8 @@ def main() -> int:
         "schemaVersion": 1,
         "reviewThreshold": review_threshold,
         "highSimilarityThreshold": high_threshold,
+        "identityDisjoint": True,
+        "consentConfirmed": True,
         "sfaceSha256": sface_sha,
         "yunetSha256": yunet_sha,
         "pipelineVersion": PIPELINE_VERSION,

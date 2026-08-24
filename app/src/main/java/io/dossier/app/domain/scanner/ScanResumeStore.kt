@@ -37,6 +37,54 @@ internal class ResumeCryptoFailure(
 
 internal class BoundedReadException : Exception()
 
+/**
+ * Durable, allow-listed boundaries owned by the scan coordinator.
+ *
+ * These are deliberately semantic stages rather than arbitrary progress text:
+ * no URLs, identifiers, exception messages, or provider response content may
+ * enter encrypted checkpoint metadata.  A recreated worker may safely rerun
+ * an incomplete stage; [completed] only records boundaries that were actually
+ * crossed by the prior owner.
+ */
+internal enum class ScanCheckpointStage(
+    val wireName: String,
+    val order: Int
+) {
+    Queued("QUEUED_BACKGROUND_SCAN", 0),
+    DiscoveringUsernames("DISCOVERING_USERNAMES", 1),
+    ComparingFaceConsistency("COMPARING_FACE_CONSISTENCY", 2),
+    CheckingBreachExposure("CHECKING_BREACH_EXPOSURE", 3),
+    BuildingEntityGraph("BUILDING_ENTITY_GRAPH", 4),
+    ScoringRelationshipConfidence("SCORING_RELATIONSHIP_CONFIDENCE", 5),
+    TracingAttackPaths("TRACING_ATTACK_PATHS", 6),
+    CompilingExposureLevels("COMPILING_EXPOSURE_LEVELS", 7),
+    CompilingExposureScores("COMPILING_EXPOSURE_SCORES", 8),
+    GeneratingAiSummary("GENERATING_AI_SUMMARY", 9),
+    PostProcessing("POST_PROCESSING", 10),
+    Completed("BACKGROUND_SCAN_COMPLETE", 11);
+
+    companion object {
+        private val BY_WIRE_NAME = entries.associateBy(ScanCheckpointStage::wireName)
+
+        fun fromWire(value: String?): ScanCheckpointStage? =
+            value?.let(BY_WIRE_NAME::get)
+    }
+}
+
+internal data class ScanCheckpoint(
+    val currentStage: ScanCheckpointStage,
+    val completedStages: List<ScanCheckpointStage>,
+    val ownerId: String?
+)
+
+internal sealed interface ResumeCheckpointWriteState {
+    data class Saved(val point: ResumePoint) : ResumeCheckpointWriteState
+    data object Missing : ResumeCheckpointWriteState
+    data object StaleOwner : ResumeCheckpointWriteState
+    data class Invalid(val reason: ResumeInvalidReason) : ResumeCheckpointWriteState
+    data class StorageFailure(val reason: ResumeStorageReason) : ResumeCheckpointWriteState
+}
+
 internal interface DirectorySyncer {
     fun sync(dir: File)
 }
@@ -466,6 +514,121 @@ internal class ScanResumeStore internal constructor(
             }
             else -> state
         }
+    }
+
+    /**
+     * Binds the current WorkManager owner to the encrypted request record and
+     * resets only the in-flight stage.  Completed boundaries remain intact so
+     * a recreated worker can distinguish work that must be rerun from work
+     * that was durably crossed before process death.
+     *
+     * The lifecycle manager calls this while holding its exact owner/generation
+     * compare-and-swap lock.  The store itself still validates both UUIDs and
+     * the active opaque pointer before replacing ciphertext.
+     */
+    internal fun bindCheckpointOwner(
+        requestId: String,
+        ownerId: String
+    ): ResumeCheckpointWriteState = synchronized(STORE_LOCK) {
+        if (!isValidRequestId(requestId) || !isValidRequestId(ownerId)) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(
+                ResumeInvalidReason.InvalidRequestId
+            )
+        }
+        if (hasClearAllGuard() || hasClearTombstone(requestId)) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(
+                ResumeStorageReason.IoFailure
+            )
+        }
+        val pointer = runCatching { readPointer() }.getOrElse {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(
+                ResumeStorageReason.PointerFailure
+            )
+        }
+        if (pointer != requestId) return@synchronized ResumeCheckpointWriteState.Missing
+
+        val state = try {
+            loadRecord(requestId)
+        } catch (error: ResumeCryptoFailure) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val available = state as? ResumeReadState.Available
+            ?: return@synchronized state.toCheckpointWriteState()
+        val record = recordForPoint(available.point)
+        val now = runCatching { nowMillis() }.getOrElse {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val rebound = record.copy(
+            updatedAtEpochMillis = now.coerceAtLeast(record.updatedAtEpochMillis),
+            checkpointStage = ScanCheckpointStage.Queued.wireName,
+            checkpointOwnerId = ownerId
+        )
+        persistUpdatedRecord(rebound)
+    }
+
+    /**
+     * Advances the exact owner's semantic checkpoint.  A stale owner can read
+     * the record but cannot overwrite a newer owner's stage.  Out-of-order
+     * callbacks never regress the durable current stage; they may still record
+     * that their lower boundary was completed.
+     */
+    internal fun advanceCheckpoint(
+        requestId: String,
+        ownerId: String,
+        stage: ScanCheckpointStage,
+        completed: Boolean
+    ): ResumeCheckpointWriteState = synchronized(STORE_LOCK) {
+        if (!isValidRequestId(requestId) || !isValidRequestId(ownerId)) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(
+                ResumeInvalidReason.InvalidRequestId
+            )
+        }
+        if (hasClearAllGuard() || hasClearTombstone(requestId)) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(
+                ResumeStorageReason.IoFailure
+            )
+        }
+        val pointer = runCatching { readPointer() }.getOrElse {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(
+                ResumeStorageReason.PointerFailure
+            )
+        }
+        if (pointer != requestId) return@synchronized ResumeCheckpointWriteState.Missing
+
+        val state = try {
+            loadRecord(requestId)
+        } catch (error: ResumeCryptoFailure) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val available = state as? ResumeReadState.Available
+            ?: return@synchronized state.toCheckpointWriteState()
+        if (available.point.checkpointOwnerId != ownerId) {
+            return@synchronized ResumeCheckpointWriteState.StaleOwner
+        }
+
+        val current = available.point.checkpointStage
+        val completedStages = available.point.completedCheckpointStages
+            .toMutableList()
+        if (completed && stage !in completedStages) completedStages += stage
+        val nextCurrent = if (stage.order >= current.order) stage else current
+        val now = runCatching { nowMillis() }.getOrElse {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val updated = recordForPoint(available.point).copy(
+            updatedAtEpochMillis = now.coerceAtLeast(available.point.updatedAtEpochMillis),
+            checkpointStage = nextCurrent.wireName,
+            completedCheckpointStages = completedStages
+                .sortedBy(ScanCheckpointStage::order)
+                .distinct()
+                .map(ScanCheckpointStage::wireName)
+                .take(MAX_CHECKPOINT_STAGES),
+            checkpointOwnerId = ownerId
+        )
+        persistUpdatedRecord(updated)
     }
 
     /** Removes one exact request generation without touching a different pointer. */
@@ -933,9 +1096,16 @@ internal class ScanResumeStore internal constructor(
                 strongFaceCorrelation = record.strongFaceCorrelation,
                 createdAtEpochMillis = record.createdAtEpochMillis,
                 expiresAtEpochMillis = record.expiresAtEpochMillis,
+                updatedAtEpochMillis = record.updatedAtEpochMillis,
                 planFingerprint = record.planFingerprint,
                 plannedProviderIds = record.plannedProviderIds,
-                plannedProviderCount = record.plannedProviderCount
+                plannedProviderCount = record.plannedProviderCount,
+                checkpointStage = ScanCheckpointStage.fromWire(record.checkpointStage)
+                    ?: ScanCheckpointStage.Queued,
+                completedCheckpointStages = record.completedCheckpointStages.mapNotNull(
+                    ScanCheckpointStage::fromWire
+                ),
+                checkpointOwnerId = record.checkpointOwnerId
             )
         )
     }
@@ -947,11 +1117,103 @@ internal class ScanResumeStore internal constructor(
         // Version-1 records created before plan metadata was added remain
         // resumable. They are explicitly marked as lacking a reproducibility
         // guard rather than being assigned the current catalog retroactively.
-        if (fingerprint == null && ids.isEmpty() && count == 0) return true
-        if (!ProviderPlanFingerprint.isValid(fingerprint)) return false
-        if (!ProviderPlanFingerprint.areValidProviderIds(ids)) return false
-        return count >= ids.size
+        val planValid = if (fingerprint == null && ids.isEmpty() && count == 0) {
+            true
+        } else {
+            ProviderPlanFingerprint.isValid(fingerprint) &&
+                ProviderPlanFingerprint.areValidProviderIds(ids) &&
+                count >= ids.size
+        }
+        if (!planValid) return false
+        if (ScanCheckpointStage.fromWire(record.checkpointStage) == null) return false
+        val completed = record.completedCheckpointStages
+        if (completed.size > MAX_CHECKPOINT_STAGES || completed.distinct().size != completed.size) {
+            return false
+        }
+        if (completed.any { ScanCheckpointStage.fromWire(it) == null }) return false
+        return record.checkpointOwnerId == null || isValidRequestId(record.checkpointOwnerId)
     }
+
+    private fun recordForPoint(point: ResumePoint): ResumeRecord = ResumeRecord(
+        formatVersion = FORMAT_VERSION,
+        requestId = point.requestId,
+        createdAtEpochMillis = point.createdAtEpochMillis,
+        updatedAtEpochMillis = point.updatedAtEpochMillis,
+        expiresAtEpochMillis = point.expiresAtEpochMillis,
+        input = point.input,
+        deepResearch = point.deepResearch,
+        scanMode = point.scanMode,
+        strongFaceCorrelation = point.strongFaceCorrelation,
+        planFingerprint = point.planFingerprint,
+        plannedProviderIds = point.plannedProviderIds,
+        plannedProviderCount = point.plannedProviderCount,
+        checkpointStage = point.checkpointStage.wireName,
+        completedCheckpointStages = point.completedCheckpointStages.map(ScanCheckpointStage::wireName),
+        checkpointOwnerId = point.checkpointOwnerId
+    )
+
+    private fun ResumeReadState.toCheckpointWriteState(): ResumeCheckpointWriteState = when (this) {
+        ResumeReadState.Missing -> ResumeCheckpointWriteState.Missing
+        ResumeReadState.Expired -> ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidTimestamp)
+        is ResumeReadState.Invalid -> ResumeCheckpointWriteState.Invalid(reason)
+        is ResumeReadState.StorageFailure -> ResumeCheckpointWriteState.StorageFailure(reason)
+        is ResumeReadState.Available -> error("available state requires a record")
+    }
+
+    private fun persistUpdatedRecord(record: ResumeRecord): ResumeCheckpointWriteState {
+        return try {
+            val plaintext = json.encodeToString(record).toByteArray(Charsets.UTF_8)
+            if (plaintext.size > MAX_RECORD_BYTES) {
+                return ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.RecordTooLarge)
+            }
+            val sealed = crypto.seal(plaintext, aad(record.requestId), allowKeyCreation = false)
+            if (sealed.iv.size != GCM_IV_BYTES ||
+                sealed.ciphertext.size <= GCM_TAG_BYTES ||
+                sealed.ciphertext.size > MAX_RECORD_BYTES + GCM_TAG_BYTES
+            ) {
+                return ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.KeyFailure)
+            }
+            val envelope = EncryptedEnvelope(
+                formatVersion = FORMAT_VERSION,
+                ivBase64 = Base64.getEncoder().encodeToString(sealed.iv),
+                ciphertextBase64 = Base64.getEncoder().encodeToString(sealed.ciphertext)
+            )
+            val encoded = json.encodeToString(envelope).toByteArray(Charsets.UTF_8)
+            if (encoded.size > MAX_ENVELOPE_BYTES) {
+                return ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.RecordTooLarge)
+            }
+            val target = recordFile(record.requestId)
+            if (!target.exists() || !target.isFile || Files.isSymbolicLink(target.toPath())) {
+                return ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+            }
+            atomicWrite(target, encoded)
+            ResumeCheckpointWriteState.Saved(record.toPoint())
+        } catch (error: ResumeCryptoFailure) {
+            ResumeCheckpointWriteState.StorageFailure(error.reason)
+        } catch (_: GeneralSecurityException) {
+            ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.KeyFailure)
+        } catch (_: Exception) {
+            ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+    }
+
+    private fun ResumeRecord.toPoint(): ResumePoint = ResumePoint(
+        requestId = requestId,
+        input = input,
+        deepResearch = deepResearch,
+        scanMode = scanMode,
+        strongFaceCorrelation = strongFaceCorrelation,
+        createdAtEpochMillis = createdAtEpochMillis,
+        expiresAtEpochMillis = expiresAtEpochMillis,
+        updatedAtEpochMillis = updatedAtEpochMillis,
+        planFingerprint = planFingerprint,
+        plannedProviderIds = plannedProviderIds,
+        plannedProviderCount = plannedProviderCount,
+        checkpointStage = ScanCheckpointStage.fromWire(checkpointStage)
+            ?: ScanCheckpointStage.Queued,
+        completedCheckpointStages = completedCheckpointStages.mapNotNull(ScanCheckpointStage::fromWire),
+        checkpointOwnerId = checkpointOwnerId
+    )
 
     /**
      * Persists a prepared record without touching either the active pointer or
@@ -1798,7 +2060,12 @@ internal class ScanResumeStore internal constructor(
         /** Optional for backward-compatible decoding of pre-plan records. */
         val planFingerprint: String? = null,
         val plannedProviderIds: List<String> = emptyList(),
-        val plannedProviderCount: Int = 0
+        val plannedProviderCount: Int = 0,
+        /** Semantic coordinator checkpoint; old records default to queued. */
+        val checkpointStage: String = ScanCheckpointStage.Queued.wireName,
+        val completedCheckpointStages: List<String> = emptyList(),
+        /** Exact WorkManager owner bound after lifecycle CAS succeeds. */
+        val checkpointOwnerId: String? = null
     )
 
     private data class PriorRecordBackup(
@@ -1846,6 +2113,7 @@ internal class ScanResumeStore internal constructor(
         const val MAX_LEGACY_BYTES = 64 * 1024L
         const val MAX_FIELD_CHARS = 4_096
         const val MAX_LIST_ITEMS = 128
+        const val MAX_CHECKPOINT_STAGES = 16
         const val MAX_POINTER_BYTES = 64L
         const val GCM_IV_BYTES = 12
         const val GCM_TAG_BYTES = 16
@@ -1886,11 +2154,15 @@ internal data class ResumePoint(
     val strongFaceCorrelation: Boolean,
     val createdAtEpochMillis: Long,
     val expiresAtEpochMillis: Long,
+    val updatedAtEpochMillis: Long = createdAtEpochMillis,
     /** SHA-256 commitment to the immutable declarative plan at enqueue time. */
     val planFingerprint: String? = null,
     /** Ordered IDs are bounded; the fingerprint still covers the full plan. */
     val plannedProviderIds: List<String> = emptyList(),
-    val plannedProviderCount: Int = 0
+    val plannedProviderCount: Int = 0,
+    val checkpointStage: ScanCheckpointStage = ScanCheckpointStage.Queued,
+    val completedCheckpointStages: List<ScanCheckpointStage> = emptyList(),
+    val checkpointOwnerId: String? = null
 )
 
 internal sealed interface ResumeReadState {

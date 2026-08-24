@@ -10,6 +10,11 @@ import io.dossier.app.domain.discovery.ProviderScanPlan
 import io.dossier.app.domain.discovery.QueryCapability
 import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.discovery.SourceReliability
+import io.dossier.app.domain.discovery.ProviderHealthAssessmentRules
+import io.dossier.app.domain.discovery.ProviderHealthReport
+import io.dossier.app.domain.discovery.ProviderHealthSample
+import java.time.Duration
+import java.time.Instant
 
 /**
  * Discovery Fabric v2 provider catalog.
@@ -144,6 +149,22 @@ object ProviderCatalogV2 {
     operator fun get(id: String): ProviderDefinition? = findById(id)
 
     fun schemaValidCount(): Int = definitions.size - schemaIssues.map { it.providerId }.distinct().size
+
+    /**
+     * Assess persisted aggregate diagnostics against this exact catalog snapshot.
+     * Provider IDs remain the source of truth for breadth; health records cannot
+     * introduce extra definitions or inflate coverage.
+     */
+    fun healthReport(
+        samples: Collection<ProviderHealthSample>,
+        now: Instant = Instant.now(),
+        staleAfter: Duration = ProviderHealthAssessmentRules.DEFAULT_STALE_AFTER
+    ): ProviderHealthReport = ProviderHealthAssessmentRules.report(
+        knownProviderIds = definitions.map(ProviderDefinition::id),
+        samples = samples,
+        now = now,
+        staleAfter = staleAfter
+    )
 
     private fun p(
         id: String,
