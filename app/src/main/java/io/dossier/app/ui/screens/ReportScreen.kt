@@ -291,6 +291,7 @@ fun ReportScreen(
                     modifier = Modifier.weight(1f),
                     remediationItems = remediationItems,
                     remediationTips = remediationTips,
+                    onNavigateToBrowser = onNavigateToBrowser,
                     actionMessage = actionMessage,
                     onSaveCase = {
                         purgeScope.launch {
@@ -638,6 +639,7 @@ private fun ActionsReport(
     modifier: Modifier,
     remediationItems: List<RemediationItem>,
     remediationTips: List<String>,
+    onNavigateToBrowser: (String) -> Unit,
     actionMessage: String?,
     onSaveCase: () -> Unit,
     onExport: () -> Unit,
@@ -658,7 +660,7 @@ private fun ActionsReport(
             )
         }
         if (remediationItems.isNotEmpty()) {
-            items(remediationItems.take(20)) { item -> RemediationCard(item) }
+            items(remediationItems.take(20)) { item -> RemediationCard(item, onNavigateToBrowser) }
         } else {
             items(remediationTips) { tip -> NoticeCard(tip, NeuralTheme.TextSecondary) }
         }
@@ -836,7 +838,7 @@ private fun ExposurePathCard(path: AttackPathFinder.AttackPath) {
 }
 
 @Composable
-private fun RemediationCard(item: RemediationItem) {
+private fun RemediationCard(item: RemediationItem, onNavigateToBrowser: (String) -> Unit) {
     ReportCard(borderColor = riskColor(item.risk).copy(alpha = 0.4f)) {
         Row(verticalAlignment = Alignment.Top) {
             Text(
@@ -856,6 +858,38 @@ private fun RemediationCard(item: RemediationItem) {
             lineHeight = 15.sp,
             modifier = Modifier.padding(top = 5.dp)
         )
+        item.resource.providerName?.let { providerName ->
+            Text(
+                text = "Resource: $providerName · ${item.resource.state.name}",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 10.5.sp,
+                modifier = Modifier.padding(top = 7.dp)
+            )
+        } ?: Text(
+            text = "Resource: ${item.resource.state.name}",
+            color = NeuralTheme.TextSecondary,
+            fontSize = 10.5.sp,
+            modifier = Modifier.padding(top = 7.dp)
+        )
+        Text(
+            text = item.resource.note,
+            color = NeuralTheme.TextMuted,
+            fontSize = 10.5.sp,
+            lineHeight = 14.sp,
+            modifier = Modifier.padding(top = 2.dp)
+        )
+        item.resource.actionUrl?.let { actionUrl ->
+            TextButton(
+                onClick = { onNavigateToBrowser(actionUrl) },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            ) {
+                Text(
+                    text = item.resource.actionLabel ?: "Open provider resource",
+                    color = NeuralTheme.Cobalt,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
     }
 }
 

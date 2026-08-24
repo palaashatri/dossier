@@ -1,7 +1,95 @@
 package io.dossier.app.domain.discovery
 
+import kotlinx.serialization.Serializable
 import java.security.MessageDigest
 import java.util.Locale
+
+/** One non-sensitive, deterministic stage budget in a persisted scan plan. */
+@Serializable
+data class ScanPlanStageSummary(
+    val name: String,
+    val budget: Int
+)
+
+/**
+ * Sanitized coordinator-owned scan plan committed with a durable request.
+ *
+ * It contains mode, a commitment to the declarative provider plan, bounded
+ * provider counts, and an allow-listed stage order. It intentionally carries
+ * no identity seeds, URLs, provider responses, or stage output payloads.
+ */
+@Serializable
+data class ScanPlanSummary(
+    val version: Int,
+    val mode: ScanMode,
+    val providerPlanFingerprint: String,
+    val providerCount: Int,
+    val scheduledProviderCount: Int,
+    val stages: List<ScanPlanStageSummary>
+) {
+    /** Shape validation used at coordinator/event boundaries. */
+    fun isWellFormed(): Boolean {
+        if (version != CURRENT_VERSION || !ProviderPlanFingerprint.isValid(providerPlanFingerprint)) return false
+        if (providerCount !in 0..MAX_PROVIDER_COUNT ||
+            scheduledProviderCount !in 0..MAX_PROVIDER_COUNT
+        ) return false
+        if (stages.size != STAGE_ORDER.size || stages.map { it.name } != STAGE_ORDER) return false
+        return stages.all { stage ->
+            stage.budget in 0..MAX_STAGE_BUDGET &&
+                (stage.name == "DISCOVERING_USERNAMES" || stage.budget == 1)
+        }
+    }
+
+    /** Recomputes the summary commitment; a catalog change invalidates resume. */
+    fun matches(plan: ProviderScanPlan): Boolean =
+        isWellFormed() &&
+            mode == plan.mode &&
+            providerPlanFingerprint == ProviderPlanFingerprint.forPlan(plan) &&
+            providerCount == plan.providers.size &&
+            scheduledProviderCount == plan.scheduledProviderCount &&
+            stages == expectedStages(plan)
+
+    companion object {
+        const val CURRENT_VERSION = 1
+        const val MAX_PROVIDER_COUNT = 100_000
+        const val MAX_STAGE_BUDGET = 100_000
+        private val STAGE_ORDER = listOf(
+            "QUEUED_BACKGROUND_SCAN",
+            "DISCOVERING_USERNAMES",
+            "COMPARING_FACE_CONSISTENCY",
+            "CHECKING_BREACH_EXPOSURE",
+            "BUILDING_ENTITY_GRAPH",
+            "SCORING_RELATIONSHIP_CONFIDENCE",
+            "TRACING_ATTACK_PATHS",
+            "COMPILING_EXPOSURE_LEVELS",
+            "COMPILING_EXPOSURE_SCORES",
+            "GENERATING_AI_SUMMARY",
+            "POST_PROCESSING",
+            "BACKGROUND_SCAN_COMPLETE"
+        )
+
+        fun from(plan: ProviderScanPlan): ScanPlanSummary = ScanPlanSummary(
+            version = CURRENT_VERSION,
+            mode = plan.mode,
+            providerPlanFingerprint = ProviderPlanFingerprint.forPlan(plan),
+            providerCount = plan.providers.size,
+            scheduledProviderCount = plan.scheduledProviderCount,
+            stages = expectedStages(plan)
+        )
+
+        private fun expectedStages(plan: ProviderScanPlan): List<ScanPlanStageSummary> =
+            STAGE_ORDER.map { stage ->
+                ScanPlanStageSummary(
+                    name = stage,
+                    budget = if (stage == "DISCOVERING_USERNAMES") {
+                        plan.scheduledProviderCount
+                    } else {
+                        1
+                    }
+                )
+            }
+    }
+}
 
 /**
  * Stable identity for one declarative provider plan.

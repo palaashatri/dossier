@@ -3,6 +3,7 @@ package io.dossier.app.domain.scanner
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ProviderPlanFingerprint
 import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.discovery.ScanPlanSummary
 import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
@@ -146,6 +147,20 @@ class ScanResumeStoreTest {
         assertEquals(saved.point.planFingerprint, loaded.point.planFingerprint)
         assertEquals(expected.providers.size, loaded.point.plannedProviderCount)
         assertEquals(expected.providers.map { it.id }, loaded.point.plannedProviderIds)
+        assertEquals(ScanPlanSummary.from(expected), saved.point.scanPlan)
+        assertEquals(saved.point.scanPlan, loaded.point.scanPlan)
+        assertTrue(loaded.point.scanPlan!!.matches(expected))
+    }
+
+    @Test
+    fun persistedPlanSummaryRejectsModeFingerprintAndStageOrderMismatch() {
+        val plan = ProviderCatalogV2.plan(ScanMode.Deep)
+        val summary = ScanPlanSummary.from(plan)
+
+        assertTrue(summary.isWellFormed())
+        assertFalse(summary.copy(mode = ScanMode.Quick).matches(plan))
+        assertFalse(summary.copy(providerPlanFingerprint = "a".repeat(64)).matches(plan))
+        assertFalse(summary.copy(stages = summary.stages.drop(1)).matches(plan))
     }
 
     @Test

@@ -1,5 +1,6 @@
 package io.dossier.app.domain.discovery
 
+import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.scanner.BackgroundScanWorker
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
@@ -158,6 +159,7 @@ class ScanCoordinatorRuntimeTest {
         val nextEvent = async(start = CoroutineStart.UNDISPATCHED) {
             ScanCoordinatorRuntime.events.first { it is ScanEvent.CheckpointUpdated }
         }
+        val plan = ScanPlanSummary.from(ProviderCatalogV2.plan(ScanMode.Standard))
 
         ScanCoordinatorRuntime.dispatch(
             ScanEvent.CheckpointUpdated(
@@ -168,7 +170,8 @@ class ScanCoordinatorRuntimeTest {
                     "DISCOVERING_USERNAMES",
                     "private-token=do-not-emit",
                     "BUILDING_ENTITY_GRAPH"
-                )
+                ),
+                plan = plan
             )
         )
 
@@ -180,6 +183,8 @@ class ScanCoordinatorRuntimeTest {
         )
         assertEquals("QUEUED_BACKGROUND_SCAN", ScanCoordinatorRuntime.snapshot.value.checkpointStage)
         assertEquals(event.completedStages, ScanCoordinatorRuntime.snapshot.value.completedCheckpointStages)
+        assertEquals(plan, event.plan)
+        assertEquals(plan, ScanCoordinatorRuntime.snapshot.value.plan)
     }
 
     @Test

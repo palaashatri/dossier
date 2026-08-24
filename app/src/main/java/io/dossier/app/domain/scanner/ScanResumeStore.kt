@@ -6,7 +6,9 @@ import android.security.keystore.KeyProperties
 import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ProviderPlanFingerprint
+import io.dossier.app.domain.discovery.ProviderScanPlan
 import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.discovery.ScanPlanSummary
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
@@ -215,6 +217,7 @@ internal class ScanResumeStore internal constructor(
             val expiresAt = expiresAt(now)
             val scanMode = DiscoveryScanPreferences.selectedMode.value
             val providerPlan = ProviderCatalogV2.plan(scanMode)
+            val scanPlan = ScanPlanSummary.from(providerPlan)
             val point = ResumePoint(
                 requestId = id,
                 input = input,
@@ -225,7 +228,8 @@ internal class ScanResumeStore internal constructor(
                 expiresAtEpochMillis = expiresAt,
                 planFingerprint = ProviderPlanFingerprint.forPlan(providerPlan),
                 plannedProviderIds = ProviderPlanFingerprint.persistedProviderIds(providerPlan),
-                plannedProviderCount = providerPlan.providers.size
+                plannedProviderCount = providerPlan.providers.size,
+                scanPlan = scanPlan
             )
             val record = ResumeRecord(
                 formatVersion = FORMAT_VERSION,
@@ -239,7 +243,8 @@ internal class ScanResumeStore internal constructor(
                 strongFaceCorrelation = point.strongFaceCorrelation,
                 planFingerprint = point.planFingerprint,
                 plannedProviderIds = point.plannedProviderIds,
-                plannedProviderCount = point.plannedProviderCount
+                plannedProviderCount = point.plannedProviderCount,
+                scanPlan = point.scanPlan
             )
 
             // Capture this before publishing the prepared marker. The marker
@@ -1134,6 +1139,7 @@ internal class ScanResumeStore internal constructor(
                 planFingerprint = record.planFingerprint,
                 plannedProviderIds = record.plannedProviderIds,
                 plannedProviderCount = record.plannedProviderCount,
+                scanPlan = record.scanPlan,
                 checkpointStage = ScanCheckpointStage.fromWire(record.checkpointStage)
                     ?: ScanCheckpointStage.Queued,
                 completedCheckpointStages = record.completedCheckpointStages.mapNotNull(
@@ -1164,6 +1170,15 @@ internal class ScanResumeStore internal constructor(
                 count >= ids.size
         }
         if (!planValid) return false
+        record.scanPlan?.let { persistedPlan ->
+            val currentPlan = runCatching { ProviderCatalogV2.plan(record.scanMode) }
+                .getOrNull()
+                ?: return false
+            if (!persistedPlan.matches(currentPlan) ||
+                persistedPlan.providerPlanFingerprint != fingerprint ||
+                persistedPlan.providerCount != count
+            ) return false
+        }
         if (ScanCheckpointStage.fromWire(record.checkpointStage) == null) return false
         val completed = record.completedCheckpointStages
         if (completed.size > MAX_CHECKPOINT_STAGES || completed.distinct().size != completed.size) {
@@ -1202,6 +1217,7 @@ internal class ScanResumeStore internal constructor(
         planFingerprint = point.planFingerprint,
         plannedProviderIds = point.plannedProviderIds,
         plannedProviderCount = point.plannedProviderCount,
+        scanPlan = point.scanPlan,
         checkpointStage = point.checkpointStage.wireName,
         completedCheckpointStages = point.completedCheckpointStages.map(ScanCheckpointStage::wireName),
         stageOutputs = point.stageOutputs
@@ -1276,6 +1292,7 @@ internal class ScanResumeStore internal constructor(
         planFingerprint = planFingerprint,
         plannedProviderIds = plannedProviderIds,
         plannedProviderCount = plannedProviderCount,
+        scanPlan = scanPlan,
         checkpointStage = ScanCheckpointStage.fromWire(checkpointStage)
             ?: ScanCheckpointStage.Queued,
         completedCheckpointStages = completedCheckpointStages.mapNotNull(ScanCheckpointStage::fromWire),
@@ -2133,6 +2150,8 @@ internal class ScanResumeStore internal constructor(
         val planFingerprint: String? = null,
         val plannedProviderIds: List<String> = emptyList(),
         val plannedProviderCount: Int = 0,
+        /** Full allow-listed coordinator plan; absent on pre-plan records. */
+        val scanPlan: ScanPlanSummary? = null,
         /** Semantic coordinator checkpoint; old records default to queued. */
         val checkpointStage: String = ScanCheckpointStage.Queued.wireName,
         val completedCheckpointStages: List<String> = emptyList(),
@@ -2249,6 +2268,7 @@ internal data class ResumePoint(
     /** Ordered IDs are bounded; the fingerprint still covers the full plan. */
     val plannedProviderIds: List<String> = emptyList(),
     val plannedProviderCount: Int = 0,
+    val scanPlan: ScanPlanSummary? = null,
     val checkpointStage: ScanCheckpointStage = ScanCheckpointStage.Queued,
     val completedCheckpointStages: List<ScanCheckpointStage> = emptyList(),
     val stageOutputs: Map<ScanCheckpointStage, ScanStageOutput> = emptyMap(),

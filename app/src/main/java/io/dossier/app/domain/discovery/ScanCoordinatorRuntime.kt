@@ -177,7 +177,8 @@ sealed interface ScanEvent {
         override val scanId: ScanId,
         override val occurredAt: Instant,
         val stage: String,
-        val completedStages: List<String>
+        val completedStages: List<String>,
+        val plan: ScanPlanSummary? = null
     ) : ScanEvent
 
     data class ScanPaused(
@@ -276,7 +277,8 @@ data class LiveScanSnapshot(
     val pivotMaxTotalPivots: Int = 0,
     val pivotLastDecision: PivotDecisionSummary? = null,
     val checkpointStage: String = ScanCheckpointStage.Queued.wireName,
-    val completedCheckpointStages: List<String> = emptyList()
+    val completedCheckpointStages: List<String> = emptyList(),
+    val plan: ScanPlanSummary? = null
 )
 
 /**
@@ -381,7 +383,8 @@ object ScanCoordinatorRuntime {
             val current = _snapshot.value.copy(
                 checkpointStage = point.checkpointStage.wireName,
                 completedCheckpointStages = point.completedCheckpointStages
-                    .map(ScanCheckpointStage::wireName)
+                    .map(ScanCheckpointStage::wireName),
+                plan = point.scanPlan
             )
             _snapshot.value = current
             emit(
@@ -389,7 +392,8 @@ object ScanCoordinatorRuntime {
                     scanId = id,
                     occurredAt = Instant.now(),
                     stage = current.checkpointStage,
-                    completedStages = current.completedCheckpointStages
+                    completedStages = current.completedCheckpointStages,
+                    plan = current.plan
                 )
             )
         }
@@ -532,7 +536,8 @@ object ScanCoordinatorRuntime {
                 )
                 is ScanEvent.CheckpointUpdated -> current.copy(
                     checkpointStage = event.stage,
-                    completedCheckpointStages = event.completedStages
+                    completedCheckpointStages = event.completedStages,
+                    plan = event.plan ?: current.plan
                 )
                 else -> current
             }
@@ -574,7 +579,8 @@ object ScanCoordinatorRuntime {
             completedStages = event.completedStages
                 .mapNotNull { ScanCheckpointStage.fromWire(it)?.wireName }
                 .distinct()
-                .take(ScanResumeStore.MAX_CHECKPOINT_STAGES)
+                .take(ScanResumeStore.MAX_CHECKPOINT_STAGES),
+            plan = event.plan?.takeIf(ScanPlanSummary::isWellFormed)
         )
         else -> event
     }
@@ -880,6 +886,11 @@ object ScanCoordinatorRuntime {
         synchronized(lock) {
             requestedScanId = id
             activeScanId = id
+            _snapshot.value = _snapshot.value.copy(
+                scanId = id,
+                mode = request.mode,
+                plan = ScanPlanSummary.from(ProviderCatalogV2.plan(request.mode))
+            )
         }
         DiscoveryScanPreferences.setMode(request.mode)
         ScanSession.setDeepResearch(request.deepResearch)
