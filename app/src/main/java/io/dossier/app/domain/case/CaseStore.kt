@@ -9,6 +9,9 @@ import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.place.MediaIntelligenceSession
 import io.dossier.app.domain.place.MediaIntelligenceSnapshotPolicy
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -67,6 +70,26 @@ class CaseStore(private val context: Context) {
     }
 
     /**
+     * Persists an already-built case away from the caller's dispatcher. Case
+     * serialization, Keystore access, and the fsynced atomic replacement are
+     * all blocking operations and must not run from a Compose/main callback.
+     */
+    suspend fun saveAsync(
+        case: DossierCase,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): Boolean = withContext(dispatcher) {
+        save(case)
+    }
+
+    /** Persists a loaded case exactly as supplied on an IO dispatcher. */
+    suspend fun saveExactCaseAsync(
+        case: DossierCase,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): Boolean = withContext(dispatcher) {
+        saveExactCase(case)
+    }
+
+    /**
      * Applies only the validated summary produced from [expectedCase]. The current case is
      * loaded and compared while the same process-wide mutation lock is held, so a correction,
      * remediation, scan-history update, or other persisted change cannot be overwritten by a
@@ -110,6 +133,15 @@ class CaseStore(private val context: Context) {
         }
     }
 
+    /** Applies validated analysis without doing encrypted read/modify/write work on the caller. */
+    suspend fun saveAnalysisIfUnchangedAsync(
+        expectedCase: DossierCase,
+        validatedSummary: String,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): CaseAnalysisUpdateResult = withContext(dispatcher) {
+        saveAnalysisIfUnchanged(expectedCase, validatedSummary)
+    }
+
     private fun saveInternal(
         case: DossierCase,
         attachSessionState: Boolean
@@ -148,6 +180,14 @@ class CaseStore(private val context: Context) {
 
     fun load(caseId: String): DossierCase? = synchronized(CASE_MUTATION_LOCK) {
         loadUnlocked(caseId)
+    }
+
+    /** Loads one encrypted case without doing disk/Keystore work on the caller's dispatcher. */
+    suspend fun loadAsync(
+        caseId: String,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): DossierCase? = withContext(dispatcher) {
+        load(caseId)
     }
 
     private fun loadUnlocked(caseId: String): DossierCase? {
@@ -197,6 +237,13 @@ class CaseStore(private val context: Context) {
     fun listEffective(): List<DossierCase> = list()
         .map { EffectiveCaseProjection.from(it).presentationCase() }
 
+    /** Lists the corrected presentation view without blocking the caller's dispatcher. */
+    suspend fun listEffectiveAsync(
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): List<DossierCase> = withContext(dispatcher) {
+        listEffective()
+    }
+
     /** Returns one corrected presentation case without mutating persisted data. */
     fun loadEffective(caseId: String): DossierCase? = load(caseId)
         ?.let { EffectiveCaseProjection.from(it).presentationCase() }
@@ -218,6 +265,15 @@ class CaseStore(private val context: Context) {
         )
     }
 
+    /** Records a correction without running encrypted read/modify/write work on the caller. */
+    suspend fun recordCorrectionAsync(
+        caseId: String,
+        correction: UserCorrection,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): Boolean = withContext(dispatcher) {
+        recordCorrection(caseId, correction)
+    }
+
     fun upsertRemediation(caseId: String, remediation: RemediationRecord): Boolean = update(caseId) { current ->
         val retained = current.remediationRecords.filterNot { it.remediationId == remediation.remediationId }
         current.copy(
@@ -225,6 +281,15 @@ class CaseStore(private val context: Context) {
             aiSummary = null,
             aiSummaryNeedsRefresh = true
         )
+    }
+
+    /** Records remediation state without blocking the caller's dispatcher. */
+    suspend fun upsertRemediationAsync(
+        caseId: String,
+        remediation: RemediationRecord,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): Boolean = withContext(dispatcher) {
+        upsertRemediation(caseId, remediation)
     }
 
     fun appendScanHistory(caseId: String, entry: CaseScanHistoryEntry): Boolean = update(caseId) { current ->
@@ -243,6 +308,14 @@ class CaseStore(private val context: Context) {
             val legacyDeleted = !legacyFile(caseId).exists() || legacyFile(caseId).delete()
             encryptedDeleted && backupDeleted && legacyDeleted
         }.getOrDefault(false)
+    }
+
+    /** Deletes one encrypted case without blocking the caller's dispatcher. */
+    suspend fun deleteAsync(
+        caseId: String,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): Boolean = withContext(dispatcher) {
+        delete(caseId)
     }
 
     fun clear(): Boolean = synchronized(CASE_MUTATION_LOCK) {

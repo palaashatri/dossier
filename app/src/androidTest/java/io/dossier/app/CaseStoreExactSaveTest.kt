@@ -16,6 +16,8 @@ import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.place.MediaIntelligenceSnapshot
 import io.dossier.app.domain.place.MediaIntelligenceSession
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
@@ -25,6 +27,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -330,6 +333,34 @@ class CaseStoreExactSaveTest {
 
         assertTrue(retainedPlaintext.delete())
         assertTrue(legacy.delete())
+    }
+
+    @Test
+    fun asyncCaseStoreSeamsRoundTripOnProvidedIoDispatcher() = runBlocking {
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "case-store-io-test")
+        }
+        val dispatcher = executor.asCoroutineDispatcher()
+        try {
+            val target = DossierCase(
+                caseId = "async-case-store",
+                createdAt = "2026-08-24 00:00",
+                subjectName = "Async Case",
+                input = IdentityInput(fullName = "Async Case")
+            )
+
+            assertTrue(store.saveAsync(target, dispatcher))
+            assertEquals(target.caseId, store.loadAsync(target.caseId, dispatcher)?.caseId)
+            assertEquals(
+                listOf(target.caseId),
+                store.listEffectiveAsync(dispatcher).map(DossierCase::caseId)
+            )
+            assertTrue(store.deleteAsync(target.caseId, dispatcher))
+            assertEquals(null, store.loadAsync(target.caseId, dispatcher))
+        } finally {
+            dispatcher.close()
+            executor.shutdownNow()
+        }
     }
 
 }

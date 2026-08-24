@@ -69,6 +69,7 @@ import io.dossier.app.ui.screens.HistoricalTimelinePanelContent
 import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.NeuralTheme
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -79,6 +80,7 @@ import java.time.Instant
 fun CaseComparisonScreen(onNavigateToBrowser: (String) -> Unit = {}) {
     val context = LocalContext.current
     val store = remember { CaseStore(context) }
+    val caseScope = rememberCoroutineScope()
     val aiInsightService = remember { AiInsightService(context) }
     val exporter = remember { ReportExporter(context) }
     var cases by remember { mutableStateOf(emptyList<DossierCase>()) }
@@ -87,8 +89,8 @@ fun CaseComparisonScreen(onNavigateToBrowser: (String) -> Unit = {}) {
     var pendingDelete by remember { mutableStateOf<DossierCase?>(null) }
     var actionNotice by remember { mutableStateOf<String?>(null) }
 
-    fun refreshCases() {
-        cases = store.listEffective()
+    suspend fun refreshCases() {
+        cases = store.listEffectiveAsync()
         selectedBefore = selectedBefore?.takeIf { id -> cases.any { it.caseId == id } }
         selectedAfter = selectedAfter?.takeIf { id -> cases.any { it.caseId == id } }
         if (selectedAfter == null) selectedAfter = cases.firstOrNull()?.caseId
@@ -114,10 +116,16 @@ fun CaseComparisonScreen(onNavigateToBrowser: (String) -> Unit = {}) {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        store.delete(target.caseId)
                         pendingDelete = null
-                        actionNotice = "Saved case deleted from this device."
-                        refreshCases()
+                        caseScope.launch {
+                            val deleted = store.deleteAsync(target.caseId)
+                            actionNotice = if (deleted) {
+                                "Saved case deleted from this device."
+                            } else {
+                                "Saved case could not be deleted; the encrypted case was retained."
+                            }
+                            if (deleted) refreshCases()
+                        }
                     }
                 ) {
                     Text("Delete", color = NeuralTheme.Crimson, fontWeight = FontWeight.SemiBold)
@@ -203,8 +211,10 @@ fun CaseComparisonScreen(onNavigateToBrowser: (String) -> Unit = {}) {
                                 aiInsightService = aiInsightService,
                                 exporter = exporter,
                                 onChanged = { notice ->
-                                    actionNotice = notice
-                                    refreshCases()
+                                    caseScope.launch {
+                                        actionNotice = notice
+                                        refreshCases()
+                                    }
                                 },
                                 onShareNotice = {
                                     actionNotice = "Share-safe export prepared. Review the generated files before sharing."
@@ -246,8 +256,10 @@ fun CaseComparisonScreen(onNavigateToBrowser: (String) -> Unit = {}) {
                                 aiInsightService = aiInsightService,
                                 exporter = exporter,
                                 onChanged = { notice ->
-                                    actionNotice = notice
-                                    refreshCases()
+                                    caseScope.launch {
+                                        actionNotice = notice
+                                        refreshCases()
+                                    }
                                 },
                                 onShareNotice = {
                                     actionNotice = "Share-safe export prepared. Review the generated files before sharing."
@@ -1075,7 +1087,7 @@ private fun CaseReviewPanel(
                         reanalysisScope.launch {
                             val outcome = try {
                                 withContext(Dispatchers.IO) {
-                                    val loaded = store.load(case.caseId)
+                                    val loaded = store.loadAsync(case.caseId)
                                     if (loaded == null) {
                                         SavedCaseAiReanalysisOutcome.Failure(
                                             "The saved case could not be loaded. Existing analysis and refresh state were preserved."
@@ -1159,15 +1171,23 @@ private fun CaseReviewPanel(
                     finding = finding,
                     current = current,
                     onDecision = { decision ->
-                        val ok = store.recordCorrection(
-                            case.caseId,
-                            UserCorrection(
-                                evidenceId = evidence.id,
-                                decision = decision,
-                                createdAtUtc = Instant.now().toString()
+                        reanalysisScope.launch {
+                            val ok = store.recordCorrectionAsync(
+                                case.caseId,
+                                UserCorrection(
+                                    evidenceId = evidence.id,
+                                    decision = decision,
+                                    createdAtUtc = Instant.now().toString()
+                                )
                             )
-                        )
-                        onChanged(if (ok) "Evidence decision saved to the encrypted case." else "Evidence decision could not be saved.")
+                            onChanged(
+                                if (ok) {
+                                    "Evidence decision saved to the encrypted case."
+                                } else {
+                                    "Evidence decision could not be saved."
+                                }
+                            )
+                        }
                     }
                 )
             }
@@ -1197,13 +1217,34 @@ private fun CaseReviewPanel(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         CorrectionButton("This is me", current == UserCorrectionDecision.ThisIsMe, Modifier.weight(1f)) {
-                            saveEntityCorrection(store, case, entity.id, UserCorrectionDecision.ThisIsMe, onChanged)
+                            saveEntityCorrection(
+                                scope = reanalysisScope,
+                                store = store,
+                                case = case,
+                                entityId = entity.id,
+                                decision = UserCorrectionDecision.ThisIsMe,
+                                onChanged = onChanged
+                            )
                         }
                         CorrectionButton("Not me", current == UserCorrectionDecision.ThisIsNotMe, Modifier.weight(1f)) {
-                            saveEntityCorrection(store, case, entity.id, UserCorrectionDecision.ThisIsNotMe, onChanged)
+                            saveEntityCorrection(
+                                scope = reanalysisScope,
+                                store = store,
+                                case = case,
+                                entityId = entity.id,
+                                decision = UserCorrectionDecision.ThisIsNotMe,
+                                onChanged = onChanged
+                            )
                         }
                         CorrectionButton("Unsure", current == UserCorrectionDecision.Unsure, Modifier.weight(1f)) {
-                            saveEntityCorrection(store, case, entity.id, UserCorrectionDecision.Unsure, onChanged)
+                            saveEntityCorrection(
+                                scope = reanalysisScope,
+                                store = store,
+                                case = case,
+                                entityId = entity.id,
+                                decision = UserCorrectionDecision.Unsure,
+                                onChanged = onChanged
+                            )
                         }
                     }
                 }
@@ -1241,11 +1282,16 @@ private fun CaseReviewPanel(
                             createdAtUtc = now,
                             updatedAtUtc = now
                         )
-                        val ok = store.upsertRemediation(case.caseId, record)
-                        onChanged(
-                            if (ok) "Remediation status saved. Re-scan later to verify the exposure state."
-                            else "Remediation status could not be saved."
-                        )
+                        reanalysisScope.launch {
+                            val ok = store.upsertRemediationAsync(case.caseId, record)
+                            onChanged(
+                                if (ok) {
+                                    "Remediation status saved. Re-scan later to verify the exposure state."
+                                } else {
+                                    "Remediation status could not be saved."
+                                }
+                            )
+                        }
                     }
                 )
             }
@@ -1450,24 +1496,27 @@ private fun ReviewSectionTitle(title: String, subtitle: String) {
 }
 
 private fun saveEntityCorrection(
+    scope: CoroutineScope,
     store: CaseStore,
     case: DossierCase,
     entityId: String,
     decision: UserCorrectionDecision,
     onChanged: (String) -> Unit
 ) {
-    val ok = store.recordCorrection(
-        case.caseId,
-        UserCorrection(
-            entityId = entityId,
-            decision = decision,
-            createdAtUtc = Instant.now().toString()
+    scope.launch {
+        val ok = store.recordCorrectionAsync(
+            case.caseId,
+            UserCorrection(
+                entityId = entityId,
+                decision = decision,
+                createdAtUtc = Instant.now().toString()
+            )
         )
-    )
-    onChanged(
-        if (ok) "Account attribution decision saved to the encrypted case."
-        else "Account attribution decision could not be saved."
-    )
+        onChanged(
+            if (ok) "Account attribution decision saved to the encrypted case."
+            else "Account attribution decision could not be saved."
+        )
+    }
 }
 
 private fun UserCorrectionDecision.displayLabel(): String = when (this) {
@@ -1580,7 +1629,7 @@ private suspend fun reanalyzeSavedCaseSnapshot(
         ?: return SavedCaseAiReanalysisOutcome.Failure(
             "No validated analysis result was returned. Existing analysis and refresh state were preserved."
         )
-    return when (store.saveAnalysisIfUnchanged(loadedCase, summary)) {
+    return when (store.saveAnalysisIfUnchangedAsync(loadedCase, summary)) {
         CaseAnalysisUpdateResult.Applied -> SavedCaseAiReanalysisOutcome.Success(remotePermission)
         CaseAnalysisUpdateResult.Conflict -> SavedCaseAiReanalysisOutcome.Failure(
             "The saved case changed while analysis was running. The current case was preserved; re-run analysis again."
