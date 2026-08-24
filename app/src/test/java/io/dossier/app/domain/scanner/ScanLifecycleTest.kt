@@ -173,6 +173,131 @@ class ScanLifecycleTest {
     }
 
     @Test
+    fun pauseIntentAndTerminalPausePreservePublicationRace() {
+        val running = record(ScanLifecyclePhase.Running, resultReady = false)
+        val pausing = ScanLifecycleReducer.reduce(
+            current = running,
+            expectedGeneration = generation,
+            expectedOwnerId = owner,
+            expectedRequestId = request,
+            transition = ScanLifecycleTransition.RequestPause,
+            nowEpochMillis = 101L
+        ) as ScanLifecycleTransitionResult.Applied
+        assertEquals(ScanLifecyclePhase.Pausing, pausing.record.phase)
+        assertFalse(pausing.record.resultReady)
+
+        // The worker may publish after pause intent but before cancellation
+        // becomes terminal. The marker must remain bound to Pausing.
+        val published = ScanLifecycleReducer.reduce(
+            current = pausing.record,
+            expectedGeneration = generation,
+            transition = ScanLifecycleTransition.PublishResult,
+            nowEpochMillis = 102L
+        ) as ScanLifecycleTransitionResult.Applied
+        assertEquals(ScanLifecyclePhase.Pausing, published.record.phase)
+        assertTrue(published.record.resultReady)
+
+        val paused = ScanLifecycleReducer.reduce(
+            current = published.record,
+            expectedGeneration = generation,
+            transition = ScanLifecycleTransition.MarkPaused,
+            nowEpochMillis = 103L
+        ) as ScanLifecycleTransitionResult.Applied
+        assertEquals(ScanLifecyclePhase.Paused, paused.record.phase)
+        assertTrue(paused.record.resultReady)
+
+        val recovered = ScanLifecycleReducer.reduce(
+            current = paused.record,
+            expectedGeneration = generation,
+            transition = ScanLifecycleTransition.RecoverSucceeded,
+            nowEpochMillis = 104L
+        ) as ScanLifecycleTransitionResult.Applied
+        assertEquals(ScanLifecyclePhase.Succeeded, recovered.record.phase)
+        assertTrue(recovered.record.resultReady)
+    }
+
+    @Test
+    fun pauseReconciliationIsBoundedAndCheckpointTolerant() {
+        val pausing = record(ScanLifecyclePhase.Pausing, resultReady = false)
+        assertEquals(
+            ScanReconciliationAction.RetryPause(pausing),
+            ScanLifecycleReconciler.plan(
+                lifecycle = pausing,
+                workInfo = work(ScanWorkState.Running),
+                checkpoint = ScanCheckpointAvailability.StorageFailure,
+                resultWorkId = null
+            )
+        )
+        assertEquals(
+            ScanReconciliationAction.PausedTerminal(pausing),
+            ScanLifecycleReconciler.plan(
+                lifecycle = pausing,
+                workInfo = ScanWorkInfoLookup.Missing,
+                checkpoint = ScanCheckpointAvailability.Missing,
+                resultWorkId = null
+            )
+        )
+
+        val paused = record(ScanLifecyclePhase.Paused, resultReady = false)
+        assertEquals(
+            ScanReconciliationAction.KeepPaused(paused),
+            ScanLifecycleReconciler.plan(
+                lifecycle = paused,
+                workInfo = ScanWorkInfoLookup.Missing,
+                checkpoint = ScanCheckpointAvailability.Invalid,
+                resultWorkId = null
+            )
+        )
+        assertEquals(
+            ScanReconciliationAction.RetryPause(paused),
+            ScanLifecycleReconciler.plan(
+                lifecycle = paused,
+                workInfo = work(ScanWorkState.Blocked),
+                checkpoint = ScanCheckpointAvailability.Missing,
+                resultWorkId = null
+            )
+        )
+
+        // An exact encrypted result wins a pause/cancellation race and is
+        // promoted rather than hidden or replaced.
+        assertEquals(
+            ScanReconciliationAction.RecoverSucceeded(paused),
+            ScanLifecycleReconciler.plan(
+                lifecycle = paused,
+                workInfo = ScanWorkInfoLookup.Missing,
+                checkpoint = ScanCheckpointAvailability.Missing,
+                resultWorkId = owner
+            )
+        )
+    }
+
+    @Test
+    fun pauseTransitionsDoNotAllowResumingOrPausingTerminalRows() {
+        val paused = record(ScanLifecyclePhase.Paused, resultReady = false)
+        val duplicatePause = ScanLifecycleReducer.reduce(
+            current = paused,
+            expectedGeneration = generation,
+            transition = ScanLifecycleTransition.RequestPause,
+            nowEpochMillis = 101L
+        )
+        assertEquals(
+            ScanLifecycleRejectionReason.IllegalTransition,
+            (duplicatePause as ScanLifecycleTransitionResult.Rejected).reason
+        )
+
+        val illegalMark = ScanLifecycleReducer.reduce(
+            current = record(ScanLifecyclePhase.Running, resultReady = false),
+            expectedGeneration = generation,
+            transition = ScanLifecycleTransition.MarkPaused,
+            nowEpochMillis = 101L
+        )
+        assertEquals(
+            ScanLifecycleRejectionReason.IllegalTransition,
+            (illegalMark as ScanLifecycleTransitionResult.Rejected).reason
+        )
+    }
+
+    @Test
     fun durableCancelIntentNeverReenqueuesAndRetriesOnlyWhileRowIsActive() {
         val cancelling = record(ScanLifecyclePhase.CancelRequested, resultReady = false)
         for (checkpoint in ScanCheckpointAvailability.entries) {
@@ -567,7 +692,8 @@ class ScanLifecycleTest {
         for (phase in listOf(
             ScanLifecyclePhase.Succeeded,
             ScanLifecyclePhase.Failed,
-            ScanLifecyclePhase.Cancelled
+            ScanLifecyclePhase.Cancelled,
+            ScanLifecyclePhase.Paused
         )) {
             val terminal = record(phase, resultReady = true)
             val cleanup = ScanLifecycleReducer.reduce(

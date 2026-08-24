@@ -646,6 +646,127 @@ object BackgroundScanManager {
         }
     }
 
+    /**
+     * Requests a bounded pause of the exact lifecycle owner.  Pausing is a
+     * durable two-step state: the reducer records intent first, then this
+     * method asks WorkManager to cancel the exact UUID.  [monitorPause]
+     * commits Paused only after the exact row is terminal, so an in-flight
+     * worker cannot be mistaken for a resumable checkpoint.
+     */
+    fun pause(context: Context): Boolean {
+        val appContext = context.applicationContext
+        synchronized(LIFECYCLE_LOCK) {
+            val lifecycleStore = lifecycleStoreProvider(appContext)
+            val record = (lifecycleStore.read() as? ScanLifecycleReadResult.Available)?.record
+                ?: return false
+            if (record.phase == ScanLifecyclePhase.Paused) return true
+            if (record.phase !in setOf(
+                    ScanLifecyclePhase.EnqueuePending,
+                    ScanLifecyclePhase.Enqueued,
+                    ScanLifecyclePhase.Running,
+                    ScanLifecyclePhase.Pausing
+                )
+            ) return false
+
+            val requested = lifecycleStore.transition(
+                expected = record,
+                transition = ScanLifecycleTransition.RequestPause,
+                nowEpochMillis = nowEpochMillis()
+            )
+            if (requested !is ScanLifecycleWriteResult.Saved) return false
+            val pausing = (lifecycleStore.read() as? ScanLifecycleReadResult.Available)?.record
+                ?.takeIf { isSameLifecycleGeneration(it, record) }
+                ?: return false
+            val ownerUuid = runCatching { UUID.fromString(pausing.ownerId) }.getOrNull()
+                ?: return false
+            try {
+                monitorPause(
+                    operation = WorkManager.getInstance(appContext).cancelWorkById(ownerUuid),
+                    context = appContext,
+                    expected = pausing
+                )
+            } catch (_: Exception) {
+                // Keep Pausing durable. Startup reconciliation will retry the
+                // exact owner rather than silently resuming or failing it.
+            }
+            return true
+        }
+    }
+
+    /**
+     * Resumes only a fully Paused generation. A fresh WorkManager UUID is
+     * required because a cancelled WorkRequest cannot be enqueued again; the
+     * request/generation remain constant and the exact Paused snapshot is the
+     * compare-and-swap guard against stale callbacks.
+     */
+    fun resume(context: Context): Boolean {
+        val appContext = context.applicationContext
+        synchronized(LIFECYCLE_LOCK) {
+            val lifecycleStore = lifecycleStoreProvider(appContext)
+            val resumeStore = resumeStoreProvider(appContext)
+            val resultStore = resultStoreProvider(appContext)
+            val paused = (lifecycleStore.read() as? ScanLifecycleReadResult.Available)?.record
+                ?: return false
+            if (paused.phase != ScanLifecyclePhase.Paused) return false
+
+            // A result that belongs to this paused owner is a publication race,
+            // not resumable work. Leave it untouched; reconciliation promotes
+            // the exact lifecycle to Succeeded and keeps the evidence visible.
+            val persistedResultOwner = runCatching { resultStore.load()?.workId }.getOrNull()
+            if (paused.resultReady || persistedResultOwner == paused.ownerId) return false
+            val checkpoint = runCatching { resumeStore.loadRequestDetailed(paused.requestId) }
+                .getOrNull()
+            if (checkpoint !is ResumeReadState.Available) {
+                return false
+            }
+
+            val newOwnerId = uuidGenerator().toString()
+            if (newOwnerId == paused.ownerId) return false
+            val pending = try {
+                ScanLifecycleRecord(
+                    ownerId = newOwnerId,
+                    requestId = paused.requestId,
+                    generation = paused.generation,
+                    phase = ScanLifecyclePhase.EnqueuePending,
+                    updatedAtEpochMillis = nowEpochMillis(),
+                    resultReady = false,
+                    errorCode = null
+                )
+            } catch (_: IllegalArgumentException) {
+                return false
+            }
+            if (lifecycleStore.replace(paused, pending) !is ScanLifecycleWriteResult.Saved) {
+                return false
+            }
+
+            val ownerUuid = runCatching { UUID.fromString(newOwnerId) }.getOrNull()
+                ?: return false
+            val request = buildRequest(
+                requestId = pending.requestId,
+                generation = pending.generation,
+                ownerUuid = ownerUuid
+            )
+            try {
+                val operation = WorkManager.getInstance(appContext).enqueueUniqueWork(
+                    BackgroundScanWorker.UNIQUE_WORK_NAME,
+                    ExistingWorkPolicy.REPLACE,
+                    request
+                )
+                monitorEnqueue(
+                    operation = operation,
+                    context = appContext,
+                    pendingRecord = pending,
+                    priorOwnerId = paused.ownerId,
+                    priorRequestId = null
+                )
+            } catch (_: Exception) {
+                // Leave the exact pending record/checkpoint for startup
+                // reconciliation to retry. No result or checkpoint is erased.
+            }
+            return true
+        }
+    }
+
     fun statusFlow(context: Context): Flow<List<WorkInfo>> =
         WorkManager.getInstance(context.applicationContext)
             .getWorkInfosForUniqueWorkFlow(BackgroundScanWorker.UNIQUE_WORK_NAME)
@@ -743,6 +864,8 @@ object BackgroundScanManager {
                 lifecycle.record.resultReady &&
                 lifecycle.record.phase in setOf(
                     ScanLifecyclePhase.Running,
+                    ScanLifecyclePhase.Pausing,
+                    ScanLifecyclePhase.Paused,
                     ScanLifecyclePhase.Succeeded
                 )
         is ScanLifecycleReadResult.Invalid,
@@ -788,7 +911,7 @@ object BackgroundScanManager {
                 record.ownerId == workerId &&
                     record.requestId == requestId &&
                     (generation == null || record.generation == generation) &&
-                    record.phase == ScanLifecyclePhase.Succeeded &&
+                    record.phase in setOf(ScanLifecyclePhase.Succeeded, ScanLifecyclePhase.Paused) &&
                     record.resultReady
             }
             is ScanLifecycleReadResult.Invalid,
@@ -811,7 +934,8 @@ object BackgroundScanManager {
                     record.phase in setOf(
                         ScanLifecyclePhase.Succeeded,
                         ScanLifecyclePhase.Failed,
-                        ScanLifecyclePhase.Cancelled
+                        ScanLifecyclePhase.Cancelled,
+                        ScanLifecyclePhase.Paused
                     ) -> {
                         val transitioned = lifecycleStore.transition(
                             expected = record,
@@ -929,6 +1053,7 @@ object BackgroundScanManager {
                     ScanLifecyclePhase.EnqueuePending,
                     ScanLifecyclePhase.Enqueued,
                     ScanLifecyclePhase.Running,
+                    ScanLifecyclePhase.Pausing,
                     ScanLifecyclePhase.CancelRequested,
                     ScanLifecyclePhase.CancelFailed
                 )
@@ -953,6 +1078,23 @@ object BackgroundScanManager {
         dispatcher: CoroutineDispatcher = Dispatchers.IO
     ): Boolean = withContext(dispatcher) {
         hasActiveMarker(context)
+    }
+
+    /**
+     * Reads the durable lifecycle phase without doing encrypted storage work
+     * on the caller's UI thread.  WorkManager's row alone cannot represent a
+     * paused checkpoint because a paused request is intentionally cancelled.
+     */
+    suspend fun lifecyclePhaseAsync(
+        context: Context,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): ScanLifecyclePhase? = withContext(dispatcher) {
+        synchronized(LIFECYCLE_LOCK) {
+            (lifecycleStoreProvider(context.applicationContext).read()
+                as? ScanLifecycleReadResult.Available)
+                ?.record
+                ?.phase
+        }
     }
 
     internal fun claimActive(context: Context, workerId: String): Boolean =
@@ -1025,7 +1167,8 @@ object BackgroundScanManager {
                 return@synchronized record.phase in setOf(
                     ScanLifecyclePhase.EnqueuePending,
                     ScanLifecyclePhase.Enqueued,
-                    ScanLifecyclePhase.Running
+                    ScanLifecyclePhase.Running,
+                    ScanLifecyclePhase.Pausing
                 )
             }
             ScanLifecycleReadResult.Missing -> activeOwner(appContext) == workerId
@@ -1046,7 +1189,9 @@ object BackgroundScanManager {
                 val record = readResult.record
                 if (record.ownerId != workerId) return@synchronized false
                 if (generation != null && record.generation != generation) return@synchronized false
-                if (record.phase != ScanLifecyclePhase.Running) return@synchronized false
+                if (record.phase != ScanLifecyclePhase.Running &&
+                    record.phase != ScanLifecyclePhase.Pausing
+                ) return@synchronized false
                 if (record.resultReady) return@synchronized true
                 val transitionResult = lifecycleStore.transition(
                     expected = record,
@@ -1074,7 +1219,9 @@ object BackgroundScanManager {
                 if (record.ownerId != workerId) return@synchronized false
                 if (generation != null && record.generation != generation) return@synchronized false
                 if (record.phase == ScanLifecyclePhase.Succeeded) return@synchronized true
-                if (record.phase != ScanLifecyclePhase.Running) return@synchronized false
+                if (record.phase != ScanLifecyclePhase.Running &&
+                    record.phase != ScanLifecyclePhase.Pausing
+                ) return@synchronized false
                 if (!record.resultReady) {
                     val pub = lifecycleStore.transition(
                         expected = record,
@@ -1116,7 +1263,8 @@ object BackgroundScanManager {
                         if (record.phase in setOf(
                                 ScanLifecyclePhase.EnqueuePending,
                                 ScanLifecyclePhase.Enqueued,
-                                ScanLifecyclePhase.Running
+                                ScanLifecyclePhase.Running,
+                                ScanLifecyclePhase.Pausing
                             )
                         ) {
                             lifecycleStore.transition(
@@ -1175,7 +1323,9 @@ object BackgroundScanManager {
                     when (completion) {
                         BackgroundScanCompletion.Succeeded -> {
                             if (record.phase == ScanLifecyclePhase.Succeeded || record.resultReady) {
-                                if (record.phase == ScanLifecyclePhase.Running) {
+                                if (record.phase == ScanLifecyclePhase.Running ||
+                                    record.phase == ScanLifecyclePhase.Pausing
+                                ) {
                                     lifecycleStore.transition(
                                         expected = record,
                                         transition = ScanLifecycleTransition.MarkSucceeded,
@@ -1183,7 +1333,9 @@ object BackgroundScanManager {
                                     )
                                 }
                                 ScanSession.markBackgroundSucceeded()
-                            } else if (record.phase == ScanLifecyclePhase.Running) {
+                            } else if (record.phase == ScanLifecyclePhase.Running ||
+                                record.phase == ScanLifecyclePhase.Pausing
+                            ) {
                                 // Do not manufacture a result marker in a
                                 // terminal cleanup callback. The worker must
                                 // persist the encrypted snapshot and publish
@@ -1208,7 +1360,8 @@ object BackgroundScanManager {
                             if (record.phase in setOf(
                                     ScanLifecyclePhase.EnqueuePending,
                                     ScanLifecyclePhase.Enqueued,
-                                    ScanLifecyclePhase.Running
+                                    ScanLifecyclePhase.Running,
+                                    ScanLifecyclePhase.Pausing
                                 )
                             ) {
                                 lifecycleStore.transition(
@@ -1388,6 +1541,34 @@ object BackgroundScanManager {
             is ScanReconciliationAction.RetryLegacyLookup -> action
             is ScanReconciliationAction.RetryReconciliation -> action
             is ScanReconciliationAction.KeepOrRecover -> action
+            is ScanReconciliationAction.KeepPaused -> action
+            is ScanReconciliationAction.PausedTerminal -> {
+                if (isExactLifecycle(lifecycleStore, action.expected)) {
+                    lifecycleStore.transition(
+                        expected = action.expected,
+                        transition = ScanLifecycleTransition.MarkPaused,
+                        nowEpochMillis = now
+                    )
+                }
+                action
+            }
+            is ScanReconciliationAction.RetryPause -> {
+                val current = lifecycleStore.read()
+                if (current !is ScanLifecycleReadResult.Available || current.record != action.expected) {
+                    return@synchronized action
+                }
+                val ownerUuid = runCatching { UUID.fromString(action.expected.ownerId) }.getOrNull()
+                if (ownerUuid != null) {
+                    runCatching {
+                        monitorPause(
+                            operation = WorkManager.getInstance(appContext).cancelWorkById(ownerUuid),
+                            context = appContext,
+                            expected = action.expected
+                        )
+                    }
+                }
+                action
+            }
             is ScanReconciliationAction.TruthfulFailurePreserve -> {
                 // The result is intentionally retained for inspection. Keep a
                 // safe failure visible to the session without attempting any
@@ -1837,6 +2018,60 @@ object BackgroundScanManager {
     ): Boolean = priorOwnerId != null &&
         resultOwnerId == priorOwnerId &&
         isSameLifecycleGeneration(current, pending)
+
+    /**
+     * Pause-specific cancellation monitor. Operation success acknowledges the
+     * request only; Paused is committed after the exact WorkManager row is
+     * terminal. A published result marker is carried through MarkPaused and
+     * recovered to Succeeded by reconciliation, never cleared here.
+     */
+    private fun monitorPause(
+        operation: androidx.work.Operation,
+        context: Context,
+        expected: ScanLifecycleRecord
+    ) {
+        operation.result.addListener(
+            {
+                try {
+                    operation.result.get()
+                } catch (_: Exception) {
+                    // Keep the durable Pausing intent. A later reconciliation
+                    // retries the exact UUID instead of claiming it paused.
+                    return@addListener
+                }
+
+                lifecycleScope.launch {
+                    val observed = runCatching {
+                        withTimeoutOrNull(CANCEL_OBSERVATION_TIMEOUT_MILLIS) {
+                            true to WorkManager.getInstance(context.applicationContext)
+                                .getWorkInfoByIdFlow(UUID.fromString(expected.ownerId))
+                                .first { info -> info == null || info.state.isFinished }
+                        }
+                    }.getOrNull() ?: return@launch
+                    val terminal = observed.second
+                    if (terminal == null || terminal.state == WorkInfo.State.CANCELLED) {
+                        synchronized(LIFECYCLE_LOCK) {
+                            val lifecycleStore = lifecycleStoreProvider(context.applicationContext)
+                            val current = lifecycleStore.read()
+                            if (current is ScanLifecycleReadResult.Available && current.record == expected) {
+                                lifecycleStore.transition(
+                                    expected = expected,
+                                    transition = ScanLifecycleTransition.MarkPaused,
+                                    nowEpochMillis = nowEpochMillis()
+                                )
+                            }
+                        }
+                    } else {
+                        // Completion/failure won the pause race. Feed the exact
+                        // terminal row through the ordinary result-aware path.
+                        val action = reconcile(context.applicationContext)
+                        executeReconciliation(context.applicationContext, action)
+                    }
+                }
+            },
+            directExecutor
+        )
+    }
 
     /**
      * Cancellation is a two-step truth: a successful Operation acknowledges

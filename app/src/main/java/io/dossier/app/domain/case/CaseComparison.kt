@@ -3,9 +3,54 @@ package io.dossier.app.domain.case
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.RiskLevel
+import java.util.Locale
 
 /** Pure before/after comparison for encrypted saved cases. */
 class CaseComparison {
+
+    /**
+     * A bounded, provenance-preserving view of one public-image duplicate cluster in a
+     * saved case. These records describe whole-image evidence only; they do not assert
+     * that the pages belong to the same person or account owner.
+     */
+    data class MediaClusterMember(
+        val candidateId: String,
+        val title: String,
+        val imageUrl: String,
+        val sourcePageUrl: String,
+        val source: String,
+        val retrievedAtEpochMillis: Long?,
+        val contentSha256: String?,
+        val perceptualHashHex: String?,
+        val state: ReverseImageLookupResult.ImageCandidateState
+    )
+
+    data class MediaClusterObservation(
+        val caseId: String,
+        val caseLabel: String,
+        val clusterId: String,
+        val type: ReverseImageLookupResult.ImageClusterType,
+        val representativeCandidateId: String,
+        val members: List<MediaClusterMember>
+    )
+
+    /**
+     * A history group keyed by a shared whole-image fingerprint when one is available.
+     * A null fingerprint means the observation remains case-local rather than being
+     * guessed to match another case.
+     */
+    data class MediaClusterHistoryEntry(
+        val historyKey: String,
+        val type: ReverseImageLookupResult.ImageClusterType,
+        val fingerprint: String?,
+        val observations: List<MediaClusterObservation>
+    ) {
+        val caseCount: Int
+            get() = observations.map(MediaClusterObservation::caseId).distinct().size
+
+        val memberCount: Int
+            get() = observations.sumOf { observation -> observation.members.size }
+    }
 
     data class FindingChange(
         val finding: Finding,
@@ -105,6 +150,132 @@ class CaseComparison {
         )
     }
 
+    /**
+     * Returns bounded, deterministic cluster history for saved-case review.
+     *
+     * Exact-content groups use SHA-256 values and near-duplicate groups use the
+     * available perceptual hashes. Clusters without a usable fingerprint are kept as
+     * case-local observations and are never merged by cluster ID, because cluster IDs
+     * are derived from a scan's candidate IDs. Every member is retained with its source
+     * provider/page and retrieval timestamp for inspection.
+     */
+    fun mediaClusterHistory(cases: List<DossierCase>): List<MediaClusterHistoryEntry> {
+        val groups = linkedMapOf<String, MutableHistoryGroup>()
+        val seenObservations = hashSetOf<String>()
+
+        cases.takeLast(MAX_MEDIA_HISTORY_CASES).forEach { case ->
+            case.mediaIntelligence.imageResults
+                .takeLast(MAX_IMAGE_RESULTS_PER_CASE)
+                .forEach { result ->
+                    val candidatesById = result.visualCandidates
+                        .asSequence()
+                        .filter { candidate -> candidate.id.isNotBlank() }
+                        .distinctBy(ReverseImageLookupResult.ImageCandidateProvenance::id)
+                        .take(MAX_CANDIDATES_PER_RESULT)
+                        .associateBy(ReverseImageLookupResult.ImageCandidateProvenance::id)
+
+                    result.visualClusters
+                        .asSequence()
+                        .filter { cluster ->
+                            cluster.id.isNotBlank() &&
+                                cluster.representativeCandidateId in candidatesById
+                        }
+                        .distinctBy { cluster -> "${cluster.type.name}|${cluster.id}" }
+                        .take(MAX_CLUSTERS_PER_RESULT)
+                        .forEach { cluster ->
+                            val observationKey =
+                                "${case.caseId}|${cluster.type.name}|${cluster.id}"
+                            if (!seenObservations.add(observationKey)) return@forEach
+
+                            val memberIds = cluster.memberCandidateIds
+                                .asSequence()
+                                .distinct()
+                                .mapNotNull(candidatesById::get)
+                                .take(MAX_CLUSTER_MEMBERS)
+                                .toList()
+                            if (memberIds.size < MIN_CLUSTER_MEMBERS ||
+                                cluster.representativeCandidateId !in memberIds.map { it.id }
+                            ) {
+                                return@forEach
+                            }
+
+                            val observation = MediaClusterObservation(
+                                caseId = case.caseId,
+                                caseLabel = case.label,
+                                clusterId = cluster.id,
+                                type = cluster.type,
+                                representativeCandidateId = cluster.representativeCandidateId,
+                                members = memberIds.map(::toMediaClusterMember)
+                            )
+                            val fingerprint = clusterFingerprint(cluster.type, memberIds)
+                            val historyKey = fingerprint?.let {
+                                "${cluster.type.name}|fingerprint:$it"
+                            } ?: "${cluster.type.name}|case:${case.caseId}|cluster:${cluster.id}"
+                            val group = groups.getOrPut(historyKey) {
+                                MutableHistoryGroup(
+                                    type = cluster.type,
+                                    fingerprint = fingerprint
+                                )
+                            }
+                            if (group.observations.size < MAX_OBSERVATIONS_PER_HISTORY_ENTRY) {
+                                group.observations += observation
+                            }
+                        }
+                }
+        }
+
+        return groups.entries
+            .take(MAX_HISTORY_ENTRIES)
+            .map { (historyKey, group) ->
+                MediaClusterHistoryEntry(
+                    historyKey = historyKey,
+                    type = group.type,
+                    fingerprint = group.fingerprint,
+                    observations = group.observations.toList()
+                )
+            }
+    }
+
+    private data class MutableHistoryGroup(
+        val type: ReverseImageLookupResult.ImageClusterType,
+        val fingerprint: String?,
+        val observations: MutableList<MediaClusterObservation> = mutableListOf()
+    )
+
+    private fun toMediaClusterMember(
+        candidate: ReverseImageLookupResult.ImageCandidateProvenance
+    ): MediaClusterMember = MediaClusterMember(
+        candidateId = candidate.id,
+        title = candidate.title,
+        imageUrl = candidate.imageUrl,
+        sourcePageUrl = candidate.sourcePageUrl,
+        source = candidate.source,
+        retrievedAtEpochMillis = candidate.retrievedAtEpochMillis,
+        contentSha256 = candidate.contentSha256,
+        perceptualHashHex = candidate.perceptualHashHex,
+        state = candidate.state
+    )
+
+    private fun clusterFingerprint(
+        type: ReverseImageLookupResult.ImageClusterType,
+        members: List<ReverseImageLookupResult.ImageCandidateProvenance>
+    ): String? {
+        val values = when (type) {
+            ReverseImageLookupResult.ImageClusterType.ExactContent ->
+                members.mapNotNull { it.contentSha256 }
+            ReverseImageLookupResult.ImageClusterType.PerceptualNearDuplicate ->
+                members.mapNotNull { it.perceptualHashHex }
+        }
+        return values
+            .asSequence()
+            .map { it.trim().lowercase(Locale.ROOT) }
+            .filter { it.isNotBlank() && it.length <= MAX_FINGERPRINT_LENGTH }
+            .distinct()
+            .sorted()
+            .joinToString(",")
+            .takeIf(String::isNotBlank)
+    }
+
     private data class MediaState(
         val contentHashes: Set<String>,
         val perceptualHashes: Set<String>,
@@ -202,5 +373,17 @@ class CaseComparison {
         RiskLevel.Medium -> 50
         RiskLevel.High -> 80
         RiskLevel.Critical -> 100
+    }
+
+    private companion object {
+        const val MAX_MEDIA_HISTORY_CASES = 24
+        const val MAX_IMAGE_RESULTS_PER_CASE = 12
+        const val MAX_CANDIDATES_PER_RESULT = 100
+        const val MAX_CLUSTERS_PER_RESULT = 50
+        const val MAX_CLUSTER_MEMBERS = 100
+        const val MAX_OBSERVATIONS_PER_HISTORY_ENTRY = 24
+        const val MAX_HISTORY_ENTRIES = 128
+        const val MIN_CLUSTER_MEMBERS = 2
+        const val MAX_FINGERPRINT_LENGTH = 256
     }
 }

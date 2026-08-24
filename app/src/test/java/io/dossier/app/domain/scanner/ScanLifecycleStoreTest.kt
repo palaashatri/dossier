@@ -141,6 +141,60 @@ class ScanLifecycleStoreTest {
     }
 
     @Test
+    fun pauseTransitionsUseExactCasAndRetainResultMarker() {
+        val preferences = FakePreferences()
+        val store = ScanLifecycleStore(preferences)
+        val running = record(phase = ScanLifecyclePhase.Running, updatedAt = 100L)
+        assertEquals(ScanLifecycleWriteResult.Saved, store.publish(running))
+
+        assertEquals(
+            ScanLifecycleWriteResult.Saved,
+            store.transition(
+                expected = running,
+                transition = ScanLifecycleTransition.RequestPause,
+                nowEpochMillis = 101L
+            )
+        )
+        val pausing = (store.read() as ScanLifecycleReadResult.Available).record
+        assertEquals(ScanLifecyclePhase.Pausing, pausing.phase)
+
+        assertEquals(
+            ScanLifecycleWriteResult.Saved,
+            store.transition(
+                expected = pausing,
+                transition = ScanLifecycleTransition.PublishResult,
+                nowEpochMillis = 102L
+            )
+        )
+        val published = (store.read() as ScanLifecycleReadResult.Available).record
+        assertTrue(published.resultReady)
+        assertEquals(ScanLifecyclePhase.Pausing, published.phase)
+
+        assertEquals(
+            ScanLifecycleWriteResult.Saved,
+            store.transition(
+                expected = published,
+                transition = ScanLifecycleTransition.MarkPaused,
+                nowEpochMillis = 103L
+            )
+        )
+        val paused = (store.read() as ScanLifecycleReadResult.Available).record
+        assertEquals(ScanLifecyclePhase.Paused, paused.phase)
+        assertTrue(paused.resultReady)
+
+        // A stale pre-pause callback cannot overwrite the paused generation.
+        assertEquals(
+            ScanLifecycleWriteResult.RecordMismatch,
+            store.transition(
+                expected = running,
+                transition = ScanLifecycleTransition.MarkRunning,
+                nowEpochMillis = 104L
+            )
+        )
+        assertEquals(ScanLifecycleReadResult.Available(paused), store.read())
+    }
+
+    @Test
     fun transitionRejectsStaleSameTimestampSnapshot() {
         val preferences = FakePreferences()
         val store = ScanLifecycleStore(preferences)

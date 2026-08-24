@@ -13,6 +13,10 @@ enum class ScanLifecyclePhase {
     EnqueuePending,
     Enqueued,
     Running,
+    /** Durable user intent to stop execution at a WorkManager boundary. */
+    Pausing,
+    /** WorkManager has stopped the exact owner and the checkpoint is retained. */
+    Paused,
     CancelRequested,
     CancelFailed,
     Succeeded,
@@ -26,6 +30,8 @@ enum class ScanLifecyclePhase {
         val ENQUEUE_PENDING: ScanLifecyclePhase = EnqueuePending
         val ENQUEUED: ScanLifecyclePhase = Enqueued
         val RUNNING: ScanLifecyclePhase = Running
+        val PAUSING: ScanLifecyclePhase = Pausing
+        val PAUSED: ScanLifecyclePhase = Paused
         val CANCEL_REQUESTED: ScanLifecyclePhase = CancelRequested
         val CANCEL_FAILED: ScanLifecyclePhase = CancelFailed
         val SUCCEEDED: ScanLifecyclePhase = Succeeded
@@ -167,6 +173,11 @@ data class ScanLifecycleRecord(
             val legalCombination = when (phase) {
                 ScanLifecyclePhase.EnqueuePending,
                 ScanLifecyclePhase.Enqueued -> !resultReady && errorCode == null
+                // Pause is a durable intent/state, not a terminal failure.
+                // A publication may win the race with cancellation, so both
+                // phases deliberately retain resultReady without clearing it.
+                ScanLifecyclePhase.Pausing,
+                ScanLifecyclePhase.Paused -> errorCode == null
                 // A result marker may already be durable when cancellation or
                 // failure wins the race with publication.  Keep it visible so
                 // cleanup can still remove the orphan result safely.
@@ -202,6 +213,10 @@ data class ScanLifecycleRecord(
 sealed interface ScanLifecycleTransition {
     data object MarkEnqueued : ScanLifecycleTransition
     data object MarkRunning : ScanLifecycleTransition
+    /** Records pause intent before asking WorkManager to stop the owner. */
+    data object RequestPause : ScanLifecycleTransition
+    /** Commits Paused only after exact WorkManager cancellation/absence. */
+    data object MarkPaused : ScanLifecycleTransition
     data object RequestCancel : ScanLifecycleTransition
     data class MarkCancelFailed(val errorCode: String = ScanLifecycleErrors.CANCEL_REQUEST_FAILED) :
         ScanLifecycleTransition
@@ -222,6 +237,8 @@ sealed interface ScanLifecycleTransition {
     companion object {
         val Enqueued: ScanLifecycleTransition = MarkEnqueued
         val Running: ScanLifecycleTransition = MarkRunning
+        val Pausing: ScanLifecycleTransition = RequestPause
+        val Paused: ScanLifecycleTransition = MarkPaused
         val CancelRequested: ScanLifecycleTransition = RequestCancel
         val Cancelled: ScanLifecycleTransition = MarkCancelled
         val Succeeded: ScanLifecycleTransition = MarkSucceeded
@@ -336,10 +353,36 @@ object ScanLifecycleReducer {
                 else -> reject(ScanLifecycleRejectionReason.IllegalTransition)
             }
 
+            ScanLifecycleTransition.RequestPause -> when (current.phase) {
+                ScanLifecyclePhase.EnqueuePending,
+                ScanLifecyclePhase.Enqueued,
+                ScanLifecyclePhase.Running -> applied(ScanLifecyclePhase.Pausing)
+                // A repeated pause callback is idempotent and must not clear a
+                // result marker published while the first request was in flight.
+                ScanLifecyclePhase.Pausing -> applied(ScanLifecyclePhase.Pausing)
+                else -> reject(ScanLifecycleRejectionReason.IllegalTransition)
+            }
+
+            ScanLifecycleTransition.MarkPaused -> when (current.phase) {
+                ScanLifecyclePhase.Pausing -> applied(
+                    phase = ScanLifecyclePhase.Paused,
+                    resultReady = current.resultReady,
+                    errorCode = null
+                )
+                ScanLifecyclePhase.Paused -> applied(
+                    phase = ScanLifecyclePhase.Paused,
+                    resultReady = current.resultReady,
+                    errorCode = null
+                )
+                else -> reject(ScanLifecycleRejectionReason.IllegalTransition)
+            }
+
             ScanLifecycleTransition.RequestCancel -> when (current.phase) {
                 ScanLifecyclePhase.EnqueuePending,
                 ScanLifecyclePhase.Enqueued,
                 ScanLifecyclePhase.Running,
+                ScanLifecyclePhase.Pausing,
+                ScanLifecyclePhase.Paused,
                 ScanLifecyclePhase.CancelFailed -> applied(ScanLifecyclePhase.CancelRequested)
                 ScanLifecyclePhase.CancelRequested -> applied(ScanLifecyclePhase.CancelRequested)
                 else -> reject(ScanLifecycleRejectionReason.IllegalTransition)
@@ -361,6 +404,7 @@ object ScanLifecycleReducer {
                 ScanLifecyclePhase.EnqueuePending,
                 ScanLifecyclePhase.Enqueued,
                 ScanLifecyclePhase.Running,
+                ScanLifecyclePhase.Pausing,
                 ScanLifecyclePhase.CancelRequested,
                 ScanLifecyclePhase.CancelFailed -> applied(
                     ScanLifecyclePhase.Cancelled,
@@ -377,6 +421,7 @@ object ScanLifecycleReducer {
                         ScanLifecyclePhase.EnqueuePending,
                         ScanLifecyclePhase.Enqueued,
                         ScanLifecyclePhase.Running,
+                        ScanLifecyclePhase.Pausing,
                         ScanLifecyclePhase.CancelRequested,
                         ScanLifecyclePhase.CancelFailed
                     ) -> applied(
@@ -388,20 +433,23 @@ object ScanLifecycleReducer {
             }
 
             ScanLifecycleTransition.PublishResult -> {
-                if (current.phase != ScanLifecyclePhase.Running) {
+                if (current.phase != ScanLifecyclePhase.Running &&
+                    current.phase != ScanLifecyclePhase.Pausing
+                ) {
                     reject(ScanLifecycleRejectionReason.IllegalTransition)
                 } else if (current.resultReady) {
                     // A duplicate publication callback cannot change the
                     // generation or publish from a terminal/cancelled state.
-                    applied(ScanLifecyclePhase.Running, resultReady = true, errorCode = null)
+                    applied(current.phase, resultReady = true, errorCode = null)
                 } else {
-                    applied(ScanLifecyclePhase.Running, resultReady = true, errorCode = null)
+                    applied(current.phase, resultReady = true, errorCode = null)
                 }
             }
 
             ScanLifecycleTransition.MarkSucceeded -> {
                 when {
-                    current.phase != ScanLifecyclePhase.Running ->
+                    current.phase != ScanLifecyclePhase.Running &&
+                        current.phase != ScanLifecyclePhase.Pausing ->
                         reject(ScanLifecycleRejectionReason.IllegalTransition)
                     !current.resultReady ->
                         reject(ScanLifecycleRejectionReason.ResultNotPublished)
@@ -413,6 +461,8 @@ object ScanLifecycleReducer {
                 ScanLifecyclePhase.EnqueuePending,
                 ScanLifecyclePhase.Enqueued,
                 ScanLifecyclePhase.Running,
+                ScanLifecyclePhase.Pausing,
+                ScanLifecyclePhase.Paused,
                 ScanLifecyclePhase.CancelRequested,
                 ScanLifecyclePhase.CancelFailed -> applied(
                     ScanLifecyclePhase.Succeeded,
@@ -430,7 +480,10 @@ object ScanLifecycleReducer {
             ScanLifecycleTransition.BeginCleanup -> when (current.phase) {
                 ScanLifecyclePhase.Succeeded,
                 ScanLifecyclePhase.Failed,
-                ScanLifecyclePhase.Cancelled -> applied(
+                ScanLifecyclePhase.Cancelled,
+                // Paused owns no active WorkManager execution, so an
+                // explicit purge may retire its retained checkpoint/result.
+                ScanLifecyclePhase.Paused -> applied(
                     ScanLifecyclePhase.CleanupPending,
                     resultReady = current.resultReady,
                     errorCode = current.errorCode
@@ -530,6 +583,12 @@ sealed interface ScanReconciliationAction {
         override val expected: ScanLifecycleRecord,
         val state: ScanWorkState
     ) : Bound
+    /** WorkManager is still active while a durable pause request is pending. */
+    data class RetryPause(override val expected: ScanLifecycleRecord) : Bound
+    /** Exact owner is gone/cancelled; commit Paused through the reducer. */
+    data class PausedTerminal(override val expected: ScanLifecycleRecord) : Bound
+    /** Paused work is intentionally inert until an explicit resume call. */
+    data class KeepPaused(override val expected: ScanLifecycleRecord) : Bound
     data class RetryCancellation(override val expected: ScanLifecycleRecord) : Bound
     data class RetryReconciliation(override val expected: ScanLifecycleRecord) : Bound
     /** Persist RecoverSucceeded before any terminal cleanup is attempted. */
@@ -578,6 +637,42 @@ object ScanLifecycleReconciler {
         // not use list order or state to adopt it.
         if (work != null && work.id != lifecycle.ownerId) {
             return ScanReconciliationAction.DoNotAdopt
+        }
+
+        // A matching encrypted result is stronger than a cancellation race:
+        // it proves this exact owner published before WorkManager disappeared.
+        // Promote it to Succeeded rather than ever hiding or replacing it.
+        if (lifecycle.phase in setOf(ScanLifecyclePhase.Pausing, ScanLifecyclePhase.Paused) &&
+            resultWorkId == lifecycle.ownerId
+        ) {
+            return ScanReconciliationAction.RecoverSucceeded(lifecycle)
+        }
+
+        // Pausing/Paused are intentionally checkpoint-tolerant.  A pause
+        // retains encrypted resume state and does not turn a missing
+        // checkpoint into a failure until an explicit resume is attempted.
+        if (lifecycle.phase == ScanLifecyclePhase.Paused) {
+            return when (work?.state) {
+                ScanWorkState.Enqueued,
+                ScanWorkState.Running,
+                ScanWorkState.Blocked -> ScanReconciliationAction.RetryPause(lifecycle)
+                else -> ScanReconciliationAction.KeepPaused(lifecycle)
+            }
+        }
+
+        // While pausing, terminal WorkManager cancellation is the only point
+        // at which Paused may be committed. Active work must be cancelled
+        // again; a failed/finished work row flows through the ordinary
+        // terminal handling below.
+        if (lifecycle.phase == ScanLifecyclePhase.Pausing &&
+            (workInfo is ScanWorkInfoLookup.Missing || work?.state == ScanWorkState.Cancelled)
+        ) {
+            return ScanReconciliationAction.PausedTerminal(lifecycle)
+        }
+        if (lifecycle.phase == ScanLifecyclePhase.Pausing &&
+            work?.state in setOf(ScanWorkState.Enqueued, ScanWorkState.Running, ScanWorkState.Blocked)
+        ) {
+            return ScanReconciliationAction.RetryPause(lifecycle)
         }
 
         when (lifecycle.phase) {

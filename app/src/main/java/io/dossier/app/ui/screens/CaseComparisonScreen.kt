@@ -60,6 +60,7 @@ import io.dossier.app.domain.case.UserCorrectionDecision
 import io.dossier.app.domain.evidence.toEvidence
 import io.dossier.app.domain.model.EntityType
 import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.export.ExportRedactionMode
 import io.dossier.app.export.ReportExporter
@@ -221,6 +222,10 @@ fun CaseComparisonScreen(onNavigateToBrowser: (String) -> Unit = {}) {
                                 CaseComparison().compare(beforeCase, afterCase)
                             }
                             RenderDiff(beforeCase.label, afterCase.label, diff)
+                            val mediaHistory = remember(beforeCase.caseId, afterCase.caseId) {
+                                CaseComparison().mediaClusterHistory(listOf(beforeCase, afterCase))
+                            }
+                            RenderMediaClusterHistory(mediaHistory)
                         }
                         afterCase != null -> RenderSingleCase(afterCase, onNavigateToBrowser)
                         beforeCase != null -> RenderSingleCase(beforeCase, onNavigateToBrowser)
@@ -536,6 +541,162 @@ private fun MediaMetricRow(label: String, value: Int) {
 }
 
 @Composable
+private fun RenderMediaClusterHistory(
+    history: List<CaseComparison.MediaClusterHistoryEntry>
+) {
+    if (history.isEmpty()) return
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp)
+            .clip(DossierButtonShape)
+            .background(NeuralTheme.CardBackground)
+            .border(1.dp, NeuralTheme.BorderColor, DossierButtonShape)
+            .padding(14.dp)
+    ) {
+        Text(
+            text = "Saved-case image cluster review",
+            color = NeuralTheme.TextPrimary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            text = "Repeated whole-image fingerprints are grouped across the selected cases. This is public-image provenance only and does not establish that accounts or people are the same.",
+            color = NeuralTheme.TextSecondary,
+            fontSize = 10.5.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.padding(top = 3.dp, bottom = 7.dp)
+        )
+
+        history.take(MAX_VISIBLE_MEDIA_HISTORY).forEachIndexed { index, entry ->
+            if (index > 0) HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 7.dp)
+                    .semantics {
+                        contentDescription = buildString {
+                            append(entry.type.displayLabel())
+                            append(" image cluster; observed in ")
+                            append(entry.caseCount)
+                            append(" saved case(s)")
+                        }
+                        stateDescription = if (entry.caseCount > 1) {
+                            "Repeated whole-image evidence"
+                        } else {
+                            "Single-case whole-image evidence"
+                        }
+                    }
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text(
+                        text = entry.type.displayLabel(),
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = if (entry.caseCount > 1) {
+                            "${entry.caseCount} saved cases"
+                        } else {
+                            "1 saved case"
+                        },
+                        color = NeuralTheme.Cobalt,
+                        fontSize = 10.5.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                entry.fingerprint?.let { fingerprint ->
+                    Text(
+                        text = "Fingerprint: ${fingerprint.take(MAX_VISIBLE_FINGERPRINT_CHARS)}" +
+                            if (fingerprint.length > MAX_VISIBLE_FINGERPRINT_CHARS) "…" else "",
+                        color = NeuralTheme.TextMuted,
+                        fontSize = 9.5.sp,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                } ?: Text(
+                    text = "No reusable fingerprint; retained as a case-local cluster.",
+                    color = NeuralTheme.TextMuted,
+                    fontSize = 9.5.sp,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+
+                entry.observations.take(MAX_VISIBLE_MEDIA_OBSERVATIONS).forEach { observation ->
+                    Text(
+                        text = "${observation.caseLabel} · ${observation.members.size} public images · cluster ${observation.clusterId.takeLast(12)}",
+                        color = NeuralTheme.TextSecondary,
+                        fontSize = 10.5.sp,
+                        lineHeight = 15.sp,
+                        modifier = Modifier.padding(top = 5.dp)
+                    )
+                    observation.members.take(MAX_VISIBLE_MEDIA_MEMBERS).forEach { member ->
+                        Text(
+                            text = "• ${member.title.ifBlank { "Public image candidate" }} · ${member.state.name}",
+                            color = NeuralTheme.TextPrimary,
+                            fontSize = 10.5.sp,
+                            lineHeight = 15.sp,
+                            modifier = Modifier.padding(start = 4.dp, top = 2.dp)
+                        )
+                        Text(
+                            text = "  ${member.source} · ${member.sourcePageUrl}",
+                            color = NeuralTheme.TextMuted,
+                            fontSize = 9.5.sp,
+                            lineHeight = 14.sp,
+                            modifier = Modifier.padding(start = 4.dp)
+                        )
+                        member.retrievedAtEpochMillis?.let { retrievedAt ->
+                            Text(
+                                text = "  retrieved ${Instant.ofEpochMilli(retrievedAt)}" +
+                                    (member.contentSha256?.let { " · SHA-256 ${it.take(12)}…" } ?: ""),
+                                color = NeuralTheme.TextMuted,
+                                fontSize = 9.sp,
+                                lineHeight = 13.sp,
+                                modifier = Modifier.padding(start = 4.dp)
+                            )
+                        }
+                    }
+                    if (observation.members.size > MAX_VISIBLE_MEDIA_MEMBERS) {
+                        Text(
+                            text = "… ${observation.members.size - MAX_VISIBLE_MEDIA_MEMBERS} more member(s) retained in the encrypted case",
+                            color = NeuralTheme.TextMuted,
+                            fontSize = 9.5.sp,
+                            modifier = Modifier.padding(start = 4.dp, top = 2.dp)
+                        )
+                    }
+                }
+                if (entry.observations.size > MAX_VISIBLE_MEDIA_OBSERVATIONS) {
+                    Text(
+                        text = "… ${entry.observations.size - MAX_VISIBLE_MEDIA_OBSERVATIONS} more saved-case observation(s)",
+                        color = NeuralTheme.TextMuted,
+                        fontSize = 9.5.sp,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+            }
+        }
+        if (history.size > MAX_VISIBLE_MEDIA_HISTORY) {
+            Text(
+                text = "… ${history.size - MAX_VISIBLE_MEDIA_HISTORY} more cluster group(s) retained in the encrypted case",
+                color = NeuralTheme.TextMuted,
+                fontSize = 9.5.sp,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+    }
+}
+
+private fun ReverseImageLookupResult.ImageClusterType.displayLabel(): String = when (this) {
+    ReverseImageLookupResult.ImageClusterType.ExactContent -> "Exact-content image cluster"
+    ReverseImageLookupResult.ImageClusterType.PerceptualNearDuplicate -> "Perceptual near-duplicate cluster"
+}
+
+@Composable
 private fun DeltaRow(label: String, value: Int, positiveIsGood: Boolean?) {
     val color = when {
         value == 0 -> NeuralTheme.TextSecondary
@@ -693,6 +854,9 @@ private fun RenderSingleCase(case: DossierCase, onNavigateToBrowser: (String) ->
         HistoricalTimelinePanelContent(
             case = case,
             onNavigateToBrowser = onNavigateToBrowser
+        )
+        RenderMediaClusterHistory(
+            CaseComparison().mediaClusterHistory(listOf(case))
         )
         Text(
             text = "Choose another case as the other comparison point to calculate a delta.",
@@ -1312,3 +1476,7 @@ private suspend fun reanalyzeSavedCaseSnapshot(
 }
 
 private const val REVIEW_PREVIEW_LIMIT = 8
+private const val MAX_VISIBLE_MEDIA_HISTORY = 8
+private const val MAX_VISIBLE_MEDIA_OBSERVATIONS = 4
+private const val MAX_VISIBLE_MEDIA_MEMBERS = 4
+private const val MAX_VISIBLE_FINGERPRINT_CHARS = 36

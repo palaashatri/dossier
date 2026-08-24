@@ -159,6 +159,34 @@ class BackgroundScanWorkerTest {
     }
 
     @Test
+    fun lifecyclePhaseAsyncRunsEncryptedLifecycleReadOnSuppliedDispatcher() {
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "dossier-lifecycle-phase-io-test")
+        }
+        val dispatcher = executor.asCoroutineDispatcher()
+        val observedThread = AtomicReference<String>()
+        BackgroundScanManager.lifecycleStoreProvider = {
+            observedThread.set(Thread.currentThread().name)
+            throw AsyncAccessMarkerException()
+        }
+
+        try {
+            assertThrows(AsyncAccessMarkerException::class.java) {
+                runBlocking {
+                    BackgroundScanManager.lifecyclePhaseAsync(
+                        fakeContext(FakePreferences()),
+                        dispatcher
+                    )
+                }
+            }
+            assertTrue(observedThread.get().startsWith("dossier-lifecycle-phase-io-test"))
+        } finally {
+            dispatcher.close()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
     fun legacyPlaintextWorkDataIsRejectedWithoutEchoingItsValue() {
         val secret = "authorized@example.test"
         val legacy = Data.Builder()
@@ -492,6 +520,17 @@ class BackgroundScanWorkerTest {
                 owner
             )
         )
+        assertTrue(
+            BackgroundScanManager.isResultVisible(
+                ScanLifecycleReadResult.Available(
+                    runningBeforePublication.copy(
+                        phase = ScanLifecyclePhase.Paused,
+                        resultReady = true
+                    )
+                ),
+                owner
+            )
+        )
         assertFalse(
             BackgroundScanManager.isResultVisible(
                 ScanLifecycleReadResult.Available(runningBeforePublication.copy(resultReady = true)),
@@ -503,6 +542,39 @@ class BackgroundScanWorkerTest {
             BackgroundScanManager.isResultVisible(
                 ScanLifecycleReadResult.Invalid(ScanLifecycleStoreInvalidReason.InvalidRecord),
                 owner
+            )
+        )
+    }
+
+    @Test
+    fun durablePausedPublicationIsIdempotentForWorkerRetry() {
+        val owner = "11111111-1111-4111-8111-111111111111"
+        val request = "22222222-2222-4222-8222-222222222222"
+        val generation = "33333333-3333-4333-8333-333333333333"
+        val paused = ScanLifecycleRecord(
+            ownerId = owner,
+            requestId = request,
+            generation = generation,
+            phase = ScanLifecyclePhase.Paused,
+            updatedAtEpochMillis = 100L,
+            resultReady = true
+        )
+        assertTrue(
+            BackgroundScanManager.isDurableSuccess(
+                lifecycle = ScanLifecycleReadResult.Available(paused),
+                resultWorkId = owner,
+                workerId = owner,
+                requestId = request,
+                generation = generation
+            )
+        )
+        assertFalse(
+            BackgroundScanManager.isDurableSuccess(
+                lifecycle = ScanLifecycleReadResult.Available(paused.copy(resultReady = false)),
+                resultWorkId = owner,
+                workerId = owner,
+                requestId = request,
+                generation = generation
             )
         )
     }
@@ -746,6 +818,32 @@ class BackgroundScanWorkerTest {
         val context = fakeContext(prefs)
 
         BackgroundScanManager.clearLatestResult(context)
+        assertEquals(ScanLifecycleReadResult.Missing, store.read())
+    }
+
+    @Test
+    fun clearLatestResultPurgesPausedCheckpointAndLifecycle() {
+        val owner = "11111111-1111-4111-8111-111111111111"
+        val request = "22222222-2222-4222-8222-222222222222"
+        val generation = "33333333-3333-4333-8333-333333333333"
+
+        val prefs = FakePreferences()
+        val store = ScanLifecycleStore(prefs, nowEpochMillis = { 100L })
+        val paused = ScanLifecycleRecord(
+            ownerId = owner,
+            requestId = request,
+            generation = generation,
+            phase = ScanLifecyclePhase.Paused,
+            updatedAtEpochMillis = 100L,
+            resultReady = false,
+            errorCode = null
+        )
+        assertEquals(ScanLifecycleWriteResult.Saved, store.publish(paused))
+
+        BackgroundScanManager.lifecycleStoreProvider = { store }
+        BackgroundScanManager.nowEpochMillis = { 110L }
+
+        assertTrue(BackgroundScanManager.clearLatestResult(fakeContext(prefs)))
         assertEquals(ScanLifecycleReadResult.Missing, store.read())
     }
 

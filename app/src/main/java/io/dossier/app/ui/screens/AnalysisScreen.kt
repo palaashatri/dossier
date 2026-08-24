@@ -39,6 +39,7 @@ import io.dossier.app.domain.case.CaseTimelineBuilder
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.scanner.BackgroundScanManager
 import io.dossier.app.domain.scanner.BackgroundScanResultStore
+import io.dossier.app.domain.scanner.ScanLifecyclePhase
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.export.GraphExportService
 import io.dossier.app.ui.components.AnimatedObsidianBackground
@@ -47,6 +48,11 @@ import io.dossier.app.ui.theme.NeuralTheme
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Non-blocking landing surface for durable collection and post-processing. */
 @Composable
@@ -62,8 +68,10 @@ fun AnalysisScreen(
     val profileCount by ScanSession.profileScanResults.collectAsState()
     val findingCount by ScanSession.findings.collectAsState()
     val entityGraph by ScanSession.entityGraph.collectAsState()
+    val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
 
     var snapshot by remember { mutableStateOf<BackgroundScanResultStore.Snapshot?>(null) }
+    var lifecyclePhase by remember { mutableStateOf<ScanLifecyclePhase?>(null) }
     val latestInfo = BackgroundScanManager.selectRelevantWorkInfo(
         context = context,
         workInfos = workInfos,
@@ -75,6 +83,24 @@ fun AnalysisScreen(
         snapshot = BackgroundScanManager.latestResultAsync(context)
     }
 
+    // A paused request has a cancelled WorkManager row by design. Keep the
+    // encrypted lifecycle marker as the source of truth and poll only while
+    // the exact pause transition is still settling.
+    LaunchedEffect(latestInfo?.state, latestInfo?.id, lifecyclePhase) {
+        val observed = BackgroundScanManager.lifecyclePhaseAsync(context)
+        if (observed != lifecyclePhase) lifecyclePhase = observed
+        if (observed == ScanLifecyclePhase.Pausing) {
+            while (isActive) {
+                delay(250L)
+                val next = BackgroundScanManager.lifecyclePhaseAsync(context)
+                if (next != lifecyclePhase) {
+                    lifecyclePhase = next
+                    break
+                }
+            }
+        }
+    }
+
     LaunchedEffect(latestInfo?.state, latestInfo?.id) {
         if (latestInfo?.state == WorkInfo.State.SUCCEEDED) {
             snapshot = BackgroundScanManager.latestResultAsync(context)
@@ -82,9 +108,11 @@ fun AnalysisScreen(
         }
     }
 
-    val running = status?.running == true
+    val pausing = lifecyclePhase == ScanLifecyclePhase.Pausing
+    val paused = lifecyclePhase == ScanLifecyclePhase.Paused
+    val running = status?.running == true && !pausing && !paused
     val failed = latestInfo?.state == WorkInfo.State.FAILED
-    val cancelled = latestInfo?.state == WorkInfo.State.CANCELLED
+    val cancelled = latestInfo?.state == WorkInfo.State.CANCELLED && !paused && !pausing
     val analysis = snapshot?.analysis ?: OsintAnalysisBundle()
 
     AnimatedObsidianBackground(showGrid = false)
@@ -104,6 +132,9 @@ fun AnalysisScreen(
         )
         Text(
             text = when {
+                pausing -> "Pause requested. Dossier is waiting for the exact WorkManager owner to stop safely."
+                paused && snapshot != null -> "The scan is paused; its encrypted transient result is ready for review."
+                paused -> "The scan is paused with its encrypted checkpoint retained. Resume when you are ready."
                 running -> "You can use the rest of Dossier while collection and analysis continue."
                 snapshot != null -> "The latest encrypted transient result is ready for review."
                 failed -> "The background scan failed. Partial in-memory results may still be available."
@@ -115,16 +146,25 @@ fun AnalysisScreen(
             lineHeight = 19.sp
         )
 
-        if (running) {
+        if (running || pausing) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             AnalysisCard("Current stage") {
-                MonoText(status?.stage ?: "BACKGROUND_SCAN_RUNNING")
+                MonoText(if (pausing) "PAUSE_REQUESTED" else status?.stage ?: "BACKGROUND_SCAN_RUNNING")
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     Metric("Profiles", profileCount.size)
                     Metric("Entities", entityGraph.entities.size)
                     Metric("Findings", findingCount.size)
                 }
+            }
+        } else if (paused && snapshot == null) {
+            AnalysisCard("Paused checkpoint") {
+                Text(
+                    text = "No WorkManager execution is active. The encrypted request checkpoint remains local and will be used only after you explicitly resume this scan.",
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 12.5.sp,
+                    lineHeight = 18.sp
+                )
             }
         } else if (failed) {
             AnalysisCard("Scan error") {
@@ -174,12 +214,72 @@ fun AnalysisScreen(
 
         if (running) {
             OutlinedButton(
-                onClick = { BackgroundScanManager.cancel(context) },
+                onClick = {
+                    coroutineScope.launch {
+                        val requested = withContext(Dispatchers.IO) {
+                            BackgroundScanManager.pause(context)
+                        }
+                        lifecyclePhase = withContext(Dispatchers.IO) {
+                            BackgroundScanManager.lifecyclePhaseAsync(context)
+                        }
+                        if (!requested && lifecyclePhase == null) {
+                            snapshot = BackgroundScanManager.latestResultAsync(context)
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = io.dossier.app.ui.theme.DossierButtonShape,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt)
+            ) {
+                Text("PAUSE BACKGROUND SCAN", fontWeight = FontWeight.Bold)
+            }
+            OutlinedButton(
+                onClick = {
+                    coroutineScope.launch {
+                        withContext(Dispatchers.IO) {
+                            BackgroundScanManager.cancel(context)
+                        }
+                        lifecyclePhase = withContext(Dispatchers.IO) {
+                            BackgroundScanManager.lifecyclePhaseAsync(context)
+                        }
+                    }
+                },
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 shape = io.dossier.app.ui.theme.DossierButtonShape,
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Crimson)
             ) {
                 Text("CANCEL BACKGROUND SCAN", fontWeight = FontWeight.Bold)
+            }
+        }
+
+        if (pausing) {
+            OutlinedButton(
+                onClick = {},
+                enabled = false,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = io.dossier.app.ui.theme.DossierButtonShape
+            ) {
+                Text("PAUSING…", fontWeight = FontWeight.Bold)
+            }
+        }
+
+        if (paused && snapshot == null) {
+            Button(
+                onClick = {
+                    coroutineScope.launch {
+                        withContext(Dispatchers.IO) {
+                            BackgroundScanManager.resume(context)
+                        }
+                        lifecyclePhase = withContext(Dispatchers.IO) {
+                            BackgroundScanManager.lifecyclePhaseAsync(context)
+                        }
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = NeuralTheme.Cobalt),
+                shape = io.dossier.app.ui.theme.DossierButtonShape,
+                modifier = Modifier.fillMaxWidth().height(50.dp)
+            ) {
+                Text("RESUME PAUSED SCAN", fontWeight = FontWeight.Bold)
             }
         }
 
