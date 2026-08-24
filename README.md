@@ -6,7 +6,7 @@ It collects public evidence, preserves provenance, separates verification from r
 
 ## Current status
 
-The current implementation branch is **65/100 under the strict production rubric**.
+The current implementation branch is **66/100 under the strict production rubric**.
 
 Validated implementation commit:
 
@@ -78,6 +78,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - Live UI state derives from real scan-stage/profile/face/breach/graph/analysis observations.
 - Direct-profile execution emits provider queued/started/completed/unavailable events with one stable scan ID; retries do not inflate unique started counts and stale callbacks are ignored.
 - Identity seeds, scan mode, deep-scan choice and per-scan face policy are stored in an Android Keystore AES-GCM resume record; new WorkManager requests receive only its opaque UUID.
+- Stable results from the initial direct-profile pass are checkpointed per request, plan and canonical candidate in Android Keystore AES-GCM storage. A restarted worker reuses only exact, unexpired stable outcomes; transient network, timeout, challenge and parser failures are fetched again.
 - Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
 - Background enqueue now publishes a generation-bound lifecycle before replacing the old exact WorkManager UUID, promotes only that prepared encrypted request, and reenqueues the same UUID after an authoritative missing-row crash boundary.
 - The worker claims the exact owner/request/generation, publishes the encrypted result before durable success, and treats an exact matching result as idempotent success if WorkManager retries after the success-commit boundary.
@@ -88,7 +89,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
 - Later case edits cannot silently attach a newer scan to an older case.
 
-True suspended pause/resume, persisted general frontier/plan checkpoints and sole coordinator ownership remain incomplete. Some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
+This recovery is intentionally limited to the initial direct-profile pass. True suspended pause/resume, persisted pivot/search/image/breach/AI frontier checkpoints and sole coordinator ownership remain incomplete. Some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
 
 ## Evidence, graph and entity resolution
 
@@ -232,6 +233,7 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - Some custom resolver operations still bypass unified provider lifecycle events; true pause/resume and persisted recursive-frontier recovery are incomplete.
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
 - Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
+- Replacement-generation cleanup is best effort after WorkManager enqueue acknowledgement. A crash or cleanup failure in that narrow hand-off can retain an encrypted prior-request profile scope until explicit purge or later maintenance; a durable retirement ledger remains open.
 - Latest-result decrypt/deserialize and purge paths still include synchronous call sites, and result-envelope reads are not yet size-bounded; large-case ANR/storage-corruption hardening remains open.
 - Entity resolution still needs a calibrated representative benchmark.
 - Image provenance/clusters are not yet persisted into encrypted cases/identity graph for cross-account or cross-scan investigation.
