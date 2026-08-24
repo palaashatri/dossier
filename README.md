@@ -11,21 +11,25 @@ The current implementation branch is **63/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-dd85b8fcd8e32bd7e4d88e4b034af888305aaaee
+b79c6969be8e0732ce806ab9550ee2bd39eb0f76
 ```
 
 That exact implementation passed the current final-tree validation gates:
 
 ```text
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
-JVM unit tests                      PASS — 405 tests / 82 suites / 0 failures, errors, or skips
-Debug APK assembly                  PASS — 118,206,364 bytes
-Debug APK SHA-256                   35BB01C344716F6A64137B6C7738E76476DDA43F6A1173EB407265F8C1604EC4
-Android lint                        PASS — 0 errors / 65 warnings / 6 hints
-API 36 x86_64 instrumentation       PASS — 17/17 tests
+Debug JVM unit tests                PASS — 430 tests / 84 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 430 tests / 84 suites / 0 failures, errors, or skips
+Debug APK assembly                  PASS — 118,240,288 bytes
+Debug APK SHA-256                   F7860FDCDF38E9B7952EF6EC67161174E130759D024B9A9417FB98565FEED681
+uiTest APK assembly                 PASS — 242,963,519 bytes
+uiTest APK SHA-256                  1532A965FC076F4442BA282089DC8E1886B3696B326DA588CDB4B1764F5601F9
+Debug lint                          PASS — 0 errors / 65 warnings / 6 hints
+uiTest lint                         PASS — 0 errors / 68 warnings / 6 hints
+API 36 x86_64 instrumentation       PASS — 20/20 tests
 ```
 
-The API 36 Medium Phone emulator run included 2/2 direct-current-row WorkManager database checks that confirm new work input/output contains only opaque identifiers and safe status values, plus 2/2 Android Keystore-backed resume-store checks. It also exercised the uiTest-only encrypted visual fixture and the remediation-layout regression. This proves the current WorkManager row shape and emulator behavior, not historical-row erasure, SQLite WAL/free-page sanitization, restart reconciliation, reboot recovery, accessibility, or physical-device behavior.
+The API 36 Medium Phone emulator run included 5/5 exact-UUID WorkManager lifecycle tests: opaque work input, pending-generation reenqueuing under the same UUID, idempotent retry after durable result publication, cancellation that waits for the exact terminal row, and stale-owner isolation/cleanup. It also included 2/2 Android Keystore-backed resume-store checks, the uiTest-only encrypted visual fixture, and the Compose/remediation regressions. This proves the exercised crash-boundary states and current WorkManager rows on that emulator; it does not prove historical-row erasure, SQLite WAL/free-page sanitization, an externally killed/rebooted process, accessibility, or physical-device behavior.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, historical/case-integrated image workflows, and representative physical-device/accessibility/performance validation remain release gates.
 
@@ -67,12 +71,16 @@ The long-term contract calls for 1,000+ useful reviewed definitions. The current
 - Cancellation is supported; Dossier does not invent provider-level completion events while the underlying scheduler lacks callbacks.
 - Identity seeds, scan mode, deep-scan choice and per-scan face policy are stored in an Android Keystore AES-GCM resume record; new WorkManager requests receive only its opaque UUID.
 - Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
-- A tested lifecycle/recovery foundation defines encrypted request prepare/promote/discard, durable deletion guards, generation/owner/request compare-and-transition rules, exact-work reconciliation decisions and safe failure codes.
+- Background enqueue now publishes a generation-bound lifecycle before replacing the old exact WorkManager UUID, promotes only that prepared encrypted request, and reenqueues the same UUID after an authoritative missing-row crash boundary.
+- The worker claims the exact owner/request/generation, publishes the encrypted result before durable success, and treats an exact matching result as idempotent success if WorkManager retries after the success-commit boundary.
+- Process startup reconciles only `getWorkInfoById` for the persisted owner, retries unavailable lookups without mutation, and never adopts a unique-work-list result by ordering.
+- Cancellation persists intent first and reports cancellation only after the exact WorkInfo row is terminal; completion/failure races return through result-aware reconciliation.
+- Result replacement uses file and parent-directory sync plus atomic replacement, while cleanup is exact owner/request/generation scoped.
 - Terminal scan lifecycle stores actual start/end time, mode, plan size, result counts and cancellation state.
 - A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
 - Later case edits cannot silently attach a newer scan to an older case.
 
-The new lifecycle foundation is not yet called by `BackgroundScanManager`, `BackgroundScanWorker` or startup reconciliation; the production path still uses the legacy `active_owner` marker. True suspended pause/resume, provider-level queue/start/completion events, persisted frontier checkpoints, startup owner/WorkManager reconciliation and sole coordinator ownership therefore remain incomplete.
+True suspended pause/resume, provider-level queue/start/completion events, persisted general frontier/plan checkpoints and sole coordinator ownership remain incomplete. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
 
 ## Evidence, graph and entity resolution
 
@@ -214,7 +222,8 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - Providers can change markup, challenge requests, rate-limit or omit content.
 - Provider-level live events, true pause/resume and persisted recursive-frontier recovery are incomplete.
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
-- Power-loss/startup reconciliation between the encrypted request pointer, owner marker and WorkManager state is incomplete; cancellation/cleanup operation failures are not yet durably reconciled.
+- Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
+- Latest-result decrypt/deserialize and purge paths still include synchronous call sites, and result-envelope reads are not yet size-bounded; large-case ANR/storage-corruption hardening remains open.
 - Entity resolution still needs a calibrated representative benchmark.
 - Image provenance/clusters are not yet persisted into encrypted cases/identity graph for cross-account or cross-scan investigation.
 - Cross-photo face correlation still requires measured ROC/FAR/FRR and representative physical-device validation.
