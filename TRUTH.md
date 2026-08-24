@@ -7,12 +7,12 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 - **Strict product readiness score:** **76/100**
 - **Milestone state:** M0 complete; M1–M6 and M8–M12 materially advanced but still partial; M7 and M13 remain partial
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
-- **Last validated implementation commit:** `805fe9c` (`fix: preserve paused coordinator state`)
+- **Last validated implementation commit:** `94e9311` (`test: cover Android pause resume ownership`)
 - **Last validation date:** **2026-08-25**
-- **Current-session validation of the implementation plus the preserved pre-existing uiTest fixture edit:** provider and pinned-catalog audits passed; both debug and uiTest JVM suites passed 631 tests across 109 suites each; debug/uiTest APKs assembled; Android-test Kotlin compiled; lint completed with zero errors; and the connected instrumentation task reached packaging but stopped with `No connected devices!`.
+- **Current-session validation of the implementation plus the preserved pre-existing uiTest fixture edit:** provider and pinned-catalog audits passed; both debug and uiTest JVM suites passed 631 tests across 109 suites each; debug/uiTest APKs assembled; Android-test Kotlin compiled; lint completed with zero errors; and the focused `BackgroundScanWorkManagerAndroidTest` passed 8/8 on the API 36 `medium_phone` emulator. The full connected suite and physical-device gates remain open.
 - **Documentation-only commits after the validated implementation:** may update this file/PR prose without changing the validated code claim
-- **Last validated device class for this commit:** none; no ADB device was connected in this session
-- **Prior device evidence:** API 36 x86_64 emulator instrumentation exists only for an earlier commit and is not promoted to this tree
+- **Last validated device class for this commit:** API 36 `medium_phone` emulator; no physical device was connected
+- **Prior device evidence:** current-tree focused pause/resume instrumentation now exists; it is emulator-only and does not establish physical-device acceptance
 - **Real-device production validation:** not yet recorded
 - **Declarative provider definitions:** **78 authored**
 - **Pinned WhatsMyName catalog:** **716 source records; 644 executable HTTPS username rules after parser/policy filtering; 72 non-executable under current policy**
@@ -39,7 +39,7 @@ The readiness score is **76/100** after adding an exact-owner `Pausing`/`Paused`
 | AI analyst | **4/5** | Generated factual claims must be structured, cite existing evidence IDs and survive deterministic validation; uncited/unknown identifiers are withheld and invalid output falls back locally. The validator also rejects explicit email/URL identifiers not present in the evidence actually cited. Remote graph entities and relationships now carry only pseudonymized references to evidence inside the same bounded prompt window, with omitted provenance counted. Corrected-graph/remediation-native inputs beyond this bounded seam and a production evaluation corpus remain incomplete. |
 | UX/UI | **7/8** | Overview/Evidence/Connections/Actions remain coherent; live scan state is event-derived; saved Cases support persistent corrections, remediation tracking, scan-history display, share-safe export, bounded media provenance persistence and whole-image cluster history review. Background analysis now exposes explicit pause/resume states and truthful checkpoint wording. API 36 visual QA fixed consent-footer overlap, machine-token status copy, graph-label clipping, remediation-status overlap, stale scan logs, the background/cancel action collision, ambiguous provider budgets and large-type navigation/count wrapping. The changed scan-budget and navigation states were inspected at 1.0x, 1.3x, 1.5x and 2.0x font scale. Timeline UX, broad TalkBack/adaptive-layout/physical-device validation and independent review of the new pause/media surfaces remain incomplete. |
 | Security/privacy | **3/4** | Keystore AES-256-GCM cases, encrypted request-scoped scan checkpoints, generation-bound exact-owner lifecycle state, opaque new WorkManager inputs, allowlisted WorkManager progress/error values, atomic encrypted result replacement, restricted evidence WebView, local visual processing defaults, opt-in remote AI, explicit deletion and pre-write share-safe export are implemented. External report imports are bounded, local/in-memory, tied to explicit audit seeds and strip/reject password/hash/cookie/token/session/credential material. UI latest-result reads, purge and case-save actions now dispatch encrypted work off the main thread; lower-level synchronous helpers remain for controlled lifecycle paths. Historical plaintext WorkManager rows are not forensically erased, and large-case ANR/storage-corruption testing remains open. |
-| Testing/device validation | **3/5** | Provider audit (78 definitions), pinned WhatsMyName integrity audit (716 records / 644 executable rules), both debug and uiTest JVM suites (631 tests across 109 suites each, 0 failures/errors/skips), debug/uiTest APK assembly, Android-test Kotlin compilation and zero-error lint pass on the exact implementation commit above. The connected AndroidJUnitRunner task reached packaging but stopped with `No connected devices!`; no current-tree emulator/device result is claimed. Physical Samsung/Pixel/lower-memory, battery, external process-death/reboot and complete accessibility gates remain incomplete. |
+| Testing/device validation | **3/5** | Provider audit (78 definitions), pinned WhatsMyName integrity audit (716 records / 644 executable rules), both debug and uiTest JVM suites (631 tests across 109 suites each, 0 failures/errors/skips), debug/uiTest APK assembly, Android-test Kotlin compilation, zero-error lint and a focused 8/8 `BackgroundScanWorkManagerAndroidTest` emulator run pass on the exact implementation commit above. Full connected coverage, physical Samsung/Pixel/lower-memory, battery, external process-death/reboot and complete accessibility gates remain incomplete. |
 | **Total** | **76/100** | Declarative provider extraction, fail-closed redirect/WebView boundaries, interactive health installation, a configured-depth bounded frontier drain, exact-owner background pause/resume, bounded graph-provenance redaction, encrypted media persistence/history, historical attribute extraction and off-main UI persistence seams are now covered by current-tree tests and builds. This does not establish sole coordinator ownership, all-stage checkpoints, process-kill/reboot acceptance, registry-wide live validation, representative empirical calibration, connected-device acceptance or release hardening. |
 
 ## M0 — Baseline audit
@@ -336,7 +336,7 @@ External OSINT imports are local/in-memory and bounded. Import parsers require e
 Validated implementation commit:
 
 ```text
-805fe9c
+94e9311
 ```
 
 Validation date:
@@ -354,14 +354,15 @@ Debug JVM unit tests          PASS — 631 tests / 109 suites / 0 failures / 0 e
 uiTest JVM unit tests         PASS — 631 tests / 109 suites / 0 failures / 0 errors / 0 skips
 Android-test Kotlin compile  PASS — `compileUiTestAndroidTestKotlin`
 Debug APK                     PASS — 118,767,289 bytes / SHA-256 019998B218820359FFB7FCA7F88401B79554BCAE1E6E3E8F7E1B2FC1FF127040
-uiTest APK                    PASS — 243,320,368 bytes / SHA-256 370DAA368B9359DF5869FDD66D9A724A145D23382AD7AAD0C886BB0B49F738A3
+uiTest APK                    PASS — 243,319,921 bytes / SHA-256 846FD1ABC15523CCCB0BEAF90EA6F56BCB56542DD011B501D228E678409DADBC
+Android-test APK              PASS — 1,020,897 bytes / SHA-256 B90DF4FDDB291154044F8E07B89B5B4EB82BF09621D08DA43B59C96A85B4EEE6
 Debug lint                    PASS — 0 errors / 69 warnings
 uiTest lint                   PASS — 0 errors / 72 warnings
-Connected instrumentation    NOT RUN — `No connected devices!` after APK packaging
+Connected pause/resume test  PASS — 8 tests / 0 failures on API 36 `medium_phone` emulator; full connected suite not run
 Visual QA                     NOT RUN in this validation session
 ```
 
-The full JVM gate was run after the implementation commit with the declarative extractor, redirect-policy, WebView-policy, frontier-depth, AI-key, encrypted-plan-fingerprint, remote graph-provenance, encrypted result-store bounds, pause/resume lifecycle, media-history, off-main persistence and historical attribute tests included. The connected Android test task packaged the current APKs but could not launch AndroidJUnitRunner because no ADB device was connected. The uiTest-only receiver edit that was already present in the worktree remains uncommitted; the uiTest APK hash above therefore describes the current worktree artifact, not a clean checkout of the implementation commit. No current-tree emulator, physical-device, screenshot, process-death/reboot, accessibility or battery/thermal claim is made here.
+The deterministic JVM/build gate was run with the declarative extractor, redirect-policy, WebView-policy, frontier-depth, AI-key, encrypted-plan-fingerprint, remote graph-provenance, encrypted result-store bounds, pause/resume lifecycle, media-history, off-main persistence and historical attribute tests included. The focused Android test then ran on the API 36 `medium_phone` emulator and covered delayed exact-owner cancellation, durable Paused state, encrypted checkpoint retention, fresh-owner resume and request/generation binding. The uiTest-only receiver edit that was already present in the worktree remains uncommitted; the APK hashes above therefore describe current-worktree artifacts, not a clean checkout of the implementation commit. No physical-device, full-suite, screenshot, process-death/reboot, accessibility or battery/thermal claim is made here.
 
 ## Current production blockers
 

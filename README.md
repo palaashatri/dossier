@@ -11,7 +11,7 @@ The current implementation branch is **76/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-805fe9c
+94e9311
 ```
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
@@ -24,14 +24,16 @@ uiTest JVM unit tests               PASS — 631 tests / 109 suites / 0 failures
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
 Debug APK assembly                  PASS — 118,767,289 bytes
 Debug APK SHA-256                   019998B218820359FFB7FCA7F88401B79554BCAE1E6E3E8F7E1B2FC1FF127040
-uiTest APK assembly                 PASS — 243,320,368 bytes
-uiTest APK SHA-256                  370DAA368B9359DF5869FDD66D9A724A145D23382AD7AAD0C886BB0B49F738A3
+uiTest APK assembly                 PASS — 243,319,921 bytes
+uiTest APK SHA-256                  846FD1ABC15523CCCB0BEAF90EA6F56BCB56542DD011B501D228E678409DADBC
+Android-test APK                    PASS — 1,020,897 bytes
+Android-test APK SHA-256             B90DF4FDDB291154044F8E07B89B5B4EB82BF09621D08DA43B59C96A85B4EEE6
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
-Connected Android instrumentation  NOT RUN — `No connected devices!`
+Connected pause/resume test         PASS — 8 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The current validation session had no connected ADB device, so the connected Android test task stopped after packaging with `No connected devices!`. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Prior API 36 emulator evidence belongs to an earlier implementation commit and is not promoted to this tree. No current-tree claim is made for instrumentation, physical devices, process-death/reboot, accessibility, or battery/thermal behavior.
+The focused Android pause/resume test ran on the API 36 `medium_phone` emulator. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Full connected coverage, physical devices, process-death/reboot, accessibility, and battery/thermal behavior remain unvalidated.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, verified-account image correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
