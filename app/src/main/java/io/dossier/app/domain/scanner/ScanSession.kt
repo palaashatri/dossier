@@ -278,7 +278,8 @@ object ScanSession {
     suspend fun executeScan(
         context: Context,
         input: IdentityInput,
-        deepResearch: Boolean = false
+        deepResearch: Boolean = false,
+        requestId: String? = null
     ) = withContext(Dispatchers.IO) {
         val inputToUse = input
         _currentInput.value = inputToUse
@@ -307,7 +308,7 @@ object ScanSession {
             val variantGenerator = UsernameVariantGenerator()
             val profileScanner = ProfileScanner(context, piiExtractor, variantGenerator)
 
-            val scanResults = profileScanner.scanIdentity(inputToUse, deepResearch = deepResearch)
+            val scanResults = profileScanner.scanIdentity(inputToUse, deepResearch = deepResearch, requestId = requestId)
             currentCoroutineContext().ensureActive()
             _profileScanResults.value = scanResults
 

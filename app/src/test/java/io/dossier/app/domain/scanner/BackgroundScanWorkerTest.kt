@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.work.Data
 import androidx.work.WorkInfo
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -12,9 +13,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.lang.reflect.Proxy
 import java.io.File
+import java.time.Instant
 import java.util.UUID
 
 class BackgroundScanWorkerTest {
+
+    @Before
+    fun setUp() {
+        // Lifecycle JVM tests do not provide Android's Os-backed directory
+        // fsync implementation. Store durability is covered separately.
+        BackgroundScanManager.profileCheckpointClearer = { _, _ -> true }
+        BackgroundScanManager.profileCheckpointAllClearer = { true }
+        BackgroundScanManager.resumeStateAllClearer = { true }
+    }
 
     @After
     fun tearDown() {
@@ -648,6 +659,134 @@ class BackgroundScanWorkerTest {
 
         BackgroundScanManager.clearLatestResult(context)
         assertEquals(ScanLifecycleReadResult.Missing, store.read())
+    }
+
+    @Test
+    fun profileCleanupFailureRetainsExactLifecycleForRetry() {
+        val owner = "11111111-1111-4111-8111-111111111111"
+        val request = "22222222-2222-4222-8222-222222222222"
+        val generation = "33333333-3333-4333-8333-333333333333"
+        val prefs = FakePreferences()
+        val store = ScanLifecycleStore(prefs, nowEpochMillis = { 100L })
+        val succeeded = ScanLifecycleRecord(
+            ownerId = owner,
+            requestId = request,
+            generation = generation,
+            phase = ScanLifecyclePhase.Succeeded,
+            updatedAtEpochMillis = 100L,
+            resultReady = true,
+            errorCode = null
+        )
+        assertEquals(ScanLifecycleWriteResult.Saved, store.publish(succeeded))
+        BackgroundScanManager.lifecycleStoreProvider = { store }
+        BackgroundScanManager.profileCheckpointClearer = { _, _ -> false }
+        BackgroundScanManager.nowEpochMillis = { 110L }
+
+        assertFalse(BackgroundScanManager.clearLatestResult(fakeContext(prefs)))
+
+        val retained = (store.read() as ScanLifecycleReadResult.Available).record
+        assertEquals(owner, retained.ownerId)
+        assertEquals(request, retained.requestId)
+        assertEquals(generation, retained.generation)
+        assertEquals(ScanLifecyclePhase.CleanupPending, retained.phase)
+    }
+
+    @Test
+    fun profileScopeIsClearedBeforeRequestAndFailureShortCircuitsRequestDeletion() {
+        val request = "22222222-2222-4222-8222-222222222222"
+        val context = fakeContext(FakePreferences())
+        val calls = mutableListOf<String>()
+        BackgroundScanManager.profileCheckpointClearer = { _, exactRequest ->
+            calls += "profile:$exactRequest"
+            true
+        }
+
+        assertTrue(
+            BackgroundScanManager.clearProfileThenRequest(context, request) {
+                calls += "request:$request"
+                true
+            }
+        )
+        assertEquals(listOf("profile:$request", "request:$request"), calls)
+
+        calls.clear()
+        BackgroundScanManager.profileCheckpointClearer = { _, exactRequest ->
+            calls += "profile:$exactRequest"
+            false
+        }
+        assertFalse(
+            BackgroundScanManager.clearProfileThenRequest(context, request) {
+                calls += "request:$request"
+                true
+            }
+        )
+        assertEquals(listOf("profile:$request"), calls)
+    }
+
+    @Test
+    fun lifecycleMissingPurgeClearsAllProfilesBeforeAllResumeState() {
+        val calls = mutableListOf<String>()
+        BackgroundScanManager.profileCheckpointAllClearer = {
+            calls += "profiles"
+            true
+        }
+        BackgroundScanManager.resumeStateAllClearer = {
+            calls += "resume"
+            true
+        }
+
+        assertTrue(BackgroundScanManager.clearLatestResult(fakeContext(FakePreferences())))
+        assertEquals(listOf("profiles", "resume"), calls)
+
+        calls.clear()
+        BackgroundScanManager.profileCheckpointAllClearer = {
+            calls += "profiles"
+            false
+        }
+        assertFalse(BackgroundScanManager.clearLatestResult(fakeContext(FakePreferences())))
+        assertEquals(listOf("profiles"), calls)
+    }
+
+    @Test
+    fun explicitPurgeRetiresOwnedOrProvablyOlderResultOnly() {
+        val lifecycle = ScanLifecycleRecord(
+            ownerId = "11111111-1111-4111-8111-111111111111",
+            requestId = "22222222-2222-4222-8222-222222222222",
+            generation = "33333333-3333-4333-8333-333333333333",
+            phase = ScanLifecyclePhase.Failed,
+            updatedAtEpochMillis = Instant.parse("2026-08-24T12:00:00Z").toEpochMilli(),
+            resultReady = false,
+            errorCode = ScanLifecycleErrors.SCAN_EXECUTION_FAILED
+        )
+
+        assertTrue(
+            BackgroundScanManager.isResultSafeToRetire(
+                resultWorkId = lifecycle.ownerId,
+                completedAtUtc = "not-a-timestamp",
+                lifecycle = lifecycle
+            )
+        )
+        assertTrue(
+            BackgroundScanManager.isResultSafeToRetire(
+                resultWorkId = "44444444-4444-4444-8444-444444444444",
+                completedAtUtc = "2026-08-24T11:59:59Z",
+                lifecycle = lifecycle
+            )
+        )
+        assertFalse(
+            BackgroundScanManager.isResultSafeToRetire(
+                resultWorkId = "44444444-4444-4444-8444-444444444444",
+                completedAtUtc = "2026-08-24T12:00:01Z",
+                lifecycle = lifecycle
+            )
+        )
+        assertFalse(
+            BackgroundScanManager.isResultSafeToRetire(
+                resultWorkId = "44444444-4444-4444-8444-444444444444",
+                completedAtUtc = "not-a-timestamp",
+                lifecycle = lifecycle
+            )
+        )
     }
 
     @Test

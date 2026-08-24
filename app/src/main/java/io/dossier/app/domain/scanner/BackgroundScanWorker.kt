@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeoutOrNull
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
@@ -139,7 +140,7 @@ class BackgroundScanWorker(
                 }
             }
 
-            ScanSession.executeScan(applicationContext, input, deepResearch)
+            ScanSession.executeScan(applicationContext, input, deepResearch, requestId = requestId)
 
             if (!BackgroundScanManager.isCurrentOwner(applicationContext, workerId, generation)) {
                 return@coroutineScope Result.failure(failureData(ERROR_STALE_WORK_REQUEST))
@@ -364,6 +365,9 @@ object BackgroundScanManager {
     internal var lifecycleStoreProvider: (Context) -> ScanLifecycleStore = { ScanLifecycleStore(it) }
     internal var resumeStoreProvider: (Context) -> ScanResumeStore = { ScanResumeStore(it) }
     internal var resultStoreProvider: (Context) -> BackgroundScanResultStore = { BackgroundScanResultStore(it) }
+    internal var profileCheckpointClearer: (Context, String) -> Boolean = { ctx, reqId -> ProfileScanCheckpointStore.clearRequest(ctx, reqId) }
+    internal var profileCheckpointAllClearer: (Context) -> Boolean = { ProfileScanCheckpointStore.clearAll(it) }
+    internal var resumeStateAllClearer: (Context) -> Boolean = { ScanResumeStore(it).clear() }
     // Operation callbacks can synchronously invoke an already-completed
     // Future. Keep their default executor off the UI thread because
     // cancellation reconciliation performs an exact WorkManager lookup.
@@ -380,6 +384,9 @@ object BackgroundScanManager {
         lifecycleStoreProvider = { ScanLifecycleStore(it) }
         resumeStoreProvider = { ScanResumeStore(it) }
         resultStoreProvider = { BackgroundScanResultStore(it) }
+        profileCheckpointClearer = { ctx, reqId -> ProfileScanCheckpointStore.clearRequest(ctx, reqId) }
+        profileCheckpointAllClearer = { ProfileScanCheckpointStore.clearAll(it) }
+        resumeStateAllClearer = { ScanResumeStore(it).clear() }
         directExecutor = backgroundExecutor
     }
 
@@ -482,7 +489,8 @@ object BackgroundScanManager {
                     operation = operation,
                     context = appContext,
                     pendingRecord = pendingRecord,
-                    priorOwnerId = replacedOwnerId
+                    priorOwnerId = replacedOwnerId,
+                    priorRequestId = existingLifecycle?.requestId
                 )
             } catch (_: Exception) {
                 FaceCorrelationSessionPolicy.useBasicMatching()
@@ -492,7 +500,14 @@ object BackgroundScanManager {
                     transition = ScanLifecycleTransition.MarkFailed(BackgroundScanWorker.ERROR_ENQUEUE_FAILED),
                     nowEpochMillis = nowEpochMillis()
                 )
-                resumeStore.clearRequest(requestId)
+                if (!clearProfileThenRequest(
+                        context = appContext,
+                        requestId = requestId,
+                        clearRequest = { resumeStore.clearRequest(requestId) }
+                    )
+                ) {
+                    ScanSession.markBackgroundFailure(ScanLifecycleErrors.CLEANUP_FAILED)
+                }
                 throw BackgroundScanSchedulingException(BackgroundScanWorker.ERROR_ENQUEUE_FAILED)
             }
             return request.id
@@ -745,15 +760,25 @@ object BackgroundScanManager {
                 } ?: return@synchronized false
 
                 val snapshot = resultStore.load()
-                if (snapshot != null && snapshot.workId != cleanupRecord.ownerId) {
-                    // Preserve a newer generation's result.
+                if (snapshot != null && !isResultSafeToRetire(
+                        resultWorkId = snapshot.workId,
+                        completedAtUtc = snapshot.completedAtUtc,
+                        lifecycle = record
+                    )
+                ) {
+                    // Preserve a result that cannot be proven to belong to,
+                    // or predate, the lifecycle being explicitly purged.
                     return@synchronized false
                 }
                 val resumeStore = runCatching { resumeStoreProvider(appContext) }.getOrNull()
                     ?: return@synchronized false
                 val resultCleared = snapshot == null || resultStore.clear()
-                val requestCleared = resumeStore.clearRequest(cleanupRecord.requestId)
-                if (!resultCleared || !requestCleared) {
+                val requestStateCleared = resultCleared && clearProfileThenRequest(
+                    context = appContext,
+                    requestId = cleanupRecord.requestId,
+                    clearRequest = { resumeStore.clearRequest(cleanupRecord.requestId) }
+                )
+                if (!requestStateCleared) {
                     ScanSession.markBackgroundFailure(ScanLifecycleErrors.CLEANUP_FAILED)
                     return@synchronized false
                 }
@@ -768,8 +793,26 @@ object BackgroundScanManager {
             ScanLifecycleReadResult.Missing -> {
                 // With no lifecycle owner, only clear an existing result by
                 // the opaque owner embedded in that result; never infer a
-                // generation from unique-work list ordering.
-                return@synchronized resultStore.load()?.let { resultStore.clear() } ?: true
+                // generation from unique-work list ordering. Explicit purge
+                // also retires any request-scoped orphans left by a crashed
+                // replacement callback before clearing all resume state.
+                val resultCleared = resultStore.load()?.let { resultStore.clear() } ?: true
+                if (!resultCleared) return@synchronized false
+                val profilesCleared = runCatching {
+                    profileCheckpointAllClearer(appContext)
+                }.getOrDefault(false)
+                if (!profilesCleared) {
+                    ScanSession.markBackgroundFailure(ScanLifecycleErrors.CLEANUP_FAILED)
+                    return@synchronized false
+                }
+                val resumeCleared = runCatching {
+                    resumeStateAllClearer(appContext)
+                }.getOrDefault(false)
+                if (!resumeCleared) {
+                    ScanSession.markBackgroundFailure(ScanLifecycleErrors.CLEANUP_FAILED)
+                    return@synchronized false
+                }
+                return@synchronized true
             }
             is ScanLifecycleReadResult.Invalid,
             ScanLifecycleReadResult.StorageFailure -> {
@@ -777,6 +820,18 @@ object BackgroundScanManager {
                 return@synchronized false
             }
         }
+    }
+
+    internal fun isResultSafeToRetire(
+        resultWorkId: String,
+        completedAtUtc: String,
+        lifecycle: ScanLifecycleRecord
+    ): Boolean {
+        if (resultWorkId == lifecycle.ownerId) return true
+        val completedAtEpochMillis = runCatching {
+            Instant.parse(completedAtUtc).toEpochMilli()
+        }.getOrNull() ?: return false
+        return completedAtEpochMillis <= lifecycle.updatedAtEpochMillis
     }
 
     fun hasActiveMarker(context: Context): Boolean = synchronized(LIFECYCLE_LOCK) {
@@ -1245,6 +1300,7 @@ object BackgroundScanManager {
             }
             is ScanReconciliationAction.CleanupTerminal -> {
                 completeCleanupIfExact(
+                    context = appContext,
                     expected = action.expected,
                     lifecycleStore = lifecycleStore,
                     resumeStore = resumeStore,
@@ -1367,6 +1423,7 @@ object BackgroundScanManager {
             }
             is ScanReconciliationAction.CompleteCleanup -> {
                 completeCleanupIfExact(
+                    context = appContext,
                     expected = action.expected,
                     lifecycleStore = lifecycleStore,
                     resumeStore = resumeStore,
@@ -1424,6 +1481,7 @@ object BackgroundScanManager {
      * exact request cleanup and result cleanup succeed.
      */
     private fun completeCleanupIfExact(
+        context: Context,
         expected: ScanLifecycleRecord,
         lifecycleStore: ScanLifecycleStore,
         resumeStore: ScanResumeStore,
@@ -1448,7 +1506,12 @@ object BackgroundScanManager {
                 ScanSession.markBackgroundFailure(ScanLifecycleErrors.RESULT_MISMATCH)
                 return false
             }
-            if (!resumeStore.clearRequest(expected.requestId)) {
+            if (!clearProfileThenRequest(
+                    context = context.applicationContext,
+                    requestId = expected.requestId,
+                    clearRequest = { resumeStore.clearRequest(expected.requestId) }
+                )
+            ) {
                 ScanSession.markBackgroundFailure(ScanLifecycleErrors.CLEANUP_FAILED)
                 return false
             }
@@ -1498,8 +1561,12 @@ object BackgroundScanManager {
         // result can therefore mean an earlier unlink completed before a
         // crash; treat it as already cleared and continue the exact cleanup.
         val resultCleared = snapshot == null || resultStore.clear()
-        val requestCleared = resumeStore.clearRequest(expected.requestId)
-        if (!resultCleared || !requestCleared) {
+        val requestStateCleared = resultCleared && clearProfileThenRequest(
+            context = context.applicationContext,
+            requestId = expected.requestId,
+            clearRequest = { resumeStore.clearRequest(expected.requestId) }
+        )
+        if (!requestStateCleared) {
             ScanSession.markBackgroundFailure(ScanLifecycleErrors.CLEANUP_FAILED)
             return false
         }
@@ -1557,12 +1624,23 @@ object BackgroundScanManager {
         operation: androidx.work.Operation,
         context: Context,
         pendingRecord: ScanLifecycleRecord,
-        priorOwnerId: String?
+        priorOwnerId: String?,
+        priorRequestId: String? = null
     ) {
         operation.result.addListener(
             {
                 try {
                     operation.result.get()
+                    // The enqueue itself is now acknowledged. The replaced
+                    // request can be tombstoned even if a newer generation
+                    // superseded this callback before it ran; request IDs are
+                    // immutable and never reused. This closes A -> B -> C
+                    // callback chains that would otherwise strand A.
+                    if (priorRequestId != null && priorRequestId != pendingRecord.requestId) {
+                        runCatching {
+                            profileCheckpointClearer(context.applicationContext, priorRequestId)
+                        }
+                    }
                     synchronized(LIFECYCLE_LOCK) {
                         val lifecycleStore = lifecycleStoreProvider(context)
                         val current = lifecycleStore.read()
@@ -1611,13 +1689,38 @@ object BackgroundScanManager {
                                 transition = ScanLifecycleTransition.MarkFailed(BackgroundScanWorker.ERROR_ENQUEUE_FAILED),
                                 nowEpochMillis = nowEpochMillis()
                             )
-                            resumeStoreProvider(context).clearRequest(pendingRecord.requestId)
+                            val resumeStore = resumeStoreProvider(context)
+                            if (!clearProfileThenRequest(
+                                    context = context.applicationContext,
+                                    requestId = pendingRecord.requestId,
+                                    clearRequest = { resumeStore.clearRequest(pendingRecord.requestId) }
+                                )
+                            ) {
+                                ScanSession.markBackgroundFailure(ScanLifecycleErrors.CLEANUP_FAILED)
+                            }
                         }
                     }
                 }
             },
             directExecutor
         )
+    }
+
+    /**
+     * Profile observations must be removed before their encrypted scan request.
+     * Short-circuiting preserves the request and lifecycle for a later exact
+     * cleanup retry when profile deletion cannot be proven durable.
+     */
+    internal fun clearProfileThenRequest(
+        context: Context,
+        requestId: String,
+        clearRequest: () -> Boolean
+    ): Boolean {
+        val profileCleared = runCatching {
+            profileCheckpointClearer(context.applicationContext, requestId)
+        }.getOrDefault(false)
+        if (!profileCleared) return false
+        return runCatching(clearRequest).getOrDefault(false)
     }
 
     internal fun isSameLifecycleGeneration(

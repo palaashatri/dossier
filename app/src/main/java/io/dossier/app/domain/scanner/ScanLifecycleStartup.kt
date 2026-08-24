@@ -122,8 +122,17 @@ internal object ScanLifecycleStartup {
 
             val runner = ScanLifecycleStartupReconciler(
                 gateway = object : ScanLifecycleStartupGateway {
-                    override fun reconcile(): ScanReconciliationAction =
-                        BackgroundScanManager.reconcile(appContext)
+                    private var checkpointMaintenanceAttempted = false
+
+                    override fun reconcile(): ScanReconciliationAction {
+                        if (!checkpointMaintenanceAttempted) {
+                            checkpointMaintenanceAttempted = true
+                            if (!ProfileScanCheckpointStore.retireLegacyAndPrune(appContext)) {
+                                ScanSession.markBackgroundFailure(ScanLifecycleErrors.CLEANUP_FAILED)
+                            }
+                        }
+                        return BackgroundScanManager.reconcile(appContext)
+                    }
 
                     override fun execute(action: ScanReconciliationAction) {
                         BackgroundScanManager.executeReconciliation(appContext, action)

@@ -49,7 +49,7 @@ class ProfileScanner(
 
     private val providerRuntime = ProviderExecutionRuntime(client)
 
-    suspend fun scanIdentity(input: IdentityInput, deepResearch: Boolean = false): List<ProfileScanResult> {
+    suspend fun scanIdentity(input: IdentityInput, deepResearch: Boolean = false, requestId: String? = null): List<ProfileScanResult> {
         val scanId = ScanCoordinatorRuntime.claimProviderScanId()
         val results = mutableListOf<ProfileScanResult>()
 
@@ -170,24 +170,18 @@ class ProfileScanner(
         // confidence (user-supplied + exact-match candidates first) and take the
         // top N. Pivot discovery can still surface additional handles afterwards.
         val uniqueCandidates = allCandidates
-            .distinctBy { it.url }
+            .distinctBy { ProfileScanCheckpointStore.canonicalCandidateKey(it.url) }
             .sortedByDescending { it.confidence }
             .take(MAX_INITIAL_CANDIDATES)
 
-        // Queue real provider lifecycle events for catalog-backed candidates
-        uniqueCandidates.forEach { candidate ->
-            queueProviderCandidate(candidate, scanId)
-        }
-
         // ---- Pass 1: initial fan-out over name-variant / user-supplied candidates.
-        val initialResults = coroutineScope {
-            val deferredResults = uniqueCandidates.map { candidate ->
-                async(Dispatchers.IO) {
-                    fetchAndParse(candidate, input, provenance = null, scanId = scanId)
-                }
-            }
-            deferredResults.awaitAll()
-        }
+        val initialResults = executeInitialPass(
+            uniqueCandidates = uniqueCandidates,
+            input = input,
+            scanId = scanId,
+            requestId = requestId,
+            deepResearch = deepResearch
+        )
 
         // ---- Pass 2 (+ hop 2): multi-hop pivot discovery. For every profile
         // confirmed in pass 1, read its rendered content/links for OTHER handles
@@ -261,6 +255,33 @@ class ProfileScanner(
         }
 
         return initialResults + pivotResults + publicSearchResults + publicImageResults
+    }
+
+    private suspend fun executeInitialPass(
+        uniqueCandidates: List<UsernameCandidate>,
+        input: IdentityInput,
+        scanId: ScanId,
+        requestId: String?,
+        deepResearch: Boolean
+    ): List<ProfileScanResult> {
+        val planFingerprint = if (requestId != null && BackgroundScanWorker.isCanonicalUuid(requestId)) {
+            ProfileScanCheckpointStore.planFingerprint(input, deepResearch, uniqueCandidates)
+        } else null
+
+        val checkpointStore = if (requestId != null && planFingerprint != null) {
+            runCatching {
+                ProfileScanCheckpointStore(context, requestId, planFingerprint)
+            }.getOrNull()
+        } else null
+
+        return ProfileInitialPassExecutor.execute(
+            candidates = uniqueCandidates,
+            checkpoint = checkpointStore,
+            queueMiss = { candidate -> queueProviderCandidate(candidate, scanId) },
+            fetchMiss = { candidate ->
+                fetchAndParse(candidate, input, provenance = null, scanId = scanId)
+            }
+        )
     }
 
     /**
