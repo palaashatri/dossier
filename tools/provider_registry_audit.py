@@ -3,8 +3,9 @@
 
 This tool never performs network requests. It catches repository-level mistakes
 before runtime/live health checks: duplicate IDs, insecure profile templates,
-category drift, malformed priorities, parser drift, and inventory changes that
-require TRUTH.md review. Live-provider health remains a separate concern.
+category/capability/reliability drift, malformed priorities, unsafe URL
+placeholders/credentials, parser drift, and inventory changes that require
+TRUTH.md review. Live-provider health remains a separate concern.
 """
 
 from __future__ import annotations
@@ -16,18 +17,23 @@ import pathlib
 import re
 import sys
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "app/src/main/java/io/dossier/app/data/platform/ProviderCatalogV2.kt"
 TRUTH = ROOT / "TRUTH.md"
 
-CALL_ID_RE = re.compile(r'\b(?:p|service)\("(?P<id>[a-z0-9-]+)"')
+# Keep the source audit independent of the Kotlin compiler, but make the
+# parser deliberately broader than the production ID policy. Invalid IDs
+# should become actionable audit errors rather than disappearing from the
+# inventory and looking like a healthy, smaller catalog.
+CALL_ID_RE = re.compile(r'\b(?P<kind>p|service)\s*\(\s*"(?P<id>[^"]*)"')
 PROFILE_RE = re.compile(
-    r'p\("(?P<id>[a-z0-9-]+)",\s*"(?P<name>[^"]+)",\s*ProviderCategory\.(?P<category>[A-Za-z]+),\s*"(?P<template>[^"]+)",\s*(?P<priority>\d+)',
+    r'p\s*\(\s*"(?P<id>[^"]*)",\s*"(?P<name>[^"]*)",\s*ProviderCategory\.(?P<category>[A-Za-z]+),\s*"(?P<template>[^"]*)",\s*(?P<priority>-?\d+)',
     re.MULTILINE,
 )
 SERVICE_RE = re.compile(
-    r'service\("(?P<id>[a-z0-9-]+)",\s*"(?P<name>[^"]+)",\s*ProviderCategory\.(?P<category>[A-Za-z]+),\s*setOf\([^)]*\),\s*(?P<priority>\d+),\s*SourceReliability\.[A-Za-z]+\)',
+    r'service\s*\(\s*"(?P<id>[^"]*)",\s*"(?P<name>[^"]*)",\s*ProviderCategory\.(?P<category>[A-Za-z]+),\s*setOf\((?P<capabilities>[^)]*)\),\s*(?P<priority>-?\d+),\s*SourceReliability\.(?P<reliability>[A-Za-z]+)\s*\)',
     re.MULTILINE,
 )
 # Accept the canonical Markdown label whether it is bolded or not and whether
@@ -46,6 +52,9 @@ class Entry:
     category: str
     priority: int
     template: str | None
+    kind: str = "profile"
+    capabilities: tuple[str, ...] = ("Username",)
+    reliability: str | None = "DirectPublicProfile"
 
 
 def parse_catalog(text: str) -> tuple[list[Entry], list[str]]:
@@ -56,6 +65,9 @@ def parse_catalog(text: str) -> tuple[list[Entry], list[str]]:
             category=m.group("category"),
             priority=int(m.group("priority")),
             template=m.group("template"),
+            kind="profile",
+            capabilities=("Username",),
+            reliability="DirectPublicProfile",
         )
         for m in PROFILE_RE.finditer(text)
     ]
@@ -66,11 +78,128 @@ def parse_catalog(text: str) -> tuple[list[Entry], list[str]]:
             category=m.group("category"),
             priority=int(m.group("priority")),
             template=None,
+            kind="service",
+            capabilities=tuple(
+                capability
+                for capability in re.findall(
+                    r"\bQueryCapability\.([A-Za-z]+)", m.group("capabilities")
+                )
+            ),
+            reliability=m.group("reliability"),
         )
         for m in SERVICE_RE.finditer(text)
     )
     declared_ids = [m.group("id") for m in CALL_ID_RE.finditer(text)]
     return entries, declared_ids
+
+
+KNOWN_CATEGORIES = {
+    "Developer",
+    "Social",
+    "Forum",
+    "Gaming",
+    "Creative",
+    "Publishing",
+    "Professional",
+    "Media",
+    "Commerce",
+    "Education",
+    "CodeHosting",
+    "PackageRegistry",
+    "PersonalWebsite",
+    "PublicDirectory",
+    "Archive",
+    "BreachMetadata",
+    "SearchEngine",
+}
+KNOWN_CAPABILITIES = {
+    "Username",
+    "Name",
+    "Email",
+    "Phone",
+    "Domain",
+    "Url",
+    "Image",
+    "Archive",
+    "Breach",
+}
+KNOWN_RELIABILITIES = {
+    "AuthoritativeApi",
+    "DirectPublicProfile",
+    "DirectPersonalWebsite",
+    "ArchiveSnapshot",
+    "SearchCandidate",
+    "ThirdPartyAggregation",
+}
+ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+PLACEHOLDER_PATTERN = re.compile(r"\{([^{}]+)\}")
+
+
+def validate_entry(entry: Entry) -> list[str]:
+    """Return deterministic schema/policy errors for one parsed definition."""
+
+    errors: list[str] = []
+    provider_id = entry.provider_id or "<blank>"
+    if not ID_PATTERN.fullmatch(entry.provider_id):
+        errors.append(
+            f"{provider_id}: provider id must use lowercase letters, numbers and hyphens"
+        )
+    if not entry.name.strip():
+        errors.append(f"{provider_id}: display name must not be blank")
+    if entry.category not in KNOWN_CATEGORIES:
+        errors.append(f"{entry.provider_id}: unknown provider category {entry.category}")
+    if not 0 <= entry.priority <= 100:
+        errors.append(f"{entry.provider_id}: priority {entry.priority} outside 0..100")
+    if entry.kind not in {"profile", "service"}:
+        errors.append(f"{entry.provider_id}: unknown entry kind {entry.kind}")
+
+    unknown_capabilities = sorted(set(entry.capabilities) - KNOWN_CAPABILITIES)
+    if unknown_capabilities:
+        errors.append(
+            f"{entry.provider_id}: unknown query capabilities: {', '.join(unknown_capabilities)}"
+        )
+    if entry.kind == "service" and not entry.capabilities:
+        errors.append(f"{entry.provider_id}: service must declare at least one query capability")
+    if entry.reliability not in KNOWN_RELIABILITIES:
+        errors.append(
+            f"{entry.provider_id}: unknown source reliability {entry.reliability or '<missing>'}"
+        )
+
+    if entry.template is not None:
+        if entry.kind == "service":
+            errors.append(f"{entry.provider_id}: service must not declare a profile template")
+        template = entry.template
+        if not template.lower().startswith("https://"):
+            errors.append(f"{entry.provider_id}: profile template is not HTTPS")
+        if template.count("{username}") != 1:
+            errors.append(
+                f"{entry.provider_id}: username profile template must contain exactly one {{username}}"
+            )
+        placeholders = PLACEHOLDER_PATTERN.findall(template)
+        unknown_placeholders = sorted(set(placeholders) - {"username"})
+        if unknown_placeholders:
+            errors.append(
+                f"{entry.provider_id}: unsupported template placeholders: "
+                + ", ".join("{" + value + "}" for value in unknown_placeholders)
+            )
+        if any(character.isspace() or ord(character) < 0x20 for character in template):
+            errors.append(f"{entry.provider_id}: profile template contains whitespace/control characters")
+        try:
+            parsed = urlsplit(template.replace("{username}", "probe"))
+            hostname = parsed.hostname
+            username = parsed.username
+            password = parsed.password
+        except ValueError as exc:
+            errors.append(f"{entry.provider_id}: profile template URL is malformed ({exc})")
+        else:
+            if parsed.scheme.lower() != "https" or not hostname:
+                errors.append(f"{entry.provider_id}: profile template must have an HTTPS host")
+            if username or password:
+                errors.append(f"{entry.provider_id}: profile template must not contain URL credentials")
+    elif entry.kind == "profile":
+        errors.append(f"{entry.provider_id}: profile must declare a URL template")
+
+    return errors
 
 
 def audit(
@@ -81,8 +210,11 @@ def audit(
     errors: list[str] = []
     parsed_ids = [entry.provider_id for entry in entries]
 
+    normalized_declared_ids = [pid.strip().lower() for pid in declared_ids]
     declared_duplicates = sorted(
-        pid for pid, count in collections.Counter(declared_ids).items() if count > 1
+        pid
+        for pid, count in collections.Counter(normalized_declared_ids).items()
+        if count > 1
     )
     if declared_duplicates:
         errors.append(f"duplicate provider IDs: {', '.join(declared_duplicates)}")
@@ -99,15 +231,7 @@ def audit(
         errors.append("provider audit parser drift: " + "; ".join(detail))
 
     for entry in entries:
-        if not 0 <= entry.priority <= 100:
-            errors.append(f"{entry.provider_id}: priority {entry.priority} outside 0..100")
-        if entry.template is not None:
-            if not entry.template.startswith("https://"):
-                errors.append(f"{entry.provider_id}: profile template is not HTTPS")
-            if entry.template.count("{username}") != 1:
-                errors.append(
-                    f"{entry.provider_id}: username profile template must contain exactly one {{username}}"
-                )
+        errors.extend(validate_entry(entry))
 
     truth_match = TRUTH_COUNT_RE.search(truth_text)
     truth_count = int(truth_match.group(1)) if truth_match else None
@@ -119,13 +243,22 @@ def audit(
         )
 
     categories = collections.Counter(entry.category for entry in entries)
+    capabilities = collections.Counter(
+        capability for entry in entries for capability in entry.capabilities
+    )
+    reliabilities = collections.Counter(
+        reliability for entry in entries if (reliability := entry.reliability) is not None
+    )
     stats: dict[str, object] = {
         "providerCount": len(declared_ids),
         "profileTemplateCount": sum(entry.template is not None for entry in entries),
         "serviceCount": sum(entry.template is None for entry in entries),
         "categories": dict(sorted(categories.items())),
+        "capabilities": dict(sorted(capabilities.items())),
+        "reliabilities": dict(sorted(reliabilities.items())),
         "duplicateIds": declared_duplicates,
         "structuredParseCount": len(parsed_ids),
+        "invalidEntryCount": sum(bool(validate_entry(entry)) for entry in entries),
     }
     return errors, stats
 
