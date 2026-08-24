@@ -93,6 +93,40 @@ class MediaIntelligenceSnapshotPolicyTest {
         assertTrue(normalized.imageResults.all { it.visualClusters.isEmpty() })
     }
 
+    @Test
+    fun normalizeBoundsAndCanonicalizesExplicitAccountLinkageProvenance() {
+        val candidate = candidate("reviewed", null).copy(
+            accountLinkages = listOf(
+                ReverseImageLookupResult.ImageAccountLinkage(
+                    accountUrl = " HTTPS://WWW.Example.test/alice/?utm_source=fixture#profile ",
+                    basis = ReverseImageLookupResult.ImageAccountLinkageBasis.UserReviewed,
+                    evidenceIds = listOf(" evidence-1 ", "", "evidence-1", "evidence-2"),
+                    linkedAtEpochMillis = 42L
+                ),
+                ReverseImageLookupResult.ImageAccountLinkage(
+                    accountUrl = "https://example.test/alice",
+                    basis = ReverseImageLookupResult.ImageAccountLinkageBasis.UserReviewed,
+                    evidenceIds = listOf("different"),
+                    linkedAtEpochMillis = 43L
+                ),
+                ReverseImageLookupResult.ImageAccountLinkage(
+                    accountUrl = "ftp://example.test/alice",
+                    basis = ReverseImageLookupResult.ImageAccountLinkageBasis.UserReviewed,
+                    linkedAtEpochMillis = 44L
+                )
+            )
+        )
+
+        val normalized = MediaIntelligenceSnapshotPolicy.normalize(
+            MediaIntelligenceSnapshot(imageResults = listOf(sampleResult(listOf(candidate), emptyList())))
+        ).imageResults.single().visualCandidates.single()
+
+        assertEquals(1, normalized.accountLinkages.size)
+        assertEquals("https://example.test/alice", normalized.accountLinkages.single().accountUrl)
+        assertEquals(listOf("evidence-1", "evidence-2"), normalized.accountLinkages.single().evidenceIds)
+        assertEquals(42L, normalized.accountLinkages.single().linkedAtEpochMillis)
+    }
+
     private fun sampleResult(
         candidates: List<ReverseImageLookupResult.ImageCandidateProvenance>,
         clusters: List<ReverseImageLookupResult.ImageCluster>,

@@ -170,6 +170,29 @@ data class ReverseImageLookupResult(
         PerceptualNearDuplicate
     }
 
+    /**
+     * The provenance basis for an explicit image-to-account association.
+     *
+     * Neither basis is a person-identity assertion. VerifiedProfile means the
+     * candidate was observed on an account page whose account node was already
+     * directly verified. UserReviewed records an explicit operator review.
+     */
+    @Serializable
+    enum class ImageAccountLinkageBasis {
+        VerifiedProfile,
+        UserReviewed
+    }
+
+    @Serializable
+    data class ImageAccountLinkage(
+        val accountUrl: String,
+        val basis: ImageAccountLinkageBasis,
+        /** Evidence IDs supporting the account/page association, when available. */
+        val evidenceIds: List<String> = emptyList(),
+        /** Explicit review/association time; this is not an image capture time. */
+        val linkedAtEpochMillis: Long? = null
+    )
+
     @Serializable
     data class ImageCandidateProvenance(
         val id: String,
@@ -189,7 +212,12 @@ data class ReverseImageLookupResult(
         val comparisonScore: Float? = null,
         val exactBytes: Boolean = false,
         val state: ImageCandidateState = ImageCandidateState.Indexed,
-        val clusterId: String? = null
+        val clusterId: String? = null,
+        /**
+         * Explicit account associations are kept separate from visual scores.
+         * A visual match or cluster never populates this list automatically.
+         */
+        val accountLinkages: List<ImageAccountLinkage> = emptyList()
     )
 
     @Serializable

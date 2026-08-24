@@ -1,6 +1,7 @@
 package io.dossier.app.domain.place
 
 import io.dossier.app.domain.model.ReverseImageLookupResult
+import java.net.URI
 
 /**
  * Bounds and repairs persisted reverse-media provenance before it is rehydrated.
@@ -63,7 +64,8 @@ internal object MediaIntelligenceSnapshotPolicy {
                 candidate.copy(
                     clusterId = candidate.clusterId?.takeIf { clusterId ->
                         clusterId in clusterIds && candidate.id in clusterMembers[clusterId].orEmpty()
-                    }
+                    },
+                    accountLinkages = normalizeAccountLinkages(candidate.accountLinkages)
                 )
             },
             visualMatches = result.visualMatches
@@ -82,6 +84,40 @@ internal object MediaIntelligenceSnapshotPolicy {
         )
     }
 
+    /**
+     * Keep explicit account associations bounded and canonical without creating
+     * any new association. Account URLs are identifiers, so fragments and query
+     * parameters are discarded for deterministic saved-case matching.
+     */
+    private fun normalizeAccountLinkages(
+        linkages: List<ReverseImageLookupResult.ImageAccountLinkage>
+    ): List<ReverseImageLookupResult.ImageAccountLinkage> = linkages
+        .asSequence()
+        .mapNotNull { linkage ->
+            val accountUrl = canonicalAccountUrl(linkage.accountUrl) ?: return@mapNotNull null
+            val evidenceIds = linkage.evidenceIds
+                .asSequence()
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+                .take(MAX_EVIDENCE_IDS_PER_LINKAGE)
+                .toList()
+            linkage.copy(accountUrl = accountUrl, evidenceIds = evidenceIds)
+        }
+        .distinctBy { "${it.basis.name}|${it.accountUrl}" }
+        .take(MAX_ACCOUNT_LINKAGES_PER_CANDIDATE)
+        .toList()
+
+    private fun canonicalAccountUrl(raw: String): String? = runCatching {
+        val uri = URI(raw.trim())
+        val scheme = uri.scheme?.lowercase()?.takeIf { it == "http" || it == "https" }
+            ?: return null
+        val host = uri.host?.lowercase()?.removePrefix("www.")?.takeIf(String::isNotBlank)
+            ?: return null
+        val path = uri.path.orEmpty().trimEnd('/').ifBlank { "/" }
+        "$scheme://$host$path"
+    }.getOrNull()
+
     private const val MAX_IMAGE_RESULTS = 12
     private const val MAX_VIDEO_RESULTS = 6
     private const val MAX_CANDIDATES_PER_RESULT = 100
@@ -89,4 +125,6 @@ internal object MediaIntelligenceSnapshotPolicy {
     private const val MAX_CLUSTERS_PER_RESULT = 50
     private const val MAX_CLUSTER_MEMBERS = 100
     private const val MIN_CLUSTER_MEMBERS = 2
+    private const val MAX_ACCOUNT_LINKAGES_PER_CANDIDATE = 4
+    private const val MAX_EVIDENCE_IDS_PER_LINKAGE = 8
 }

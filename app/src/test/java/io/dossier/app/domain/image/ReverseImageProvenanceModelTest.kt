@@ -31,7 +31,15 @@ class ReverseImageProvenanceModelTest {
             comparisonScore = 0.91f,
             exactBytes = false,
             state = ReverseImageLookupResult.ImageCandidateState.Matched,
-            clusterId = "imgcluster:cluster-one"
+            clusterId = "imgcluster:cluster-one",
+            accountLinkages = listOf(
+                ReverseImageLookupResult.ImageAccountLinkage(
+                    accountUrl = "https://example.test/profile",
+                    basis = ReverseImageLookupResult.ImageAccountLinkageBasis.VerifiedProfile,
+                    evidenceIds = listOf("profile-evidence"),
+                    linkedAtEpochMillis = 1_786_147_200_000L
+                )
+            )
         )
         val result = ReverseImageLookupResult(
             gps = null,

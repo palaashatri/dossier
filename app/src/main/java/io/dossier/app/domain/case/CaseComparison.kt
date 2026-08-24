@@ -7,6 +7,7 @@ import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.ReverseImageLookupResult
+import io.dossier.app.domain.model.ReverseImageLookupResult.ImageAccountLinkageBasis
 import io.dossier.app.domain.model.RiskLevel
 import java.net.URI
 import java.util.Locale
@@ -56,6 +57,39 @@ class CaseComparison {
 
         val memberCount: Int
             get() = observations.sumOf { observation -> observation.members.size }
+    }
+
+    /**
+     * One persisted, explicit account association observed for a media candidate.
+     * The fingerprint is image-content provenance only; it is never an identity key.
+     */
+    data class MediaAccountLinkageObservation(
+        val caseId: String,
+        val caseLabel: String,
+        val candidateId: String,
+        val accountUrl: String,
+        val basis: ImageAccountLinkageBasis,
+        val sourcePageUrl: String,
+        val linkedAtEpochMillis: Long?,
+        val evidenceIds: List<String>,
+        val fingerprintType: ReverseImageLookupResult.ImageClusterType?,
+        val fingerprint: String?
+    )
+
+    /**
+     * Bounded saved-case history for explicit account/image associations.
+     * Entries are grouped only by the account URL plus an exact/perceptual
+     * candidate fingerprint. Candidates without a fingerprint remain case-local.
+     */
+    data class MediaAccountLinkageHistoryEntry(
+        val historyKey: String,
+        val accountUrl: String,
+        val fingerprintType: ReverseImageLookupResult.ImageClusterType?,
+        val fingerprint: String?,
+        val observations: List<MediaAccountLinkageObservation>
+    ) {
+        val caseCount: Int
+            get() = observations.map(MediaAccountLinkageObservation::caseId).distinct().size
     }
 
     data class FindingChange(
@@ -396,10 +430,105 @@ class CaseComparison {
             }
     }
 
+    /**
+     * Returns explicit account-linkage history without deriving ownership from
+     * image similarity. A repeated fingerprint only groups provenance reviews;
+     * it does not merge accounts or assert that the same person is depicted.
+     */
+    fun mediaAccountLinkageHistory(
+        cases: List<DossierCase>
+    ): List<MediaAccountLinkageHistoryEntry> {
+        val groups = linkedMapOf<String, MutableAccountHistoryGroup>()
+        val seenObservations = hashSetOf<String>()
+
+        cases.takeLast(MAX_MEDIA_HISTORY_CASES).forEach { case ->
+            case.mediaIntelligence.imageResults
+                .takeLast(MAX_IMAGE_RESULTS_PER_CASE)
+                .forEach { result ->
+                    result.visualCandidates
+                        .asSequence()
+                        .filter { candidate -> candidate.id.isNotBlank() }
+                        .distinctBy(ReverseImageLookupResult.ImageCandidateProvenance::id)
+                        .take(MAX_CANDIDATES_PER_RESULT)
+                        .forEach { candidate ->
+                            val fingerprint = mediaLinkageFingerprint(candidate)
+                            candidate.accountLinkages
+                                .asSequence()
+                                .filter { linkage -> linkage.accountUrl.isNotBlank() }
+                                .distinctBy { linkage ->
+                                    "${linkage.basis.name}|${canonicalMediaAccountTarget(linkage.accountUrl).orEmpty()}"
+                                }
+                                .take(MAX_ACCOUNT_LINKAGES_PER_CANDIDATE)
+                                .forEach { linkage ->
+                                    val accountTarget = canonicalMediaAccountTarget(linkage.accountUrl)
+                                        ?: return@forEach
+                                    val observationKey = listOf(
+                                        case.caseId,
+                                        candidate.id,
+                                        linkage.basis.name,
+                                        accountTarget
+                                    ).joinToString("|")
+                                    if (!seenObservations.add(observationKey)) return@forEach
+
+                                    val historyKey = if (fingerprint != null) {
+                                        "account:$accountTarget|${fingerprint.first.name}:${fingerprint.second}"
+                                    } else {
+                                        "case:${case.caseId}|candidate:${candidate.id}|account:$accountTarget"
+                                    }
+                                    val group = groups.getOrPut(historyKey) {
+                                        MutableAccountHistoryGroup(
+                                            accountUrl = linkage.accountUrl.trim(),
+                                            fingerprintType = fingerprint?.first,
+                                            fingerprint = fingerprint?.second
+                                        )
+                                    }
+                                    if (group.observations.size < MAX_OBSERVATIONS_PER_HISTORY_ENTRY) {
+                                        group.observations += MediaAccountLinkageObservation(
+                                            caseId = case.caseId,
+                                            caseLabel = case.label,
+                                            candidateId = candidate.id,
+                                            accountUrl = linkage.accountUrl.trim(),
+                                            basis = linkage.basis,
+                                            sourcePageUrl = candidate.sourcePageUrl,
+                                            linkedAtEpochMillis = linkage.linkedAtEpochMillis,
+                                            evidenceIds = linkage.evidenceIds
+                                                .map(String::trim)
+                                                .filter(String::isNotBlank)
+                                                .distinct()
+                                                .take(MAX_EVIDENCE_IDS_PER_LINKAGE),
+                                            fingerprintType = fingerprint?.first,
+                                            fingerprint = fingerprint?.second
+                                        )
+                                    }
+                                }
+                        }
+                }
+        }
+
+        return groups.entries
+            .take(MAX_HISTORY_ENTRIES)
+            .map { (historyKey, group) ->
+                MediaAccountLinkageHistoryEntry(
+                    historyKey = historyKey,
+                    accountUrl = group.accountUrl,
+                    fingerprintType = group.fingerprintType,
+                    fingerprint = group.fingerprint,
+                    observations = group.observations.toList()
+                )
+            }
+    }
+
     private data class MutableHistoryGroup(
         val type: ReverseImageLookupResult.ImageClusterType,
         val fingerprint: String?,
         val observations: MutableList<MediaClusterObservation> = mutableListOf()
+    )
+
+    private data class MutableAccountHistoryGroup(
+        val accountUrl: String,
+        val fingerprintType: ReverseImageLookupResult.ImageClusterType?,
+        val fingerprint: String?,
+        val observations: MutableList<MediaAccountLinkageObservation> = mutableListOf()
     )
 
     private fun toMediaClusterMember(
@@ -435,6 +564,37 @@ class CaseComparison {
             .joinToString(",")
             .takeIf(String::isNotBlank)
     }
+
+    private fun mediaLinkageFingerprint(
+        candidate: ReverseImageLookupResult.ImageCandidateProvenance
+    ): Pair<ReverseImageLookupResult.ImageClusterType, String>? {
+        val exact = candidate.contentSha256
+            ?.trim()
+            ?.lowercase(Locale.ROOT)
+            ?.takeIf { it.isNotBlank() && it.length <= MAX_FINGERPRINT_LENGTH }
+        if (exact != null) {
+            return ReverseImageLookupResult.ImageClusterType.ExactContent to exact
+        }
+        val perceptual = candidate.perceptualHashHex
+            ?.trim()
+            ?.lowercase(Locale.ROOT)
+            ?.takeIf { it.isNotBlank() && it.length <= MAX_FINGERPRINT_LENGTH }
+        return perceptual?.let {
+            ReverseImageLookupResult.ImageClusterType.PerceptualNearDuplicate to it
+        }
+    }
+
+    private fun canonicalMediaAccountTarget(raw: String): String? = runCatching {
+        val uri = URI(raw.trim())
+        val scheme = uri.scheme?.lowercase(Locale.ROOT)
+            ?.takeIf { it == "http" || it == "https" }
+            ?: return null
+        val host = uri.host?.lowercase(Locale.ROOT)?.removePrefix("www.")
+            ?.takeIf(String::isNotBlank)
+            ?: return null
+        val path = uri.path.orEmpty().trimEnd('/').ifBlank { "/" }
+        "$scheme://$host$path"
+    }.getOrNull()
 
     private data class MediaState(
         val contentHashes: Set<String>,
@@ -655,6 +815,8 @@ class CaseComparison {
         const val MAX_HISTORY_ENTRIES = 128
         const val MIN_CLUSTER_MEMBERS = 2
         const val MAX_FINGERPRINT_LENGTH = 256
+        const val MAX_ACCOUNT_LINKAGES_PER_CANDIDATE = 4
+        const val MAX_EVIDENCE_IDS_PER_LINKAGE = 8
         const val MAX_REMEDIATION_EVIDENCE_RECORDS = 256
     }
 }
