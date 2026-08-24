@@ -6,12 +6,12 @@ It collects public evidence, preserves provenance, separates verification from r
 
 ## Current status
 
-The current implementation branch is **76/100 under the strict production rubric**.
+The current implementation branch is **80/100 under the strict production rubric**.
 
 Validated implementation commit:
 
 ```text
-02fb506
+deed6fd
 ```
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
@@ -19,21 +19,21 @@ That exact implementation passed the current final-tree build and deterministic 
 ```text
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
-Debug JVM unit tests                PASS — 644 tests / 110 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 644 tests / 110 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 657 tests / 110 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 657 tests / 110 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 118,780,131 bytes
-Debug APK SHA-256                   82DCDCAF23E11120C273F411F1A3AEF12802536F3BADEDA9F70237F9D84963C6
-uiTest APK assembly                 PASS — 243,319,921 bytes
-uiTest APK SHA-256                  31E646AE024BE15DC3A47F54470ED36928B0ADB3BEC88AB9EC6E3392B8752AB9
-Android-test APK                    PASS — 1,020,897 bytes
-Android-test APK SHA-256             B90DF4FDDB291154044F8E07B89B5B4EB82BF09621D08DA43B59C96A85B4EEE6
+Debug APK assembly                  PASS — 118,821,177 bytes
+Debug APK SHA-256                   9F47E9A21A7805A743C65CF72C49655EADC5390E0CB7F3C35A54313858E62758
+uiTest APK assembly                 PASS — 243,840,123 bytes
+uiTest APK SHA-256                  F8C1A023DC611DAC8897EBD6AAF700E21BDEBF7DEE9BD92D69B489BDC8105FFF
+Android-test APK                    PASS — 1,051,527 bytes
+Android-test APK SHA-256             E93ACD665F5DBC7990A27A11D02560087C90ABEC01372D3BBF748C8C0D4EE70F
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
-Connected uiTest suite              PASS — 40 tests / 0 failures on API 36 `medium_phone` emulator
+Connected uiTest suite              PASS — 41 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the 8 WorkManager pause/resume tests. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Physical devices, process-death/reboot, accessibility, and battery/thermal behavior remain unvalidated.
+The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel and 8 WorkManager pause/resume tests. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Physical devices, process-death/reboot, accessibility, and battery/thermal behavior remain unvalidated.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, verified-account image correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
@@ -67,6 +67,7 @@ These captures come from the API 36 Medium Phone emulator. Analysis, report, cas
 - Direct-profile candidates execute through the declarative provider runtime with live selector-driven extraction, bounded reads, timeout/retry/cooldown policy, provider request spacing, exact/approved-host redirect checks, HTTPS-downgrade rejection and a generic non-impersonating user agent.
 - Real queued, started, completed and unavailable callbacks drive scheduled/completed/unavailable counters; planned registry breadth is not presented as completed work.
 - Persisted aggregate provider outcomes can be assessed against the exact catalog (including explicit Unvalidated, Healthy, Degraded, Unavailable and Stale states); health buckets are maintenance diagnostics, not evidence confidence or live-validation claims.
+- The username-discovery flow surfaces the persisted catalog-health report with a bounded nonhealthy preview and explicit wording that catalog membership, HTTP 200 or search hits are not live validation.
 - Registry validation for duplicates, malformed templates, parser drift and inventory drift.
 - Deterministic response states for present, not-found, soft-404, authentication-required, challenged, rate-limited, timed-out, network-unavailable, redirect, unexpected and invalid responses.
 - Multiple bounded public-search sources, direct source verification, retries, `Retry-After`, caches and circuit breakers.
@@ -78,6 +79,8 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 ## Scan orchestration and history
 
 - `ScanCoordinatorRuntime` wraps the mature vertical scan pipeline.
+- Encrypted request checkpoints retain allow-listed stage names plus bounded item/verified/omitted counts for completed major stages; incomplete stage outputs remain eligible for rerun.
+- Saved-case comparison exposes source-scoped historical/provider changes and remediation rechecks with exact evidence IDs and only newer successful scan IDs; missing or unavailable observations are not reported as deletion.
 - Structured scan IDs, requests, run states and events.
 - Live UI state derives from real scan-stage/profile/face/breach/graph/analysis observations.
 - Direct-profile execution emits provider queued/started/completed/unavailable events with one stable scan ID; retries do not inflate unique started counts and stale callbacks are ignored.
@@ -86,7 +89,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - New encrypted scan requests commit a deterministic SHA-256 fingerprint of the selected declarative provider plan plus a bounded ordered provider-ID summary; older request records remain explicitly resumable without being assigned a retroactive plan.
 - The configured-depth pivot path now uses a request-scoped encrypted frontier with queued, visited and completed state, conservative admission, global/per-signal budgets, bounded rejection diagnostics and durable clear tombstones. A cancelled or thrown pivot attempt remains pending for a later exact-scope worker retry.
 - Background WorkManager scans now expose exact-owner `Pausing`/`Paused` lifecycle states, retain encrypted checkpoints through terminal cancellation, resume with a fresh work UUID bound to the same request/generation, and surface pause/resume controls in Background analysis.
-- The exact owner also writes an encrypted, allow-listed semantic stage ledger (profile discovery, face, breach, graph, scoring, exposure, AI, post-processing and completion); sanitized checkpoint events update the coordinator snapshot without persisting URLs, identifiers or response text.
+- The exact owner also writes an encrypted, allow-listed semantic stage ledger (profile discovery, face, breach, graph, scoring, exposure, AI, post-processing and completion) plus bounded item/verified/omitted counts for completed major stages; sanitized checkpoint events update the coordinator snapshot without persisting URLs, identifiers or response text.
 - Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
 - Background enqueue now publishes a generation-bound lifecycle before replacing the old exact WorkManager UUID, promotes only that prepared encrypted request, and reenqueues the same UUID after an authoritative missing-row crash boundary.
 - The worker claims the exact owner/request/generation, publishes the encrypted result before durable success, and treats an exact matching result as idempotent success if WorkManager retries after the success-commit boundary.
@@ -97,7 +100,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
 - Later case edits cannot silently attach a newer scan to an older case.
 
-Recovery now covers stable initial direct-profile outcomes, the configured-depth pivot frontier, an exact-owner background pause/resume lifecycle, and encrypted semantic stage-boundary metadata. A coordinator-owned general plan, persisted search/image/breach/AI outputs, sole coordinator ownership and full-stage resume semantics remain incomplete. Pivot diagnostics are persisted and the background pause state is surfaced, while some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
+Recovery now covers stable initial direct-profile outcomes, the configured-depth pivot frontier, an exact-owner background pause/resume lifecycle, encrypted semantic stage-boundary metadata and bounded completed-stage output counts. A coordinator-owned general plan, persisted search/image/frontier payloads, sole coordinator ownership and full-stage resume semantics remain incomplete. Pivot diagnostics are persisted and the background pause state is surfaced, while some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
 
 ## Evidence, graph and entity resolution
 
@@ -106,6 +109,7 @@ Recovery now covers stable initial direct-profile outcomes, the configured-depth
 - Evidence records can retain provider ID, URL, retrieval/observation timestamps, verification state, reliability, SHA-256, parser version and historical/current state.
 - Numeric confidence is separate from verification state.
 - Graph v2 provides semantic node kinds, typed relationships, evidence IDs, contradiction IDs, history fields and verification/conflict state while retaining saved-case compatibility.
+- Legacy relationship provenance is migrated only through exact existing endpoint/source evidence matches; graph queries expose both positive and contradicting evidence links.
 - Multi-signal account resolution is integrated into the production graph.
 - A deterministic benchmark harness reports confusion-matrix counts, precision, recall, F1, false-positive rate, false-negative rate and unverifiable-case accuracy over digest-bound corpora.
 - Calibration artifacts are schema/version/digest/policy checked; synthetic fixtures cannot activate production policy, and consented artifacts must meet minimum positive/negative sample counts before exact-corpus activation.
@@ -151,7 +155,7 @@ Verified-account correlation and independent visual acceptance remain incomplete
 - Untimestamped observations are omitted rather than assigned fabricated dates.
 - Directly re-fetched Wayback HTML is parsed with bounded fail-soft rules for explicit historical display name, bio, username, avatar URL, external links, organization and location attributes. These retain archive reliability, capture timestamps, historical state and semantic attribute labels in the timeline and graph.
 
-Equivalent extraction across every archive/provider source and complete change-diff UX remain incomplete.
+Equivalent extraction across every archive/provider source and universal archive timestamp propagation remain incomplete; saved-case comparison now provides bounded source-scoped historical/provider change diffing with explicit unavailable and not-observed states.
 
 ## Breach checks
 
@@ -175,7 +179,7 @@ Equivalent extraction across every archive/provider source and complete change-d
 - Remote processing remains opt-in and disclosed.
 - Remote graph entities and relationships carry bounded pseudonymized references to supporting and contradicting evidence from the same evidence window; raw local evidence IDs do not cross the remote boundary.
 
-A production AI evaluation corpus and fully corrected-graph/remediation-native model inputs remain incomplete.
+A production-sized/adversarial AI evaluation corpus remains incomplete; corrected/remediation-native validation is bounded and wired on every model path.
 
 ## Encrypted cases, corrections and remediation
 
@@ -191,6 +195,7 @@ A production AI evaluation corpus and fully corrected-graph/remediation-native m
 - Remediation states: Not started, In progress, Submitted, Awaiting response, Completed, Rejected and Needs manual action.
 - Differential comparison classifies added, removed, changed and unchanged findings.
 - Recheck UI distinguishes **Still observed**, **Not observed in latest scan**, **Workflow status changed** and **Not rechecked**.
+- Recheck rows retain the exact observed evidence ID and only a newer successful verification scan ID; failed/cancelled scans remain **Not rechecked**.
 - `Not observed in latest scan` explicitly does **not** mean verified deletion from every live page, search index, cache or archive.
 
 ## Reports and share-safe export
@@ -247,7 +252,7 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - `ProviderCatalogV2` has 78 authored definitions, while the separate pinned WhatsMyName catalog has 716 records and 644 executable HTTPS username rules; this remains below the 1,000+ useful reviewed-provider target and does not establish live health.
 - Private, authenticated, blocked, never-indexed and never-archived content cannot be discovered reliably.
 - Providers can change markup, challenge requests, rate-limit or omit content.
-- Some custom resolver operations still bypass unified provider lifecycle events; a coordinator-owned general plan and persisted non-profile/image/search/breach/AI stage outputs remain incomplete. Background pause/resume is exact-owner bounded rather than a universal coordinator pause contract.
+- Some custom resolver operations still bypass unified provider lifecycle events; a coordinator-owned general plan and persisted search/image/frontier payloads remain incomplete. Background pause/resume is exact-owner bounded rather than a universal coordinator pause contract.
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
 - Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
 - Replacement-generation cleanup is best effort after WorkManager enqueue acknowledgement. A crash or cleanup failure in that narrow hand-off can retain an encrypted prior-request profile scope until explicit purge or later maintenance; a durable retirement ledger remains open.
@@ -255,7 +260,7 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - Entity resolution has deterministic metrics and a fail-closed calibration-artifact path, but still needs a consented representative corpus and published measured calibration before weights can be treated as empirically fitted.
 - Verified-account correlation and richer cross-scan image change workflows remain open; bounded candidate/cluster provenance persistence and saved-case fingerprint history review are implemented.
 - Cross-photo face correlation still requires measured ROC/FAR/FRR and representative physical-device validation.
-- Historical extraction is currently strongest for directly re-fetched Wayback HTML; archive/provider-wide change extraction remains incomplete.
+- Historical extraction is currently strongest for directly re-fetched Wayback HTML; archive/provider-wide structured extraction and universal timestamp propagation remain incomplete even though bounded source-scoped change diffing is available.
 - HIBP email coverage depends on user-supplied supported access and provider availability.
 - Share-safe redaction reduces disclosure but cannot guarantee anonymity.
 - Visual QA currently covers one API 36 emulator viewport with synthetic data. The changed scan-budget and bottom-navigation states were checked at 1.0x, 1.3x, 1.5x and 2.0x font scale, but this does not establish whole-product accessibility, landscape/tablet or physical-device acceptance.
