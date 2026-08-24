@@ -6,24 +6,25 @@ It collects public evidence, preserves provenance, separates verification from r
 
 ## Current status
 
-The current implementation branch is **64/100 under the strict production rubric**.
+The current implementation branch is **65/100 under the strict production rubric**.
 
 Validated implementation commit:
 
 ```text
-22a3ff7a1162683fd7b0ccd212eda99ac5eb1a08
+107fd3119e1efcc3ed698e2c93925ee4c183c704
 ```
 
 That exact implementation passed the current final-tree validation gates:
 
 ```text
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
-Debug JVM unit tests                PASS — 448 tests / 85 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 448 tests / 85 suites / 0 failures, errors, or skips
-Debug APK assembly                  PASS — 115,014,478 bytes
-Debug APK SHA-256                   17A627D1FF3AC916E0B6DA2FAA44382FEF69A9AFDC442F0C3D4F33449C67C993
-uiTest APK assembly                 PASS — 242,449,051 bytes
-uiTest APK SHA-256                  AE079F82D6486F36887F913AFA6CE33126C6B9C2753D772CD0764D940ED9B3A8
+WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
+Debug JVM unit tests                PASS — 462 tests / 88 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 462 tests / 88 suites / 0 failures, errors, or skips
+Debug APK assembly                  PASS — 115,073,512 bytes
+Debug APK SHA-256                   F6A4E446F0FBCF22C5873E8BEC50923F7CBB25C2C24444495CE60E5174D318F5
+uiTest APK assembly                 PASS — 242,473,401 bytes
+uiTest APK SHA-256                  A0DC65356BB0F84FF7B35D34701B5B8CEBCD9AB6BFEC850DD02792BBD5BAFC51
 Debug lint                          PASS — 0 errors / 65 warnings / 6 hints
 uiTest lint                         PASS — 0 errors / 68 warnings / 6 hints
 API 36 x86_64 instrumentation       PASS — 21/21 tests
@@ -37,11 +38,11 @@ See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the
 
 ## Visual walkthrough
 
-These captures come from the API 36 Medium Phone emulator. Analysis, report, case and provider-progress states use deterministic **uiTest-only** fixtures; case data is written through the production encrypted stores and provider counters are emitted through the production coordinator callbacks. All identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish TalkBack, full large-font, reduced-motion, adaptive-layout or physical-device acceptance.
+These captures come from the API 36 Medium Phone emulator. Analysis, report, case and provider-progress states use deterministic **uiTest-only** fixtures; case data is written through the production encrypted stores and provider counters are emitted through the production coordinator callbacks. All identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. The updated scan-budget screen and bottom navigation were also inspected at 1.0x, 1.3x, 1.5x and 2.0x font scale. Static screenshots do not establish TalkBack, whole-product large-font, reduced-motion, adaptive-layout or physical-device acceptance.
 
 | Consent and input validation | Scan configuration |
 |---|---|
-| <img src="docs/screenshots/01-onboarding.png" width="320" alt="Dossier one-time usage notice with all consent copy clear of the Continue button"> | <img src="docs/screenshots/06-scan-configuration.png" width="320" alt="Scan depth configuration showing real direct-profile provider counts"> |
+| <img src="docs/screenshots/01-onboarding.png" width="320" alt="Dossier one-time usage notice with all consent copy clear of the Continue button"> | <img src="docs/screenshots/06-scan-configuration.png" width="320" alt="Scan depth configuration separating direct-profile counts from pinned HTTPS username-rule budgets"> |
 | <img src="docs/screenshots/03-identity-invalid-email.png" width="320" alt="Identity form showing an invalid email message and disabled Continue button"> | <img src="docs/screenshots/07-scan-progress.png" width="320" alt="Live scan showing scheduled, completed and unavailable provider counters with separate background and cancel actions"> |
 
 | Background analysis | Evidence-oriented report |
@@ -55,8 +56,10 @@ These captures come from the API 36 Medium Phone emulator. Analysis, report, cas
 ## Discovery Fabric
 
 - Typed declarative provider registry with **78 authored provider/service definitions**.
+- Separately pinned WhatsMyName username-surface catalog with **716 source records and 644 executable HTTPS rules** after parser and policy filtering. These are not 644 additional registry definitions or live-validated providers.
+- Catalog bytes and the bundled CC BY-SA 4.0 license are pinned to upstream commit `e62338e4fc88536a330733d355a9d33a3a1697c6` and checked by exact SHA-256 before release evidence is recorded.
 - Developer, social, forum, gaming, creative, publishing, professional, media, commerce, education, code/package, personal-site, archive, breach and search categories.
-- Quick, Standard, Deep and Exhaustive scan modes backed by real provider plans rather than fake totals.
+- Quick, Standard, Deep and Exhaustive scan modes backed by real provider plans rather than fake totals. Username-rule budgets are 50 / 200 / 500 / 644 per normalized handle, with at most three explicit handles; direct-profile counts remain separate.
 - Provider query capabilities, source-reliability classes, existence/extraction rules and request policies.
 - Direct-profile candidates execute through the declarative provider runtime with bounded reads, timeout/retry/cooldown policy, provider request spacing, redirect checks and a generic non-impersonating user agent.
 - Real queued, started, completed and unavailable callbacks drive scheduled/completed/unavailable counters; planned registry breadth is not presented as completed work.
@@ -66,7 +69,7 @@ These captures come from the API 36 Medium Phone emulator. Analysis, report, cas
 - Bounded two-hop pivots with admission rules: weak name/location/occupation/face-only signals do not recursively expand by themselves.
 - Exact-URL Internet Archive recovery for some deleted/replaced pages.
 
-The long-term contract calls for 1,000+ useful reviewed definitions. The current 78 definitions are not presented as registry-wide live validated.
+The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCatalogV2` currently contains 78 authored definitions (70 profile templates and 8 services); the separate pinned WhatsMyName catalog contains 716 records, of which 644 are executable HTTPS username rules. Neither count is presented as registry-wide live validation.
 
 ## Scan orchestration and history
 
@@ -205,6 +208,7 @@ Core checks:
 
 ```sh
 python3 tools/provider_registry_audit.py
+pwsh -File tools/verify_whatsmyname_catalog.ps1
 ./gradlew :app:testDebugUnitTest
 ./gradlew :app:assembleDebug
 ./gradlew :app:connectedUiTestAndroidTest
@@ -222,10 +226,10 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 
 ## Known limitations
 
-- 78 declarative definitions is not the 1,000+ reviewed/live-validated provider target.
+- `ProviderCatalogV2` has 78 authored definitions, while the separate pinned WhatsMyName catalog has 716 records and 644 executable HTTPS username rules; this remains below the 1,000+ useful reviewed-provider target and does not establish live health.
 - Private, authenticated, blocked, never-indexed and never-archived content cannot be discovered reliably.
 - Providers can change markup, challenge requests, rate-limit or omit content.
-- Provider-level live events, true pause/resume and persisted recursive-frontier recovery are incomplete.
+- Some custom resolver operations still bypass unified provider lifecycle events; true pause/resume and persisted recursive-frontier recovery are incomplete.
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
 - Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
 - Latest-result decrypt/deserialize and purge paths still include synchronous call sites, and result-envelope reads are not yet size-bounded; large-case ANR/storage-corruption hardening remains open.
@@ -235,8 +239,7 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - Historical extraction and timeline UX are incomplete.
 - HIBP email coverage depends on user-supplied supported access and provider availability.
 - Share-safe redaction reduces disclosure but cannot guarantee anonymity.
-- The queued-scan Continue-in-background and Cancel controls need more vertical separation on the captured Medium Phone viewport; the functional fix is deferred.
-- Visual QA currently covers one API 36 emulator viewport with synthetic data; it does not establish accessibility, large-font, landscape/tablet or physical-device acceptance.
+- Visual QA currently covers one API 36 emulator viewport with synthetic data. The changed scan-budget and bottom-navigation states were checked at 1.0x, 1.3x, 1.5x and 2.0x font scale, but this does not establish whole-product accessibility, landscape/tablet or physical-device acceptance.
 - Emulator CI cannot replace Samsung/Pixel/lower-memory, accessibility, font-scale, process-death, thermal, battery and large-case validation.
 
 ## Documentation policy
