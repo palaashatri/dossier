@@ -1054,6 +1054,9 @@ object BackgroundScanManager {
                     ScanLifecyclePhase.Enqueued,
                     ScanLifecyclePhase.Running,
                     ScanLifecyclePhase.Pausing,
+                    // A paused checkpoint is not executing, but it is still
+                    // an active/resumable investigation for app restoration.
+                    ScanLifecyclePhase.Paused,
                     ScanLifecyclePhase.CancelRequested,
                     ScanLifecyclePhase.CancelFailed
                 )

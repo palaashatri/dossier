@@ -1024,6 +1024,25 @@ class BackgroundScanWorkerTest {
         )
         store.publish(running)
         assertTrue(BackgroundScanManager.hasActiveMarker(context))
+
+        assertEquals(
+            ScanLifecycleWriteResult.Saved,
+            store.transition(
+                expected = (store.read() as ScanLifecycleReadResult.Available).record,
+                transition = ScanLifecycleTransition.RequestPause,
+                nowEpochMillis = 101L
+            )
+        )
+        val pausing = (store.read() as ScanLifecycleReadResult.Available).record
+        assertEquals(
+            ScanLifecycleWriteResult.Saved,
+            store.transition(
+                expected = pausing,
+                transition = ScanLifecycleTransition.MarkPaused,
+                nowEpochMillis = 102L
+            )
+        )
+        assertTrue(BackgroundScanManager.hasActiveMarker(context))
     }
 
     private fun fakeContext(prefs: SharedPreferences): Context = FakeContext(prefs)
