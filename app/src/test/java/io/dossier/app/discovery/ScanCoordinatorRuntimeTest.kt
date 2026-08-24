@@ -1,6 +1,8 @@
 package io.dossier.app.domain.discovery
 
+import android.content.ContextWrapper
 import io.dossier.app.data.platform.ProviderCatalogV2
+import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.scanner.BackgroundScanWorker
 import io.dossier.app.domain.scanner.ScanPayloadStage
 import io.dossier.app.domain.scanner.ScanPayloadSummary
@@ -16,6 +18,38 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ScanCoordinatorRuntimeTest {
+    @Test
+    fun startDelegatesOnlyThroughCoordinatorAndBindsRequestedPlan() = runBlocking {
+        val request = ScanRequest(
+            input = IdentityInput(fullName = "Coordinator Subject", primaryUsername = "coordinator"),
+            mode = ScanMode.Deep,
+            deepResearch = true
+        )
+        var delegated: ScanRequest? = null
+
+        ScanCoordinatorRuntime.resetForTests()
+        ScanCoordinatorRuntime.scanStarter = { _, delegatedRequest ->
+            delegated = delegatedRequest
+        }
+
+        try {
+            val scanId = ScanCoordinatorRuntime.start(
+                context = ContextWrapper(null),
+                request = request
+            )
+
+            assertEquals(request, delegated)
+            assertEquals(scanId, ScanCoordinatorRuntime.snapshot.value.scanId)
+            assertEquals(request.mode, ScanCoordinatorRuntime.snapshot.value.mode)
+            assertEquals(
+                ScanPlanSummary.from(ProviderCatalogV2.plan(request.mode)),
+                ScanCoordinatorRuntime.snapshot.value.plan
+            )
+        } finally {
+            ScanCoordinatorRuntime.resetForTests()
+        }
+    }
+
     @Test
     fun pivotDiagnosticsProjectFrontierStateAndLatestDecision() = runBlocking {
         val scanId = ScanId("pivot-diagnostics")

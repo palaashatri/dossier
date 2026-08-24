@@ -133,10 +133,12 @@ object ScanSession {
     private var scanApplicationContext: Context? = null
 
     /**
-     * Enqueues one unique durable scan. Navigating away from the scan screen no
-     * longer cancels work; Android/WorkManager owns execution and restart policy.
+     * Starts durable work through the scan coordinator. Navigating away from
+     * the scan screen no longer cancels work; Android/WorkManager owns
+     * execution and restart policy. Keep this entry internal so production
+     * callers cannot bypass coordinator ownership.
      */
-    suspend fun startScan(context: Context, input: IdentityInput, deepResearch: Boolean = false) {
+    internal suspend fun startScan(context: Context, input: IdentityInput, deepResearch: Boolean = false) {
         withContext(Dispatchers.IO) {
             val appContext = context.applicationContext
             scanApplicationContext = appContext
@@ -196,7 +198,8 @@ object ScanSession {
     }
 
     /** Cancels durable work. Partial in-memory results are intentionally retained. */
-    fun cancelScan() {
+    /** Cancellation is coordinator-owned; this is an internal state bridge. */
+    internal fun cancelScan() {
         _progressText.value = "SCAN_CANCELLED"
         scanApplicationContext?.let(BackgroundScanManager::cancel)
         _isScanning.value = false

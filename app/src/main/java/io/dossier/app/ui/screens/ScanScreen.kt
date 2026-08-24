@@ -45,6 +45,9 @@ import io.dossier.app.data.face.FaceCorrelationConsentStore
 import io.dossier.app.data.face.FaceCorrelationModelPack
 import io.dossier.app.data.face.FaceCorrelationSessionPolicy
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
+import io.dossier.app.domain.discovery.ScanRequest
 import io.dossier.app.domain.scanner.BackgroundScanWorker
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.components.AnimatedObsidianBackground
@@ -137,7 +140,14 @@ fun ScanScreen(
         liveLogs.add("Starting scan…")
         if (deepResearch) liveLogs.add("Deep Research enabled — following linked sites")
         coroutineScope.launch {
-            ScanSession.startScan(context, input, deepResearch = deepResearch)
+            ScanCoordinatorRuntime.start(
+                context = context,
+                request = ScanRequest(
+                    input = input,
+                    mode = DiscoveryScanPreferences.selectedMode.value,
+                    deepResearch = deepResearch
+                )
+            )
         }
     }
 
@@ -457,7 +467,7 @@ fun ScanScreen(
                             FaceCorrelationSessionPolicy.useBasicMatching()
                             cancelledByUser = true
                             navigationCompleted = true
-                            ScanSession.cancelScan()
+                            ScanCoordinatorRuntime.cancel()
                             onScanCancelled()
                         },
                         border = BorderStroke(1.2.dp, NeuralTheme.Crimson.copy(alpha = 0.8f)),

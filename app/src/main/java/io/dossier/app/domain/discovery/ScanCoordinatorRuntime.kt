@@ -332,13 +332,18 @@ object ScanCoordinatorRuntime {
     fun resetCounts(scanId: ScanId = newScanId()): ScanId {
         synchronized(lock) {
             activeScanId = scanId
+            val mode = DiscoveryScanPreferences.selectedMode.value
+            val plan = ProviderCatalogV2.plan(mode)
             _snapshot.value = LiveScanSnapshot(
                 scanId = scanId,
                 state = ScanRunState.Running,
+                mode = mode,
+                directProfileProviders = ProviderCatalogV2.legacyProfileDefinitions(mode).size,
                 scheduledProviderCount = 0,
                 startedProviderCount = 0,
                 completedProviderCount = 0,
-                unavailableProviderCount = 0
+                unavailableProviderCount = 0,
+                plan = ScanPlanSummary.from(plan)
             )
         }
         return scanId
@@ -648,6 +653,16 @@ object ScanCoordinatorRuntime {
     @Volatile
     private var requestedScanId: ScanId? = null
 
+    /**
+     * Sole coordinator launch seam.  Production always delegates to the
+     * durable ScanSession/WorkManager path; tests may replace this narrow
+     * seam to assert that callers enter through the coordinator without
+     * starting real work.
+     */
+    internal var scanStarter: suspend (Context, ScanRequest) -> Unit = { context, request ->
+        ScanSession.startScan(context, request.input, request.deepResearch)
+    }
+
     fun ensureMonitoring() {
         if (!monitoringStarted.compareAndSet(false, true)) return
 
@@ -917,7 +932,7 @@ object ScanCoordinatorRuntime {
         }
         DiscoveryScanPreferences.setMode(request.mode)
         ScanSession.setDeepResearch(request.deepResearch)
-        ScanSession.startScan(context, request.input, request.deepResearch)
+        scanStarter(context, request)
         return id
     }
 
@@ -931,6 +946,9 @@ object ScanCoordinatorRuntime {
         synchronized(lock) {
             activeScanId = null
             requestedScanId = null
+        }
+        scanStarter = { context, request ->
+            ScanSession.startScan(context, request.input, request.deepResearch)
         }
         _snapshot.value = LiveScanSnapshot()
         ScanHistoryRuntime.resetForTests()
