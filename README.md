@@ -11,7 +11,7 @@ The current implementation branch is **80/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-cf927d9
+efb6c90
 ```
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
@@ -20,21 +20,22 @@ That exact implementation passed the current final-tree build and deterministic 
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
-Debug JVM unit tests                PASS — 682 tests / 112 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 682 tests / 112 suites / 0 failures, errors, or skips
+Provider maintenance audit tests    PASS — 5 tests / no-network schema fixtures
+Debug JVM unit tests                PASS — 683 tests / 112 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 683 tests / 112 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
 Debug APK assembly                  PASS — 115,466,728 bytes
-Debug APK SHA-256                   406EC0C1A45BBD36E7380783D47F37C36A20D30D77E1E7339C8E5B718165DC7F
+Debug APK SHA-256                   E702E1EE6F51D5EBAB063F7CAF93F391AAD7E2771EFD11741284592A336137BA
 uiTest APK assembly                 PASS — 242,932,153 bytes
-uiTest APK SHA-256                  C9EC519D2EDE9CE68C682590CF59A2EDC856ABE22F1026659DDB551F9E3E62B6
-Android-test APK                    PASS — 1,005,660 bytes
-Android-test APK SHA-256             A73C0BFBA3BBDFF211319E549E81D8E81E406CA4E82C8D301411B5B45CCF3680
+uiTest APK SHA-256                  270F6A80D971CD376D0153B1C3B63D2452CA12A859A6DEAFDD6C597B413D11E9
+Android-test APK                    PASS — 1,008,344 bytes
+Android-test APK SHA-256             F8A668686B8997082BF1748103C504372988628CBE14F6DDB20782D2786B7EE5
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
-Connected uiTest suite              PASS — 41 tests / 0 failures on API 36 `medium_phone` emulator
+Connected uiTest suite              PASS — 42 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel and 8 WorkManager pause/resume tests. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Physical devices, process-death/reboot, accessibility, and battery/thermal behavior remain unvalidated.
+The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, and the async saved-case persistence coverage. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Physical devices, process-death/reboot, accessibility, and battery/thermal behavior remain unvalidated.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, verified-account image correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
@@ -70,7 +71,7 @@ These captures come from the API 36 Medium Phone emulator. Analysis, report, cas
 - Persisted aggregate provider outcomes can be assessed against the exact catalog (including explicit Unvalidated, Healthy, Degraded, Unavailable and Stale states); health buckets are maintenance diagnostics, not evidence confidence or live-validation claims.
 - The username-discovery flow surfaces the persisted catalog-health report with a bounded nonhealthy preview and explicit wording that catalog membership, HTTP 200 or search hits are not live validation; internally inconsistent counters and future validation timestamps are shown as unavailable rather than healthy.
 - A deterministic no-network contract harness exercises present, absent, soft-error, redirect, challenge and malformed observations for every catalog definition; fixture outcomes are not promoted to provider health or evidence.
-- Registry validation for duplicates, malformed templates, parser drift and inventory drift.
+- Registry validation for duplicates, case-insensitive ID drift, malformed templates/hosts, unsupported placeholders, metadata categories/capabilities/reliabilities, parser drift and inventory drift; `tools/provider_registry_audit.py --json` exposes machine-readable maintenance diagnostics without performing network requests.
 - Deterministic response states for present, not-found, soft-404, authentication-required, challenged, rate-limited, timed-out, network-unavailable, redirect, unexpected and invalid responses.
 - Multiple bounded public-search sources, direct source verification, retries, `Retry-After`, caches and circuit breakers.
 - Configured-depth bounded pivots (default two, hard maximum four) with admission rules: weak name/location/occupation/face-only signals do not recursively expand by themselves, and only verified results seed the next depth.
@@ -82,6 +83,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 ## Scan orchestration and history
 
 - `ScanCoordinatorRuntime` wraps the mature vertical scan pipeline.
+- Production scan launch and cancellation now enter through `ScanCoordinatorRuntime`; direct `ScanSession` launch/cancel bridges are internal and tested through a coordinator seam. The coordinator binds the selected scan mode and provider-plan summary before dispatching durable work.
 - Encrypted request checkpoints retain allow-listed stage names plus bounded item/verified/omitted counts for completed major stages; incomplete stage outputs remain eligible for rerun.
 - New encrypted requests retain a sanitized mode/provider-plan fingerprint/count and allow-listed stage-order summary. Successful public-search and public-image retry payloads are now stored in request/plan/stage-bound encrypted envelopes with bounded size, TTL, tamper checks and scoped tombstones; response text and identifiers remain excluded, and in-flight/frontier payloads for the remaining stages are still not persisted. Background result envelopes additionally validate bounded nested case/graph/media/analysis collection shapes on save and authenticated load.
 - Remediation cards expose reviewed provider-specific resources, manual-action fallback or explicit unavailable state; opening a settings page never asserts deletion and later scans remain required.
@@ -264,7 +266,7 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
 - Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
 - Replacement-generation cleanup is best effort after WorkManager enqueue acknowledgement. A crash or cleanup failure in that narrow hand-off can retain an encrypted prior-request profile scope until explicit purge or later maintenance; a durable retirement ledger remains open.
-- UI latest-result reads, purge and case-save actions now use IO dispatchers; lower-level synchronous helpers remain for controlled lifecycle paths. Background result envelopes enforce bounded file, metadata, IV, ciphertext and plaintext sizes before allocation/decryption and reject oversized nested case/graph/media/analysis collection shapes before save or after authenticated load. Large-case ANR/storage-corruption testing remains open.
+- UI latest-result reads, purge, saved-case listing/deletion, case analysis, corrections, remediation updates and case-save actions now use IO-dispatched seams; lower-level synchronous helpers remain for controlled lifecycle paths. Background result envelopes enforce bounded file, metadata, IV, ciphertext and plaintext sizes before allocation/decryption and reject oversized nested case/graph/media/analysis collection shapes before save or after authenticated load. Large-case ANR/storage-corruption testing remains open.
 - Entity resolution has deterministic metrics and a fail-closed calibration-artifact path, but still needs a consented representative corpus and published measured calibration before weights can be treated as empirically fitted.
 - Verified-account correlation and richer cross-scan image change workflows remain open; bounded candidate/cluster provenance persistence and saved-case fingerprint history review are implemented.
 - Provider-specific remediation resources currently use a small reviewed allowlist and truthful manual/unavailable fallback states; opening a provider settings page is not deletion proof and broader reviewed coverage remains open.
