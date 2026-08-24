@@ -3,6 +3,7 @@ package io.dossier.app.domain.scanner
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.graph.EntityGraphBuilder
 import io.dossier.app.domain.model.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -67,6 +68,43 @@ class ProfileScannerEvidenceTest {
         assertTrue(collection.relationships.any { it.relation == "mentions" && it.toValue == "jane@example.com" })
         // Identity seeds also present (self-contained collection).
         assertTrue(collection.evidence.any { it.kind == EvidenceKind.Username && it.value == "janedoe" })
+
+        val profileEvidence = collection.evidence.single {
+            it.kind == EvidenceKind.Profile && it.value == "https://github.com/janedoe"
+        }
+        val emailEvidence = collection.evidence.first {
+            it.kind == EvidenceKind.Email &&
+                it.value == "jane@example.com" &&
+                it.sourceUrl == "https://github.com/janedoe"
+        }
+        assertEquals(
+            listOf(profileEvidence.id),
+            collection.relationships.single { it.relation == "username_on_profile" }.evidenceIds
+        )
+        assertEquals(
+            listOf(emailEvidence.id),
+            collection.relationships.single { it.relation == "mentions" }.evidenceIds
+        )
+
+        // The graph consumes the same stable IDs instead of relying on a
+        // relationship description or endpoint-value inference.
+        val graph = EntityGraphBuilder.build(
+            input = input,
+            evidence = collection.evidence,
+            relationships = collection.relationships
+        )
+        val usernameProfileEdges = graph.edges.filter {
+            it.relation == "username_on_profile" &&
+                it.fromId == "username:janedoe" &&
+                it.toId == "profile:https://github.com/janedoe"
+        }
+        assertTrue(usernameProfileEdges.isNotEmpty())
+        assertTrue(usernameProfileEdges.all { profileEvidence.id in it.evidenceIds })
+        val profileMentionEdges = graph.edges.filter {
+            it.relation == "mentions" && it.fromId == "profile:https://github.com/janedoe"
+        }
+        assertTrue(profileMentionEdges.isNotEmpty())
+        assertTrue(profileMentionEdges.all { emailEvidence.id in it.evidenceIds })
     }
 
     @Test

@@ -2047,30 +2047,29 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
         val conf = result.candidate.confidence.coerceIn(0f, 1f)
 
         // Profile observation (native, not via the Finding adapter).
-        evidence.add(
-            Evidence(
-                id = "profile:${url}",
-                kind = EvidenceKind.Profile,
-                value = url,
-                sourceUrl = url,
-                snippet = result.displayName?.let { "Profile: $it" },
-                confidence = conf,
-                risk = if (result.verified && result.exists) RiskLevel.High else RiskLevel.Low,
-                signals = result.confidenceSignals,
-                providerId = result.providerId ?: result.candidate.providerId,
-                retrievedAtEpochMillis = retrievedAtEpochMillis,
-                state = when {
-                    !result.exists -> EvidenceState.Candidate
-                    result.verified -> EvidenceState.Verified
-                    else -> EvidenceState.Observed
-                },
-                reliability = if (result.exists && result.verified) {
-                    EvidenceReliability.DirectPublicProfile
-                } else {
-                    EvidenceReliability.SearchEngineCandidate
-                }
-            )
+        val profileEvidence = Evidence(
+            id = "profile:${url}",
+            kind = EvidenceKind.Profile,
+            value = url,
+            sourceUrl = url,
+            snippet = result.displayName?.let { "Profile: $it" },
+            confidence = conf,
+            risk = if (result.verified && result.exists) RiskLevel.High else RiskLevel.Low,
+            signals = result.confidenceSignals,
+            providerId = result.providerId ?: result.candidate.providerId,
+            retrievedAtEpochMillis = retrievedAtEpochMillis,
+            state = when {
+                !result.exists -> EvidenceState.Candidate
+                result.verified -> EvidenceState.Verified
+                else -> EvidenceState.Observed
+            },
+            reliability = if (result.exists && result.verified) {
+                EvidenceReliability.DirectPublicProfile
+            } else {
+                EvidenceReliability.SearchEngineCandidate
+            }
         )
+        evidence.add(profileEvidence)
 
         // Username → profile assertion (scanner knowledge).
         if (result.candidate.username.isNotBlank()
@@ -2082,21 +2081,24 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                     fromValue = result.candidate.username,
                     toValue = url,
                     relation = "username_on_profile",
-                    evidence = result.candidate.platform.name
+                    evidence = result.candidate.platform.name,
+                    evidenceIds = listOf(profileEvidence.id)
                 )
             )
         }
 
         // Each finding bridges losslessly; PII-on-profile is asserted explicitly.
         result.findings.forEach { finding ->
-            evidence.add(finding.toEvidence(retrievedAtEpochMillis))
+            val findingEvidence = finding.toEvidence(retrievedAtEpochMillis)
+            evidence.add(findingEvidence)
             if (finding.sourceUrl == url || result.exists) {
                 relationships.add(
                     EvidenceRelationship(
                         fromValue = url,
                         toValue = finding.value,
                         relation = "mentions",
-                        evidence = finding.type.name
+                        evidence = finding.type.name,
+                        evidenceIds = listOf(findingEvidence.id)
                     )
                 )
             }
