@@ -176,6 +176,7 @@ class ScanCoordinatorRuntimeTest {
         val cancelled = classifyTerminalStage("SCAN_CANCELLED")
         val restoredCancellation = classifyTerminalStage(BackgroundScanWorker.STAGE_CANCELLED)
         val completed = classifyTerminalStage(BackgroundScanWorker.STAGE_COMPLETE)
+        val paused = classifyTerminalStage("SCAN_PAUSED")
 
         assertEquals(ScanRunState.Cancelled, cancelled.state)
         assertNull(cancelled.failureCode)
@@ -183,6 +184,8 @@ class ScanCoordinatorRuntimeTest {
         assertNull(restoredCancellation.failureCode)
         assertEquals(ScanRunState.Completed, completed.state)
         assertNull(completed.failureCode)
+        assertEquals(ScanRunState.Paused, paused.state)
+        assertNull(paused.failureCode)
     }
 
     @Test

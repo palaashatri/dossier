@@ -209,6 +209,16 @@ object ScanSession {
         _isScanning.value = false
     }
 
+    /**
+     * Pausing is not a terminal failure or completion. Keep the process-local
+     * session out of the running state while retaining its durable checkpoint
+     * for an explicit resume.
+     */
+    internal fun markBackgroundPaused() {
+        _progressText.value = "SCAN_PAUSED"
+        _isScanning.value = false
+    }
+
     internal fun markBackgroundCancelled() {
         _progressText.value = "SCAN_CANCELLED"
         _isScanning.value = false

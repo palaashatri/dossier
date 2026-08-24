@@ -89,6 +89,15 @@ fun AnalysisScreen(
     LaunchedEffect(latestInfo?.state, latestInfo?.id, lifecyclePhase) {
         val observed = BackgroundScanManager.lifecyclePhaseAsync(context)
         if (observed != lifecyclePhase) lifecyclePhase = observed
+        if (observed == ScanLifecyclePhase.Paused || observed == ScanLifecyclePhase.Succeeded) {
+            // A worker can publish the encrypted result immediately before a
+            // pause cancellation wins. WorkManager then reports CANCELLED,
+            // so lifecycle changes—not the row state—must trigger this read.
+            BackgroundScanManager.latestResultAsync(context)?.let { restored ->
+                snapshot = restored
+                restored.dossierCase.let(ScanSession::restoreFromCase)
+            }
+        }
         if (observed == ScanLifecyclePhase.Pausing) {
             while (isActive) {
                 delay(250L)

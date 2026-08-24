@@ -33,6 +33,7 @@ data class ScanRequest(
 enum class ScanRunState {
     Idle,
     Running,
+    Paused,
     Completed,
     Cancelled,
     Failed
@@ -166,6 +167,13 @@ sealed interface ScanEvent {
         val findingCount: Int
     ) : ScanEvent
 
+    data class ScanPaused(
+        override val scanId: ScanId,
+        override val occurredAt: Instant,
+        val profileCount: Int,
+        val findingCount: Int
+    ) : ScanEvent
+
     data class ScanFailed(
         override val scanId: ScanId,
         override val occurredAt: Instant,
@@ -181,6 +189,7 @@ internal data class TerminalScanClassification(
 )
 
 private const val STAGE_CANCELLED = "SCAN_CANCELLED"
+private const val STAGE_PAUSED = "SCAN_PAUSED"
 private const val GENERIC_SCAN_FAILURE = "SCAN_FAILED"
 private const val MAX_SAFE_PIVOT_DECISIONS = 4_096
 private const val MAX_SAFE_PIVOT_VISITED = 4_096
@@ -209,6 +218,9 @@ internal fun safeCoordinatorStage(stage: String): String =
 internal fun classifyTerminalStage(stage: String): TerminalScanClassification {
     if (stage == STAGE_CANCELLED || stage == BackgroundScanWorker.STAGE_CANCELLED) {
         return TerminalScanClassification(ScanRunState.Cancelled)
+    }
+    if (stage == STAGE_PAUSED) {
+        return TerminalScanClassification(ScanRunState.Paused)
     }
     if (stage == BackgroundScanWorker.STAGE_FAILED) {
         return TerminalScanClassification(ScanRunState.Failed, GENERIC_SCAN_FAILURE)
@@ -590,6 +602,27 @@ object ScanCoordinatorRuntime {
                     val findingCount = ScanSession.findings.value.size
                     val breachRecordCount = ScanSession.breachDigests.value.sumOf { it.breachCount }
                     val graph = ScanSession.entityGraph.value
+                    if (terminal == ScanRunState.Paused) {
+                        _snapshot.value = _snapshot.value.copy(
+                            state = ScanRunState.Paused,
+                            profileCount = profileCount,
+                            findingCount = findingCount,
+                            breachRecordCount = breachRecordCount,
+                            entityCount = graph.entities.size,
+                            relationshipCount = graph.edges.size
+                        )
+                        emit(
+                            ScanEvent.ScanPaused(
+                                scanId = id,
+                                occurredAt = finishedAt,
+                                profileCount = profileCount,
+                                findingCount = findingCount
+                            )
+                        )
+                        // Paused is a resumable checkpoint, not a terminal
+                        // history row. Keep the active ID for a later resume.
+                        return@collect
+                    }
                     _snapshot.value = _snapshot.value.copy(
                         state = terminal,
                         profileCount = profileCount,

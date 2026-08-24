@@ -1547,11 +1547,14 @@ object BackgroundScanManager {
             is ScanReconciliationAction.KeepPaused -> action
             is ScanReconciliationAction.PausedTerminal -> {
                 if (isExactLifecycle(lifecycleStore, action.expected)) {
-                    lifecycleStore.transition(
+                    val transitioned = lifecycleStore.transition(
                         expected = action.expected,
                         transition = ScanLifecycleTransition.MarkPaused,
                         nowEpochMillis = now
                     )
+                    if (transitioned is ScanLifecycleWriteResult.Saved) {
+                        ScanSession.markBackgroundPaused()
+                    }
                 }
                 action
             }
@@ -2057,11 +2060,14 @@ object BackgroundScanManager {
                             val lifecycleStore = lifecycleStoreProvider(context.applicationContext)
                             val current = lifecycleStore.read()
                             if (current is ScanLifecycleReadResult.Available && current.record == expected) {
-                                lifecycleStore.transition(
+                                val transitioned = lifecycleStore.transition(
                                     expected = expected,
                                     transition = ScanLifecycleTransition.MarkPaused,
                                     nowEpochMillis = nowEpochMillis()
                                 )
+                                if (transitioned is ScanLifecycleWriteResult.Saved) {
+                                    ScanSession.markBackgroundPaused()
+                                }
                             }
                         }
                     } else {
