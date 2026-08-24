@@ -20,8 +20,10 @@ import io.dossier.app.domain.evidence.ConfidenceEngine
 import io.dossier.app.domain.evidence.EmailDomainContributor
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
-import io.dossier.app.domain.evidence.EvidenceRuntimeCache
+import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceRelationship
+import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.ExposureEngine
 import io.dossier.app.domain.evidence.RelationshipConfidence
 import io.dossier.app.domain.evidence.SharedDomainContributor
@@ -34,6 +36,7 @@ import io.dossier.app.domain.graph.EntityGraphBuilder
 import io.dossier.app.domain.model.BreachDigest
 import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.FaceConsistencyMatch
+import java.util.Locale
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.discovery.WhatsMyNameCatalog
 import io.dossier.app.data.platform.ProviderCatalogV2
@@ -880,9 +883,46 @@ object ScanSession {
                     pluginCollection.evidence +
                     buildEvidence(input, findings, retrievedAtEpochMillis)
                 ).distinctBy { it.id },
-            relationships = (scannerEvidence.relationships + pluginCollection.relationships)
-                .distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}" }
+            relationships = mergeEvidenceRelationships(
+                scannerEvidence.relationships + pluginCollection.relationships
+            )
         )
+    }
+
+    /**
+     * Merge duplicate assertions without dropping independent provenance. The
+     * endpoint/relation key is only a deterministic grouping key; it never
+     * creates a new relationship or performs fuzzy identity resolution.
+     */
+    private fun mergeEvidenceRelationships(
+        relationships: List<EvidenceRelationship>
+    ): List<EvidenceRelationship> {
+        val merged = LinkedHashMap<String, EvidenceRelationship>()
+        relationships.forEach { relationship ->
+            val key = listOf(
+                relationship.fromValue.trim().lowercase(Locale.ROOT),
+                relationship.toValue.trim().lowercase(Locale.ROOT),
+                relationship.relation.trim().uppercase(Locale.ROOT)
+            ).joinToString("\u001f")
+            val normalizedIds = relationship.evidenceIds
+                .map(EvidenceIdPolicy::migrate)
+                .filter(String::isNotBlank)
+            val previous = merged[key]
+            if (previous == null) {
+                merged[key] = relationship.copy(evidenceIds = normalizedIds.distinct())
+            } else {
+                val description = previous.evidence?.takeIf(String::isNotBlank)
+                    ?: relationship.evidence?.takeIf(String::isNotBlank)
+                merged[key] = previous.copy(
+                    evidence = description,
+                    evidenceIds = (previous.evidenceIds + normalizedIds)
+                        .map(EvidenceIdPolicy::migrate)
+                        .filter(String::isNotBlank)
+                        .distinct()
+                )
+            }
+        }
+        return merged.values.toList()
     }
 
     internal fun buildAiAnalysisSnapshot(

@@ -88,6 +88,7 @@ class BackgroundScanResultStore internal constructor(
             dossierCase = dossierCase,
             analysis = analysis
         )
+        validateSnapshotShape(snapshot)
         val plaintext = json.encodeToString(snapshot).toByteArray(Charsets.UTF_8)
         if (plaintext.size > MAX_PLAINTEXT_BYTES) return false
 
@@ -137,10 +138,104 @@ class BackgroundScanResultStore internal constructor(
         require(sha256(plaintext).equals(envelope.plaintextSha256, ignoreCase = true))
 
         val snapshot = json.decodeFromString<Snapshot>(plaintext.toString(Charsets.UTF_8))
+        validateSnapshotShape(snapshot)
         require(snapshot.workId.isNotBlank())
         require(snapshot.completedAtUtc.isNotBlank())
         snapshot
     }.getOrNull()
+
+    /**
+     * Byte limits bound allocation, but a compact JSON array can still contain
+     * an unsafe number of objects or nested references. Validate collection
+     * shape on both save and load so transient encrypted results fail closed
+     * before they reach ScanSession/Compose.
+     */
+    private fun validateSnapshotShape(snapshot: Snapshot) {
+        val dossierCase = snapshot.dossierCase
+        val input = dossierCase.input
+        requireCollection("input.aliases", input.aliases.size)
+        requireCollection("input.emails", input.emails.size)
+        requireCollection("input.phones", input.phones.size)
+        requireCollection("input.locations", input.locations.size)
+        requireCollection("input.organizations", input.organizations.size)
+        requireCollection("input.usernames", input.usernames.size)
+        requireCollection("input.profileUrls", input.profileUrls.size)
+
+        requireCollection("case.findings", dossierCase.findings.size)
+        requireCollection("case.evidenceRecords", dossierCase.evidenceRecords.size)
+        requireCollection("case.profileResults", dossierCase.profileResults.size)
+        requireCollection("case.faceMatches", dossierCase.faceMatches.size)
+        requireCollection("case.breachDigests", dossierCase.breachDigests.size)
+        requireCollection("case.attackPaths", dossierCase.attackPaths.size)
+        requireCollection("case.relationshipConfidence", dossierCase.relationshipConfidence.size)
+        requireCollection("case.scanHistory", dossierCase.scanHistory.size)
+        requireCollection("case.userCorrections", dossierCase.userCorrections.size)
+        requireCollection("case.remediationRecords", dossierCase.remediationRecords.size)
+        requireCollection("case.exports", dossierCase.exports.size)
+
+        val graph = dossierCase.entityGraph
+        requireCollection("graph.entities", graph.entities.size)
+        requireCollection("graph.edges", graph.edges.size)
+        graph.entities.forEach { entity ->
+            requireCollection("graph.entity.sourceUrls", entity.sourceUrls.size)
+            requireCollection("graph.entity.evidenceIds", entity.evidenceIds.size)
+        }
+        graph.edges.forEach { edge ->
+            requireCollection("graph.edge.evidenceIds", edge.evidenceIds.size)
+            requireCollection("graph.edge.contradictingEvidenceIds", edge.contradictingEvidenceIds.size)
+        }
+        dossierCase.evidenceRecords.forEach { evidence ->
+            requireCollection("evidence.signals", evidence.signals.size)
+        }
+        dossierCase.profileResults.forEach { profile ->
+            requireCollection("profile.links", profile.links.size)
+            requireCollection("profile.findings", profile.findings.size)
+            requireCollection("profile.confidenceSignals", profile.confidenceSignals.size)
+        }
+
+        val media = dossierCase.mediaIntelligence
+        require(media.imageResults.size <= MAX_MEDIA_IMAGE_RESULTS)
+        require(media.videoResults.size <= MAX_MEDIA_VIDEO_RESULTS)
+        media.imageResults.forEach { result ->
+            requireCollection("media.image.labels", result.labels.size)
+            requireCollection("media.image.webEvidence", result.webEvidence.size)
+            requireCollection("media.image.visualMatches", result.visualMatches.size)
+            requireCollection("media.image.visualCandidates", result.visualCandidates.size)
+            requireCollection("media.image.visualClusters", result.visualClusters.size)
+            result.visualClusters.forEach { cluster ->
+                requireCollection("media.image.cluster.members", cluster.memberCandidateIds.size)
+            }
+        }
+        media.videoResults.forEach { result ->
+            requireCollection("media.video.labels", result.labels.size)
+            requireCollection("media.video.webEvidence", result.webEvidence.size)
+            requireCollection("media.video.frameSummaries", result.frameSummaries.size)
+            result.frameSummaries.forEach { frame ->
+                requireCollection("media.video.frame.labels", frame.labels.size)
+            }
+        }
+
+        val identitySurface = snapshot.analysis.identitySurface
+        requireCollection("analysis.identitySurface.entries", identitySurface.entries.size)
+        val behavioral = snapshot.analysis.behavioral
+        require(behavioral.hourlyActivityUtc.size == HOURS_PER_DAY)
+        requireCollection("analysis.behavioral.timezoneHypotheses", behavioral.timezoneHypotheses.size)
+        requireCollection("analysis.behavioral.topics", behavioral.topics.size)
+        requireCollection("analysis.behavioral.crossSourceStyle", behavioral.crossSourceStyle.size)
+        val interaction = snapshot.analysis.interactionGraph
+        requireCollection("analysis.interaction.edges", interaction.edges.size)
+        requireCollection("analysis.interaction.influenceNodes", interaction.influenceNodes.size)
+        requireCollection("analysis.interaction.clusters", interaction.clusters.size)
+        interaction.clusters.forEach { cluster ->
+            requireCollection("analysis.interaction.cluster.nodes", cluster.nodes.size)
+        }
+    }
+
+    private fun requireCollection(label: String, size: Int) {
+        require(size in 0..MAX_COLLECTION_ITEMS) {
+            "$label exceeds transient-result item limit"
+        }
+    }
 
     fun clear(): Boolean = runCatching {
         val file = resultFile()
@@ -219,6 +314,10 @@ class BackgroundScanResultStore internal constructor(
         const val SHA_256_HEX_LENGTH = 64
         const val MAX_IV_BASE64_CHARS = 32
         const val MAX_CIPHERTEXT_BASE64_CHARS = ((MAX_CIPHERTEXT_BYTES + 2) / 3) * 4 + 16
+        const val MAX_COLLECTION_ITEMS = 10_000
+        const val MAX_MEDIA_IMAGE_RESULTS = 12
+        const val MAX_MEDIA_VIDEO_RESULTS = 6
+        const val HOURS_PER_DAY = 24
 
         fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
             .digest(bytes)

@@ -9,6 +9,7 @@ import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
+import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.Finding
@@ -135,6 +136,37 @@ class ScanSessionRestoreTest {
         assertEquals(restored, ScanSession.buildCase()?.evidenceRecords)
         assertTrue(CaseTimelineBuilder.build(case).isNotEmpty())
         assertTrue(CaseTimelineBuilder.presentation(case).availability.undatedEvidenceCount >= 1)
+    }
+
+    @Test
+    fun buildEvidenceSnapshotMergesDuplicateRelationshipProvenance() {
+        val snapshot = ScanSession.buildEvidenceSnapshot(
+            input = IdentityInput(fullName = "Authorized subject"),
+            profileResults = emptyList(),
+            pluginCollection = EvidenceCollection(
+                relationships = listOf(
+                    EvidenceRelationship(
+                        fromValue = "Alice",
+                        toValue = "Profile",
+                        relation = "MENTIONS",
+                        evidence = "first assertion",
+                        evidenceIds = listOf("evidence-a")
+                    ),
+                    EvidenceRelationship(
+                        fromValue = " alice ",
+                        toValue = " profile ",
+                        relation = "mentions",
+                        evidence = "second assertion",
+                        evidenceIds = listOf("evidence-b")
+                    )
+                )
+            ),
+            findings = emptyList()
+        )
+
+        val relationship = snapshot.relationships.single()
+        assertEquals("first assertion", relationship.evidence)
+        assertEquals(listOf("evidence-a", "evidence-b"), relationship.evidenceIds)
     }
 
     @Test

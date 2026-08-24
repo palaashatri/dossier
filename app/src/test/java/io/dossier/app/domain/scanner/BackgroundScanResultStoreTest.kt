@@ -4,10 +4,15 @@ import android.content.Context
 import android.content.ContextWrapper
 import io.dossier.app.domain.analysis.OsintAnalysisBundle
 import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.model.DossierEntity
+import io.dossier.app.domain.model.EntityGraph
+import io.dossier.app.domain.model.EntityType
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -162,6 +167,40 @@ class BackgroundScanResultStoreTest {
 
         val saved = store.save("work-huge", hugeCase)
         assertFalse(saved)
+        assertNull(store.load())
+    }
+
+    @Test
+    fun oversizedGraphCollectionIsRejectedBeforeEncryption() {
+        val syncer = RecordingDirectorySyncer()
+        val context = FakeContext(root)
+        val crypto = JvmBackgroundResultCrypto()
+        val store = BackgroundScanResultStore(context, syncer, crypto)
+        val oversizedCase = oversizedGraphCase()
+
+        assertFalse(store.save("work-oversized-graph", oversizedCase))
+        assertNull(store.load())
+        assertFalse(File(root, BackgroundScanResultStore.FILE_NAME).exists())
+    }
+
+    @Test
+    fun oversizedGraphCollectionIsRejectedAfterAuthenticatedLoad() {
+        val syncer = RecordingDirectorySyncer()
+        val context = FakeContext(root)
+        val crypto = JvmBackgroundResultCrypto()
+        val store = BackgroundScanResultStore(context, syncer, crypto)
+        val snapshot = BackgroundScanResultStore.Snapshot(
+            workId = "work-oversized-graph-load",
+            completedAtUtc = "2026-08-24T00:00:00Z",
+            dossierCase = oversizedGraphCase()
+        )
+        val json = Json { encodeDefaults = true; explicitNulls = false }
+        val plaintext = json.encodeToString(snapshot).toByteArray(Charsets.UTF_8)
+        val sealed = crypto.encrypt(plaintext)
+        File(root, BackgroundScanResultStore.FILE_NAME).writeText(
+            """{"formatVersion":1,"ivBase64":"${Base64.getEncoder().encodeToString(sealed.iv)}","ciphertextBase64":"${Base64.getEncoder().encodeToString(sealed.ciphertext)}","plaintextSha256":"${BackgroundScanResultStore.sha256(plaintext)}"}"""
+        )
+
         assertNull(store.load())
     }
 
@@ -328,6 +367,22 @@ class BackgroundScanResultStoreTest {
             synced += dir
         }
     }
+
+    private fun oversizedGraphCase(): DossierCase = DossierCase(
+        caseId = "oversized-graph",
+        createdAt = "2026-08-24T00:00:00Z",
+        subjectName = "Oversized",
+        input = IdentityInput(fullName = "Oversized"),
+        entityGraph = EntityGraph(
+            entities = List(BackgroundScanResultStore.MAX_COLLECTION_ITEMS + 1) { index ->
+                DossierEntity(
+                    id = "entity-$index",
+                    type = EntityType.Profile,
+                    label = "profile-$index"
+                )
+            }
+        )
+    )
 
     private class FakeContext(private val root: File) : ContextWrapper(null) {
         override fun getApplicationContext(): Context = this
