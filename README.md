@@ -11,7 +11,7 @@ The current implementation branch is **76/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-94e9311
+02fb506
 ```
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
@@ -19,13 +19,13 @@ That exact implementation passed the current final-tree build and deterministic 
 ```text
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
-Debug JVM unit tests                PASS — 631 tests / 109 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 631 tests / 109 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 644 tests / 110 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 644 tests / 110 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 118,767,289 bytes
-Debug APK SHA-256                   019998B218820359FFB7FCA7F88401B79554BCAE1E6E3E8F7E1B2FC1FF127040
+Debug APK assembly                  PASS — 118,780,131 bytes
+Debug APK SHA-256                   82DCDCAF23E11120C273F411F1A3AEF12802536F3BADEDA9F70237F9D84963C6
 uiTest APK assembly                 PASS — 243,319,921 bytes
-uiTest APK SHA-256                  846FD1ABC15523CCCB0BEAF90EA6F56BCB56542DD011B501D228E678409DADBC
+uiTest APK SHA-256                  31E646AE024BE15DC3A47F54470ED36928B0ADB3BEC88AB9EC6E3392B8752AB9
 Android-test APK                    PASS — 1,020,897 bytes
 Android-test APK SHA-256             B90DF4FDDB291154044F8E07B89B5B4EB82BF09621D08DA43B59C96A85B4EEE6
 Debug lint                          PASS — 0 errors / 69 warnings
@@ -66,6 +66,7 @@ These captures come from the API 36 Medium Phone emulator. Analysis, report, cas
 - Provider query capabilities, source-reliability classes, existence/extraction rules and request policies.
 - Direct-profile candidates execute through the declarative provider runtime with live selector-driven extraction, bounded reads, timeout/retry/cooldown policy, provider request spacing, exact/approved-host redirect checks, HTTPS-downgrade rejection and a generic non-impersonating user agent.
 - Real queued, started, completed and unavailable callbacks drive scheduled/completed/unavailable counters; planned registry breadth is not presented as completed work.
+- Persisted aggregate provider outcomes can be assessed against the exact catalog (including explicit Unvalidated, Healthy, Degraded, Unavailable and Stale states); health buckets are maintenance diagnostics, not evidence confidence or live-validation claims.
 - Registry validation for duplicates, malformed templates, parser drift and inventory drift.
 - Deterministic response states for present, not-found, soft-404, authentication-required, challenged, rate-limited, timed-out, network-unavailable, redirect, unexpected and invalid responses.
 - Multiple bounded public-search sources, direct source verification, retries, `Retry-After`, caches and circuit breakers.
@@ -85,6 +86,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - New encrypted scan requests commit a deterministic SHA-256 fingerprint of the selected declarative provider plan plus a bounded ordered provider-ID summary; older request records remain explicitly resumable without being assigned a retroactive plan.
 - The configured-depth pivot path now uses a request-scoped encrypted frontier with queued, visited and completed state, conservative admission, global/per-signal budgets, bounded rejection diagnostics and durable clear tombstones. A cancelled or thrown pivot attempt remains pending for a later exact-scope worker retry.
 - Background WorkManager scans now expose exact-owner `Pausing`/`Paused` lifecycle states, retain encrypted checkpoints through terminal cancellation, resume with a fresh work UUID bound to the same request/generation, and surface pause/resume controls in Background analysis.
+- The exact owner also writes an encrypted, allow-listed semantic stage ledger (profile discovery, face, breach, graph, scoring, exposure, AI, post-processing and completion); sanitized checkpoint events update the coordinator snapshot without persisting URLs, identifiers or response text.
 - Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
 - Background enqueue now publishes a generation-bound lifecycle before replacing the old exact WorkManager UUID, promotes only that prepared encrypted request, and reenqueues the same UUID after an authoritative missing-row crash boundary.
 - The worker claims the exact owner/request/generation, publishes the encrypted result before durable success, and treats an exact matching result as idempotent success if WorkManager retries after the success-commit boundary.
@@ -95,7 +97,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
 - Later case edits cannot silently attach a newer scan to an older case.
 
-Recovery now covers stable initial direct-profile outcomes, the configured-depth pivot frontier and an exact-owner background pause/resume lifecycle. A coordinator-owned general plan, search/image/breach/AI checkpoints, sole coordinator ownership and full-stage pause semantics remain incomplete. Pivot diagnostics are persisted and the background pause state is surfaced, while some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
+Recovery now covers stable initial direct-profile outcomes, the configured-depth pivot frontier, an exact-owner background pause/resume lifecycle, and encrypted semantic stage-boundary metadata. A coordinator-owned general plan, persisted search/image/breach/AI outputs, sole coordinator ownership and full-stage resume semantics remain incomplete. Pivot diagnostics are persisted and the background pause state is surfaced, while some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
 
 ## Evidence, graph and entity resolution
 
@@ -245,7 +247,7 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - `ProviderCatalogV2` has 78 authored definitions, while the separate pinned WhatsMyName catalog has 716 records and 644 executable HTTPS username rules; this remains below the 1,000+ useful reviewed-provider target and does not establish live health.
 - Private, authenticated, blocked, never-indexed and never-archived content cannot be discovered reliably.
 - Providers can change markup, challenge requests, rate-limit or omit content.
-- Some custom resolver operations still bypass unified provider lifecycle events; a coordinator-owned general plan and non-profile/image/search/breach/AI checkpoints remain incomplete. Background pause/resume is exact-owner bounded rather than a universal coordinator pause contract.
+- Some custom resolver operations still bypass unified provider lifecycle events; a coordinator-owned general plan and persisted non-profile/image/search/breach/AI stage outputs remain incomplete. Background pause/resume is exact-owner bounded rather than a universal coordinator pause contract.
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
 - Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
 - Replacement-generation cleanup is best effort after WorkManager enqueue acknowledgement. A crash or cleanup failure in that narrow hand-off can retain an encrypted prior-request profile scope until explicit purge or later maintenance; a durable retirement ledger remains open.
