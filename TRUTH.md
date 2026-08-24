@@ -7,7 +7,7 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 - **Strict product readiness score:** **76/100**
 - **Milestone state:** M0 complete; M1–M6 and M8–M12 materially advanced but still partial; M7 and M13 remain partial
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
-- **Last validated implementation commit:** `8f82112` (`docs: record pause media and persistence validation`)
+- **Last validated implementation commit:** `805fe9c` (`fix: preserve paused coordinator state`)
 - **Last validation date:** **2026-08-25**
 - **Current-session validation of the implementation plus the preserved pre-existing uiTest fixture edit:** provider and pinned-catalog audits passed; both debug and uiTest JVM suites passed 631 tests across 109 suites each; debug/uiTest APKs assembled; Android-test Kotlin compiled; lint completed with zero errors; and the connected instrumentation task reached packaging but stopped with `No connected devices!`.
 - **Documentation-only commits after the validated implementation:** may update this file/PR prose without changing the validated code claim
@@ -336,7 +336,7 @@ External OSINT imports are local/in-memory and bounded. Import parsers require e
 Validated implementation commit:
 
 ```text
-8f82112
+805fe9c
 ```
 
 Validation date:
@@ -353,8 +353,8 @@ WhatsMyName integrity audit   PASS — 716 records / 644 executable rules / pinn
 Debug JVM unit tests          PASS — 631 tests / 109 suites / 0 failures / 0 errors / 0 skips
 uiTest JVM unit tests         PASS — 631 tests / 109 suites / 0 failures / 0 errors / 0 skips
 Android-test Kotlin compile  PASS — `compileUiTestAndroidTestKotlin`
-Debug APK                     PASS — 118,765,332 bytes / SHA-256 CA265E42599AFCA880394F8E70ED9CA2F9596CA48EDBEB63D32B8964CEEEB61D
-uiTest APK                    PASS — 243,319,762 bytes / SHA-256 B07A6CFD4F02CAB0339FE74B115F6FEE0DD83518921DD15F21BAA1C39BEEC945
+Debug APK                     PASS — 118,767,289 bytes / SHA-256 019998B218820359FFB7FCA7F88401B79554BCAE1E6E3E8F7E1B2FC1FF127040
+uiTest APK                    PASS — 243,320,368 bytes / SHA-256 370DAA368B9359DF5869FDD66D9A724A145D23382AD7AAD0C886BB0B49F738A3
 Debug lint                    PASS — 0 errors / 69 warnings
 uiTest lint                   PASS — 0 errors / 72 warnings
 Connected instrumentation    NOT RUN — `No connected devices!` after APK packaging

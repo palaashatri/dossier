@@ -11,7 +11,7 @@ The current implementation branch is **76/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-8f82112
+805fe9c
 ```
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
@@ -22,10 +22,10 @@ WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS 
 Debug JVM unit tests                PASS — 631 tests / 109 suites / 0 failures, errors, or skips
 uiTest JVM unit tests               PASS — 631 tests / 109 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 118,765,332 bytes
-Debug APK SHA-256                   CA265E42599AFCA880394F8E70ED9CA2F9596CA48EDBEB63D32B8964CEEEB61D
-uiTest APK assembly                 PASS — 243,319,762 bytes
-uiTest APK SHA-256                  B07A6CFD4F02CAB0339FE74B115F6FEE0DD83518921DD15F21BAA1C39BEEC945
+Debug APK assembly                  PASS — 118,767,289 bytes
+Debug APK SHA-256                   019998B218820359FFB7FCA7F88401B79554BCAE1E6E3E8F7E1B2FC1FF127040
+uiTest APK assembly                 PASS — 243,320,368 bytes
+uiTest APK SHA-256                  370DAA368B9359DF5869FDD66D9A724A145D23382AD7AAD0C886BB0B49F738A3
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
 Connected Android instrumentation  NOT RUN — `No connected devices!`
