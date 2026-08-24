@@ -31,7 +31,7 @@ uiTest lint                         PASS — 0 errors / 72 warnings
 Connected Android instrumentation  NOT RUN — `No connected devices!`
 ```
 
-The current validation session had no connected ADB device, so the connected Android test task stopped after packaging with `No connected devices!`. Prior API 36 emulator evidence belongs to an earlier implementation commit and is not promoted to this tree. No current-tree claim is made for instrumentation, physical devices, process-death/reboot, accessibility, or battery/thermal behavior.
+The current validation session had no connected ADB device, so the connected Android test task stopped after packaging with `No connected devices!`. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Prior API 36 emulator evidence belongs to an earlier implementation commit and is not promoted to this tree. No current-tree claim is made for instrumentation, physical devices, process-death/reboot, accessibility, or battery/thermal behavior.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, historical/case-integrated image workflows, and representative physical-device/accessibility/performance validation remain release gates.
 

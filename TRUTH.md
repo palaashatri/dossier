@@ -9,7 +9,7 @@ This is the sole live implementation/readiness record for Dossier. `AGENTS.md` d
 - **Current implementation branch:** `feat/product-contract-discovery-v2`
 - **Last validated implementation commit:** `c0e9d91d8928ede91620e130dd2a8ebef8c8fc1f`
 - **Last validation date:** **2026-08-24**
-- **Current-session validation on that commit:** provider and pinned-catalog audits passed; both debug and uiTest JVM suites passed 579 tests across 105 suites each; debug/uiTest APKs assembled; Android-test Kotlin compiled; lint completed with zero errors; and the connected instrumentation task reached packaging but stopped with `No connected devices!`.
+- **Current-session validation of the implementation plus the preserved pre-existing uiTest fixture edit:** provider and pinned-catalog audits passed; both debug and uiTest JVM suites passed 579 tests across 105 suites each; debug/uiTest APKs assembled; Android-test Kotlin compiled; lint completed with zero errors; and the connected instrumentation task reached packaging but stopped with `No connected devices!`.
 - **Documentation-only commits after the validated implementation:** may update this file/PR prose without changing the validated code claim
 - **Last validated device class for this commit:** none; no ADB device was connected in this session
 - **Prior device evidence:** API 36 x86_64 emulator instrumentation exists only for an earlier commit and is not promoted to this tree
@@ -340,7 +340,7 @@ Validation date:
 2026-08-24
 ```
 
-Current-session validation on that exact commit:
+Current-session validation (the uiTest APK includes the pre-existing uncommitted fixture edit; the implementation commit itself does not):
 
 ```text
 Provider registry audit       PASS — 78 definitions / 0 errors
@@ -356,7 +356,7 @@ Connected instrumentation    NOT RUN — `No connected devices!` after APK packa
 Visual QA                     NOT RUN in this validation session
 ```
 
-The full JVM gate was run after the implementation commit with the declarative extractor, redirect-policy, WebView-policy, frontier-depth, AI-key, encrypted-plan-fingerprint and remote graph-provenance tests included. The connected Android test task packaged the current APKs but could not launch AndroidJUnitRunner because no ADB device was connected. The uiTest-only receiver edit that was already present in the worktree remains uncommitted and is not part of the validated implementation commit. No current-tree emulator, physical-device, screenshot, process-death/reboot, accessibility or battery/thermal claim is made here.
+The full JVM gate was run after the implementation commit with the declarative extractor, redirect-policy, WebView-policy, frontier-depth, AI-key, encrypted-plan-fingerprint and remote graph-provenance tests included. The connected Android test task packaged the current APKs but could not launch AndroidJUnitRunner because no ADB device was connected. The uiTest-only receiver edit that was already present in the worktree remains uncommitted; the uiTest APK hash above therefore describes the current worktree artifact, not a clean checkout of the implementation commit. No current-tree emulator, physical-device, screenshot, process-death/reboot, accessibility or battery/thermal claim is made here.
 
 ## Current production blockers
 
