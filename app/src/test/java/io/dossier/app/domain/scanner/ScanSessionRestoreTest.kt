@@ -1,0 +1,190 @@
+package io.dossier.app.domain.scanner
+
+import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.case.CaseTimelineBuilder
+import io.dossier.app.domain.case.CaseScanHistoryEntry
+import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceCollection
+import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceReliability
+import io.dossier.app.domain.evidence.EvidenceRuntimeCache
+import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingType
+import io.dossier.app.domain.model.Platform
+import io.dossier.app.domain.model.ProfileScanResult
+import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.model.UsernameCandidate
+import io.dossier.app.domain.model.UsernameMatchType
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ScanSessionRestoreTest {
+
+    @After
+    fun clearRuntimeEvidence() {
+        EvidenceRuntimeCache.clear()
+        ScanSession.cancelScan()
+    }
+
+    @Test
+    fun restoreFromCaseRehydratesBoundedDeduplicatedEvidence() {
+        val duplicate = Evidence(
+            id = "duplicate",
+            kind = EvidenceKind.Profile,
+            value = "first",
+            observedAtEpochMillis = 1_000L
+        )
+        val records = buildList {
+            add(duplicate)
+            add(duplicate.copy(value = "later"))
+            addAll(
+                List(EvidenceRuntimeCache.MAX_CASE_EVIDENCE + 1) { index ->
+                    Evidence(
+                        id = "record-$index",
+                        kind = EvidenceKind.Username,
+                        value = "user-$index"
+                    )
+                }
+            )
+        }
+        val dossierCase = DossierCase(
+            createdAt = "2026-08-24 12:00",
+            subjectName = "Restored subject",
+            input = IdentityInput(fullName = "Restored subject"),
+            evidenceRecords = records
+        )
+
+        ScanSession.restoreFromCase(dossierCase)
+
+        val restored = EvidenceRuntimeCache.collection.value.evidence
+        assertEquals(EvidenceRuntimeCache.MAX_CASE_EVIDENCE, restored.size)
+        assertSame(duplicate, restored.first())
+        assertEquals(
+            records.distinctBy { it.id }
+                .take(EvidenceRuntimeCache.MAX_CASE_EVIDENCE),
+            restored
+        )
+    }
+
+    @Test
+    fun verifiedProfileAndFindingEvidenceReachTheRestoredTimelineSnapshot() {
+        val profileUrl = "https://social.example/subject"
+        val finding = Finding(
+            type = FindingType.Profile,
+            value = profileUrl,
+            sourceUrl = profileUrl,
+            evidenceSnippet = "Verified public profile",
+            confidence = 0.92f,
+            risk = RiskLevel.Medium,
+            remediation = "Review the public profile"
+        )
+        val profile = ProfileScanResult(
+            candidate = UsernameCandidate(
+                username = "subject",
+                platform = Platform.Website,
+                url = profileUrl,
+                matchType = UsernameMatchType.Exact,
+                confidence = 0.92f,
+                providerId = "social-example"
+            ),
+            exists = true,
+            httpStatus = 200,
+            displayName = "Authorized subject",
+            bio = "",
+            links = emptyList(),
+            extractedText = "",
+            findings = listOf(finding),
+            confidenceSignals = listOf("direct profile verification"),
+            verified = true,
+            verificationStatus = "verified"
+        )
+        val input = IdentityInput(fullName = "Authorized subject", primaryUsername = "subject")
+
+        val snapshot = ScanSession.buildEvidenceSnapshot(
+            input = input,
+            profileResults = listOf(profile),
+            pluginCollection = EvidenceCollection(),
+            findings = listOf(finding),
+            retrievedAtEpochMillis = 123_000L
+        )
+        EvidenceRuntimeCache.replace(snapshot)
+        val case = DossierCase(
+            createdAt = "2026-08-24 12:00",
+            subjectName = "Authorized subject",
+            input = input,
+            evidenceRecords = snapshot.evidence
+        )
+
+        ScanSession.restoreFromCase(case)
+
+        val restored = EvidenceRuntimeCache.collection.value.evidence
+        val profileEvidence = restored.single { it.id == "profile:$profileUrl" }
+        assertEquals(io.dossier.app.domain.evidence.EvidenceState.Verified, profileEvidence.state)
+        assertEquals(EvidenceReliability.DirectPublicProfile, profileEvidence.reliability)
+        assertEquals(123_000L, profileEvidence.retrievedAtEpochMillis)
+        assertTrue(restored.any { it.id == EvidenceIdPolicy.findingId(finding) })
+        assertEquals(123_000L, restored.single { it.id == EvidenceIdPolicy.findingId(finding) }.retrievedAtEpochMillis)
+        assertNull(restored.single { it.id == "seed:username:subject" }.retrievedAtEpochMillis)
+        assertEquals(restored, ScanSession.buildCase()?.evidenceRecords)
+        assertTrue(CaseTimelineBuilder.build(case).isNotEmpty())
+        assertTrue(CaseTimelineBuilder.presentation(case).availability.undatedEvidenceCount >= 1)
+    }
+
+    @Test
+    fun restoreFromCaseRetainsCompletedHistoryForTheActiveTimelineSnapshot() {
+        val input = IdentityInput(fullName = "History Subject")
+        val entry = CaseScanHistoryEntry(
+            scanId = "scan-restored",
+            startedAtUtc = "2026-08-24T12:00:00Z",
+            completedAtUtc = "2026-08-24T12:04:00Z",
+            mode = ScanMode.Standard,
+            directProfileProviderCount = 18,
+            profileResultCount = 6,
+            findingCount = 2
+        )
+        val case = DossierCase(
+            createdAt = "2026-08-24 12:04",
+            subjectName = "History Subject",
+            input = input,
+            scanHistory = listOf(entry)
+        )
+
+        ScanSession.restoreFromCase(case)
+
+        assertEquals(listOf(entry), ScanSession.scanHistory.value)
+        assertEquals(listOf(entry), ScanSession.buildCase()?.scanHistory)
+        assertTrue(
+            CaseTimelineBuilder.build(ScanSession.buildCase()!!)
+                .any { it.evidenceId == "scan:scan-restored:start" }
+        )
+    }
+
+    @Test
+    fun schedulingANewBackgroundScanClearsPriorSubjectEvidence() {
+        EvidenceRuntimeCache.replace(
+            EvidenceCollection(
+                evidence = listOf(
+                    Evidence(
+                        id = "previous-subject",
+                        kind = EvidenceKind.Profile,
+                        value = "https://old.example/profile"
+                    )
+                )
+            )
+        )
+
+        ScanSession.markBackgroundScheduled(
+            input = IdentityInput(fullName = "New authorized subject"),
+            deepResearch = false
+        )
+
+        assertTrue(EvidenceRuntimeCache.collection.value.evidence.isEmpty())
+    }
+}

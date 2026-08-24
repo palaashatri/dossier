@@ -1,6 +1,8 @@
 package io.dossier.app.domain.scanner
 
 import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceReliability
+import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.model.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -75,5 +77,22 @@ class ProfileScannerEvidenceTest {
         val collection = listOf<ProfileScanResult>().toEvidenceCollection(input)
         assertTrue(collection.evidence.any { it.kind == EvidenceKind.Username && it.value == "jane" })
         assertEquals(0, collection.relationships.size)
+    }
+
+    @Test
+    fun absentOrUnverifiedProfilesDoNotClaimDirectPublicReliability() {
+        val input = IdentityInput(fullName = "Jane")
+        val collection = listOf(
+            result("missing", "https://example.test/missing", exists = false, verified = false),
+            result("unverified", "https://example.test/unverified", exists = true, verified = false)
+        ).toEvidenceCollection(input, retrievedAtEpochMillis = 42_000L)
+
+        val missing = collection.evidence.single { it.id == "profile:https://example.test/missing" }
+        val unverified = collection.evidence.single { it.id == "profile:https://example.test/unverified" }
+        assertEquals(EvidenceReliability.SearchEngineCandidate, missing.reliability)
+        assertEquals(EvidenceState.Candidate, missing.state)
+        assertEquals(EvidenceReliability.SearchEngineCandidate, unverified.reliability)
+        assertEquals(EvidenceState.Observed, unverified.state)
+        assertEquals(42_000L, missing.retrievedAtEpochMillis)
     }
 }

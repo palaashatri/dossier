@@ -109,6 +109,8 @@ data class DossierCase(
     val attackPaths: List<AttackPath> = emptyList(),
     val relationshipConfidence: Map<String, RelationshipConfidence> = emptyMap(),
     val aiSummary: String? = null,
+    /** Explicit state prevents a prior AI result being mistaken for a corrected view. */
+    val aiSummaryNeedsRefresh: Boolean = false,
     val mediaIntelligence: MediaIntelligenceSnapshot = MediaIntelligenceSnapshot(),
     val scanHistory: List<CaseScanHistoryEntry> = emptyList(),
     val userCorrections: List<UserCorrection> = emptyList(),

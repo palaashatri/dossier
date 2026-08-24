@@ -455,6 +455,13 @@ fun ModelsScreen() {
                 fontWeight = FontWeight.ExtraBold,
                 modifier = Modifier.padding(top = 4.dp, bottom = 10.dp)
             )
+            Text(
+                text = "Remote analysis is denied by default. Enable a provider below only when you explicitly permit redacted evidence metadata to leave this device; names, values, URLs, graph labels, correction notes, and remediation text stay local.",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                modifier = Modifier.padding(bottom = 12.dp)
+            )
 
             providerConfigs.forEachIndexed { index, config ->
                 ProviderConfigCard(

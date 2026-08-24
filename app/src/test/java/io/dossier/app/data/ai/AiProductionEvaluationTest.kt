@@ -122,7 +122,7 @@ class AiProductionEvaluationTest {
     }
 
     @Test
-    fun remotePromptRedactsSubjectFindingValueAndSourceButKeepsOpaqueEvidenceId() {
+    fun remotePromptRedactsSubjectFindingValueAndSourceAndPseudonymizesEvidenceId() {
         val input = IdentityInput(
             fullName = "Jane Example",
             emails = listOf("jane@example.test")
@@ -137,8 +137,9 @@ class AiProductionEvaluationTest {
         assertTrue(prompt.contains("Authorized subject: [redacted]"))
         assertTrue(prompt.contains("value=[redacted]"))
         assertTrue(prompt.contains("source=[redacted]"))
-        assertTrue(prompt.contains(evidenceId))
+        assertTrue(prompt.contains("evidence:"))
         assertTrue(evidenceId.startsWith("ev2:"))
+        assertFalse(prompt.contains(evidenceId))
         assertFalse(prompt.contains("Jane Example"))
         assertFalse(prompt.contains("jane@example.test"))
         assertFalse(prompt.contains("https://example.test/contact"))

@@ -169,6 +169,121 @@ class ScanHistoryRuntimeTest {
     }
 
     @Test
+    fun finishForSnapshotReturnsExactBoundTerminalAndConsumesActiveEntry() {
+        val input = IdentityInput(fullName = "Snapshot Subject", primaryUsername = "snapshot")
+        val scanId = ScanId("scan-snapshot")
+        ScanHistoryRuntime.scanStarted(
+            scanId = scanId,
+            input = input,
+            mode = ScanMode.Standard,
+            directProfileProviderCount = 12,
+            occurredAt = Instant.parse("2026-08-08T04:00:00Z")
+        )
+
+        val entry = ScanHistoryRuntime.finishForSnapshot(
+            input = input,
+            occurredAt = Instant.parse("2026-08-08T04:03:00Z"),
+            profileResultCount = 7,
+            findingCount = 4,
+            breachRecordCount = 1,
+            graphEntityCount = 9,
+            graphRelationshipCount = 11
+        )
+
+        requireNotNull(entry)
+        assertEquals("scan-snapshot", entry.scanId)
+        assertEquals("2026-08-08T04:00:00Z", entry.startedAtUtc)
+        assertEquals("2026-08-08T04:03:00Z", entry.completedAtUtc)
+        assertEquals(12, entry.directProfileProviderCount)
+        assertEquals(7, entry.profileResultCount)
+        assertEquals(4, entry.findingCount)
+        assertEquals(1, entry.breachRecordCount)
+        assertEquals(9, entry.graphEntityCount)
+        assertEquals(11, entry.graphRelationshipCount)
+        assertEquals(entry, ScanHistoryRuntime.latestFor(input))
+
+        assertEquals(
+            null,
+            ScanHistoryRuntime.finishForSnapshot(
+                input = input,
+                occurredAt = Instant.parse("2026-08-08T04:04:00Z"),
+                profileResultCount = 8,
+                findingCount = 5,
+                breachRecordCount = 1,
+                graphEntityCount = 10,
+                graphRelationshipCount = 12
+            )
+        )
+    }
+
+    @Test
+    fun durableWorkIdentityRebindsAfterProcessResetAndFinalizesOnce() {
+        val input = IdentityInput(fullName = "Fresh Process Subject", primaryUsername = "fresh")
+        val scanId = ScanId("11111111-1111-4111-8111-111111111111")
+
+        assertTrue(
+            ScanHistoryRuntime.ensureStarted(
+                scanId = scanId,
+                input = input,
+                mode = ScanMode.Deep,
+                directProfileProviderCount = 42,
+                occurredAt = Instant.parse("2026-08-08T05:00:00Z")
+            )
+        )
+        // A retry in the same process is idempotent and keeps the original
+        // durable identity/start row.
+        assertTrue(
+            ScanHistoryRuntime.ensureStarted(
+                scanId = scanId,
+                input = input.copy(fullName = " fresh process subject "),
+                mode = ScanMode.Deep,
+                directProfileProviderCount = 99,
+                occurredAt = Instant.parse("2026-08-08T05:01:00Z")
+            )
+        )
+
+        // Simulate WorkManager recreating the worker in a fresh process-local
+        // runtime while retaining only the opaque durable request id.
+        ScanHistoryRuntime.resetForTests()
+        assertTrue(
+            ScanHistoryRuntime.ensureStarted(
+                scanId = scanId,
+                input = input,
+                mode = ScanMode.Deep,
+                directProfileProviderCount = 42,
+                occurredAt = Instant.parse("2026-08-08T05:02:00Z")
+            )
+        )
+
+        val completed = ScanHistoryRuntime.finishForSnapshot(
+            scanId = scanId,
+            input = input,
+            occurredAt = Instant.parse("2026-08-08T05:03:00Z"),
+            profileResultCount = 3,
+            findingCount = 2,
+            breachRecordCount = 1,
+            graphEntityCount = 4,
+            graphRelationshipCount = 5
+        )
+
+        requireNotNull(completed)
+        assertEquals(scanId.value, completed.scanId)
+        assertEquals(completed, ScanHistoryRuntime.latestFor(input))
+        assertNull(
+            ScanHistoryRuntime.finishForSnapshot(
+                scanId = scanId,
+                input = input,
+                occurredAt = Instant.parse("2026-08-08T05:04:00Z"),
+                profileResultCount = 4,
+                findingCount = 3,
+                breachRecordCount = 1,
+                graphEntityCount = 5,
+                graphRelationshipCount = 6
+            )
+        )
+    }
+
+    @Test
     fun fingerprintDoesNotStoreRawIdentityAndIgnoresSelfieSelection() {
         val a = IdentityInput(
             fullName = "Jane Example",

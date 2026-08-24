@@ -28,19 +28,29 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.dossier.app.data.ai.AiInsightService
+import io.dossier.app.data.ai.AiProviderConfigStore
+import io.dossier.app.data.ai.AiRemotePermission
 import io.dossier.app.domain.case.CaseComparison
+import io.dossier.app.domain.case.CaseAnalysisUpdateResult
 import io.dossier.app.domain.case.CaseStore
+import io.dossier.app.domain.case.CaseTimelineBuilder
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.case.RemediationRecord
 import io.dossier.app.domain.case.RemediationStatus
@@ -54,15 +64,21 @@ import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.export.ExportRedactionMode
 import io.dossier.app.export.ReportExporter
 import io.dossier.app.ui.components.AnimatedObsidianBackground
+import io.dossier.app.ui.screens.HistoricalTimelinePanelContent
 import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.NeuralTheme
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 
 /** Explicit local saved-case selection, comparison, correction and remediation. */
 @Composable
-fun CaseComparisonScreen() {
+fun CaseComparisonScreen(onNavigateToBrowser: (String) -> Unit = {}) {
     val context = LocalContext.current
     val store = remember { CaseStore(context) }
+    val aiInsightService = remember { AiInsightService(context) }
     val exporter = remember { ReportExporter(context) }
     var cases by remember { mutableStateOf(emptyList<DossierCase>()) }
     var selectedBefore by remember { mutableStateOf<String?>(null) }
@@ -71,7 +87,7 @@ fun CaseComparisonScreen() {
     var actionNotice by remember { mutableStateOf<String?>(null) }
 
     fun refreshCases() {
-        cases = store.list()
+        cases = store.listEffective()
         selectedBefore = selectedBefore?.takeIf { id -> cases.any { it.caseId == id } }
         selectedAfter = selectedAfter?.takeIf { id -> cases.any { it.caseId == id } }
         if (selectedAfter == null) selectedAfter = cases.firstOrNull()?.caseId
@@ -177,6 +193,26 @@ fun CaseComparisonScreen() {
                     )
                 }
 
+                if (beforeCase == null) {
+                    afterCase?.let { reviewCase ->
+                        item(key = "review-${reviewCase.caseId}") {
+                            RenderCaseReviewItem(
+                                case = reviewCase,
+                                store = store,
+                                aiInsightService = aiInsightService,
+                                exporter = exporter,
+                                onChanged = { notice ->
+                                    actionNotice = notice
+                                    refreshCases()
+                                },
+                                onShareNotice = {
+                                    actionNotice = "Share-safe export prepared. Review the generated files before sharing."
+                                }
+                            )
+                        }
+                    }
+                }
+
                 item {
                     Spacer(modifier = Modifier.height(8.dp))
                     when {
@@ -186,8 +222,8 @@ fun CaseComparisonScreen() {
                             }
                             RenderDiff(beforeCase.label, afterCase.label, diff)
                         }
-                        afterCase != null -> RenderSingleCase(afterCase)
-                        beforeCase != null -> RenderSingleCase(beforeCase)
+                        afterCase != null -> RenderSingleCase(afterCase, onNavigateToBrowser)
+                        beforeCase != null -> RenderSingleCase(beforeCase, onNavigateToBrowser)
                         else -> Text(
                             text = "Choose at least one saved case to view its snapshot.",
                             color = NeuralTheme.TextSecondary,
@@ -196,36 +232,23 @@ fun CaseComparisonScreen() {
                     }
                 }
 
-                afterCase?.let { reviewCase ->
-                    item(key = "review-${reviewCase.caseId}") {
-                        CaseReviewPanel(
-                            case = reviewCase,
-                            store = store,
-                            onShareRedacted = {
-                                exporter.shareReport(
-                                    findings = reviewCase.findings,
-                                    subjectName = reviewCase.subjectName,
-                                    profileSummaries = reviewCase.profileResults.map { result ->
-                                        "${result.candidate.platform.name}: ${result.candidate.url} · exists=${result.exists} · verified=${result.verified}"
-                                    },
-                                    aiSummary = reviewCase.aiSummary,
-                                    faceMatches = reviewCase.faceMatches,
-                                    entityGraphSummary = reviewCase.entityGraph.entities.joinToString("\n") { entity ->
-                                        "${entity.type}: ${entity.label}"
-                                    },
-                                    breachDigests = reviewCase.breachDigests.map { digest ->
-                                        "${digest.email}: ${digest.breachCount} breach record(s)"
-                                    },
-                                    riskLevel = reviewCase.riskLevel.name,
-                                    redactionMode = ExportRedactionMode.ShareSafe
-                                )
-                                actionNotice = "Share-safe export prepared. Review the generated files before sharing."
-                            },
-                            onChanged = { notice ->
-                                actionNotice = notice
-                                refreshCases()
-                            }
-                        )
+                if (beforeCase != null) {
+                    afterCase?.let { reviewCase ->
+                        item(key = "review-${reviewCase.caseId}") {
+                            RenderCaseReviewItem(
+                                case = reviewCase,
+                                store = store,
+                                aiInsightService = aiInsightService,
+                                exporter = exporter,
+                                onChanged = { notice ->
+                                    actionNotice = notice
+                                    refreshCases()
+                                },
+                                onShareNotice = {
+                                    actionNotice = "Share-safe export prepared. Review the generated files before sharing."
+                                }
+                            )
+                        }
                     }
                 }
 
@@ -233,6 +256,43 @@ fun CaseComparisonScreen() {
             }
         }
     }
+}
+
+@Composable
+private fun RenderCaseReviewItem(
+    case: DossierCase,
+    store: CaseStore,
+    aiInsightService: AiInsightService,
+    exporter: ReportExporter,
+    onChanged: (String) -> Unit,
+    onShareNotice: () -> Unit
+) {
+    CaseReviewPanel(
+        case = case,
+        store = store,
+        aiInsightService = aiInsightService,
+        onShareRedacted = {
+            exporter.shareReport(
+                findings = case.findings,
+                subjectName = case.subjectName,
+                profileSummaries = case.profileResults.map { result ->
+                    "${result.candidate.platform.name}: ${result.candidate.url} · exists=${result.exists} · verified=${result.verified}"
+                },
+                aiSummary = case.aiSummary,
+                faceMatches = case.faceMatches,
+                entityGraphSummary = case.entityGraph.entities.joinToString("\n") { entity ->
+                    "${entity.type}: ${entity.label}"
+                },
+                breachDigests = case.breachDigests.map { digest ->
+                    "${digest.email}: ${digest.breachCount} breach record(s)"
+                },
+                riskLevel = case.riskLevel.name,
+                redactionMode = ExportRedactionMode.ShareSafe
+            )
+            onShareNotice()
+        },
+        onChanged = onChanged
+    )
 }
 
 @Composable
@@ -557,7 +617,7 @@ private fun RemediationVerificationRow(
 }
 
 @Composable
-private fun RenderSingleCase(case: DossierCase) {
+private fun RenderSingleCase(case: DossierCase, onNavigateToBrowser: (String) -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -588,6 +648,25 @@ private fun RenderSingleCase(case: DossierCase) {
                 modifier = Modifier.padding(top = 4.dp)
             )
         }
+        val timeline = remember(case) { CaseTimelineBuilder.presentation(case, limit = 240) }
+        Text(
+            text = "Timeline: ${timeline.availability.currentObservationCount} verified current · " +
+                "${timeline.availability.otherObservationCount} other observations · " +
+                "${timeline.availability.historicalObservationCount} historical · " +
+                "${timeline.availability.timestampedEvidenceCount} timestamped",
+            color = NeuralTheme.TextSecondary,
+            fontSize = 11.5.sp,
+            modifier = Modifier.padding(top = 5.dp)
+        )
+        if (timeline.availability.archiveUnavailableCount > 0) {
+            Text(
+                text = "Historical lookup unavailable for ${timeline.availability.archiveUnavailableCount} archived record(s).",
+                color = NeuralTheme.Amber,
+                fontSize = 10.5.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
         case.exposure?.let { exposure ->
             Text(
                 text = "Exposure: ${exposure.dimensions.joinToString(", ") { dimension -> "${dimension.dimension.name.lowercase()} ${dimension.score}" }}",
@@ -611,6 +690,10 @@ private fun RenderSingleCase(case: DossierCase) {
                 modifier = Modifier.padding(top = 5.dp)
             )
         }
+        HistoricalTimelinePanelContent(
+            case = case,
+            onNavigateToBrowser = onNavigateToBrowser
+        )
         Text(
             text = "Choose another case as the other comparison point to calculate a delta.",
             color = NeuralTheme.TextMuted,
@@ -624,12 +707,17 @@ private fun RenderSingleCase(case: DossierCase) {
 private fun CaseReviewPanel(
     case: DossierCase,
     store: CaseStore,
+    aiInsightService: AiInsightService,
     onShareRedacted: () -> Unit,
     onChanged: (String) -> Unit
 ) {
     var showAllEvidence by remember(case.caseId) { mutableStateOf(false) }
     var showAllAccounts by remember(case.caseId) { mutableStateOf(false) }
     var showAllActions by remember(case.caseId) { mutableStateOf(false) }
+    var isReanalyzing by remember(case.caseId) { mutableStateOf(false) }
+    var reanalysisError by remember(case.caseId) { mutableStateOf<String?>(null) }
+    val reanalysisScope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     val latestEvidenceCorrections = case.userCorrections.filter { it.evidenceId != null }.associateBy { it.evidenceId!! }
     val latestEntityCorrections = case.userCorrections.filter { it.entityId != null }.associateBy { it.entityId!! }
@@ -657,6 +745,125 @@ private fun CaseReviewPanel(
             lineHeight = 16.sp,
             modifier = Modifier.padding(top = 3.dp, bottom = 12.dp)
         )
+
+        ReviewSectionTitle(
+            "Saved-case AI analysis",
+            "Analysis is generated from this encrypted snapshot and is never evidence by itself. Re-run after corrections or remediation changes."
+        )
+        case.aiSummary?.takeIf { it.isNotBlank() }?.let { summary ->
+            Text(
+                text = aiSummaryPrivacyStatus(summary),
+                color = NeuralTheme.TextMuted,
+                fontSize = 10.5.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(bottom = 5.dp)
+            )
+            Text(
+                text = summary,
+                color = NeuralTheme.TextPrimary,
+                fontSize = 12.5.sp,
+                lineHeight = 18.sp
+            )
+        }
+        if (case.aiSummaryNeedsRefresh) {
+            Text(
+                text = "Stored analysis is stale after a saved-case change and must not be treated as the current corrected view.",
+                color = NeuralTheme.Amber,
+                fontSize = 10.5.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 5.dp)
+            )
+        }
+        Text(
+            text = savedCaseAiPrivacyStatus(
+                configuredSavedCaseAiRemotePermission(context) == AiRemotePermission.AllowRedactedEvidence
+            ),
+            color = NeuralTheme.TextSecondary,
+            fontSize = 10.5.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.padding(top = 5.dp)
+        )
+        if (savedCaseAiActionVisible(case)) {
+            OutlinedButton(
+                onClick = {
+                    if (!isReanalyzing) {
+                        isReanalyzing = true
+                        reanalysisError = null
+                        reanalysisScope.launch {
+                            val outcome = try {
+                                withContext(Dispatchers.IO) {
+                                    val loaded = store.load(case.caseId)
+                                    if (loaded == null) {
+                                        SavedCaseAiReanalysisOutcome.Failure(
+                                            "The saved case could not be loaded. Existing analysis and refresh state were preserved."
+                                        )
+                                    } else {
+                                        reanalyzeSavedCaseSnapshot(
+                                            loadedCase = loaded,
+                                            store = store,
+                                            aiInsightService = aiInsightService,
+                                            remotePermission = configuredSavedCaseAiRemotePermission(context)
+                                        )
+                                    }
+                                }
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                SavedCaseAiReanalysisOutcome.Failure(
+                                    "Saved-case analysis failed. Existing analysis and refresh state were preserved."
+                                )
+                            }
+                            isReanalyzing = false
+                            when (outcome) {
+                                is SavedCaseAiReanalysisOutcome.Success -> {
+                                    reanalysisError = null
+                                    onChanged(
+                                        "Saved-case analysis refreshed from the stored snapshot. " +
+                                            savedCaseAiPrivacyStatus(
+                                                outcome.remotePermission == AiRemotePermission.AllowRedactedEvidence
+                                            )
+                                    )
+                                }
+                                is SavedCaseAiReanalysisOutcome.Failure -> {
+                                    reanalysisError = outcome.message
+                                }
+                            }
+                        }
+                    }
+                },
+                enabled = !isReanalyzing,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .semantics {
+                        contentDescription = "Re-run saved-case analysis"
+                        stateDescription = if (isReanalyzing) "Analysis running" else "Analysis ready"
+                    },
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt)
+            ) {
+                Text(
+                    if (isReanalyzing) "Re-running analysis…" else "Re-run analysis",
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+        if (isReanalyzing) {
+            Text(
+                text = "Analyzing the exact loaded case snapshot…",
+                color = NeuralTheme.Cobalt,
+                fontSize = 10.5.sp,
+                modifier = Modifier.padding(top = 5.dp)
+            )
+        }
+        reanalysisError?.let { message ->
+            Text(
+                text = message,
+                color = NeuralTheme.Crimson,
+                fontSize = 10.5.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 5.dp)
+            )
+        }
 
         ReviewSectionTitle("Evidence decisions", "Mark attribution, uncertainty, or exclude an item from analysis.")
         if (distinctFindings.isEmpty()) {
@@ -906,7 +1113,13 @@ private fun CorrectionButton(
 ) {
     OutlinedButton(
         onClick = onClick,
-        modifier = modifier.height(48.dp),
+        modifier = modifier
+            .height(48.dp)
+            .semantics {
+                this.selected = selected
+                stateDescription = if (selected) "Selected" else "Not selected"
+                contentDescription = "$label correction, ${if (selected) "selected" else "not selected"}"
+            },
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp),
         colors = ButtonDefaults.outlinedButtonColors(
             contentColor = if (selected) NeuralTheme.Cobalt else NeuralTheme.TextSecondary
@@ -925,7 +1138,13 @@ private fun StatusButton(
 ) {
     OutlinedButton(
         onClick = onClick,
-        modifier = modifier.height(48.dp),
+        modifier = modifier
+            .height(48.dp)
+            .semantics {
+                this.selected = selected
+                stateDescription = if (selected) "Selected" else "Not selected"
+                contentDescription = "$label remediation status, ${if (selected) "selected" else "not selected"}"
+            },
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp),
         colors = ButtonDefaults.outlinedButtonColors(
             contentColor = if (selected) NeuralTheme.Emerald else NeuralTheme.TextSecondary
@@ -1020,6 +1239,76 @@ private fun remediationColor(status: RemediationStatus): Color = when (status) {
     RemediationStatus.InProgress -> NeuralTheme.Cobalt
     RemediationStatus.NeedsManualAction -> NeuralTheme.Amber
     RemediationStatus.NotStarted -> NeuralTheme.TextMuted
+}
+
+private sealed interface SavedCaseAiReanalysisOutcome {
+    data class Success(val remotePermission: AiRemotePermission) : SavedCaseAiReanalysisOutcome
+
+    data class Failure(val message: String) : SavedCaseAiReanalysisOutcome
+}
+
+internal fun savedCaseAiActionVisible(case: DossierCase): Boolean =
+    case.aiSummaryNeedsRefresh || case.aiSummary.isNullOrBlank()
+
+internal fun savedCaseAiRemotePermission(
+    hasUsableRemoteProvider: Boolean
+): AiRemotePermission = if (hasUsableRemoteProvider) {
+    AiRemotePermission.AllowRedactedEvidence
+} else {
+    AiRemotePermission.Denied
+}
+
+private fun configuredSavedCaseAiRemotePermission(context: android.content.Context): AiRemotePermission {
+    val hasUsableRemoteProvider = runCatching {
+        AiProviderConfigStore(context).firstUsableRemoteProvider() != null
+    }.getOrDefault(false)
+    return savedCaseAiRemotePermission(hasUsableRemoteProvider)
+}
+
+private fun savedCaseAiPrivacyStatus(hasUsableRemoteProvider: Boolean): String = if (hasUsableRemoteProvider) {
+    "Remote AI is configured; only the service's redacted evidence snapshot may leave this device when you run analysis."
+} else {
+    "Remote AI is not enabled; this analysis stays on-device unless you explicitly configure a usable provider."
+}
+
+private fun aiSummaryPrivacyStatus(summary: String): String {
+    val source = summary.lineSequence()
+        .firstOrNull { it.startsWith("Analysis source:") }
+        ?: "Analysis source: not reported"
+    val network = summary.lineSequence()
+        .firstOrNull { it.startsWith("Network used for analysis:") }
+        ?: "Network used for analysis: not reported"
+    val policy = summary.lineSequence()
+        .firstOrNull { it.startsWith("Input policy:") }
+        ?: "Input policy: not reported"
+    return "$source · $network · $policy"
+}
+
+private suspend fun reanalyzeSavedCaseSnapshot(
+    loadedCase: DossierCase,
+    store: CaseStore,
+    aiInsightService: AiInsightService,
+    remotePermission: AiRemotePermission
+): SavedCaseAiReanalysisOutcome {
+    val summary = aiInsightService.summarizeCase(
+        case = loadedCase,
+        remotePermission = remotePermission
+    )?.trim()?.takeIf { it.isNotBlank() }
+        ?: return SavedCaseAiReanalysisOutcome.Failure(
+            "No validated analysis result was returned. Existing analysis and refresh state were preserved."
+        )
+    return when (store.saveAnalysisIfUnchanged(loadedCase, summary)) {
+        CaseAnalysisUpdateResult.Applied -> SavedCaseAiReanalysisOutcome.Success(remotePermission)
+        CaseAnalysisUpdateResult.Conflict -> SavedCaseAiReanalysisOutcome.Failure(
+            "The saved case changed while analysis was running. The current case was preserved; re-run analysis again."
+        )
+        CaseAnalysisUpdateResult.MissingCase -> SavedCaseAiReanalysisOutcome.Failure(
+            "The saved case was removed while analysis was running. Existing analysis and refresh state were preserved."
+        )
+        CaseAnalysisUpdateResult.StorageFailure -> SavedCaseAiReanalysisOutcome.Failure(
+            "The refreshed analysis could not be saved. Existing analysis and refresh state were preserved."
+        )
+    }
 }
 
 private const val REVIEW_PREVIEW_LIMIT = 8

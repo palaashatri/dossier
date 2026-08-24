@@ -48,12 +48,28 @@ import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.ReverseVideoLookupResult
 import io.dossier.app.domain.place.ReverseImageLookupService
 import io.dossier.app.domain.place.ReverseVideoLookupService
+import io.dossier.app.domain.place.MediaIntelligenceSession
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.CircularWavyProgressIndicator
 import io.dossier.app.ui.components.GeminiSpark
 import io.dossier.app.ui.theme.NeuralTheme
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * Guards Compose-visible media state when an older lookup completes after a
+ * newer image/video request. The persistence layer has its own binding token;
+ * this generation protects the transient selection, result, error, and
+ * progress state rendered by this screen.
+ */
+internal class ReverseMediaLookupRequestGate {
+    private val generation = AtomicLong(0L)
+
+    fun begin(): Long = generation.incrementAndGet()
+
+    fun isCurrent(token: Long): Boolean = generation.get() == token
+}
 
 /**
  * Reverse media lookup with on-device OCR/location analysis and genuine whole-image
@@ -72,45 +88,70 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
     var videoResult by remember { mutableStateOf<ReverseVideoLookupResult?>(null) }
     var analyzing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    val requestGate = remember { ReverseMediaLookupRequestGate() }
 
     fun analyzeImage(uri: Uri) {
+        val requestToken = requestGate.begin()
         selectedImage = uri
         selectedVideo = null
         imageResult = null
         videoResult = null
         error = null
         analyzing = true
+        val bindingToken = ScanSession.currentInput.value?.let(MediaIntelligenceSession::bindTo)
+        if (bindingToken == null) {
+            MediaIntelligenceSession.clear()
+            error = "Start an authorized identity scan before attaching media evidence."
+            analyzing = false
+            return
+        }
         scope.launch {
             try {
-                imageResult = ReverseImageLookupService(context).lookup(
+                val result = ReverseImageLookupService(context).lookup(
                     uri,
-                    deepResearch = ScanSession.deepResearchEnabled.value
+                    deepResearch = ScanSession.deepResearchEnabled.value,
+                    bindingToken = bindingToken
                 )
+                if (requestGate.isCurrent(requestToken)) imageResult = result
             } catch (throwable: Throwable) {
-                error = "Lookup failed: ${throwable.localizedMessage ?: throwable.javaClass.simpleName}"
+                if (requestGate.isCurrent(requestToken)) {
+                    error = "Lookup failed: ${throwable.localizedMessage ?: throwable.javaClass.simpleName}"
+                }
             } finally {
-                analyzing = false
+                if (requestGate.isCurrent(requestToken)) analyzing = false
             }
         }
     }
 
     fun analyzeVideo(uri: Uri) {
+        val requestToken = requestGate.begin()
         selectedVideo = uri
         selectedImage = null
         imageResult = null
         videoResult = null
         error = null
         analyzing = true
+        val bindingToken = ScanSession.currentInput.value?.let(MediaIntelligenceSession::bindTo)
+        if (bindingToken == null) {
+            MediaIntelligenceSession.clear()
+            error = "Start an authorized identity scan before attaching media evidence."
+            analyzing = false
+            return
+        }
         scope.launch {
             try {
-                videoResult = ReverseVideoLookupService(context).lookup(
+                val result = ReverseVideoLookupService(context).lookup(
                     uri,
-                    deepResearch = ScanSession.deepResearchEnabled.value
+                    deepResearch = ScanSession.deepResearchEnabled.value,
+                    bindingToken = bindingToken
                 )
+                if (requestGate.isCurrent(requestToken)) videoResult = result
             } catch (throwable: Throwable) {
-                error = "Video lookup failed: ${throwable.localizedMessage ?: throwable.javaClass.simpleName}"
+                if (requestGate.isCurrent(requestToken)) {
+                    error = "Video lookup failed: ${throwable.localizedMessage ?: throwable.javaClass.simpleName}"
+                }
             } finally {
-                analyzing = false
+                if (requestGate.isCurrent(requestToken)) analyzing = false
             }
         }
     }

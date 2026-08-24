@@ -23,7 +23,11 @@ import kotlinx.coroutines.withContext
  */
 class ReverseImageLookupService(private val context: Context) {
 
-    suspend fun lookup(uri: Uri, deepResearch: Boolean = false): ReverseImageLookupResult =
+    suspend fun lookup(
+        uri: Uri,
+        deepResearch: Boolean = false,
+        bindingToken: String
+    ): ReverseImageLookupResult =
         withContext(Dispatchers.IO) {
             val faceAnalyzer = FaceAnalyzer(context)
             val exifParser = ExifParser(context)
@@ -104,7 +108,7 @@ class ReverseImageLookupService(private val context: Context) {
                     visualClusters = visual.clusters,
                     visualSearchNote = visual.note
                 )
-                MediaIntelligenceSession.recordImage(result)
+                MediaIntelligenceSession.recordImage(bindingToken, result)
                 result
             }
         }

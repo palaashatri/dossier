@@ -12,13 +12,17 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import io.dossier.app.data.face.FaceCorrelationSessionPolicy
+import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.analysis.OsintAnalysisBundle
 import io.dossier.app.domain.analysis.OsintPostProcessor
 import io.dossier.app.domain.analysis.UsernameSurfaceAnalysis
 import io.dossier.app.domain.case.AuthorizedScope
+import io.dossier.app.domain.case.CaseScanHistoryEntry
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ScanHistoryRuntime
 import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
+import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.UsernameSurfaceRuntimeCache
 import io.dossier.app.domain.model.IdentityInput
@@ -126,10 +130,32 @@ class BackgroundScanWorker(
             val input = requestPoint.input
             val deepResearch = requestPoint.deepResearch
             val strongCorrelation = requestPoint.strongFaceCorrelation
+            val durableScanId = ScanId(requestId)
             DiscoveryScanPreferences.setMode(requestPoint.scanMode)
             ScanSession.setDeepResearch(deepResearch)
             if (strongCorrelation) FaceCorrelationSessionPolicy.useStrongCorrelation()
             else FaceCorrelationSessionPolicy.useBasicMatching()
+
+            // Enqueue-time process state is not durable. Recreated workers must
+            // rebuild the same seed-bound session and history identity before
+            // executing providers; retries for this request are idempotent.
+            ScanSession.markBackgroundScheduled(
+                input = input,
+                deepResearch = deepResearch,
+                scanId = durableScanId
+            )
+            val historyBound = ScanHistoryRuntime.ensureStarted(
+                scanId = durableScanId,
+                input = input,
+                mode = requestPoint.scanMode,
+                directProfileProviderCount = ProviderCatalogV2
+                    .legacyProfileDefinitions(requestPoint.scanMode)
+                    .size,
+                occurredAt = Instant.now()
+            )
+            if (!historyBound) {
+                return@coroutineScope terminalFailure(ERROR_STALE_WORK_REQUEST)
+            }
 
             setProgress(workDataOf(KEY_STAGE to STAGE_STARTING))
             progressRelay = launch {
@@ -160,7 +186,23 @@ class BackgroundScanWorker(
                 )
             )
 
-            val snapshot = ScanSession.buildCase()?.copy(
+            // The coordinator normally records terminal history when the
+            // worker publishes its terminal lifecycle state. Persist the exact
+            // completed entry before the encrypted result write so a process
+            // death between those two steps cannot erase scan-history truth.
+            val completedHistory = ScanHistoryRuntime.finishForSnapshot(
+                scanId = durableScanId,
+                input = input,
+                occurredAt = Instant.now(),
+                profileResultCount = ScanSession.profileScanResults.value.size,
+                findingCount = ScanSession.findings.value.size,
+                breachRecordCount = ScanSession.breachDigests.value.sumOf { it.breachCount },
+                graphEntityCount = ScanSession.entityGraph.value.entities.size,
+                graphRelationshipCount = ScanSession.entityGraph.value.edges.size
+            )
+            val snapshot = ScanSession.buildCase()?.let { built ->
+                attachLatestScanHistory(built, completedHistory)
+            }?.copy(
                 authorizedScope = AuthorizedScope.AuthorizedAssessment,
                 evidenceRecords = evidenceCollection.evidence
                     .distinctBy { it.id }
@@ -338,6 +380,23 @@ class BackgroundScanWorker(
             }
             return workDataOf(KEY_STAGE to persistedStage)
         }
+
+        /**
+         * The coordinator owns terminal history, while this worker owns the
+         * encrypted process-death snapshot. Attach only the exact seed-bound
+         * completed entry; never adopt another subject's process-global row.
+         */
+        internal fun attachLatestScanHistory(
+            dossierCase: DossierCase,
+            completedHistory: CaseScanHistoryEntry?
+        ): DossierCase {
+            val merged = (dossierCase.scanHistory + listOfNotNull(completedHistory))
+                .distinctBy { it.scanId }
+                .takeLast(MAX_SNAPSHOT_SCAN_HISTORY)
+            return dossierCase.copy(scanHistory = merged)
+        }
+
+        private const val MAX_SNAPSHOT_SCAN_HISTORY = 8
     }
 }
 

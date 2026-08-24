@@ -48,7 +48,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.dossier.app.domain.evidence.AttackPathFinder
+import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.ExposureEngine
+import io.dossier.app.domain.discovery.ScanHistoryRuntime
 import io.dossier.app.domain.model.BreachDigest
 import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.FaceConsistencyMatch
@@ -70,6 +72,7 @@ import java.time.format.DateTimeFormatter
 private enum class ReportView(val label: String) {
     Overview("Overview"),
     Evidence("Evidence"),
+    Timeline("Timeline"),
     Connections("Connections"),
     Actions("Actions")
 }
@@ -95,6 +98,8 @@ fun ReportScreen(
     val exposure by ScanSession.exposure.collectAsState()
     val attackPaths by ScanSession.attackPaths.collectAsState()
     val breachDigests by ScanSession.breachDigests.collectAsState()
+    val scanHistory by ScanSession.scanHistory.collectAsState()
+    val evidenceCollection by EvidenceRuntimeCache.collection.collectAsState()
 
     var selectedViewIndex by rememberSaveable { mutableIntStateOf(0) }
     var actionMessage by remember { mutableStateOf<String?>(null) }
@@ -126,6 +131,28 @@ fun ReportScreen(
     val breachLines = remember(breachDigests, findings) {
         formatBreachDigestsFromSession(breachDigests)
             .ifEmpty { formatBreachDigestLines(findings) }
+    }
+    val timelineCase = remember(
+        input,
+        findings,
+        profileResults,
+        faceMatches,
+        entityGraph,
+        breachDigests,
+        scanHistory,
+        evidenceCollection
+    ) {
+        ScanSession.buildCase()?.let { current ->
+            val history = if (current.scanHistory.isNotEmpty()) {
+                current.scanHistory
+            } else {
+                input?.let(ScanHistoryRuntime::latestFor)?.let(::listOf).orEmpty()
+            }
+            current.copy(
+                evidenceRecords = evidenceCollection.evidence,
+                scanHistory = history
+            )
+        }
     }
 
     if (confirmSessionDelete) {
@@ -227,6 +254,15 @@ fun ReportScreen(
                     breachDigests = breachDigests,
                     onNavigateToBrowser = onNavigateToBrowser
                 )
+                ReportView.Timeline -> if (timelineCase != null) {
+                    HistoricalTimelinePanel(
+                        case = timelineCase,
+                        modifier = Modifier.weight(1f),
+                        onNavigateToBrowser = onNavigateToBrowser
+                    )
+                } else {
+                    TimelineUnavailablePanel(modifier = Modifier.weight(1f))
+                }
                 ReportView.Connections -> ConnectionsReport(
                     modifier = Modifier.weight(1f),
                     entityGraph = entityGraph,

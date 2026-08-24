@@ -13,11 +13,28 @@ import kotlinx.coroutines.flow.StateFlow
  * derived analysis separately; this cache is not itself a persistence layer.
  */
 object EvidenceRuntimeCache {
+    /**
+     * A restored case must not be able to repopulate the process cache with an
+     * unbounded payload. Keep this cap aligned with the encrypted case store's
+     * evidence bound while preserving the first record for each stable ID.
+     */
+    const val MAX_CASE_EVIDENCE = 10_000
+
     private val _collection = MutableStateFlow(EvidenceCollection())
     val collection: StateFlow<EvidenceCollection> = _collection
 
     fun replace(value: EvidenceCollection) {
-        _collection.value = value
+        _collection.value = value.copy(
+            evidence = value.evidence.distinctBy { it.id }.take(MAX_CASE_EVIDENCE),
+            relationships = value.relationships.distinctBy {
+                "${it.fromValue}|${it.toValue}|${it.relation}|${it.evidence.orEmpty()}"
+            }
+        )
+    }
+
+    /** Rehydrates only the bounded, ID-deduplicated evidence portion of a case. */
+    fun replaceCaseEvidence(records: List<Evidence>) {
+        replace(EvidenceCollection(evidence = records))
     }
 
     fun clear() {

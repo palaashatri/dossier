@@ -3,18 +3,24 @@ package io.dossier.app.domain.scanner
 import android.content.Context
 import android.net.Uri
 import io.dossier.app.data.ai.AiInsightService
+import io.dossier.app.data.ai.AiProviderConfigStore
+import io.dossier.app.data.ai.AiRemotePermission
 import io.dossier.app.data.breach.BreachCheckService
 import io.dossier.app.data.face.FaceCorrelationSessionPolicy
 import io.dossier.app.data.face.FaceEmbeddingModelStore
 import io.dossier.app.data.face.ProfileImageDownloader
 import io.dossier.app.data.local.ProfileConsistencyCache
+import io.dossier.app.domain.ai.AiAnalysisSnapshot
 import io.dossier.app.domain.ai.LocalAiModelType
 import io.dossier.app.domain.case.CaseStore
+import io.dossier.app.domain.case.CaseScanHistoryEntry
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.evidence.AttackPathFinder
 import io.dossier.app.domain.evidence.ConfidenceEngine
 import io.dossier.app.domain.evidence.EmailDomainContributor
 import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceCollection
+import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.ExposureEngine
 import io.dossier.app.domain.evidence.RelationshipConfidence
@@ -35,11 +41,14 @@ import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.PlaceScanResult
 import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.place.MediaIntelligenceSession
 import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.remediation.RemediationItem
 import io.dossier.app.domain.remediation.RemediationProvider
 import io.dossier.app.domain.risk.RiskScorer
 import io.dossier.app.domain.username.UsernameVariantGenerator
+import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
+import io.dossier.app.domain.discovery.ScanId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -100,6 +109,9 @@ object ScanSession {
     private val _aiSummary = MutableStateFlow<String?>(null)
     val aiSummary: StateFlow<String?> = _aiSummary
 
+    private val _scanHistory = MutableStateFlow<List<CaseScanHistoryEntry>>(emptyList())
+    val scanHistory: StateFlow<List<CaseScanHistoryEntry>> = _scanHistory
+
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning
 
@@ -137,8 +149,30 @@ object ScanSession {
         }
     }
 
-    /** Called under BackgroundScanManager's lifecycle lock after owner publication. */
-    internal fun markBackgroundScheduled(input: IdentityInput, deepResearch: Boolean) {
+    /**
+     * Called under BackgroundScanManager's lifecycle lock after owner
+     * publication, and again by a recreated WorkManager worker. The optional
+     * durable id lets the latter rebuild process-local coordinator state without
+     * resetting an already-running same-request session.
+     */
+    internal fun markBackgroundScheduled(
+        input: IdentityInput,
+        deepResearch: Boolean,
+        scanId: ScanId? = null
+    ) {
+        scanId?.let { durableId ->
+            if (ScanCoordinatorRuntime.activeScanId() != durableId) {
+                ScanCoordinatorRuntime.resetCounts(durableId)
+            }
+        }
+        if (_currentInput.value == input && _isScanning.value) {
+            setDeepResearch(deepResearch)
+            if (_progressText.value.isBlank()) _progressText.value = BackgroundScanWorker.STAGE_STARTING
+            return
+        }
+        EvidenceRuntimeCache.clear()
+        MediaIntelligenceSession.beginFor(input)
+        _scanHistory.value = emptyList()
         _currentInput.value = input
         setDeepResearch(deepResearch)
         _progressText.value = BackgroundScanWorker.STAGE_STARTING
@@ -230,20 +264,26 @@ object ScanSession {
             subjectName = input.fullName.trim().ifBlank { input.primaryUsername ?: "UNKNOWN SUBJECT" },
             input = input,
             findings = _findings.value,
+            evidenceRecords = EvidenceRuntimeCache.collection.value.evidence,
             profileResults = _profileScanResults.value,
             faceMatches = _faceConsistencyMatches.value,
             entityGraph = _entityGraph.value,
             breachDigests = _breachDigests.value,
             riskLevel = _riskLevel.value,
+            mediaIntelligence = MediaIntelligenceSession.snapshotFor(input),
             exposure = _exposure.value,
             attackPaths = _attackPaths.value,
             relationshipConfidence = _relationshipConfidence.value,
-            aiSummary = _aiSummary.value
+            aiSummary = _aiSummary.value,
+            scanHistory = _scanHistory.value
         )
     }
 
     /** Restores a transient encrypted background result after process death. */
     fun restoreFromCase(case: DossierCase) {
+        EvidenceRuntimeCache.replaceCaseEvidence(case.evidenceRecords)
+        MediaIntelligenceSession.restoreFor(case.input, case.mediaIntelligence)
+        _scanHistory.value = case.scanHistory
         _currentInput.value = case.input
         _findings.value = case.findings
         _profileScanResults.value = case.profileResults
@@ -283,6 +323,9 @@ object ScanSession {
     ) = withContext(Dispatchers.IO) {
         val inputToUse = input
         _currentInput.value = inputToUse
+        EvidenceRuntimeCache.clear()
+        MediaIntelligenceSession.beginFor(inputToUse)
+        _scanHistory.value = emptyList()
         _findings.value = emptyList()
         _placeScanResult.value = null
         _profileScanResults.value = emptyList()
@@ -334,14 +377,16 @@ object ScanSession {
             _progressText.value = "BUILDING_ENTITY_GRAPH..."
             val pluginCollection = runPlugins(inputToUse)
             currentCoroutineContext().ensureActive()
-            val scannerEvidence = profileScanner.toEvidenceCollection(scanResults, inputToUse)
-            val evidence = (
-                scannerEvidence.evidence +
-                    pluginCollection.evidence +
-                    buildEvidence(inputToUse, allFindings)
-                ).distinctBy { it.id }
-            val relationships = (scannerEvidence.relationships + pluginCollection.relationships)
-                .distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}" }
+            val evidenceSnapshot = buildEvidenceSnapshot(
+                input = inputToUse,
+                profileResults = scanResults,
+                pluginCollection = pluginCollection,
+                findings = allFindings,
+                retrievedAtEpochMillis = System.currentTimeMillis()
+            )
+            val evidence = evidenceSnapshot.evidence
+            val relationships = evidenceSnapshot.relationships
+            EvidenceRuntimeCache.replace(evidenceSnapshot)
             val graph = EntityGraphBuilder.build(
                 input = inputToUse,
                 profileResults = scanResults,
@@ -389,10 +434,28 @@ object ScanSession {
 
             _progressText.value = "GENERATING_AI_SUMMARY..."
             val summary = try {
+                // A configured-and-enabled provider is the explicit persisted
+                // opt-in. Any config/keystore failure fails closed to local AI
+                // and deterministic fallback; credentials alone never opt in.
+                val remotePermission = runCatching {
+                    if (AiProviderConfigStore(context).firstUsableRemoteProvider() != null) {
+                        AiRemotePermission.AllowRedactedEvidence
+                    } else {
+                        AiRemotePermission.Denied
+                    }
+                }.getOrDefault(AiRemotePermission.Denied)
                 AiInsightService(context).summarizeDossier(
-                    input = inputToUse,
-                    profileResults = scanResults,
-                    findings = _findings.value
+                    snapshot = buildAiAnalysisSnapshot(
+                        input = inputToUse,
+                        profileResults = scanResults,
+                        findings = _findings.value,
+                        evidence = evidence,
+                        graph = graph,
+                        faceMatches = faceMatches,
+                        breachDigests = digests,
+                        exposure = _exposure.value
+                    ),
+                    remotePermission = remotePermission
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -412,6 +475,9 @@ object ScanSession {
 
     fun purgeSession(context: Context) {
         _currentInput.value = null
+        EvidenceRuntimeCache.clear()
+        MediaIntelligenceSession.clear()
+        _scanHistory.value = emptyList()
         _findings.value = emptyList()
         _placeScanResult.value = null
         _profileScanResults.value = emptyList()
@@ -534,7 +600,50 @@ object ScanSession {
             )
         }
 
-    internal fun buildEvidence(input: IdentityInput, findings: List<Finding>): List<Evidence> {
+    internal fun buildEvidenceSnapshot(
+        input: IdentityInput,
+        profileResults: List<ProfileScanResult>,
+        pluginCollection: EvidenceCollection,
+        findings: List<Finding>,
+        retrievedAtEpochMillis: Long? = null
+    ): EvidenceCollection {
+        val scannerEvidence = profileResults.toEvidenceCollection(input, retrievedAtEpochMillis)
+        return EvidenceCollection(
+            evidence = (
+                scannerEvidence.evidence +
+                    pluginCollection.evidence +
+                    buildEvidence(input, findings, retrievedAtEpochMillis)
+                ).distinctBy { it.id },
+            relationships = (scannerEvidence.relationships + pluginCollection.relationships)
+                .distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}" }
+        )
+    }
+
+    internal fun buildAiAnalysisSnapshot(
+        input: IdentityInput,
+        profileResults: List<ProfileScanResult>,
+        findings: List<Finding>,
+        evidence: List<Evidence>,
+        graph: EntityGraph,
+        faceMatches: List<FaceConsistencyMatch> = emptyList(),
+        breachDigests: List<BreachDigest> = emptyList(),
+        exposure: ExposureEngine.ExposureResult? = null
+    ): AiAnalysisSnapshot = AiAnalysisSnapshot.from(
+        input = input,
+        profileResults = profileResults,
+        findings = findings,
+        evidence = evidence,
+        graph = graph,
+        faceMatches = faceMatches,
+        breachDigests = breachDigests,
+        exposure = exposure
+    )
+
+    internal fun buildEvidence(
+        input: IdentityInput,
+        findings: List<Finding>,
+        retrievedAtEpochMillis: Long? = null
+    ): List<Evidence> {
         val seeds = buildList {
             input.emails.filter { it.isNotBlank() }.forEach {
                 add(Evidence(id = "seed:email:$it", kind = EvidenceKind.Email, value = it, confidence = 1.0f))
@@ -549,7 +658,7 @@ object ScanSession {
                     add(Evidence(id = "seed:username:$it", kind = EvidenceKind.Username, value = it, confidence = 1.0f))
                 }
         }
-        val fromFindings = findings.map { it.toEvidence() }
+        val fromFindings = findings.map { it.toEvidence(retrievedAtEpochMillis) }
         return (seeds + fromFindings).distinctBy { it.kind to it.value.lowercase() }
     }
 }

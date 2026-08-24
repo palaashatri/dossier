@@ -10,6 +10,11 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import io.dossier.app.domain.case.CaseScanHistoryEntry
+import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.discovery.ScanHistoryRuntime
+import io.dossier.app.domain.discovery.ScanId
+import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.model.IdentityInput
 import org.junit.After
 import org.junit.Before
@@ -20,6 +25,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -35,6 +41,7 @@ class BackgroundScanWorkManagerAndroidTest {
         clearLifecyclePreferences()
         ScanResumeStore(context).clearDetailed()
         BackgroundScanResultStore(context).clear()
+        ScanHistoryRuntime.resetForTests()
     }
 
     @After
@@ -46,6 +53,7 @@ class BackgroundScanWorkManagerAndroidTest {
         ScanResumeStore(context).clearDetailed()
         BackgroundScanResultStore(context).clear()
         clearLifecyclePreferences()
+        ScanHistoryRuntime.resetForTests()
         runCatching { workManager.pruneWork().result.get(10, TimeUnit.SECONDS) }
     }
 
@@ -95,6 +103,104 @@ class BackgroundScanWorkManagerAndroidTest {
             setOf(BackgroundScanWorker.KEY_REQUEST_ID, BackgroundScanWorker.KEY_GENERATION),
             retry.workSpec.input.keyValueMap.keys
         )
+    }
+
+    @Test
+    fun encryptedBackgroundResultRoundTripRetainsCompletedScanHistory() {
+        val input = IdentityInput(fullName = "History Restore Fixture")
+        val entry = CaseScanHistoryEntry(
+            scanId = "scan-process-death",
+            startedAtUtc = "2026-08-24T00:00:00Z",
+            completedAtUtc = "2026-08-24T00:05:00Z",
+            mode = ScanMode.Deep,
+            directProfileProviderCount = 32,
+            profileResultCount = 17,
+            findingCount = 5,
+            breachRecordCount = 2,
+            graphEntityCount = 14,
+            graphRelationshipCount = 19
+        )
+        val original = DossierCase(
+            createdAt = "2026-08-24T00:05:00Z",
+            subjectName = input.fullName,
+            input = input,
+            scanHistory = listOf(entry)
+        )
+        val store = BackgroundScanResultStore(context)
+
+        assertTrue(store.save(UUID.randomUUID().toString(), original))
+        val restored = store.load()?.dossierCase
+
+        assertNotNull(restored)
+        assertEquals(listOf(entry), restored!!.scanHistory)
+        ScanSession.restoreFromCase(restored)
+        assertEquals(listOf(entry), ScanSession.buildCase()?.scanHistory)
+    }
+
+    @Test
+    fun recreatedWorkerHistoryBindsDurableRequestAndPersistsOneCompletedRow() {
+        val input = IdentityInput(fullName = "Fresh Worker Fixture", primaryUsername = "fresh-worker")
+        val requestId = UUID.randomUUID().toString()
+        val scanId = ScanId(requestId)
+
+        assertTrue(
+            ScanHistoryRuntime.ensureStarted(
+                scanId = scanId,
+                input = input,
+                mode = ScanMode.Deep,
+                directProfileProviderCount = 32,
+                occurredAt = Instant.parse("2026-08-24T00:00:00Z")
+            )
+        )
+        // WorkManager can recreate the worker after process-local runtime state
+        // is gone. Rebinding the opaque request id must remain idempotent.
+        ScanHistoryRuntime.resetForTests()
+        assertTrue(
+            ScanHistoryRuntime.ensureStarted(
+                scanId = scanId,
+                input = input,
+                mode = ScanMode.Deep,
+                directProfileProviderCount = 32,
+                occurredAt = Instant.parse("2026-08-24T00:01:00Z")
+            )
+        )
+        val completed = requireNotNull(
+            ScanHistoryRuntime.finishForSnapshot(
+                scanId = scanId,
+                input = input,
+                occurredAt = Instant.parse("2026-08-24T00:05:00Z"),
+                profileResultCount = 17,
+                findingCount = 5,
+                breachRecordCount = 2,
+                graphEntityCount = 14,
+                graphRelationshipCount = 19
+            )
+        )
+        assertEquals(null, ScanHistoryRuntime.finishForSnapshot(
+            scanId = scanId,
+            input = input,
+            occurredAt = Instant.parse("2026-08-24T00:06:00Z"),
+            profileResultCount = 18,
+            findingCount = 6,
+            breachRecordCount = 2,
+            graphEntityCount = 15,
+            graphRelationshipCount = 20
+        ))
+
+        val snapshot = BackgroundScanWorker.attachLatestScanHistory(
+            DossierCase(
+                createdAt = "2026-08-24T00:05:00Z",
+                subjectName = input.fullName,
+                input = input
+            ),
+            completed
+        )
+        assertEquals(1, snapshot.scanHistory.size)
+        assertEquals(requestId, snapshot.scanHistory.single().scanId)
+        assertTrue(BackgroundScanResultStore(context).save(requestId, snapshot))
+        val restored = requireNotNull(BackgroundScanResultStore(context).load()?.dossierCase)
+        assertEquals(1, restored.scanHistory.size)
+        assertEquals(completed, restored.scanHistory.single())
     }
 
     @Test

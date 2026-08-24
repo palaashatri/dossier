@@ -27,6 +27,7 @@ import java.security.MessageDigest
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.time.format.ResolverStyle
 import java.util.concurrent.TimeUnit
 
 /**
@@ -98,8 +99,11 @@ class WaybackHistoryPlugin(
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Exception) {
-                // Historical-provider failure is isolated from the rest of the scan.
+            } catch (error: Exception) {
+                // Keep an explicit, undated unavailable record for the URL that
+                // was actually requested. An empty capture list is not evidence
+                // that the archive had no history when the lookup itself failed.
+                evidence += unavailableEvidence(originalUrl, error)
             }
         }
 
@@ -120,7 +124,14 @@ class WaybackHistoryPlugin(
             .addQueryParameter("filter", "!digest:-")
             .addQueryParameter("limit", MAX_CDX_ROWS.toString())
             .build()
-        val body = fetchText(url.toString(), "application/json") ?: return emptyList()
+        val body = fetchText(url.toString(), "application/json", failOnError = true) ?: return emptyList()
+        val root = runCatching { JSON.parseToJsonElement(body) as? JsonArray }.getOrNull()
+        val header = (root?.firstOrNull() as? JsonArray)
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        if (root == null || header == null || !REQUIRED_CDX_FIELDS.all(header::contains)) {
+            throw ArchiveLookupException("Wayback CDX response was malformed")
+        }
+        validateCdxRows(root, header, originalUrl)
         return parseCdx(body, originalUrl)
     }
 
@@ -140,26 +151,61 @@ class WaybackHistoryPlugin(
         return ParsedPage(title, description, text)
     }
 
-    private fun fetchText(url: String, accept: String): String? {
+    private fun fetchText(url: String, accept: String, failOnError: Boolean = false): String? {
         val request = runCatching {
             Request.Builder()
                 .url(url)
                 .header("User-Agent", USER_AGENT)
                 .header("Accept", accept)
                 .build()
-        }.getOrNull() ?: return null
+        }.getOrElse {
+            if (failOnError) throw ArchiveLookupException("Wayback request could not be created")
+            return null
+        }
         return try {
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return null
+                if (!response.isSuccessful) {
+                    if (failOnError) throw ArchiveLookupException("Wayback returned HTTP ${response.code}")
+                    return null
+                }
                 val body = response.body ?: return null
-                if (body.contentLength() > MAX_BODY_BYTES) return null
+                if (body.contentLength() > MAX_BODY_BYTES) {
+                    if (failOnError) throw ArchiveLookupException("Wayback response exceeded the bounded body limit")
+                    return null
+                }
                 body.byteStream().use { input -> readBounded(input, MAX_BODY_BYTES) }
                     ?.toString(Charsets.UTF_8)
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            if (failOnError) {
+                if (error is ArchiveLookupException) throw error
+                throw ArchiveLookupException("Wayback request failed")
+            }
             null
         }
     }
+
+    private fun unavailableEvidence(originalUrl: String, error: Exception): Evidence = Evidence(
+        id = "wayback:unavailable:${sha256(originalUrl).take(32)}",
+        kind = EvidenceKind.PublicSearchEvidence,
+        value = originalUrl,
+        sourceUrl = originalUrl,
+        snippet = "Wayback historical lookup unavailable (${error.javaClass.simpleName})",
+        confidence = 0f,
+        risk = RiskLevel.Low,
+        signals = listOf(
+            "Exact URL was explicitly supplied to this authorized audit",
+            "Historical lookup failed before a capture could be verified",
+            "No historical observation or timestamp is asserted"
+        ),
+        providerId = id,
+        state = EvidenceState.Unavailable,
+        reliability = EvidenceReliability.ArchiveSnapshot,
+        parserVersion = PARSER_VERSION,
+        historical = true
+    )
+
+    private class ArchiveLookupException(message: String) : Exception(message)
 
     internal data class Capture(
         val timestamp: String,
@@ -183,6 +229,11 @@ class WaybackHistoryPlugin(
         private const val INDEXED_SNAPSHOT_CONFIDENCE = 0.58f
         private const val VERIFIED_SNAPSHOT_CONFIDENCE = 0.82f
         private val JSON = Json { ignoreUnknownKeys = true }
+        private val REQUIRED_CDX_FIELDS = setOf("timestamp", "original", "digest", "statuscode", "mimetype")
+        private val CDX_TIMESTAMP_PATTERN = Regex("^\\d{14}$")
+        private val CDX_TIMESTAMP_FORMATTER = DateTimeFormatter
+            .ofPattern("uuuuMMddHHmmss")
+            .withResolverStyle(ResolverStyle.STRICT)
 
         internal fun parseCdx(payload: String, expectedOriginalUrl: String): List<Capture> {
             val root = runCatching { JSON.parseToJsonElement(payload) as? JsonArray }.getOrNull()
@@ -212,11 +263,68 @@ class WaybackHistoryPlugin(
                 .sortedByDescending(Capture::timestamp)
         }
 
+        /**
+         * A valid JSON/header envelope with malformed rows is a provider
+         * response failure, not an empty archive. Keep [parseCdx] permissive for
+         * deterministic parser callers, but make the production lookup fail
+         * closed so scan output contains an explicit Unavailable record.
+         */
+        private fun validateCdxRows(
+            root: JsonArray,
+            header: List<String>,
+            expectedOriginalUrl: String
+        ) {
+            if (root.size <= 1) return // A header-only response is legitimate no-history.
+            val index = header.withIndex().associate { it.value to it.index }
+            root.drop(1).forEach { element ->
+                val row = element as? JsonArray
+                    ?: throw ArchiveLookupException("Wayback CDX row was not an array")
+                REQUIRED_CDX_FIELDS.forEach { field ->
+                    val value = (row.getOrNull(index.getValue(field)) as? JsonPrimitive)
+                        ?.contentOrNull
+                        ?.trim()
+                    if (value.isNullOrBlank()) {
+                        throw ArchiveLookupException("Wayback CDX row was missing $field")
+                    }
+                }
+                val timestamp = (row.getOrNull(index.getValue("timestamp")) as JsonPrimitive)
+                    .contentOrNull
+                    .orEmpty()
+                if (!CDX_TIMESTAMP_PATTERN.matches(timestamp)) {
+                    throw ArchiveLookupException("Wayback CDX row had an invalid timestamp")
+                }
+                if (timestampMillis(timestamp) == null) {
+                    throw ArchiveLookupException("Wayback CDX row had an impossible calendar timestamp")
+                }
+                val original = (row.getOrNull(index.getValue("original")) as JsonPrimitive)
+                    .contentOrNull
+                    .orEmpty()
+                    .trim()
+                if (normalizeComparableUrl(original) != normalizeComparableUrl(expectedOriginalUrl)) {
+                    throw ArchiveLookupException("Wayback CDX row did not match the requested URL")
+                }
+                val status = (row.getOrNull(index.getValue("statuscode")) as JsonPrimitive)
+                    .contentOrNull
+                    .orEmpty()
+                    .trim()
+                if (status != "200") {
+                    throw ArchiveLookupException("Wayback CDX row had unexpected HTTP status")
+                }
+                val mime = (row.getOrNull(index.getValue("mimetype")) as JsonPrimitive)
+                    .contentOrNull
+                    .orEmpty()
+                    .trim()
+                if (!mime.equals("text/html", ignoreCase = true)) {
+                    throw ArchiveLookupException("Wayback CDX row had unexpected media type")
+                }
+            }
+        }
+
         internal fun snapshotUrl(capture: Capture): String =
             "https://web.archive.org/web/${capture.timestamp}id_/${capture.originalUrl}"
 
         internal fun timestampMillis(timestamp: String): Long? = runCatching {
-            LocalDateTime.parse(timestamp, DateTimeFormatter.ofPattern("yyyyMMddHHmmss"))
+            LocalDateTime.parse(timestamp, CDX_TIMESTAMP_FORMATTER)
                 .toInstant(ZoneOffset.UTC)
                 .toEpochMilli()
         }.getOrNull()

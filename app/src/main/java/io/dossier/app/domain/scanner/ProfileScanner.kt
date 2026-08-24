@@ -13,6 +13,8 @@ import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
+import io.dossier.app.domain.evidence.EvidenceReliability
+import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.toEvidence
@@ -1785,10 +1787,21 @@ class ProfileScanner(
         deepResearch: Boolean = false
     ): EvidenceCollection {
         val results = scanIdentity(input, deepResearch = deepResearch)
-        return results.toEvidenceCollection(input)
+        // This is the retrieval boundary for a fresh scan. Capture one batch
+        // timestamp here; the pure adapter below remains parameterized for
+        // deterministic conversion of restored/test data.
+        return results.toEvidenceCollection(
+            input,
+            retrievedAtEpochMillis = System.currentTimeMillis()
+        )
     }
 
-    /** Maps already-fetched [ProfileScanResult]s to Evidence without re-scanning. */
+    /**
+     * Maps already-fetched [ProfileScanResult]s to Evidence without re-scanning.
+     * Callers converting a fresh fetch should retain the same batch timestamp
+     * by passing it to the internal adapter; this public convenience method is
+     * intentionally timestamp-free for restored data and deterministic callers.
+     */
     fun toEvidenceCollection(
         results: List<ProfileScanResult>,
         input: IdentityInput
@@ -1801,7 +1814,8 @@ class ProfileScanner(
  * that are not recoverable from findings alone.
  */
 internal fun List<ProfileScanResult>.toEvidenceCollection(
-    input: IdentityInput
+    input: IdentityInput,
+    retrievedAtEpochMillis: Long? = null
 ): EvidenceCollection {
     val evidence = mutableListOf<Evidence>()
     val relationships = mutableListOf<EvidenceRelationship>()
@@ -1821,7 +1835,18 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 confidence = conf,
                 risk = if (result.verified && result.exists) RiskLevel.High else RiskLevel.Low,
                 signals = result.confidenceSignals,
-                providerId = result.providerId ?: result.candidate.providerId
+                providerId = result.providerId ?: result.candidate.providerId,
+                retrievedAtEpochMillis = retrievedAtEpochMillis,
+                state = when {
+                    !result.exists -> EvidenceState.Candidate
+                    result.verified -> EvidenceState.Verified
+                    else -> EvidenceState.Observed
+                },
+                reliability = if (result.exists && result.verified) {
+                    EvidenceReliability.DirectPublicProfile
+                } else {
+                    EvidenceReliability.SearchEngineCandidate
+                }
             )
         )
 
@@ -1842,7 +1867,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
 
         // Each finding bridges losslessly; PII-on-profile is asserted explicitly.
         result.findings.forEach { finding ->
-            evidence.add(finding.toEvidence())
+            evidence.add(finding.toEvidence(retrievedAtEpochMillis))
             if (finding.sourceUrl == url || result.exists) {
                 relationships.add(
                     EvidenceRelationship(

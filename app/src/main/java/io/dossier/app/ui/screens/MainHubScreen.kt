@@ -162,7 +162,7 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
                     HubTab.BREACH -> BreachCheckScreen(
                         onNavigateToBrowser = onNavigateToBrowser
                     )
-                    HubTab.CASES -> CaseComparisonScreen()
+                    HubTab.CASES -> CaseComparisonScreen(onNavigateToBrowser = onNavigateToBrowser)
                     HubTab.MODELS -> ModelsScreen()
                 }
             }

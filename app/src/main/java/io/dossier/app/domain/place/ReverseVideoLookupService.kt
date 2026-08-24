@@ -27,7 +27,11 @@ import kotlin.math.roundToLong
  */
 class ReverseVideoLookupService(private val context: Context) {
 
-    suspend fun lookup(uri: Uri, deepResearch: Boolean = false): ReverseVideoLookupResult =
+    suspend fun lookup(
+        uri: Uri,
+        deepResearch: Boolean = false,
+        bindingToken: String
+    ): ReverseVideoLookupResult =
         withContext(Dispatchers.IO) {
             val retriever = MediaMetadataRetriever()
             val faceAnalyzer = FaceAnalyzer(context)
@@ -79,7 +83,7 @@ class ReverseVideoLookupService(private val context: Context) {
                     webEvidence = webResult.evidence,
                     frameSummaries = frameSummaries
                 )
-                MediaIntelligenceSession.recordVideo(result)
+                MediaIntelligenceSession.recordVideo(bindingToken, result)
                 result
             } finally {
                 try {

@@ -5,6 +5,10 @@ import io.dossier.app.domain.evidence.EvidenceIdPolicy
 /** Pure metadata migration used by encrypted case loading/saving and JVM tests. */
 object CaseEvidenceIdMigration {
     fun migrate(case: DossierCase): DossierCase {
+        val migratedEvidence = case.evidenceRecords
+            .map { evidence -> evidence.copy(id = EvidenceIdPolicy.migrate(evidence.id)) }
+            .distinctBy { it.id }
+            .take(MAX_EVIDENCE_RECORDS)
         val migratedCorrections = case.userCorrections.map { correction ->
             correction.copy(evidenceId = correction.evidenceId?.let(EvidenceIdPolicy::migrate))
         }
@@ -21,6 +25,7 @@ object CaseEvidenceIdMigration {
         }
         return case.copy(
             schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION,
+            evidenceRecords = migratedEvidence,
             userCorrections = migratedCorrections,
             entityGraph = case.entityGraph.copy(
                 entities = migratedEntities,
@@ -28,4 +33,6 @@ object CaseEvidenceIdMigration {
             )
         )
     }
+
+    private const val MAX_EVIDENCE_RECORDS = 10_000
 }
