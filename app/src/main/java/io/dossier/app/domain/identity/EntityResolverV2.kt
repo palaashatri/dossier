@@ -69,7 +69,22 @@ data class EntityResolutionResult(
  * a separate production gate.
  */
 object EntityResolverV2 {
-    fun resolve(input: IdentityInput, result: ProfileScanResult): EntityResolutionResult {
+    const val RESOLVER_VERSION = "entity-resolver-v2"
+
+    /**
+     * An imported artifact only affects production when the strict calibration
+     * loader has accepted it and it represents a sufficiently large consented
+     * corpus. Synthetic/regression artifacts deliberately fall back to the
+     * reviewed engineering defaults.
+     */
+    fun resolve(
+        input: IdentityInput,
+        result: ProfileScanResult,
+        calibration: EntityResolutionCalibrationArtifact? = null,
+        expectedCorpusDigest: String? = null
+    ): EntityResolutionResult {
+        val policy = calibration?.productionPolicyOrNull(expectedCorpusDigest)
+            ?: EntityResolutionPolicy.DEFAULT
         if (!result.exists) {
             return EntityResolutionResult(
                 band = ResolutionBand.Unresolved,
@@ -91,7 +106,7 @@ object EntityResolverV2 {
         if (result.verified) {
             supporting += CorrelationContribution(
                 feature = CorrelationFeature.DirectVerification,
-                weight = 0.45,
+                weight = policy.weight(CorrelationFeature.DirectVerification, 0.45),
                 explanation = "The public profile passed Dossier's direct verification and attribution checks"
             )
         }
@@ -108,7 +123,7 @@ object EntityResolverV2 {
             // Exact username is useful but deliberately insufficient on its own.
             supporting += CorrelationContribution(
                 feature = CorrelationFeature.ExactSuppliedUsername,
-                weight = 0.24,
+                weight = policy.weight(CorrelationFeature.ExactSuppliedUsername, 0.24),
                 explanation = "The public account uses an exact supplied username"
             )
         }
@@ -119,7 +134,7 @@ object EntityResolverV2 {
         if (sharedHosts.isNotEmpty()) {
             supporting += CorrelationContribution(
                 feature = CorrelationFeature.ExplicitCrossLink,
-                weight = 0.42,
+                weight = policy.weight(CorrelationFeature.ExplicitCrossLink, 0.42),
                 explanation = "The public account cross-links a supplied public site (${sharedHosts.first()})"
             )
         }
@@ -132,7 +147,7 @@ object EntityResolverV2 {
         if (findingEmails.intersect(suppliedEmails).isNotEmpty()) {
             supporting += CorrelationContribution(
                 feature = CorrelationFeature.ExactPublicEmail,
-                weight = 0.70,
+                weight = policy.weight(CorrelationFeature.ExactPublicEmail, 0.70),
                 explanation = "The public profile exposes an exact supplied email address"
             )
         }
@@ -144,12 +159,12 @@ object EntityResolverV2 {
             when {
                 overlap >= 0.8 -> supporting += CorrelationContribution(
                     CorrelationFeature.DisplayNameAgreement,
-                    0.18,
+                    policy.weight(CorrelationFeature.DisplayNameAgreement, 0.18),
                     explanation = "Public display name strongly agrees with the supplied name"
                 )
                 overlap == 0.0 && displayName.size >= 2 && suppliedName.size >= 2 -> contradicting += CorrelationContribution(
                     CorrelationFeature.ConflictingDisplayName,
-                    -0.45,
+                    policy.weight(CorrelationFeature.ConflictingDisplayName, -0.45),
                     explanation = "Public display name has no token overlap with the supplied full name"
                 )
             }
@@ -165,7 +180,7 @@ object EntityResolverV2 {
         if (matchingOrg != null) {
             supporting += CorrelationContribution(
                 CorrelationFeature.OrganizationAgreement,
-                0.12,
+                policy.weight(CorrelationFeature.OrganizationAgreement, 0.12),
                 explanation = "Public profile text mentions supplied organization '$matchingOrg'"
             )
         }
@@ -176,7 +191,7 @@ object EntityResolverV2 {
         if (matchingLocation != null) {
             supporting += CorrelationContribution(
                 CorrelationFeature.LocationAgreement,
-                0.08,
+                policy.weight(CorrelationFeature.LocationAgreement, 0.08),
                 explanation = "Public profile text mentions supplied location '$matchingLocation'"
             )
         }
@@ -189,12 +204,13 @@ object EntityResolverV2 {
             it.feature != CorrelationFeature.ExactSuppliedUsername && it.weight >= 0.18
         }
         val band = when {
-            contradicting.any { -it.weight >= 0.40 } && positive < 0.80 -> ResolutionBand.Conflicting
+            contradicting.any { -it.weight >= policy.contradictionWeight } && positive < 0.80 -> ResolutionBand.Conflicting
             supporting.any { it.feature == CorrelationFeature.UserSuppliedProfile } -> ResolutionBand.Confirmed
-            result.verified && score >= 0.72 && strongNonUsernameSignals >= 2 -> ResolutionBand.High
-            result.verified && score >= 0.45 -> ResolutionBand.Medium
-            score >= 0.35 && strongNonUsernameSignals >= 1 -> ResolutionBand.Medium
-            score >= 0.20 -> ResolutionBand.Low
+            result.verified && score >= policy.highScore &&
+                strongNonUsernameSignals >= policy.highMinimumNonUsernameSignals -> ResolutionBand.High
+            result.verified && score >= policy.mediumScore -> ResolutionBand.Medium
+            score >= policy.corroboratedMediumScore && strongNonUsernameSignals >= 1 -> ResolutionBand.Medium
+            score >= policy.lowScore -> ResolutionBand.Low
             else -> ResolutionBand.Unresolved
         }
 
