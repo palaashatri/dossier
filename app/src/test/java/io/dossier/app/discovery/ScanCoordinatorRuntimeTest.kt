@@ -2,6 +2,8 @@ package io.dossier.app.domain.discovery
 
 import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.scanner.BackgroundScanWorker
+import io.dossier.app.domain.scanner.ScanPayloadStage
+import io.dossier.app.domain.scanner.ScanPayloadSummary
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
@@ -160,6 +162,12 @@ class ScanCoordinatorRuntimeTest {
             ScanCoordinatorRuntime.events.first { it is ScanEvent.CheckpointUpdated }
         }
         val plan = ScanPlanSummary.from(ProviderCatalogV2.plan(ScanMode.Standard))
+        val payloadSummary = ScanPayloadSummary(
+            stage = ScanPayloadStage.PublicSearch,
+            itemCount = 2,
+            digest = "d".repeat(64),
+            payloadBytes = 512
+        )
 
         ScanCoordinatorRuntime.dispatch(
             ScanEvent.CheckpointUpdated(
@@ -171,7 +179,11 @@ class ScanCoordinatorRuntimeTest {
                     "private-token=do-not-emit",
                     "BUILDING_ENTITY_GRAPH"
                 ),
-                plan = plan
+                plan = plan,
+                payloadSummaries = listOf(
+                    payloadSummary,
+                    payloadSummary.copy(digest = "not-allowed")
+                )
             )
         )
 
@@ -185,6 +197,35 @@ class ScanCoordinatorRuntimeTest {
         assertEquals(event.completedStages, ScanCoordinatorRuntime.snapshot.value.completedCheckpointStages)
         assertEquals(plan, event.plan)
         assertEquals(plan, ScanCoordinatorRuntime.snapshot.value.plan)
+        assertTrue(event.payloadSummaries.isEmpty())
+        assertTrue(ScanCoordinatorRuntime.snapshot.value.payloadSummaries.isEmpty())
+    }
+
+    @Test
+    fun payloadSummaryIsExposedOnlyOnDiscoveryCheckpoint() = runBlocking {
+        val scanId = ScanId("payload-summary-event")
+        val summary = ScanPayloadSummary(
+            stage = ScanPayloadStage.PublicImage,
+            itemCount = 1,
+            digest = "e".repeat(64),
+            payloadBytes = 256
+        )
+        ScanCoordinatorRuntime.resetCounts(scanId)
+        val nextEvent = async(start = CoroutineStart.UNDISPATCHED) {
+            ScanCoordinatorRuntime.events.first { it is ScanEvent.CheckpointUpdated }
+        }
+        ScanCoordinatorRuntime.dispatch(
+            ScanEvent.CheckpointUpdated(
+                scanId = scanId,
+                occurredAt = java.time.Instant.now(),
+                stage = "DISCOVERING_USERNAMES",
+                completedStages = listOf("DISCOVERING_USERNAMES"),
+                payloadSummaries = listOf(summary)
+            )
+        )
+        val event = nextEvent.await() as ScanEvent.CheckpointUpdated
+        assertEquals(listOf(summary), event.payloadSummaries)
+        assertEquals(listOf(summary), ScanCoordinatorRuntime.snapshot.value.payloadSummaries)
     }
 
     @Test

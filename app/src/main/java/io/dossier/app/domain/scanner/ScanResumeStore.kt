@@ -597,7 +597,8 @@ internal class ScanResumeStore internal constructor(
         ownerId: String,
         stage: ScanCheckpointStage,
         completed: Boolean,
-        output: ScanStageOutput? = null
+        output: ScanStageOutput? = null,
+        payloads: List<ScanPayloadSummary> = emptyList()
     ): ResumeCheckpointWriteState = synchronized(STORE_LOCK) {
         if (!isValidRequestId(requestId) || !isValidRequestId(ownerId)) {
             return@synchronized ResumeCheckpointWriteState.Invalid(
@@ -634,6 +635,11 @@ internal class ScanResumeStore internal constructor(
         if (output != null && !isValidStageOutput(output)) {
             return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
         }
+        if (payloads.isNotEmpty() &&
+            (!completed || stage != ScanCheckpointStage.DiscoveringUsernames || !isValidPayloadSummaries(payloads))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
 
         val current = available.point.checkpointStage
         val completedStages = available.point.completedCheckpointStages
@@ -641,6 +647,10 @@ internal class ScanResumeStore internal constructor(
         if (completed && stage !in completedStages) completedStages += stage
         val stageOutputs = available.point.stageOutputs.toMutableMap()
         if (completed && output != null) stageOutputs[stage] = output
+        val payloadSummaries = available.point.payloadSummaries
+            .associateBy(ScanPayloadSummary::stage)
+            .toMutableMap()
+        if (completed) payloads.forEach { payloadSummaries[it.stage] = it }
         val nextCurrent = if (stage.order >= current.order) stage else current
         val now = runCatching { nowMillis() }.getOrElse {
             return@synchronized ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
@@ -665,6 +675,11 @@ internal class ScanResumeStore internal constructor(
                         omittedCount = outputValue.omittedCount
                     )
                 },
+            payloadSummaries = payloadSummaries
+                .toList()
+                .sortedBy { it.first.ordinal }
+                .take(MAX_PAYLOAD_SUMMARIES)
+                .map { it.second },
             checkpointOwnerId = ownerId
         )
         persistUpdatedRecord(updated)
@@ -1150,6 +1165,9 @@ internal class ScanResumeStore internal constructor(
                         stage to output.toDomain()
                     }
                 }.toMap(),
+                payloadSummaries = record.payloadSummaries
+                    .take(MAX_PAYLOAD_SUMMARIES)
+                    .filter(ScanPayloadSummary::isWellFormed),
                 checkpointOwnerId = record.checkpointOwnerId
             )
         )
@@ -1196,6 +1214,10 @@ internal class ScanResumeStore internal constructor(
                     !isValidStageOutput(output.toDomain())
             }
         ) return false
+        if (!isValidPayloadSummaries(record.payloadSummaries)) return false
+        if (record.payloadSummaries.isNotEmpty() &&
+            ScanCheckpointStage.DiscoveringUsernames.wireName !in completed
+        ) return false
         return record.checkpointOwnerId == null || isValidRequestId(record.checkpointOwnerId)
     }
 
@@ -1203,6 +1225,11 @@ internal class ScanResumeStore internal constructor(
         output.itemCount in 0..MAX_STAGE_OUTPUT_COUNT &&
             output.verifiedCount in 0..output.itemCount &&
             output.omittedCount in 0..MAX_STAGE_OUTPUT_COUNT
+
+    private fun isValidPayloadSummaries(payloads: List<ScanPayloadSummary>): Boolean =
+        payloads.size <= MAX_PAYLOAD_SUMMARIES &&
+            payloads.map(ScanPayloadSummary::stage).distinct().size == payloads.size &&
+            payloads.all(ScanPayloadSummary::isWellFormed)
 
     private fun recordForPoint(point: ResumePoint): ResumeRecord = ResumeRecord(
         formatVersion = FORMAT_VERSION,
@@ -1232,6 +1259,9 @@ internal class ScanResumeStore internal constructor(
                     omittedCount = output.omittedCount
                 )
             },
+        payloadSummaries = point.payloadSummaries
+            .sortedBy(ScanPayloadSummary::stage)
+            .take(MAX_PAYLOAD_SUMMARIES),
         checkpointOwnerId = point.checkpointOwnerId
     )
 
@@ -1301,6 +1331,9 @@ internal class ScanResumeStore internal constructor(
                 stage to output.toDomain()
             }
         }.toMap(),
+        payloadSummaries = payloadSummaries
+            .take(MAX_PAYLOAD_SUMMARIES)
+            .filter(ScanPayloadSummary::isWellFormed),
         checkpointOwnerId = checkpointOwnerId
     )
 
@@ -2157,6 +2190,8 @@ internal class ScanResumeStore internal constructor(
         val completedCheckpointStages: List<String> = emptyList(),
         /** Bounded non-sensitive output shape for completed stages. */
         val stageOutputs: List<StageOutputRecord> = emptyList(),
+        /** Bounded metadata for encrypted public discovery payloads. */
+        val payloadSummaries: List<ScanPayloadSummary> = emptyList(),
         /** Exact WorkManager owner bound after lifecycle CAS succeeds. */
         val checkpointOwnerId: String? = null
     )
@@ -2222,6 +2257,7 @@ internal class ScanResumeStore internal constructor(
         const val MAX_LIST_ITEMS = 128
         const val MAX_CHECKPOINT_STAGES = 16
         const val MAX_STAGE_OUTPUT_COUNT = 100_000
+        const val MAX_PAYLOAD_SUMMARIES = 2
         const val MAX_POINTER_BYTES = 64L
         const val GCM_IV_BYTES = 12
         const val GCM_TAG_BYTES = 16
@@ -2272,6 +2308,7 @@ internal data class ResumePoint(
     val checkpointStage: ScanCheckpointStage = ScanCheckpointStage.Queued,
     val completedCheckpointStages: List<ScanCheckpointStage> = emptyList(),
     val stageOutputs: Map<ScanCheckpointStage, ScanStageOutput> = emptyMap(),
+    val payloadSummaries: List<ScanPayloadSummary> = emptyList(),
     val checkpointOwnerId: String? = null
 )
 

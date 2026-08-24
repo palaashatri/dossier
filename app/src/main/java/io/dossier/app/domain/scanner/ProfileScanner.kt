@@ -5,7 +5,9 @@ import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.data.platform.resolveProfileUrl
 import io.dossier.app.data.web.PublicImageSearchService
 import io.dossier.app.data.web.PublicSearchDiscoveryService
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ProviderExecutionRuntime
+import io.dossier.app.domain.discovery.ProviderPlanFingerprint
 import io.dossier.app.domain.discovery.ProviderResponseClassifier
 import io.dossier.app.domain.discovery.ProviderRendererPolicy
 import io.dossier.app.domain.discovery.ProviderVerificationState
@@ -55,6 +57,23 @@ class ProfileScanner(
     suspend fun scanIdentity(input: IdentityInput, deepResearch: Boolean = false, requestId: String? = null): List<ProfileScanResult> {
         val scanId = ScanCoordinatorRuntime.claimProviderScanId()
         val results = mutableListOf<ProfileScanResult>()
+
+        // Public search/image observations are resumable only for a durable
+        // WorkManager request.  The catalog-plan commitment prevents a cache
+        // created under a changed provider plan from being mistaken for this
+        // scan's output; interactive scans remain process-local as before.
+        val payloadStore = requestId
+            ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
+            ?.let { durableRequestId ->
+                runCatching {
+                    val plan = ProviderCatalogV2.plan(DiscoveryScanPreferences.selectedMode.value)
+                    PublicDiscoveryPayloadStore(
+                        context = context,
+                        requestId = durableRequestId,
+                        planFingerprint = ProviderPlanFingerprint.forPlan(plan)
+                    )
+                }.getOrNull()
+            }
 
         val usernames = mutableSetOf<String>()
         input.primaryUsername?.let { if (it.isNotBlank()) usernames.add(it) }
@@ -237,28 +256,36 @@ class ProfileScanner(
         // audited name/handles/emails and site-specific sources (including
         // Reddit + 4chan). These hits are review candidates, not verified account
         // ownership, so they are surfaced with verified=false.
-        val publicSearchResults: List<ProfileScanResult> = try {
-            val confirmedUrls = (initialResults + pivotResults)
-                .filter { it.exists && it.verified }
-                .map { PublicSearchDiscoveryService.canonicalUrlKey(it.candidate.url) }
-                .toSet()
-            runPublicSearchPass(input, confirmedUrls, deepResearch)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Throwable) {
-            emptyList()
-        }
+        val publicSearchResults: List<ProfileScanResult> = payloadStore?.load(ScanPayloadStage.PublicSearch)
+            ?: try {
+                val confirmedUrls = (initialResults + pivotResults)
+                    .filter { it.exists && it.verified }
+                    .map { PublicSearchDiscoveryService.canonicalUrlKey(it.candidate.url) }
+                    .toSet()
+                val discovered = runPublicSearchPass(input, confirmedUrls, deepResearch)
+                // Persist an empty list only after the pass completed normally;
+                // exceptions below remain a cache miss and retry honestly.
+                payloadStore?.save(ScanPayloadStage.PublicSearch, discovered)
+                discovered
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                emptyList()
+            }
 
         // ---- Pass 4: public image-index discovery. This searches image indexes
         // by identity terms only; it does not upload the user's selfie or perform
         // face recognition.
-        val publicImageResults: List<ProfileScanResult> = try {
-            runPublicImagePass(input, publicSearchResults, deepResearch)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Throwable) {
-            emptyList()
-        }
+        val publicImageResults: List<ProfileScanResult> = payloadStore?.load(ScanPayloadStage.PublicImage)
+            ?: try {
+                val discovered = runPublicImagePass(input, publicSearchResults, deepResearch)
+                payloadStore?.save(ScanPayloadStage.PublicImage, discovered)
+                discovered
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                emptyList()
+            }
 
         return initialResults + pivotResults + publicSearchResults + publicImageResults
     }

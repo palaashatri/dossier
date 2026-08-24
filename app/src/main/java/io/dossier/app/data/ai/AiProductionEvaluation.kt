@@ -19,7 +19,81 @@ data class AiEvaluationFixture(
     val snapshot: AiAnalysisSnapshot,
     val rawModelOutput: String?,
     val expected: ExpectedOutcome
-)
+) {
+    /**
+     * Returns deterministic integrity failures for a fixture before any model
+     * output is evaluated. This is deliberately stricter than the persisted
+     * snapshot model: evaluation data must not contain ambiguous IDs or
+     * provenance that cannot be inspected by the validator.
+     */
+    fun integrityIssues(): List<String> = buildList {
+        if (id.isBlank()) add("fixture_id_blank")
+
+        val evidenceIds = snapshot.evidence.map(Evidence::id)
+        if (evidenceIds.any(String::isBlank)) add("evidence_id_blank")
+        if (evidenceIds.distinct().size != evidenceIds.size) add("duplicate_evidence_id")
+        if (evidenceIds.size > MAX_EVALUATION_EVIDENCE_RECORDS) add("evidence_limit_exceeded")
+        val evidenceIdSet = evidenceIds.toSet()
+
+        val entityIds = snapshot.graph.entities.map { it.id }
+        if (entityIds.any(String::isBlank)) add("graph_entity_id_blank")
+        if (entityIds.distinct().size != entityIds.size) add("duplicate_graph_entity_id")
+        if (entityIds.size > MAX_EVALUATION_GRAPH_ENTITIES) add("graph_entity_limit_exceeded")
+        val entityIdSet = entityIds.toSet()
+        if (snapshot.graph.edges.size > MAX_EVALUATION_GRAPH_EDGES) add("graph_edge_limit_exceeded")
+        if (snapshot.graph.edges.any { edge ->
+                edge.fromId !in entityIdSet || edge.toId !in entityIdSet
+            }
+        ) {
+            add("dangling_graph_endpoint")
+        }
+
+        val graphEvidenceRefs = snapshot.graph.entities
+            .flatMap { it.evidenceIds } + snapshot.graph.edges.flatMap { edge ->
+            edge.evidenceIds + edge.contradictingEvidenceIds
+        }
+        if (graphEvidenceRefs.any { it !in evidenceIdSet }) {
+            add("graph_evidence_reference_missing")
+        }
+
+        val remediationRecords = snapshot.remediationRecords
+        if (remediationRecords.size > MAX_EVALUATION_REMEDIATION_RECORDS) {
+            add("remediation_record_limit_exceeded")
+        }
+        val remediationRecordIds = remediationRecords.map { it.remediationId }
+        if (remediationRecordIds.any(String::isBlank)) add("remediation_id_blank")
+        if (remediationRecordIds.distinct().size != remediationRecordIds.size) {
+            add("duplicate_remediation_id")
+        }
+
+        val remediationLinks = snapshot.remediationLinks
+        if (remediationLinks.size > MAX_EVALUATION_REMEDIATION_RECORDS) {
+            add("remediation_link_limit_exceeded")
+        }
+        val linkedRecordIds = remediationLinks.map { it.record.remediationId }
+        if (linkedRecordIds.any(String::isBlank)) add("remediation_link_id_blank")
+        if (linkedRecordIds.distinct().size != linkedRecordIds.size) {
+            add("duplicate_remediation_link_id")
+        }
+        if (remediationLinks.any { link ->
+                link.evidenceId != null &&
+                    (link.evidenceId.isBlank() || link.evidenceId !in evidenceIdSet)
+            }
+        ) {
+            add("remediation_evidence_reference_missing")
+        }
+    }
+
+    private companion object {
+        // These limits are intentionally above the normal prompt windows so
+        // deterministic fixtures can exercise omission/provenance cases while
+        // still preventing an unbounded evaluation artifact from entering CI.
+        const val MAX_EVALUATION_EVIDENCE_RECORDS = 256
+        const val MAX_EVALUATION_GRAPH_ENTITIES = 256
+        const val MAX_EVALUATION_GRAPH_EDGES = 512
+        const val MAX_EVALUATION_REMEDIATION_RECORDS = 256
+    }
+}
 
 enum class ExpectedOutcome {
     ACCEPTED,
@@ -39,6 +113,13 @@ data class AiEvaluationCorpus(
         require(fixtures.isNotEmpty())
         require(fixtures.map(AiEvaluationFixture::id).distinct().size == fixtures.size) {
             "AI evaluation fixture IDs must be unique."
+        }
+        val integrityFailures = fixtures.flatMap { fixture ->
+            fixture.integrityIssues().map { issue -> "${fixture.id}:$issue" }
+        }
+        require(integrityFailures.isEmpty()) {
+            "AI evaluation corpus contains invalid fixture provenance: " +
+                integrityFailures.joinToString(", ")
         }
     }
 }

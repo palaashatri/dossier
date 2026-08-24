@@ -3,6 +3,7 @@ package io.dossier.app.domain.remediation
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.data.platform.ProviderCatalogV2
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -98,5 +99,46 @@ class RemediationProviderTest {
         assertNull(unknownResource.actionUrl)
         assertNull(missingResource.actionUrl)
         assertFalse(unknownResource.note.isBlank())
+    }
+
+    @Test
+    fun reviewedResourceCatalogIsSchemaValidAgainstProviderCatalog() {
+        val issues = RemediationResourceCatalog.validate(
+            RemediationResourceCatalog.entries,
+            ProviderCatalogV2.definitions
+        )
+
+        assertTrue("catalog issues: $issues", issues.isEmpty())
+        assertEquals(8, RemediationResourceCatalog.entries.size)
+        assertTrue(RemediationResourceCatalog.entries.all { resource ->
+            resource.actionUrl.startsWith("https://") &&
+                resource.reviewNote.contains("does not prove removal", ignoreCase = true) &&
+                listOf("delete", "remove", "erase").none { token ->
+                    resource.actionLabel.contains(token, ignoreCase = true)
+                }
+        })
+    }
+
+    @Test
+    fun catalogValidationRejectsDuplicatesUnknownProvidersAndUnsafeLinks() {
+        val invalid = listOf(
+            ReviewedRemediationResource("github", "", "https://evil.example/action", reviewNote = ""),
+            ReviewedRemediationResource("github", "Duplicate", "https://github.com/settings/profile"),
+            ReviewedRemediationResource("missing-provider", "Manual", "http://example.com/settings"),
+            ReviewedRemediationResource("reddit", "Redirect", "https://www.reddit.com/settings/profile?next=https://evil.example/#x"),
+            ReviewedRemediationResource("gitlab", "Credentials", "https://user:pass@gitlab.com/-/profile")
+        )
+
+        val issues = RemediationResourceCatalog.validate(invalid, ProviderCatalogV2.definitions)
+        val codes = issues.map { it.code }.toSet()
+
+        assertTrue(codes.contains("duplicate-provider"))
+        assertTrue(codes.contains("unknown-provider"))
+        assertTrue(codes.contains("https-required"))
+        assertTrue(codes.contains("blank-label"))
+        assertTrue(codes.contains("blank-review-note"))
+        assertTrue(codes.contains("host-mismatch"))
+        assertTrue(codes.contains("redirect-material-forbidden"))
+        assertTrue(codes.contains("userinfo-forbidden"))
     }
 }

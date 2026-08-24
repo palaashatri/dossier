@@ -1107,13 +1107,15 @@ object BackgroundScanManager {
     private fun clearRequestRecoveryState(context: Context, requestId: String): Boolean {
         val profilesCleared = ProfileScanCheckpointStore.clearRequest(context, requestId)
         val frontierCleared = PivotFrontierStore.clearRequest(context, requestId)
-        return profilesCleared && frontierCleared
+        val payloadsCleared = PublicDiscoveryPayloadStore.clearRequest(context, requestId)
+        return profilesCleared && frontierCleared && payloadsCleared
     }
 
     private fun clearAllRecoveryState(context: Context): Boolean {
         val profilesCleared = ProfileScanCheckpointStore.clearAll(context)
         val frontiersCleared = PivotFrontierStore.clearAll(context)
-        return profilesCleared && frontiersCleared
+        val payloadsCleared = PublicDiscoveryPayloadStore.clearAll(context)
+        return profilesCleared && frontiersCleared && payloadsCleared
     }
 
     fun hasActiveMarker(context: Context): Boolean = synchronized(LIFECYCLE_LOCK) {
@@ -1263,7 +1265,8 @@ object BackgroundScanManager {
         requestId: String,
         stage: ScanCheckpointStage,
         completed: Boolean,
-        output: ScanStageOutput? = null
+        output: ScanStageOutput? = null,
+        payloads: List<ScanPayloadSummary> = emptyList()
     ): ResumeCheckpointWriteState = synchronized(LIFECYCLE_LOCK) {
         val appContext = context.applicationContext
         val lifecycle = (lifecycleStoreProvider(appContext).read()
@@ -1281,7 +1284,8 @@ object BackgroundScanManager {
             ownerId = workerId,
             stage = stage,
             completed = completed,
-            output = output
+            output = output,
+            payloads = payloads
         )
     }
 

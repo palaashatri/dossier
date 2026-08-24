@@ -245,6 +245,43 @@ class ScanResumeStoreTest {
     }
 
     @Test
+    fun coordinatorCheckpointPersistsOnlyValidatedPublicPayloadSummaries() {
+        val fixture = fixture()
+        val store = store(fixture)
+        val saved = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+        val summary = ScanPayloadSummary(
+            stage = ScanPayloadStage.PublicSearch,
+            itemCount = 3,
+            digest = "c".repeat(64),
+            payloadBytes = 1_024
+        )
+
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.DiscoveringUsernames,
+                completed = true,
+                payloads = listOf(summary)
+            ) is ResumeCheckpointWriteState.Saved
+        )
+        val loaded = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertEquals(listOf(summary), loaded.point.payloadSummaries)
+
+        val invalid = store.advanceCheckpoint(
+            requestId = saved.point.requestId,
+            ownerId = OWNER_ONE,
+            stage = ScanCheckpointStage.BuildingEntityGraph,
+            completed = true,
+            payloads = listOf(summary.copy(digest = "not-a-digest"))
+        )
+        assertTrue(invalid is ResumeCheckpointWriteState.Invalid)
+        val retained = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertEquals(listOf(summary), retained.point.payloadSummaries)
+    }
+
+    @Test
     fun staleCheckpointOwnerCannotOverwriteNewOwnerOrRegressStage() {
         val fixture = fixture()
         val store = store(fixture)

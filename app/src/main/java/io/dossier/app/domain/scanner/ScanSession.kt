@@ -36,6 +36,9 @@ import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.discovery.WhatsMyNameCatalog
+import io.dossier.app.data.platform.ProviderCatalogV2
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ProviderPlanFingerprint
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.PlaceScanResult
@@ -388,6 +391,20 @@ object ScanSession {
             val variantGenerator = UsernameVariantGenerator()
             val profileScanner = ProfileScanner(context, piiExtractor, variantGenerator)
 
+            val publicPayloadStore = requestId
+                ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
+                ?.let { durableRequestId ->
+                    runCatching {
+                        PublicDiscoveryPayloadStore(
+                            context = context,
+                            requestId = durableRequestId,
+                            planFingerprint = ProviderPlanFingerprint.forPlan(
+                                ProviderCatalogV2.plan(DiscoveryScanPreferences.selectedMode.value)
+                            )
+                        )
+                    }.getOrNull()
+                }
+
             val scanResults = profileScanner.scanIdentity(inputToUse, deepResearch = deepResearch, requestId = requestId)
             currentCoroutineContext().ensureActive()
             _profileScanResults.value = scanResults
@@ -401,7 +418,8 @@ object ScanSession {
                 output = ScanStageOutput(
                     itemCount = scanResults.size,
                     verifiedCount = scanResults.count { it.exists && it.verified }
-                )
+                ),
+                payloads = publicPayloadStore?.summaries().orEmpty()
             )
 
             val allFindings = mutableListOf<Finding>()
@@ -686,7 +704,8 @@ object ScanSession {
         generation: String?,
         stage: ScanCheckpointStage,
         completed: Boolean,
-        output: ScanStageOutput? = null
+        output: ScanStageOutput? = null,
+        payloads: List<ScanPayloadSummary> = emptyList()
     ) {
         if (requestId == null || ownerId == null || generation == null) return
         when (
@@ -697,7 +716,8 @@ object ScanSession {
                 generation = generation,
                 stage = stage,
                 completed = completed,
-                output = output
+                output = output,
+                payloads = payloads
             )
         ) {
             is ResumeCheckpointWriteState.Saved -> Unit

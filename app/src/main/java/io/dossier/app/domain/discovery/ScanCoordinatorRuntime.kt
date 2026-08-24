@@ -11,6 +11,7 @@ import io.dossier.app.domain.scanner.ScanCheckpointStage
 import io.dossier.app.domain.scanner.ScanLifecycleErrors
 import io.dossier.app.domain.scanner.ScanResumeStore
 import io.dossier.app.domain.scanner.ScanSession
+import io.dossier.app.domain.scanner.ScanPayloadSummary
 import io.dossier.app.domain.scanner.ScanStageOutput
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -178,7 +179,8 @@ sealed interface ScanEvent {
         override val occurredAt: Instant,
         val stage: String,
         val completedStages: List<String>,
-        val plan: ScanPlanSummary? = null
+        val plan: ScanPlanSummary? = null,
+        val payloadSummaries: List<ScanPayloadSummary> = emptyList()
     ) : ScanEvent
 
     data class ScanPaused(
@@ -278,7 +280,8 @@ data class LiveScanSnapshot(
     val pivotLastDecision: PivotDecisionSummary? = null,
     val checkpointStage: String = ScanCheckpointStage.Queued.wireName,
     val completedCheckpointStages: List<String> = emptyList(),
-    val plan: ScanPlanSummary? = null
+    val plan: ScanPlanSummary? = null,
+    val payloadSummaries: List<ScanPayloadSummary> = emptyList()
 )
 
 /**
@@ -363,7 +366,8 @@ object ScanCoordinatorRuntime {
         generation: String,
         stage: ScanCheckpointStage,
         completed: Boolean,
-        output: ScanStageOutput? = null
+        output: ScanStageOutput? = null,
+        payloads: List<ScanPayloadSummary> = emptyList()
     ): ResumeCheckpointWriteState =
         BackgroundScanManager.advanceCheckpointIfOwner(
             context = context,
@@ -372,7 +376,8 @@ object ScanCoordinatorRuntime {
             requestId = requestId,
             stage = stage,
             completed = completed,
-            output = output
+            output = output,
+            payloads = payloads
         ).also(::publishCheckpointState)
 
     private fun publishCheckpointState(state: ResumeCheckpointWriteState) {
@@ -384,7 +389,8 @@ object ScanCoordinatorRuntime {
                 checkpointStage = point.checkpointStage.wireName,
                 completedCheckpointStages = point.completedCheckpointStages
                     .map(ScanCheckpointStage::wireName),
-                plan = point.scanPlan
+                plan = point.scanPlan,
+                payloadSummaries = point.payloadSummaries
             )
             _snapshot.value = current
             emit(
@@ -393,7 +399,8 @@ object ScanCoordinatorRuntime {
                     occurredAt = Instant.now(),
                     stage = current.checkpointStage,
                     completedStages = current.completedCheckpointStages,
-                    plan = current.plan
+                    plan = current.plan,
+                    payloadSummaries = current.payloadSummaries
                 )
             )
         }
@@ -537,7 +544,10 @@ object ScanCoordinatorRuntime {
                 is ScanEvent.CheckpointUpdated -> current.copy(
                     checkpointStage = event.stage,
                     completedCheckpointStages = event.completedStages,
-                    plan = event.plan ?: current.plan
+                    plan = event.plan ?: current.plan,
+                    payloadSummaries = event.payloadSummaries
+                        .takeIf { it.isNotEmpty() }
+                        ?: current.payloadSummaries
                 )
                 else -> current
             }
@@ -573,15 +583,27 @@ object ScanCoordinatorRuntime {
             maxDepth = event.maxDepth.coerceIn(0, PivotAdmissionPolicy.MAX_ALLOWED_DEPTH),
             maxTotalPivots = event.maxTotalPivots.coerceIn(0, PivotFrontierConfig.MAX_ALLOWED_TOTAL_PIVOTS)
         )
-        is ScanEvent.CheckpointUpdated -> event.copy(
-            stage = ScanCheckpointStage.fromWire(event.stage)?.wireName
-                ?: ScanCheckpointStage.Queued.wireName,
-            completedStages = event.completedStages
-                .mapNotNull { ScanCheckpointStage.fromWire(it)?.wireName }
-                .distinct()
-                .take(ScanResumeStore.MAX_CHECKPOINT_STAGES),
-            plan = event.plan?.takeIf(ScanPlanSummary::isWellFormed)
-        )
+        is ScanEvent.CheckpointUpdated -> {
+            val safeStage = ScanCheckpointStage.fromWire(event.stage)
+            event.copy(
+                stage = safeStage?.wireName ?: ScanCheckpointStage.Queued.wireName,
+                completedStages = event.completedStages
+                    .mapNotNull { ScanCheckpointStage.fromWire(it)?.wireName }
+                    .distinct()
+                    .take(ScanResumeStore.MAX_CHECKPOINT_STAGES),
+                plan = event.plan?.takeIf(ScanPlanSummary::isWellFormed),
+                // Payload metadata is meaningful only on the discovery
+                // boundary that owns the public search/image envelopes.
+                payloadSummaries = if (safeStage == ScanCheckpointStage.DiscoveringUsernames) {
+                    event.payloadSummaries
+                        .filter(ScanPayloadSummary::isWellFormed)
+                        .distinctBy(ScanPayloadSummary::stage)
+                        .take(ScanResumeStore.MAX_PAYLOAD_SUMMARIES)
+                } else {
+                    emptyList()
+                }
+            )
+        }
         else -> event
     }
 
@@ -889,7 +911,8 @@ object ScanCoordinatorRuntime {
             _snapshot.value = _snapshot.value.copy(
                 scanId = id,
                 mode = request.mode,
-                plan = ScanPlanSummary.from(ProviderCatalogV2.plan(request.mode))
+                plan = ScanPlanSummary.from(ProviderCatalogV2.plan(request.mode)),
+                payloadSummaries = emptyList()
             )
         }
         DiscoveryScanPreferences.setMode(request.mode)

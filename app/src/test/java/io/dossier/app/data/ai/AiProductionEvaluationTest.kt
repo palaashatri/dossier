@@ -1,11 +1,23 @@
 package io.dossier.app.data.ai
 
+import io.dossier.app.domain.ai.AiAnalysisSnapshot
 import io.dossier.app.domain.ai.AiConfidence
+import io.dossier.app.domain.ai.AiRemediationLink
+import io.dossier.app.domain.ai.AiRemediationLinkState
 import io.dossier.app.domain.ai.EvidenceGroundedAiValidator
+import io.dossier.app.domain.case.RemediationRecord
+import io.dossier.app.domain.case.RemediationStatus
+import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.model.DossierEdge
+import io.dossier.app.domain.model.DossierEntity
+import io.dossier.app.domain.model.EntityGraph
+import io.dossier.app.domain.model.EntityType
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -122,6 +134,178 @@ class AiProductionEvaluationTest {
     }
 
     @Test
+    fun syntheticCorpusPassesAllDeterministicCases() {
+        val report = AiProductionEvaluation.evaluate(AiProductionEvaluation.syntheticCorpus())
+
+        assertTrue(report.metrics.allCasesPassed)
+        assertEquals(5, report.metrics.total)
+        assertEquals(5, report.metrics.passedCases)
+        assertEquals(1, report.metrics.fallbackOutputsProduced)
+    }
+
+    @Test
+    fun evaluationCorpusRejectsDanglingGraphProvenance() {
+        val snapshot = snapshot(
+            graph = EntityGraph(
+                entities = listOf(
+                    DossierEntity(id = "subject", type = EntityType.Person, label = "Synthetic Subject"),
+                    DossierEntity(id = "account", type = EntityType.Profile, label = "https://example.test/profile")
+                ),
+                edges = listOf(
+                    DossierEdge(
+                        fromId = "subject",
+                        toId = "account",
+                        relation = "USES_ACCOUNT",
+                        evidenceIds = listOf("evidence-that-does-not-exist")
+                    )
+                )
+            )
+        )
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            AiEvaluationCorpus(
+                corpusId = "invalid-graph",
+                version = AiProductionEvaluation.CORPUS_VERSION,
+                kind = AiEvaluationCorpusKind.SYNTHETIC,
+                fixtures = listOf(
+                    AiEvaluationFixture(
+                        id = "dangling-graph",
+                        snapshot = snapshot,
+                        rawModelOutput = null,
+                        expected = ExpectedOutcome.FALLBACK
+                    )
+                )
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("dangling-graph:graph_evidence_reference_missing"))
+    }
+
+    @Test
+    fun evaluationCorpusRejectsDuplicateAndOversizedEvidence() {
+        val duplicate = snapshot(
+            evidence = listOf(
+                evidence("duplicate"),
+                evidence("duplicate")
+            )
+        )
+        val duplicateError = assertThrows(IllegalArgumentException::class.java) {
+            AiEvaluationCorpus(
+                corpusId = "duplicate-evidence",
+                version = AiProductionEvaluation.CORPUS_VERSION,
+                kind = AiEvaluationCorpusKind.SYNTHETIC,
+                fixtures = listOf(
+                    AiEvaluationFixture("duplicate", duplicate, null, ExpectedOutcome.FALLBACK)
+                )
+            )
+        }
+        assertTrue(duplicateError.message.orEmpty().contains("duplicate:duplicate_evidence_id"))
+
+        val oversized = snapshot(
+            evidence = (0..256).map { index -> evidence("evidence-$index") }
+        )
+        val oversizedError = assertThrows(IllegalArgumentException::class.java) {
+            AiEvaluationCorpus(
+                corpusId = "oversized-evidence",
+                version = AiProductionEvaluation.CORPUS_VERSION,
+                kind = AiEvaluationCorpusKind.SYNTHETIC,
+                fixtures = listOf(
+                    AiEvaluationFixture("oversized", oversized, null, ExpectedOutcome.FALLBACK)
+                )
+            )
+        }
+        assertTrue(oversizedError.message.orEmpty().contains("oversized:evidence_limit_exceeded"))
+
+        val oversizedGraph = snapshot(
+            graph = EntityGraph(
+                entities = (0..256).map { index ->
+                    DossierEntity(
+                        id = "entity-$index",
+                        type = EntityType.Person,
+                        label = "Synthetic entity $index"
+                    )
+                }
+            )
+        )
+        val oversizedGraphError = assertThrows(IllegalArgumentException::class.java) {
+            AiEvaluationCorpus(
+                corpusId = "oversized-graph",
+                version = AiProductionEvaluation.CORPUS_VERSION,
+                kind = AiEvaluationCorpusKind.SYNTHETIC,
+                fixtures = listOf(
+                    AiEvaluationFixture("graph", oversizedGraph, null, ExpectedOutcome.FALLBACK)
+                )
+            )
+        }
+        assertTrue(oversizedGraphError.message.orEmpty().contains("graph:graph_entity_limit_exceeded"))
+    }
+
+    @Test
+    fun evaluationBindsRemediationOutcomeToVerifiedLink() {
+        val observed = evidence("remediation-evidence")
+        val completedRecord = remediationRecord(
+            remediationId = "remediation-completed",
+            status = RemediationStatus.Completed,
+            verifiedByScanId = "scan-after-remediation"
+        )
+        val submittedRecord = remediationRecord(
+            remediationId = "remediation-submitted",
+            status = RemediationStatus.Submitted,
+            verifiedByScanId = null
+        )
+        val completedLink = AiRemediationLink(
+            record = completedRecord,
+            evidenceId = observed.id,
+            effective = true,
+            state = AiRemediationLinkState.Effective
+        )
+        val submittedLink = completedLink.copy(
+            record = submittedRecord,
+            effective = false,
+            state = AiRemediationLinkState.Unmatched
+        )
+        val claimOutput = resultJson(
+            claim = "The provider removed the public email exposure.",
+            supporting = listOf(observed.id)
+        )
+        val corpus = AiEvaluationCorpus(
+            corpusId = "remediation-boundary",
+            version = AiProductionEvaluation.CORPUS_VERSION,
+            kind = AiEvaluationCorpusKind.SYNTHETIC,
+            fixtures = listOf(
+                AiEvaluationFixture(
+                    id = "verified-remediation",
+                    snapshot = snapshot(
+                        evidence = listOf(observed),
+                        remediationRecords = listOf(completedRecord),
+                        remediationLinks = listOf(completedLink)
+                    ),
+                    rawModelOutput = claimOutput,
+                    expected = ExpectedOutcome.ACCEPTED
+                ),
+                AiEvaluationFixture(
+                    id = "unverified-remediation",
+                    snapshot = snapshot(
+                        evidence = listOf(observed),
+                        remediationRecords = listOf(submittedRecord),
+                        remediationLinks = listOf(submittedLink)
+                    ),
+                    rawModelOutput = claimOutput,
+                    expected = ExpectedOutcome.REJECTED
+                )
+            )
+        )
+
+        val report = AiProductionEvaluation.evaluate(corpus)
+        assertTrue(report.metrics.allCasesPassed)
+        assertEquals(ExpectedOutcome.ACCEPTED, report.cases.first { it.id == "verified-remediation" }.actual)
+        assertEquals(ExpectedOutcome.REJECTED, report.cases.first { it.id == "unverified-remediation" }.actual)
+        assertTrue(
+            report.cases.first { it.id == "unverified-remediation" }
+                .rejectedReasonCodes.contains("remediation_outcome_requires_verification")
+        )
+    }
+
+    @Test
     fun remotePromptRedactsSubjectFindingValueAndSourceAndPseudonymizesEvidenceId() {
         val input = IdentityInput(
             fullName = "Jane Example",
@@ -163,6 +347,43 @@ class AiProductionEvaluationTest {
         // The snippet itself is deliberately not added to the AI snapshot.
         assertFalse(prompt.contains("IGNORE ALL PRIOR RULES"))
     }
+
+    private fun snapshot(
+        evidence: List<Evidence> = listOf(evidence("evidence-1")),
+        graph: EntityGraph = EntityGraph(),
+        remediationRecords: List<RemediationRecord> = emptyList(),
+        remediationLinks: List<AiRemediationLink> = emptyList()
+    ): AiAnalysisSnapshot = AiAnalysisSnapshot(
+        input = IdentityInput(fullName = "Synthetic Subject"),
+        evidence = evidence,
+        graph = graph,
+        remediationRecords = remediationRecords,
+        remediationLinks = remediationLinks
+    )
+
+    private fun evidence(id: String): Evidence = Evidence(
+        id = id,
+        kind = EvidenceKind.Email,
+        value = "jane@example.test",
+        sourceUrl = "https://example.test/contact"
+    )
+
+    private fun remediationRecord(
+        remediationId: String,
+        status: RemediationStatus,
+        verifiedByScanId: String?
+    ): RemediationRecord = RemediationRecord(
+        remediationId = remediationId,
+        findingKey = "Email|jane@example.test|https://example.test/contact",
+        providerId = "example",
+        sourceUrl = "https://example.test/contact",
+        action = "Remove public email",
+        status = status,
+        createdAtUtc = "2026-01-01T00:00:00Z",
+        updatedAtUtc = "2026-01-02T00:00:00Z",
+        verifiedByScanId = verifiedByScanId,
+        evidenceId = "remediation-evidence"
+    )
 
     private fun resultJson(
         claim: String,

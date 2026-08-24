@@ -123,7 +123,7 @@ class RemediationProvider {
             )
         }
 
-        val reviewed = REVIEWED_PROVIDER_RESOURCES[provider.id]
+        val reviewed = RemediationResourceCatalog.find(provider.id)
         if (reviewed == null) {
             return RemediationResource(
                 state = RemediationResourceState.ManualActionRequired,
@@ -139,9 +139,9 @@ class RemediationProvider {
             state = RemediationResourceState.ProviderSpecific,
             providerId = provider.id,
             providerName = provider.displayName,
-            actionLabel = reviewed.label,
-            actionUrl = reviewed.url,
-            note = "Official ${provider.displayName} settings resource. Opening it does not prove removal; verify any provider response with a later scan."
+            actionLabel = reviewed.actionLabel,
+            actionUrl = reviewed.actionUrl,
+            note = "Official ${provider.displayName} settings resource. ${reviewed.reviewNote}"
         )
     }
 
@@ -162,24 +162,6 @@ class RemediationProvider {
                 (templateHost.startsWith("dossier-user.") && sourceHost.endsWith(templateHost.removePrefix("dossier-user")))
         }
     }.getOrNull()
-
-    private data class ReviewedResource(val label: String, val url: String)
-
-    /**
-     * Small reviewed allowlist of provider-owned settings resources. Providers
-     * not listed here deliberately stay manual rather than receiving guessed
-     * help/privacy URLs.
-     */
-    private val REVIEWED_PROVIDER_RESOURCES = mapOf(
-        "github" to ReviewedResource("Open GitHub profile settings", "https://github.com/settings/profile"),
-        "reddit" to ReviewedResource("Open Reddit profile settings", "https://www.reddit.com/settings/profile"),
-        "gitlab" to ReviewedResource("Open GitLab profile settings", "https://gitlab.com/-/profile"),
-        "devto" to ReviewedResource("Open DEV settings", "https://dev.to/settings"),
-        "medium" to ReviewedResource("Open Medium settings", "https://medium.com/me/settings"),
-        "twitch" to ReviewedResource("Open Twitch profile settings", "https://www.twitch.tv/settings/profile"),
-        "instagram" to ReviewedResource("Open Instagram profile settings", "https://www.instagram.com/accounts/edit/"),
-        "x" to ReviewedResource("Open X profile settings", "https://x.com/settings/profile")
-    )
 
     private fun problemFor(f: Finding): String = when (f.type) {
         FindingType.Email -> "Email address exposed publicly"
