@@ -403,6 +403,53 @@ class ProviderExecutionRuntimeTest {
     }
 
     @Test
+    fun customSchedulingKeyAndClassifierWorksCorrectlyAndCapsBody() = runBlocking {
+        val hugeBody = "X".repeat(300_000)
+        val provider = sampleProvider.copy(id = "test-provider")
+        val client = createMockClient { request ->
+            mockResponse(request, 200, hugeBody)
+        }
+        val diagnostics = mutableListOf<Pair<String, ProviderOutcome>>()
+        val runtime = ProviderExecutionRuntime(
+            client = client,
+            diagnosticsRecorder = { providerId, outcome, _ ->
+                diagnostics += providerId to outcome
+            }
+        )
+        ScanCoordinatorRuntime.onProviderQueued(provider.id)
+
+        val customClassifier = { _: ProviderDefinition, obs: ProviderResponseObservation ->
+            assertEquals(192 * 1024, obs.bodyText.length)
+            ProviderResponseDecision(ProviderVerificationState.Present, "Custom classifier success")
+        }
+
+        val result = runtime.execute(
+            provider = provider,
+            url = "https://test.example.com/custom_user",
+            schedulingKey = " API.Example.COM ",
+            classifier = customClassifier,
+            maxBodyChars = 192 * 1024
+        )
+
+        assertEquals(ProviderVerificationState.Present, result.decision.state)
+        assertEquals("Custom classifier success", result.decision.explanation)
+        assertEquals(200, result.statusCode)
+        assertEquals(192 * 1024, result.bodyText.length)
+        assertEquals(listOf("test-provider" to ProviderOutcome.Success), diagnostics)
+        val snapshot = ScanCoordinatorRuntime.snapshot.value
+        assertEquals(1, snapshot.startedProviderCount)
+        assertEquals(1, snapshot.completedProviderCount)
+        assertEquals(
+            "api.example.com",
+            ProviderExecutionRuntime.normalizeSchedulingKey(" API.Example.COM ", "fallback")
+        )
+        assertEquals(
+            "fallback",
+            ProviderExecutionRuntime.normalizeSchedulingKey("invalid/key", "fallback")
+        )
+    }
+
+    @Test
     fun modelSerializationBackwardCompatibility() {
         // Legacy JSON without providerId or providerVerificationState
         val legacyCandidateJson = """

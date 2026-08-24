@@ -1,0 +1,8 @@
+Upstream repository: https://github.com/WebBreacher/WhatsMyName
+Pinned source: https://raw.githubusercontent.com/WebBreacher/WhatsMyName/e62338e4fc88536a330733d355a9d33a3a1697c6/wmn-data.json
+Commit: e62338e4fc88536a330733d355a9d33a3a1697c6
+wmn-data.json SHA-256: 779922223756F47D1512F81A5A2D0C69D19418FE5DF1A2A9406C7CF18CF68F34
+LICENSE.md SHA-256: 3EAB49AA5CABC24918C11AAB97DFE8873E0641317B898D989C993C4283A4D84B
+Dataset is unmodified.
+License: CC BY-SA 4.0
+Author: Micah Hoffman (WebBreacher)

@@ -14,6 +14,7 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -68,9 +69,14 @@ class ProviderExecutionRuntime(
         url: String,
         scanId: ScanId = checkNotNull(ScanCoordinatorRuntime.activeScanId()) {
             "Provider execution requires an explicitly claimed active scan"
-        }
+        },
+        schedulingKey: String = normalize(provider.id),
+        classifier: (ProviderDefinition, ProviderResponseObservation) -> ProviderResponseDecision = ProviderResponseClassifier::classify,
+        maxBodyChars: Int = MAX_BODY_CHARS
     ): ProviderExecutionResult {
         val providerId = normalize(provider.id)
+        val safeSchedulingKey = normalizeSchedulingKey(schedulingKey, providerId)
+        val cappedBodyChars = maxBodyChars.coerceIn(1, MAX_BODY_CHARS)
 
         if (isCooldownActive(providerId)) {
             val decision = ProviderResponseDecision(
@@ -112,7 +118,7 @@ class ProviderExecutionRuntime(
             finalBody = ""
 
             try {
-                scheduler.execute(providerId, policy.minimumIntervalMs) providerRequest@{
+                scheduler.execute(safeSchedulingKey, policy.minimumIntervalMs) providerRequest@{
                     if (isCooldownActive(providerId)) {
                         finalStatusCode = 429
                         finalDecision = ProviderResponseDecision(
@@ -139,7 +145,7 @@ class ProviderExecutionRuntime(
                     callClient.newCall(request).execute().use { response ->
                         finalStatusCode = response.code
                         finalUrl = response.request.url.toString()
-                        val rawBody = readBoundedBody(response.body, MAX_BODY_CHARS)
+                        val rawBody = readBoundedBody(response.body, cappedBodyChars)
                         finalBody = rawBody
                         val observation = ProviderResponseObservation(
                             statusCode = response.code,
@@ -147,7 +153,7 @@ class ProviderExecutionRuntime(
                             finalUrl = finalUrl,
                             bodyText = rawBody
                         )
-                        finalDecision = ProviderResponseClassifier.classify(provider, observation)
+                        finalDecision = classifier(provider, observation)
                     }
                 }
 
@@ -285,6 +291,14 @@ class ProviderExecutionRuntime(
         const val USER_AGENT = "Dossier/0.1 authorized-assessment (+https://github.com/palaashatri/dossier)"
         const val MAX_BODY_CHARS = 1_000_000
         private val providerIdPattern = Regex("^[a-z0-9]+(?:-[a-z0-9]+)*$")
+        private val schedulingKeyPattern = Regex("^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
+
+        internal fun normalizeSchedulingKey(value: String, fallbackProviderId: String): String {
+            val normalized = value.trim().lowercase(Locale.ROOT)
+            return normalized.takeIf {
+                schedulingKeyPattern.matches(it) && ".." !in it
+            } ?: fallbackProviderId
+        }
 
         fun readBoundedBody(body: ResponseBody?, maxChars: Int = MAX_BODY_CHARS): String {
             if (body == null) return ""

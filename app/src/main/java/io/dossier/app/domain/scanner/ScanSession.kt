@@ -29,6 +29,7 @@ import io.dossier.app.domain.model.BreachDigest
 import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.discovery.WhatsMyNameCatalog
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.PlaceScanResult
@@ -301,6 +302,7 @@ object ScanSession {
 
         try {
             _progressText.value = "DISCOVERING_USERNAMES..."
+            WhatsMyNameCatalog.install(context)
             val piiExtractor = PiiExtractor()
             val variantGenerator = UsernameVariantGenerator()
             val profileScanner = ProfileScanner(context, piiExtractor, variantGenerator)

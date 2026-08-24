@@ -1,10 +1,16 @@
 package io.dossier.app.domain.evidence
 
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
-import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
-import io.dossier.app.domain.discovery.ProviderOutcome
+import io.dossier.app.domain.discovery.ProviderExecutionRuntime
 import io.dossier.app.domain.discovery.ProviderRequestScheduler
+import io.dossier.app.domain.discovery.ProviderVerificationState
+import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
+import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.discovery.WhatsMyNameCatalog
+import io.dossier.app.domain.discovery.WhatsMyNameCatalogState
+import io.dossier.app.domain.discovery.WhatsMyNameSite
+import io.dossier.app.domain.discovery.WhatsMyNameResponseClassifier
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
 import kotlinx.coroutines.Dispatchers
@@ -12,46 +18,18 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import java.net.URI
 import java.security.MessageDigest
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
-/**
- * Broad username-surface enumeration using WhatsMyName's public site-definition
- * dataset as response-classification rules.
- *
- * Correctness boundary:
- * - only usernames explicitly supplied to the assessment are checked;
- * - GET-only entries with a literal {account} placeholder are eligible;
- * - POST probes, authentication/CAPTCHA flows, invalid/broken entries and NSFW
- *   categories are skipped rather than bypassed;
- * - direct account existence is an observation, never proof that the account
- *   belongs to the investigated identity.
- *
- * Requests are paced per provider and bounded globally. Aggregate provider health
- * records contain provider IDs/outcomes only and never queried handles or content.
- */
-class WhatsMyNameUsernamePlugin : ScannerPlugin {
+class WhatsMyNameUsernamePlugin(
+    private val runtime: ProviderExecutionRuntime = ProviderExecutionRuntime(
+        scheduler = ProviderRequestScheduler(MAX_CONCURRENCY)
+    ),
+    private val timeSource: () -> Long = System::currentTimeMillis
+) : ScannerPlugin {
     override val id: String = SOURCE_ID
     override val displayName: String = "WhatsMyName public username surface"
-
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(6, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
-    private val scheduler = ProviderRequestScheduler(MAX_CONCURRENCY)
 
     override suspend fun scan(input: IdentityInput): EvidenceCollection {
         val handles = (listOfNotNull(input.primaryUsername) + input.usernames)
@@ -59,43 +37,57 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
             .filter(String::isNotBlank)
             .distinct()
             .take(MAX_HANDLES)
+
         if (handles.isEmpty()) {
             UsernameSurfaceRuntimeCache.replace(SOURCE_ID, emptyList())
             return EvidenceCollection()
         }
 
-        val sites = fetchDataset()
-        if (sites.isEmpty()) {
-            UsernameSurfaceRuntimeCache.replace(SOURCE_ID, emptyList())
+        val catalogState = WhatsMyNameCatalog.state
+        if (catalogState !is WhatsMyNameCatalogState.Ready) {
+            val reason = (catalogState as? WhatsMyNameCatalogState.Unavailable)?.reason ?: "Not initialized"
+            val obs = handles.map { handle ->
+                unavailable("WhatsMyName", handle, "", timeSource(), reason, SOURCE_ID)
+            }
+            UsernameSurfaceRuntimeCache.replace(SOURCE_ID, obs)
             return EvidenceCollection()
         }
 
         val mode = DiscoveryScanPreferences.selectedMode.value
-        val eligible = sites
-            .asSequence()
-            .filter(::eligibleSite)
-            .take(siteLimit(mode))
-            .toList()
-        if (eligible.isEmpty()) {
-            UsernameSurfaceRuntimeCache.replace(SOURCE_ID, emptyList())
-            return EvidenceCollection()
+        val eligibleSites = catalogState.sites.take(siteLimit(mode))
+
+        val scanId = ScanCoordinatorRuntime.activeScanId()
+            ?: ScanCoordinatorRuntime.claimProviderScanId()
+
+        val operations = mutableListOf<Pair<WhatsMyNameSite, String>>()
+        for (site in eligibleSites) {
+            for (rawHandle in handles) {
+                val cleanHandle = site.stripBadChar.fold(rawHandle) { current, character ->
+                    current.replace(character.toString(), "")
+                }
+                if (cleanHandle.length < 2) continue
+                operations.add(site to cleanHandle)
+            }
         }
 
-        val observations = coroutineScope {
-            handles.flatMap { handle ->
-                eligible.map { site ->
-                    async(Dispatchers.IO) {
-                        scheduler.execute(
-                            providerKey = providerKey(site),
-                            minimumIntervalMs = PER_PROVIDER_INTERVAL_MS
-                        ) {
-                            checkSite(site, handle)
-                        }
-                    }
-                }
-            }.awaitAll().filterNotNull()
+        val finalOps = operations.take(MAX_PLANNED_OPERATIONS)
+        for (op in finalOps) {
+            ScanCoordinatorRuntime.onProviderQueued(op.first.id, scanId)
         }
-        scheduler.clearIdleState()
+
+        val observations = try {
+            finalOps.chunked(MAX_CONCURRENCY).flatMap { chunk ->
+                coroutineScope {
+                    chunk.map { (site, handle) ->
+                        async(Dispatchers.IO) {
+                            checkSite(site, handle, scanId)
+                        }
+                    }.awaitAll()
+                }
+            }
+        } finally {
+            runtime.scheduler.clearIdleState()
+        }
 
         UsernameSurfaceRuntimeCache.replace(SOURCE_ID, observations)
 
@@ -115,7 +107,7 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
                         "The handle was explicitly supplied to this assessment",
                         "Account existence does not establish ownership by the investigated identity"
                     ),
-                    providerId = SOURCE_ID,
+                    providerId = observation.providerId,
                     retrievedAtEpochMillis = observation.observedAtEpochMillis,
                     observedAtEpochMillis = observation.observedAtEpochMillis,
                     state = EvidenceState.Observed,
@@ -125,8 +117,8 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
                 )
             }
 
-        val relationships = evidence.mapNotNull { item ->
-            val observation = observations.firstOrNull { it.profileUrl == item.value && it.state == UsernameSurfaceState.Present }
+        val relationships = evidence.mapNotNull { ev ->
+            val observation = observations.find { it.profileUrl == ev.value }
                 ?: return@mapNotNull null
             EvidenceRelationship(
                 fromValue = observation.username,
@@ -142,125 +134,69 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
         )
     }
 
-    private fun fetchDataset(): List<JsonObject> = runCatching {
-        val request = Request.Builder()
-            .url(DATASET_URL)
-            .header("User-Agent", USER_AGENT)
-            .header("Accept", "application/json")
-            .build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return emptyList()
-            val body = response.body ?: return emptyList()
-            if ((body.contentLength().takeIf { it >= 0 } ?: 0L) > MAX_DATASET_BYTES) return emptyList()
-            val text = body.charStream().use { reader ->
-                val buffer = CharArray(8192)
-                val out = StringBuilder()
-                var chars = 0
-                while (true) {
-                    val read = reader.read(buffer)
-                    if (read < 0) break
-                    chars += read
-                    if (chars > MAX_DATASET_CHARS) return emptyList()
-                    out.append(buffer, 0, read)
-                }
-                out.toString()
-            }
-            val root = JSON.parseToJsonElement(text) as? JsonObject ?: return emptyList()
-            (root["sites"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+    private suspend fun checkSite(
+        site: WhatsMyNameSite,
+        handle: String,
+        scanId: ScanId
+    ): UsernameSurfaceObservation {
+        val checkUrl = site.uriCheck.replace("{account}", handle)
+        var profileUrl = site.uriPretty.replace("{account}", handle)
+        if (!isHttpsUrl(profileUrl)) {
+            profileUrl = checkUrl
         }
-    }.getOrElse { emptyList() }
 
-    private fun eligibleSite(site: JsonObject): Boolean {
-        if ((site["valid"] as? JsonPrimitive)?.booleanOrNull == false) return false
-        if ((site["post_body"] as? JsonPrimitive)?.contentOrNull?.isNotBlank() == true) return false
-        val category = site.string("cat")?.lowercase(Locale.ROOT).orEmpty()
-        if (category.contains("nsfw")) return false
-        val uri = site.string("uri_check") ?: return false
-        if (!uri.contains("{account}")) return false
-        if (!isHttpUrl(uri.replace("{account}", "probe"))) return false
-        val protection = (site["protection"] as? JsonArray).orEmpty()
-            .mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.lowercase(Locale.ROOT) }
-            .toSet()
-        if ("captcha" in protection || "user-auth" in protection || "anubis" in protection) return false
-        return true
-    }
-
-    private fun checkSite(site: JsonObject, originalHandle: String): UsernameSurfaceObservation? {
-        val siteName = site.string("name")?.take(MAX_SITE_NAME_CHARS) ?: return null
-        val healthId = "$SOURCE_ID:${siteName.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "-").trim('-').take(100)}"
-        val stripChars = site.string("strip_bad_char").orEmpty()
-        val handle = stripChars.fold(originalHandle) { acc, ch -> acc.replace(ch.toString(), "") }
-            .takeIf { it.length >= 2 } ?: return null
-        val checkTemplate = site.string("uri_check") ?: return null
-        val checkUrl = checkTemplate.replace("{account}", handle)
-        if (!isHttpUrl(checkUrl)) return null
-        val prettyTemplate = site.string("uri_pretty")
-        val profileUrl = prettyTemplate?.replace("{account}", handle)
-            ?.takeIf(::isHttpUrl)
-            ?: checkUrl
-        val expectedExistsCode = site.int("e_code") ?: return null
-        val expectedMissingCode = site.int("m_code") ?: return null
-        val existsText = site.string("e_string").orEmpty()
-        val missingText = site.string("m_string").orEmpty()
-        val observedAt = System.currentTimeMillis()
-        val started = System.nanoTime()
+        val providerDef = site.toProviderDefinition()
+        val schedulingKey = providerKey(checkUrl) ?: providerDef.id
 
         return try {
-            val request = Request.Builder()
-                .url(checkUrl)
-                .header("User-Agent", USER_AGENT)
-                .header("Accept", "text/html,application/json;q=0.9,*/*;q=0.7")
-                .build()
-            client.newCall(request).execute().use { response ->
-                val status = response.code
-                val body = response.body?.source()?.let { source ->
-                    source.request(MAX_RESPONSE_BYTES.toLong())
-                    val byteCount = minOf(source.buffer.size, MAX_RESPONSE_BYTES.toLong())
-                    source.buffer.clone().readUtf8(byteCount)
-                }.orEmpty()
-                val exists = status == expectedExistsCode && (existsText.isBlank() || body.contains(existsText, ignoreCase = false))
-                val missing = status == expectedMissingCode && (missingText.isBlank() || body.contains(missingText, ignoreCase = false))
-                val latency = elapsedMillis(started)
-                when {
-                    exists -> {
-                        ProviderDiagnosticsRuntime.record(healthId, ProviderOutcome.Success, latency)
-                        UsernameSurfaceObservation(
-                            SOURCE_ID, siteName, originalHandle, profileUrl,
-                            UsernameSurfaceState.Present, 0.68,
-                            "HTTP $status matched the site's published existence rule", observedAt
-                        )
-                    }
-                    missing -> {
-                        ProviderDiagnosticsRuntime.record(healthId, ProviderOutcome.NotFound, latency)
-                        UsernameSurfaceObservation(
-                            SOURCE_ID, siteName, originalHandle, profileUrl,
-                            UsernameSurfaceState.Absent, 0.90,
-                            "HTTP $status matched the site's published missing-account rule", observedAt
-                        )
-                    }
-                    status == 429 -> {
-                        ProviderDiagnosticsRuntime.record(healthId, ProviderOutcome.RateLimited, latency)
-                        unavailable(siteName, originalHandle, profileUrl, observedAt, "Provider rate-limited the public check")
-                    }
-                    status == 401 -> {
-                        ProviderDiagnosticsRuntime.record(healthId, ProviderOutcome.AuthenticationRequired, latency)
-                        unavailable(siteName, originalHandle, profileUrl, observedAt, "Provider requires authentication")
-                    }
-                    else -> {
-                        ProviderDiagnosticsRuntime.record(healthId, ProviderOutcome.ParseFailure, latency)
-                        unavailable(
-                            siteName, originalHandle, profileUrl, observedAt,
-                            "Response did not conclusively match the published exists/missing rules (HTTP $status)"
-                        )
-                    }
+            val result = runtime.execute(
+                provider = providerDef,
+                url = checkUrl,
+                scanId = scanId,
+                schedulingKey = schedulingKey,
+                classifier = { _, observation ->
+                    WhatsMyNameResponseClassifier.classify(site, observation)
+                },
+                maxBodyChars = MAX_RESPONSE_CHARS
+            )
+
+            val observedAt = timeSource()
+
+            when (result.decision.state) {
+                ProviderVerificationState.Present -> {
+                    UsernameSurfaceObservation(
+                        SOURCE_ID, site.name, handle, profileUrl,
+                        UsernameSurfaceState.Present, 0.68,
+                        "HTTP ${result.statusCode} matched the site's published existence rule", observedAt, site.id
+                    )
+                }
+                ProviderVerificationState.NotFound -> {
+                    UsernameSurfaceObservation(
+                        SOURCE_ID, site.name, handle, profileUrl,
+                        UsernameSurfaceState.Absent, 0.90,
+                        "HTTP ${result.statusCode} matched the site's published missing-account rule", observedAt, site.id
+                    )
+                }
+                ProviderVerificationState.RateLimited -> {
+                    unavailable(site.name, handle, profileUrl, observedAt, "Provider rate-limited the public check", site.id)
+                }
+                ProviderVerificationState.AuthenticationRequired -> {
+                    unavailable(site.name, handle, profileUrl, observedAt, "Provider requires authentication", site.id)
+                }
+                ProviderVerificationState.AutomationChallenged -> {
+                    unavailable(site.name, handle, profileUrl, observedAt, "Provider returned an automation challenge", site.id)
+                }
+                else -> {
+                    unavailable(
+                        site.name, handle, profileUrl, observedAt,
+                        "Response did not conclusively match the published exists/missing rules (HTTP ${result.statusCode})", site.id
+                    )
                 }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (error: Throwable) {
-            val outcome = if (error is java.net.SocketTimeoutException) ProviderOutcome.Timeout else ProviderOutcome.NetworkFailure
-            ProviderDiagnosticsRuntime.record(healthId, outcome, elapsedMillis(started))
-            unavailable(siteName, originalHandle, profileUrl, observedAt, "Provider could not be conclusively checked")
+        } catch (error: Exception) {
+            unavailable(site.name, handle, profileUrl, timeSource(), "Provider could not be conclusively checked", site.id)
         }
     }
 
@@ -269,20 +205,16 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
         handle: String,
         profileUrl: String,
         observedAt: Long,
-        reason: String
+        reason: String,
+        providerId: String
     ) = UsernameSurfaceObservation(
         SOURCE_ID, siteName, handle, profileUrl,
-        UsernameSurfaceState.Unavailable, 0.0, reason, observedAt
+        UsernameSurfaceState.Unavailable, 0.0, reason, observedAt, providerId
     )
 
-    private fun providerKey(site: JsonObject): String {
-        val uri = site.string("uri_check").orEmpty().replace("{account}", "probe")
-        return runCatching { URI(uri).host?.lowercase(Locale.ROOT) }.getOrNull()
-            ?: site.string("name").orEmpty().lowercase(Locale.ROOT)
+    private fun providerKey(url: String): String? {
+        return runCatching { URI(url).host?.lowercase(Locale.ROOT) }.getOrNull()
     }
-
-    private fun elapsedMillis(startedNanos: Long): Long =
-        ((System.nanoTime() - startedNanos) / 1_000_000L).coerceAtLeast(0L)
 
     private fun normalizeHandle(raw: String): String = raw.trim()
         .removePrefix("@")
@@ -291,9 +223,9 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
         .takeIf { it.matches(HANDLE) }
         .orEmpty()
 
-    private fun isHttpUrl(raw: String): Boolean = runCatching {
+    private fun isHttpsUrl(raw: String): Boolean = runCatching {
         val uri = URI(raw)
-        (uri.scheme == "https" || uri.scheme == "http") && !uri.host.isNullOrBlank()
+        uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrBlank() && uri.userInfo == null
     }.getOrDefault(false)
 
     private fun siteLimit(mode: ScanMode): Int = when (mode) {
@@ -303,29 +235,17 @@ class WhatsMyNameUsernamePlugin : ScannerPlugin {
         ScanMode.Exhaustive -> Int.MAX_VALUE
     }
 
-    private fun JsonObject.string(key: String): String? =
-        (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
-
-    private fun JsonObject.int(key: String): Int? =
-        (this[key] as? JsonPrimitive)?.intOrNull
-
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
 
     private companion object {
         const val SOURCE_ID = "whatsmyname-direct"
-        const val DATASET_URL = "https://raw.githubusercontent.com/WebBreacher/WhatsMyName/main/wmn-data.json"
-        const val USER_AGENT = "Dossier/0.1 authorized-assessment (+https://github.com/palaashatri/dossier)"
         const val MAX_HANDLES = 3
         const val MAX_CONCURRENCY = 6
-        const val PER_PROVIDER_INTERVAL_MS = 350L
-        const val MAX_RESPONSE_BYTES = 192 * 1024
-        const val MAX_DATASET_BYTES = 4L * 1024L * 1024L
-        const val MAX_DATASET_CHARS = 4 * 1024 * 1024
-        const val MAX_SITE_NAME_CHARS = 120
-        const val PARSER_VERSION = "whatsmyname-direct-v2"
+        const val MAX_PLANNED_OPERATIONS = MAX_HANDLES * 644
+        const val MAX_RESPONSE_CHARS = 192 * 1024
+        const val PARSER_VERSION = "whatsmyname-pinned-e62338e-v3"
         val HANDLE = Regex("[a-z0-9_][a-z0-9_.-]{1,63}")
-        val JSON = Json { ignoreUnknownKeys = true }
     }
 }

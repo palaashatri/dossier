@@ -21,7 +21,8 @@ data class UsernameSurfaceObservation(
     val state: UsernameSurfaceState,
     val confidence: Double,
     val reason: String,
-    val observedAtEpochMillis: Long
+    val observedAtEpochMillis: Long,
+    val providerId: String = source
 )
 
 /**
