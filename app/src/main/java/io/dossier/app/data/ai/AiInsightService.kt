@@ -501,6 +501,7 @@ class AiInsightService(private val context: Context) {
                 if (remoteRedacted) {
                     appendLine(
                         "- id=${RemoteAiRedaction.graphId(entity.id)} kind=${entity.kind} state=${entity.state} " +
+                            "evidenceRefs=[${graphEvidenceRefs(snapshot, entity.evidenceIds, remoteRedacted)}] " +
                             "evidenceCount=${entity.evidenceIds.size}"
                     )
                 } else {
@@ -513,6 +514,8 @@ class AiInsightService(private val context: Context) {
                 if (remoteRedacted) {
                     appendLine(
                         "- ${RemoteAiRedaction.graphId(edge.fromId)} -[${remoteRelationshipType(edge)}]-> ${RemoteAiRedaction.graphId(edge.toId)} " +
+                            "evidenceRefs=[${graphEvidenceRefs(snapshot, edge.evidenceIds, remoteRedacted)}] " +
+                            "contradictingEvidenceRefs=[${graphEvidenceRefs(snapshot, edge.contradictingEvidenceIds, remoteRedacted)}] " +
                             "evidenceCount=${edge.evidenceIds.size} contradictionCount=${edge.contradictingEvidenceIds.size}"
                     )
                 } else {
@@ -530,6 +533,34 @@ class AiInsightService(private val context: Context) {
                 )
             }
         }.trim()
+
+        /**
+         * Keeps graph provenance usable at the remote boundary without exposing
+         * local evidence IDs. The remote prompt only receives references that
+         * also appear in its bounded evidence section; omitted references remain
+         * visible through the count fields so a model cannot mistake the list
+         * for a complete graph export.
+         */
+        private fun graphEvidenceRefs(
+            snapshot: AiAnalysisSnapshot,
+            evidenceIds: List<String>,
+            remoteRedacted: Boolean
+        ): String {
+            val visibleIds = if (remoteRedacted) {
+                val allowed = snapshot.evidence
+                    .take(RemoteAiRedaction.MAX_PROMPT_EVIDENCE_RECORDS)
+                    .map(Evidence::id)
+                    .toSet()
+                evidenceIds.filter(allowed::contains)
+            } else {
+                evidenceIds
+            }
+            val rendered = visibleIds.joinToString { id ->
+                if (remoteRedacted) RemoteAiRedaction.evidenceId(id) else safeField(id)
+            }.ifBlank { "none" }
+            val omitted = (evidenceIds.size - visibleIds.size).coerceAtLeast(0)
+            return if (omitted == 0) rendered else "$rendered (+$omitted omitted)"
+        }
 
         /** RelationshipType is an allowlisted enum; arbitrary legacy relation text becomes OTHER. */
         private fun remoteRelationshipType(edge: io.dossier.app.domain.model.DossierEdge): String =

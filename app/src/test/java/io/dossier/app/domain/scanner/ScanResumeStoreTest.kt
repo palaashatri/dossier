@@ -1,7 +1,9 @@
 package io.dossier.app.domain.scanner
 
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ProviderPlanFingerprint
 import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
@@ -127,6 +129,26 @@ class ScanResumeStoreTest {
     }
 
     @Test
+    fun requestCheckpointCapturesDeterministicProviderPlanMetadata() {
+        val fixture = fixture()
+        val store = store(fixture)
+        DiscoveryScanPreferences.setMode(ScanMode.Deep)
+        val expected = ProviderCatalogV2.plan(ScanMode.Deep)
+
+        val saved = store.saveRequestDetailed(
+            input = completeInput(),
+            deepResearch = true,
+            strongFaceCorrelation = false
+        ) as ResumeWriteState.Saved
+        val loaded = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+
+        assertEquals(ProviderPlanFingerprint.forPlan(expected), saved.point.planFingerprint)
+        assertEquals(saved.point.planFingerprint, loaded.point.planFingerprint)
+        assertEquals(expected.providers.size, loaded.point.plannedProviderCount)
+        assertEquals(expected.providers.map { it.id }, loaded.point.plannedProviderIds)
+    }
+
+    @Test
     fun requestScopedLoadRejectsSupersededPointer() {
         val fixture = fixture()
         val store = store(fixture, ids = listOf(ID_ONE, ID_TWO))
@@ -163,6 +185,9 @@ class ScanResumeStoreTest {
         assertEquals(ScanMode.Deep, loaded.point.scanMode)
         assertTrue(loaded.point.deepResearch)
         assertFalse(loaded.point.strongFaceCorrelation)
+        assertEquals(null, loaded.point.planFingerprint)
+        assertTrue(loaded.point.plannedProviderIds.isEmpty())
+        assertEquals(0, loaded.point.plannedProviderCount)
     }
 
     @Test

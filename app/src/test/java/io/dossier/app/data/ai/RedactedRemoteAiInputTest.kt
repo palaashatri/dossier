@@ -54,6 +54,15 @@ class RedactedRemoteAiInputTest {
         }
         assertTrue(remoteEvidenceId.startsWith("evidence:"))
         assertTrue(remote.prompt.contains(remoteEvidenceId))
+        assertTrue(
+            "remote graph must retain bounded evidence provenance",
+            remote.prompt.contains("evidenceRefs=[$remoteEvidenceId]")
+        )
+        assertTrue(
+            "remote graph must retain bounded contradiction provenance",
+            remote.prompt.contains("contradictingEvidenceRefs=[none]")
+        )
+        assertFalse("raw graph evidence IDs must not cross the remote boundary", remote.prompt.contains(RAW_EVIDENCE_ID))
         val graphTokens = Regex("graph:[0-9a-f]{32}")
             .findAll(remote.prompt)
             .map(MatchResult::value)
@@ -102,6 +111,26 @@ class RedactedRemoteAiInputTest {
         val validated = EvidenceGroundedAiValidator.validate(restored, snapshot.evidence)
         assertEquals(1, validated.acceptedClaims.size)
         assertEquals(RAW_EVIDENCE_ID, validated.acceptedClaims.single().supportingEvidence.single())
+    }
+
+    @Test
+    fun remoteGraphOmitsProvenanceNotPresentInBoundedEvidenceWindow() {
+        val snapshot = directSnapshot().copy(
+            graph = directSnapshot().graph.copy(
+                edges = listOf(
+                    directSnapshot().graph.edges.single().copy(
+                        evidenceIds = listOf(RAW_EVIDENCE_ID, "direct-evidence-60", "graph-only-evidence")
+                    )
+                )
+            )
+        )
+
+        val remote = RedactedRemoteAiInput.from(snapshot)
+
+        assertFalse(remote.prompt.contains("direct-evidence-60"))
+        assertFalse(remote.prompt.contains("graph-only-evidence"))
+        assertTrue(remote.prompt.contains("evidenceRefs=[evidence:"))
+        assertTrue(remote.prompt.contains("(+2 omitted)"))
     }
 
     private fun directSnapshot(): AiAnalysisSnapshot {

@@ -3,7 +3,9 @@ package io.dossier.app.domain.scanner
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ProviderPlanFingerprint
 import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.serialization.Serializable
@@ -150,14 +152,19 @@ internal class ScanResumeStore internal constructor(
 
             val now = nowMillis()
             val expiresAt = expiresAt(now)
+            val scanMode = DiscoveryScanPreferences.selectedMode.value
+            val providerPlan = ProviderCatalogV2.plan(scanMode)
             val point = ResumePoint(
                 requestId = id,
                 input = input,
                 deepResearch = deepResearch,
-                scanMode = DiscoveryScanPreferences.selectedMode.value,
+                scanMode = scanMode,
                 strongFaceCorrelation = strongFaceCorrelation,
                 createdAtEpochMillis = now,
-                expiresAtEpochMillis = expiresAt
+                expiresAtEpochMillis = expiresAt,
+                planFingerprint = ProviderPlanFingerprint.forPlan(providerPlan),
+                plannedProviderIds = ProviderPlanFingerprint.persistedProviderIds(providerPlan),
+                plannedProviderCount = providerPlan.providers.size
             )
             val record = ResumeRecord(
                 formatVersion = FORMAT_VERSION,
@@ -168,7 +175,10 @@ internal class ScanResumeStore internal constructor(
                 input = point.input,
                 deepResearch = point.deepResearch,
                 scanMode = point.scanMode,
-                strongFaceCorrelation = point.strongFaceCorrelation
+                strongFaceCorrelation = point.strongFaceCorrelation,
+                planFingerprint = point.planFingerprint,
+                plannedProviderIds = point.plannedProviderIds,
+                plannedProviderCount = point.plannedProviderCount
             )
 
             // Capture this before publishing the prepared marker. The marker
@@ -908,7 +918,8 @@ internal class ScanResumeStore internal constructor(
             return ResumeReadState.Expired
         }
         if (!isValidRequestId(record.requestId) ||
-            validateInput(record.input) != null
+            validateInput(record.input) != null ||
+            !validPlanMetadata(record)
         ) {
             return ResumeReadState.Invalid(ResumeInvalidReason.InvalidPayload)
         }
@@ -921,9 +932,25 @@ internal class ScanResumeStore internal constructor(
                 scanMode = record.scanMode,
                 strongFaceCorrelation = record.strongFaceCorrelation,
                 createdAtEpochMillis = record.createdAtEpochMillis,
-                expiresAtEpochMillis = record.expiresAtEpochMillis
+                expiresAtEpochMillis = record.expiresAtEpochMillis,
+                planFingerprint = record.planFingerprint,
+                plannedProviderIds = record.plannedProviderIds,
+                plannedProviderCount = record.plannedProviderCount
             )
         )
+    }
+
+    private fun validPlanMetadata(record: ResumeRecord): Boolean {
+        val fingerprint = record.planFingerprint
+        val ids = record.plannedProviderIds
+        val count = record.plannedProviderCount
+        // Version-1 records created before plan metadata was added remain
+        // resumable. They are explicitly marked as lacking a reproducibility
+        // guard rather than being assigned the current catalog retroactively.
+        if (fingerprint == null && ids.isEmpty() && count == 0) return true
+        if (!ProviderPlanFingerprint.isValid(fingerprint)) return false
+        if (!ProviderPlanFingerprint.areValidProviderIds(ids)) return false
+        return count >= ids.size
     }
 
     /**
@@ -1767,7 +1794,11 @@ internal class ScanResumeStore internal constructor(
         val input: IdentityInput,
         val deepResearch: Boolean,
         val scanMode: ScanMode,
-        val strongFaceCorrelation: Boolean = false
+        val strongFaceCorrelation: Boolean = false,
+        /** Optional for backward-compatible decoding of pre-plan records. */
+        val planFingerprint: String? = null,
+        val plannedProviderIds: List<String> = emptyList(),
+        val plannedProviderCount: Int = 0
     )
 
     private data class PriorRecordBackup(
@@ -1854,7 +1885,12 @@ internal data class ResumePoint(
     val scanMode: ScanMode,
     val strongFaceCorrelation: Boolean,
     val createdAtEpochMillis: Long,
-    val expiresAtEpochMillis: Long
+    val expiresAtEpochMillis: Long,
+    /** SHA-256 commitment to the immutable declarative plan at enqueue time. */
+    val planFingerprint: String? = null,
+    /** Ordered IDs are bounded; the fingerprint still covers the full plan. */
+    val plannedProviderIds: List<String> = emptyList(),
+    val plannedProviderCount: Int = 0
 )
 
 internal sealed interface ResumeReadState {
