@@ -24,6 +24,7 @@ import kotlinx.serialization.Serializable
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.model.FindingType
 import java.security.MessageDigest
+import java.time.Instant
 import java.util.Locale
 
 @Serializable
@@ -39,7 +40,13 @@ data class AiRemediationLink(
     val record: RemediationRecord,
     val evidenceId: String? = null,
     val effective: Boolean = true,
-    val state: AiRemediationLinkState = AiRemediationLinkState.Effective
+    val state: AiRemediationLinkState = AiRemediationLinkState.Effective,
+    /**
+     * True only when [RemediationRecord.verifiedByScanId] resolves to a
+     * completed, non-failed, non-cancelled durable scan-history entry.
+     * A nonblank ID alone is not evidence that a verification scan ran.
+     */
+    val verificationScanPresent: Boolean = false
 ) {
     val remediationRecord: RemediationRecord get() = record
 }
@@ -238,7 +245,8 @@ data class AiAnalysisSnapshot(
                 excludedEvidenceKeys = excludedEvidenceKeys,
                 rejectedEntityProvenanceIds = rejectedEntityProvenanceIds,
                 rejectedEntityEvidenceKeys = rejectedEntityEvidenceKeys,
-                unusableEvidenceIds = unusableEvidenceIds
+                unusableEvidenceIds = unusableEvidenceIds,
+                scanHistory = scanHistory
             )
             return AiAnalysisSnapshot(
                 input = input,
@@ -388,6 +396,33 @@ data class AiAnalysisSnapshot(
             .replace(Regex("\\s+"), " ")
             .lowercase(Locale.US)
 
+        /**
+         * A verification ID is only evidence when it points to a later scan
+         * that completed successfully. Undated or malformed legacy timestamps
+         * fail closed instead of being treated as chronological proof.
+         */
+        private fun hasLaterCompletedVerificationScan(
+            record: RemediationRecord,
+            scanHistory: List<CaseScanHistoryEntry>
+        ): Boolean {
+            val verificationScanId = record.verifiedByScanId?.takeIf(String::isNotBlank) ?: return false
+            val remediationUpdatedAt = parseInstant(record.updatedAtUtc) ?: return false
+            return scanHistory.any { scan ->
+                val startedAt = parseInstant(scan.startedAtUtc)
+                val completedAt = scan.completedAtUtc?.let(::parseInstant)
+                scan.scanId == verificationScanId &&
+                    !scan.failed &&
+                    !scan.cancelled &&
+                    startedAt != null &&
+                    completedAt != null &&
+                    startedAt.isAfter(remediationUpdatedAt) &&
+                    !completedAt.isBefore(startedAt)
+            }
+        }
+
+        private fun parseInstant(value: String): Instant? =
+            runCatching { Instant.parse(value.trim()) }.getOrNull()
+
         private fun isExplicitlySuppliedEntity(entity: DossierEntity, input: IdentityInput): Boolean {
             if (entity.kind == io.dossier.app.domain.model.GraphEntityKind.Subject || entity.type == EntityType.Person) {
                 return true
@@ -416,7 +451,8 @@ data class AiAnalysisSnapshot(
             excludedEvidenceKeys: Set<EvidenceMatchKey>,
             rejectedEntityProvenanceIds: Set<String>,
             rejectedEntityEvidenceKeys: Set<EvidenceMatchKey>,
-            unusableEvidenceIds: Set<String>
+            unusableEvidenceIds: Set<String>,
+            scanHistory: List<CaseScanHistoryEntry>
         ): List<AiRemediationLink> {
             val allEvidence = (effectiveEvidence + rawEvidence).distinctBy(Evidence::id)
             return remediationRecords.sortedWith(
@@ -425,6 +461,7 @@ data class AiAnalysisSnapshot(
                 val matched = findMatchingEvidence(record, allEvidence, normalizedEvidenceId)
                 if (matched != null) {
                     val localEvidenceId = normalizedEvidenceId(matched.id)
+                    val verificationScanPresent = hasLaterCompletedVerificationScan(record, scanHistory)
                     val isExcluded = matched.id in excludedProvenanceIds ||
                         evidenceMatchKey(matched) in excludedEvidenceKeys ||
                         matched.id in rejectedEntityProvenanceIds ||
@@ -443,7 +480,8 @@ data class AiAnalysisSnapshot(
                         ),
                         evidenceId = localEvidenceId,
                         effective = linkState == AiRemediationLinkState.Effective,
-                        state = linkState
+                        state = linkState,
+                        verificationScanPresent = verificationScanPresent
                     )
                 } else {
                     AiRemediationLink(
@@ -452,7 +490,8 @@ data class AiAnalysisSnapshot(
                         ),
                         evidenceId = null,
                         effective = false,
-                        state = AiRemediationLinkState.Unmatched
+                        state = AiRemediationLinkState.Unmatched,
+                        verificationScanPresent = false
                     )
                 }
             }

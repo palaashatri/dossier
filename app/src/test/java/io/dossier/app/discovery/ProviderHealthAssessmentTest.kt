@@ -3,6 +3,7 @@ package io.dossier.app.discovery
 import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.discovery.PersistentProviderHealthStore
 import io.dossier.app.domain.discovery.ProviderHealthAssessmentRules
+import io.dossier.app.domain.discovery.ProviderHealthDataQuality
 import io.dossier.app.domain.discovery.ProviderHealthSample
 import io.dossier.app.domain.discovery.ProviderHealthStatus
 import io.dossier.app.domain.discovery.WhatsMyNameCatalog
@@ -63,6 +64,25 @@ class ProviderHealthAssessmentTest {
 
         assertEquals(ProviderHealthStatus.Stale, stale.status)
         assertEquals(ProviderHealthStatus.Unvalidated, unvalidated.status)
+    }
+
+    @Test
+    fun inconsistentAggregateCountersCannotAppearHealthy() {
+        val inconsistent = ProviderHealthAssessmentRules.assess(
+            sample = sample(attempts = 3, successes = 3, timeouts = 1),
+            now = now
+        )
+        val future = ProviderHealthAssessmentRules.assess(
+            sample = sample(attempts = 3, successes = 3, at = now.plusSeconds(60)),
+            now = now
+        )
+
+        assertEquals(ProviderHealthStatus.Unavailable, inconsistent.status)
+        assertEquals(ProviderHealthDataQuality.Invalid, inconsistent.dataQuality)
+        assertTrue(inconsistent.dataQualityMessage.orEmpty().contains("do not equal", ignoreCase = true))
+        assertEquals(ProviderHealthStatus.Unavailable, future.status)
+        assertEquals(ProviderHealthDataQuality.Invalid, future.dataQuality)
+        assertTrue(future.dataQualityMessage.orEmpty().contains("future", ignoreCase = true))
     }
 
     @Test

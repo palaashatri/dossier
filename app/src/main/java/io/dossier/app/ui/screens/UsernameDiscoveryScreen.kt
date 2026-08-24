@@ -515,7 +515,10 @@ private fun ProviderHealthAssessmentRow(assessment: ProviderHealthAssessment) {
                 fontWeight = FontWeight.Medium
             )
             Text(
-                text = "${assessment.attempts} attempt(s) · ${(assessment.usableResponseRate * 100).toInt()}% usable responses",
+                text = buildString {
+                    append("${assessment.attempts} attempt(s) · ${(assessment.usableResponseRate * 100).toInt()}% usable responses")
+                    assessment.dataQualityMessage?.let { append(" · $it") }
+                },
                 color = NeuralTheme.TextMuted,
                 fontSize = 9.5.sp
             )

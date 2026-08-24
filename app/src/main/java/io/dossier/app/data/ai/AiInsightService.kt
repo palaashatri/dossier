@@ -637,7 +637,8 @@ class AiInsightService(private val context: Context) {
                     appendLine(
                         "- findingType=$findingType status=${record.status} provider=${record.providerId?.takeIf { it.isNotBlank() }?.let(RemoteAiRedaction::providerId) ?: "unspecified"} " +
                             "evidenceRefs=[$evidenceRef] effective=${link.effective} state=${link.state} " +
-                            "verifiedByScan=${record.verifiedByScanId != null} source=[redacted] action=[redacted] note=[redacted]"
+                            "verifiedByScan=${record.verifiedByScanId != null} verificationScanBound=${link.verificationScanPresent} " +
+                            "source=[redacted] action=[redacted] note=[redacted]"
                     )
                 } else {
                     val evidenceRef = remediationEvidenceRef(snapshot, link.evidenceId, remoteRedacted = false)
@@ -645,7 +646,8 @@ class AiInsightService(private val context: Context) {
                         "- finding=${safeField(record.findingKey)} status=${record.status} provider=${safeField(record.providerId ?: "unspecified")} " +
                             "source=${safeField(record.sourceUrl ?: "none")} action=${safeField(record.action)} " +
                             "evidence=$evidenceRef effective=${link.effective} state=${link.state} " +
-                            "verifiedByScan=${safeField(record.verifiedByScanId ?: "none")} note=${safeField(record.verificationNote.orEmpty())}"
+                            "verifiedByScan=${safeField(record.verifiedByScanId ?: "none")} verificationScanBound=${link.verificationScanPresent} " +
+                            "note=${safeField(record.verificationNote.orEmpty())}"
                     )
                 }
             }

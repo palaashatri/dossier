@@ -2,6 +2,7 @@ package io.dossier.app.data.ai
 
 import io.dossier.app.domain.ai.AiAnalysisSnapshot
 import io.dossier.app.domain.ai.AiRemediationLinkState
+import io.dossier.app.domain.case.CaseScanHistoryEntry
 import io.dossier.app.domain.case.RemediationRecord
 import io.dossier.app.domain.case.RemediationStatus
 import io.dossier.app.domain.case.DossierCase
@@ -521,6 +522,68 @@ class AiAnalysisSnapshotTest {
         assertEquals(null, link.evidenceId)
         val prompt = AiInsightService.buildDossierSummaryPrompt(snapshot, AiPromptDisclosure.LocalFull)
         assertTrue(prompt.contains("evidence=none effective=false state=Unmatched"))
+    }
+
+    @Test
+    fun remediationVerificationRequiresCompletedDurableScanHistory() {
+        val evidence = Evidence(
+            id = "verified-email",
+            kind = EvidenceKind.Email,
+            value = "alice@example.test",
+            sourceUrl = "https://example.test/contact",
+            state = EvidenceState.Observed
+        )
+        val remediation = RemediationRecord(
+            remediationId = "verified-remediation",
+            findingKey = "Email|alice@example.test|https://example.test/contact",
+            sourceUrl = evidence.sourceUrl,
+            action = "Request removal",
+            status = RemediationStatus.Completed,
+            createdAtUtc = "2026-08-24T00:00:00Z",
+            updatedAtUtc = "2026-08-24T00:00:01Z",
+            verifiedByScanId = "verification-scan"
+        )
+
+        val incomplete = AiAnalysisSnapshot.from(
+            input = input,
+            evidence = listOf(evidence),
+            remediationRecords = listOf(remediation),
+            scanHistory = listOf(
+                CaseScanHistoryEntry(
+                    scanId = "verification-scan",
+                    startedAtUtc = "2026-08-24T00:01:00Z"
+                )
+            )
+        )
+        assertFalse(incomplete.remediationLinks.single().verificationScanPresent)
+
+        val earlier = AiAnalysisSnapshot.from(
+            input = input,
+            evidence = listOf(evidence),
+            remediationRecords = listOf(remediation),
+            scanHistory = listOf(
+                CaseScanHistoryEntry(
+                    scanId = "verification-scan",
+                    startedAtUtc = "2026-08-23T23:59:00Z",
+                    completedAtUtc = "2026-08-24T00:00:30Z"
+                )
+            )
+        )
+        assertFalse(earlier.remediationLinks.single().verificationScanPresent)
+
+        val completed = AiAnalysisSnapshot.from(
+            input = input,
+            evidence = listOf(evidence),
+            remediationRecords = listOf(remediation),
+            scanHistory = listOf(
+                CaseScanHistoryEntry(
+                    scanId = "verification-scan",
+                    startedAtUtc = "2026-08-24T00:01:00Z",
+                    completedAtUtc = "2026-08-24T00:02:00Z"
+                )
+            )
+        )
+        assertTrue(completed.remediationLinks.single().verificationScanPresent)
     }
 
     @Test

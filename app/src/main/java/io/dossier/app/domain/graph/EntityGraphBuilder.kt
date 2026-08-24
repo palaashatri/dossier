@@ -267,19 +267,30 @@ object EntityGraphBuilder {
             attachFinding(finding, subjectId, profileId, ::putEntity, ::link)
         }
 
+        evidence.forEach { ev ->
+            attachEvidence(ev, subjectId, ::putEntity, ::link)
+        }
+
         val resolvedRelationships = EvidenceCollection(
             evidence = evidence,
             relationships = relationships
         ).withResolvedRelationshipEvidence().relationships
         resolvedRelationships.forEach { rel ->
-            val fromId = entityIdForValue(rel.fromValue)
-            val toId = entityIdForValue(rel.toValue)
-            putEntity(DossierEntity(fromId, EntityType.Website, rel.fromValue, 0.7f))
-            putEntity(DossierEntity(toId, EntityType.Website, rel.toValue, 0.7f))
+            // Reuse one exact canonical entity when the relationship endpoint
+            // already exists. This keeps evidence/plugin relationships in the
+            // same graph source of truth as profile/finding/input nodes while
+            // refusing ambiguous or fuzzy merges.
+            val fromId = resolveExistingEntityId(rel.fromValue, entities)
+                ?: entityIdForValue(rel.fromValue)
+            val toId = resolveExistingEntityId(rel.toValue, entities)
+                ?: entityIdForValue(rel.toValue)
+            if (fromId !in entities) {
+                putEntity(DossierEntity(fromId, EntityType.Website, rel.fromValue, 0.7f))
+            }
+            if (toId !in entities) {
+                putEntity(DossierEntity(toId, EntityType.Website, rel.toValue, 0.7f))
+            }
             linkWithEvidence(fromId, toId, rel.relation, rel.evidence, rel.evidenceIds)
-        }
-        evidence.forEach { ev ->
-            attachEvidence(ev, subjectId, ::putEntity, ::link)
         }
 
         faceMatches.forEach { match ->
@@ -588,6 +599,40 @@ object EntityGraphBuilder {
     }
 
     private fun entityIdForValue(raw: String): String = "value:${raw.trim().lowercase(Locale.US)}"
+
+    /**
+     * Resolves only an exact, unique label/source URL match. Multiple entities
+     * with the same public value remain unresolved rather than being merged by
+     * a relationship payload that lacks a typed endpoint.
+     */
+    private fun resolveExistingEntityId(
+        raw: String,
+        entities: Map<String, DossierEntity>
+    ): String? {
+        val key = raw.trim().lowercase(Locale.US)
+        if (key.isBlank()) return null
+        val labelMatches = entities.values
+            .asSequence()
+            .filter { entity -> entity.label.trim().lowercase(Locale.US) == key }
+            .map(DossierEntity::id)
+            .distinct()
+            .toList()
+        if (labelMatches.size == 1) return labelMatches.single()
+        if (labelMatches.isNotEmpty()) return null
+
+        val sourceMatches = entities.values
+            .asSequence()
+            .filter { entity -> entity.sourceUrls.any { it.trim().lowercase(Locale.US) == key } }
+            .toList()
+        val typedUrlMatches = sourceMatches.filter {
+            it.type == EntityType.Profile || it.type == EntityType.Website
+        }.map(DossierEntity::id).distinct()
+        return when {
+            typedUrlMatches.size == 1 -> typedUrlMatches.single()
+            sourceMatches.map(DossierEntity::id).distinct().size == 1 -> sourceMatches.single().id
+            else -> null
+        }
+    }
 
     private fun entityId(type: EntityType, raw: String): String =
         "${type.name.lowercase(Locale.US)}:${raw.trim().lowercase(Locale.US)}"

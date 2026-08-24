@@ -5,6 +5,7 @@ import io.dossier.app.domain.ai.AiConfidence
 import io.dossier.app.domain.ai.AiRemediationLink
 import io.dossier.app.domain.ai.AiRemediationLinkState
 import io.dossier.app.domain.ai.EvidenceGroundedAiValidator
+import io.dossier.app.domain.case.CaseScanHistoryEntry
 import io.dossier.app.domain.case.RemediationRecord
 import io.dossier.app.domain.case.RemediationStatus
 import io.dossier.app.domain.evidence.Evidence
@@ -256,12 +257,14 @@ class AiProductionEvaluationTest {
             record = completedRecord,
             evidenceId = observed.id,
             effective = true,
-            state = AiRemediationLinkState.Effective
+            state = AiRemediationLinkState.Effective,
+            verificationScanPresent = true
         )
         val submittedLink = completedLink.copy(
             record = submittedRecord,
             effective = false,
-            state = AiRemediationLinkState.Unmatched
+            state = AiRemediationLinkState.Unmatched,
+            verificationScanPresent = false
         )
         val claimOutput = resultJson(
             claim = "The provider removed the public email exposure.",
@@ -277,7 +280,14 @@ class AiProductionEvaluationTest {
                     snapshot = snapshot(
                         evidence = listOf(observed),
                         remediationRecords = listOf(completedRecord),
-                        remediationLinks = listOf(completedLink)
+                        remediationLinks = listOf(completedLink),
+                        scanHistory = listOf(
+                            CaseScanHistoryEntry(
+                                scanId = "scan-after-remediation",
+                                startedAtUtc = "2026-01-03T00:00:00Z",
+                                completedAtUtc = "2026-01-03T00:01:00Z"
+                            )
+                        )
                     ),
                     rawModelOutput = claimOutput,
                     expected = ExpectedOutcome.ACCEPTED
@@ -291,6 +301,16 @@ class AiProductionEvaluationTest {
                     ),
                     rawModelOutput = claimOutput,
                     expected = ExpectedOutcome.REJECTED
+                ),
+                AiEvaluationFixture(
+                    id = "completed-remediation-with-missing-scan-history",
+                    snapshot = snapshot(
+                        evidence = listOf(observed),
+                        remediationRecords = listOf(completedRecord),
+                        remediationLinks = listOf(completedLink.copy(verificationScanPresent = false))
+                    ),
+                    rawModelOutput = claimOutput,
+                    expected = ExpectedOutcome.REJECTED
                 )
             )
         )
@@ -301,6 +321,14 @@ class AiProductionEvaluationTest {
         assertEquals(ExpectedOutcome.REJECTED, report.cases.first { it.id == "unverified-remediation" }.actual)
         assertTrue(
             report.cases.first { it.id == "unverified-remediation" }
+                .rejectedReasonCodes.contains("remediation_outcome_requires_verification")
+        )
+        assertEquals(
+            ExpectedOutcome.REJECTED,
+            report.cases.first { it.id == "completed-remediation-with-missing-scan-history" }.actual
+        )
+        assertTrue(
+            report.cases.first { it.id == "completed-remediation-with-missing-scan-history" }
                 .rejectedReasonCodes.contains("remediation_outcome_requires_verification")
         )
     }
@@ -352,13 +380,15 @@ class AiProductionEvaluationTest {
         evidence: List<Evidence> = listOf(evidence("evidence-1")),
         graph: EntityGraph = EntityGraph(),
         remediationRecords: List<RemediationRecord> = emptyList(),
-        remediationLinks: List<AiRemediationLink> = emptyList()
+        remediationLinks: List<AiRemediationLink> = emptyList(),
+        scanHistory: List<CaseScanHistoryEntry> = emptyList()
     ): AiAnalysisSnapshot = AiAnalysisSnapshot(
         input = IdentityInput(fullName = "Synthetic Subject"),
         evidence = evidence,
         graph = graph,
         remediationRecords = remediationRecords,
-        remediationLinks = remediationLinks
+        remediationLinks = remediationLinks,
+        scanHistory = scanHistory
     )
 
     private fun evidence(id: String): Evidence = Evidence(

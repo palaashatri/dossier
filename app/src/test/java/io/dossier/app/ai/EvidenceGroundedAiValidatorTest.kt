@@ -450,7 +450,8 @@ class EvidenceGroundedAiValidatorTest {
             ),
             evidenceId = "E1",
             effective = true,
-            state = AiRemediationLinkState.Effective
+            state = AiRemediationLinkState.Effective,
+            verificationScanPresent = true
         )
 
         val accepted = EvidenceGroundedAiValidator.validate(
@@ -502,7 +503,8 @@ class EvidenceGroundedAiValidatorTest {
                 action = "Request removal",
                 status = RemediationStatus.Completed,
                 createdAtUtc = "2026-08-24T00:00:00Z",
-                updatedAtUtc = "2026-08-24T00:00:01Z"
+                updatedAtUtc = "2026-08-24T00:00:01Z",
+                verifiedByScanId = "scan-not-bound"
             ),
             evidenceId = "E1",
             effective = true,

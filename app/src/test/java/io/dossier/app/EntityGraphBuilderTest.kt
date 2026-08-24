@@ -240,6 +240,50 @@ class EntityGraphBuilderTest {
     }
 
     @Test
+    fun evidenceRelationshipReusesUniqueCanonicalEvidenceEntities() {
+        val profileUrl = "https://example.test/alice"
+        val emailValue = "alice@example.test"
+        val evidence = listOf(
+            Evidence(
+                id = "profile-observation",
+                kind = EvidenceKind.Profile,
+                value = profileUrl,
+                sourceUrl = profileUrl,
+                state = EvidenceState.Verified
+            ),
+            Evidence(
+                id = "email-observation",
+                kind = EvidenceKind.Email,
+                value = emailValue,
+                sourceUrl = profileUrl,
+                state = EvidenceState.Verified
+            )
+        )
+
+        val graph = EntityGraphBuilder.build(
+            input = IdentityInput(fullName = "Authorized subject"),
+            evidence = evidence,
+            relationships = listOf(
+                EvidenceRelationship(
+                    fromValue = emailValue,
+                    toValue = profileUrl,
+                    relation = "found_on",
+                    evidenceIds = listOf("email-observation")
+                )
+            )
+        )
+
+        val emailId = graph.entities.single { it.type == EntityType.Email && it.label == emailValue }.id
+        val profileId = graph.entities.single { it.type == EntityType.Profile && it.label == profileUrl }.id
+        val edge = graph.edges.single { it.relation == "found_on" }
+        assertEquals(emailId, edge.fromId)
+        assertEquals(profileId, edge.toId)
+        assertTrue(graph.entities.none { it.id == "value:$emailValue" })
+        assertTrue(graph.entities.none { it.id == "value:${profileUrl.lowercase()}" })
+        assertTrue(edge.evidenceIds.contains("email-observation"))
+    }
+
+    @Test
     fun historicalAttributesAttachToArchiveSourceWithoutCurrentOwnershipEdges() {
         val snapshotUrl = "https://web.archive.org/web/20240102030405id_/https://example.com/profile"
         val archiveEvidence = Evidence(

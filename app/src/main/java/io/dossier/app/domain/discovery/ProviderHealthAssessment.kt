@@ -12,6 +12,11 @@ import java.util.Locale
  * worked), while soft errors, policy blocks and transport/parser failures are
  * reliability failures.
  */
+/**
+ * Aggregate-only provider diagnostics. Every attempt must contribute to exactly
+ * one outcome counter; malformed or partial samples are surfaced as invalid by
+ * [ProviderHealthAssessmentRules] rather than being treated as healthy.
+ */
 data class ProviderHealthSample(
     val providerId: String,
     val attempts: Long,
@@ -46,6 +51,17 @@ enum class ProviderHealthStatus {
     Stale
 }
 
+enum class ProviderHealthDataQuality {
+    /** Aggregate counters form one complete, non-negative validation sample. */
+    Valid,
+
+    /** No sample exists for this catalog provider yet. */
+    Missing,
+
+    /** A persisted/received sample is internally inconsistent and is not trusted. */
+    Invalid
+}
+
 data class ProviderHealthAssessment(
     val providerId: String,
     val status: ProviderHealthStatus,
@@ -54,7 +70,9 @@ data class ProviderHealthAssessment(
     val usableResponseRate: Double,
     val failureRate: Double,
     val latencyMs: Long?,
-    val lastValidatedAt: Instant?
+    val lastValidatedAt: Instant?,
+    val dataQuality: ProviderHealthDataQuality = ProviderHealthDataQuality.Valid,
+    val dataQualityMessage: String? = null
 )
 
 /**
@@ -77,19 +95,72 @@ object ProviderHealthAssessmentRules {
         require(!staleAfter.isNegative) { "staleAfter must not be negative" }
 
         val providerId = sample?.providerId?.trim()?.lowercase(Locale.ROOT).orEmpty().ifBlank { "unknown" }
-        val attempts = sample?.attempts?.coerceAtLeast(0L) ?: 0L
+        val rawAttempts = sample?.attempts ?: 0L
+        val attempts = rawAttempts.coerceAtLeast(0L)
         val successes = sample?.successes?.coerceAtLeast(0L) ?: 0L
         val notFound = sample?.notFound?.coerceAtLeast(0L) ?: 0L
+        val softNotFound = sample?.softNotFound?.coerceAtLeast(0L) ?: 0L
+        val timeouts = sample?.timeouts?.coerceAtLeast(0L) ?: 0L
+        val rateLimited = sample?.rateLimited?.coerceAtLeast(0L) ?: 0L
+        val authenticationRequired = sample?.authenticationRequired?.coerceAtLeast(0L) ?: 0L
+        val unsupportedAutomation = sample?.unsupportedAutomation?.coerceAtLeast(0L) ?: 0L
+        val providerChanged = sample?.providerChanged?.coerceAtLeast(0L) ?: 0L
+        val parseFailures = sample?.parseFailures?.coerceAtLeast(0L) ?: 0L
+        val networkFailures = sample?.networkFailures?.coerceAtLeast(0L) ?: 0L
         val usableResponses = (successes + notFound).coerceAtMost(attempts)
         val failureCount = (attempts - usableResponses).coerceAtLeast(0L)
         val usableRate = if (attempts == 0L) 0.0 else usableResponses.toDouble() / attempts
         val failureRate = if (attempts == 0L) 0.0 else failureCount.toDouble() / attempts
         val lastValidatedAt = sample?.lastValidatedAt
+        val allCounters = listOf(
+            rawAttempts,
+            sample?.successes ?: 0L,
+            sample?.notFound ?: 0L,
+            sample?.softNotFound ?: 0L,
+            sample?.timeouts ?: 0L,
+            sample?.rateLimited ?: 0L,
+            sample?.authenticationRequired ?: 0L,
+            sample?.unsupportedAutomation ?: 0L,
+            sample?.providerChanged ?: 0L,
+            sample?.parseFailures ?: 0L,
+            sample?.networkFailures ?: 0L
+        )
+        val hasNegativeCounter = allCounters.any { it < 0L }
+        val outcomeTotal = listOf(
+            successes,
+            notFound,
+            softNotFound,
+            timeouts,
+            rateLimited,
+            authenticationRequired,
+            unsupportedAutomation,
+            providerChanged,
+            parseFailures,
+            networkFailures
+        ).fold(0L) { total, count ->
+            if (Long.MAX_VALUE - total < count) Long.MAX_VALUE else total + count
+        }
+        val futureTimestamp = lastValidatedAt?.isAfter(now) == true
+        val dataQualityMessage = when {
+            sample == null -> null
+            sample.providerId.isBlank() -> "provider ID is blank"
+            hasNegativeCounter -> "aggregate validation counters contain a negative value"
+            outcomeTotal != rawAttempts -> "aggregate outcome counts do not equal attempts"
+            sample.latencyMs != null && sample.latencyMs < 0L -> "latency is negative"
+            futureTimestamp -> "validation timestamp is in the future"
+            else -> null
+        }
+        val dataQuality = when {
+            sample == null -> ProviderHealthDataQuality.Missing
+            dataQualityMessage != null -> ProviderHealthDataQuality.Invalid
+            else -> ProviderHealthDataQuality.Valid
+        }
         val stale = lastValidatedAt != null &&
             !Duration.between(lastValidatedAt, now).isNegative &&
             Duration.between(lastValidatedAt, now) > staleAfter
 
         val status = when {
+            dataQuality == ProviderHealthDataQuality.Invalid -> ProviderHealthStatus.Unavailable
             attempts == 0L || lastValidatedAt == null -> ProviderHealthStatus.Unvalidated
             stale -> ProviderHealthStatus.Stale
             attempts < MIN_ATTEMPTS -> ProviderHealthStatus.Degraded
@@ -106,7 +177,9 @@ object ProviderHealthAssessmentRules {
             usableResponseRate = usableRate,
             failureRate = failureRate,
             latencyMs = sample?.latencyMs?.coerceAtLeast(0L),
-            lastValidatedAt = lastValidatedAt
+            lastValidatedAt = lastValidatedAt,
+            dataQuality = dataQuality,
+            dataQualityMessage = dataQualityMessage
         )
     }
 
@@ -131,7 +204,9 @@ object ProviderHealthAssessmentRules {
         val assessments = known.map { id -> assess(byId[id], now, staleAfter) }
         return ProviderHealthReport(
             knownProviderCount = assessments.size,
-            observedProviderCount = assessments.count { it.attempts > 0L },
+            observedProviderCount = assessments.count {
+                it.attempts > 0L && it.dataQuality == ProviderHealthDataQuality.Valid
+            },
             assessments = assessments
         )
     }

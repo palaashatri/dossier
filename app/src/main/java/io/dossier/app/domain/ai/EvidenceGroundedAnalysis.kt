@@ -120,8 +120,8 @@ object EvidenceGroundedAiValidator {
      * Validate model output against effective evidence and, when available,
      * explicitly linked remediation state. Outcome language is accepted only
      * when the matching evidence link is effective, completed, and tied to a
-     * later verification scan. Callers without remediation state retain the
-     * fail-closed behavior by using the default empty list.
+     * completed durable scan-history entry. Callers without remediation state
+     * retain the fail-closed behavior by using the default empty list.
      */
     fun validate(
         result: AiAnalysisResult,
@@ -287,6 +287,7 @@ object EvidenceGroundedAiValidator {
                 link.state == AiRemediationLinkState.Effective &&
                 link.record.status == io.dossier.app.domain.case.RemediationStatus.Completed &&
                 !link.record.verifiedByScanId.isNullOrBlank() &&
+                link.verificationScanPresent &&
                 linkedEvidenceId != null &&
                 linkedEvidenceId in supportIds &&
                 linkedEvidenceId !in contradictionIds &&
