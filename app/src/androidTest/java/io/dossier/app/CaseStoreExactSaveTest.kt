@@ -336,6 +336,46 @@ class CaseStoreExactSaveTest {
     }
 
     @Test
+    fun oversizedCaseSaveIsRejectedWithoutReplacingLastGoodEncryptedCase() {
+        val target = DossierCase(
+            caseId = "bounded-case-save",
+            createdAt = "2026-08-24 00:00",
+            subjectName = "Bounded Case",
+            input = IdentityInput(fullName = "Bounded Case"),
+            aiSummary = "last known good"
+        )
+        assertTrue(store.saveExactCase(target))
+
+        val oversized = target.copy(
+            aiSummary = "X".repeat(CaseStore.MAX_PLAINTEXT_BYTES + 1)
+        )
+        assertFalse(store.saveExactCase(oversized))
+
+        assertEquals("last known good", requireNotNull(store.load(target.caseId)).aiSummary)
+        val directory = File(context.filesDir, "dossier_cases")
+        assertFalse(directory.listFiles().orEmpty().any { it.name.endsWith(".${CaseStore.TEMP_EXTENSION}") })
+    }
+
+    @Test
+    fun oversizedEncryptedCaseFileFailsClosedBeforeUnboundedRead() {
+        val target = DossierCase(
+            caseId = "bounded-case-read",
+            createdAt = "2026-08-24 00:00",
+            subjectName = "Bounded Read",
+            input = IdentityInput(fullName = "Bounded Read")
+        )
+        assertTrue(store.saveExactCase(target))
+
+        val encrypted = File(
+            context.filesDir,
+            "${CaseStore.CASE_DIRECTORY}/${target.caseId}.${CaseStore.ENCRYPTED_EXTENSION}"
+        )
+        encrypted.writeBytes(ByteArray((CaseStore.MAX_ENVELOPE_BYTES + 1).toInt()))
+
+        assertEquals(null, store.load(target.caseId))
+    }
+
+    @Test
     fun asyncCaseStoreSeamsRoundTripOnProvidedIoDispatcher() = runBlocking {
         val executor = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "case-store-io-test")

@@ -18,7 +18,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.file.Files
@@ -186,8 +188,15 @@ class CaseStore(private val context: Context) {
         }
         val normalized = normalizeCase(withHistory)
         val plaintext = json.encodeToString(normalized).toByteArray(Charsets.UTF_8)
+        require(plaintext.size <= MAX_PLAINTEXT_BYTES) {
+            "Encrypted case plaintext exceeds the ${MAX_PLAINTEXT_BYTES}-byte limit."
+        }
         val envelope = encrypt(plaintext)
-        atomicWrite(encryptedFile(case.caseId), json.encodeToString(envelope))
+        val encodedEnvelope = json.encodeToString(envelope)
+        require(encodedEnvelope.toByteArray(Charsets.UTF_8).size <= MAX_ENVELOPE_BYTES) {
+            "Encrypted case envelope exceeds the ${MAX_ENVELOPE_BYTES}-byte limit."
+        }
+        atomicWrite(encryptedFile(case.caseId), encodedEnvelope)
         val legacy = legacyFile(case.caseId)
         if (legacy.exists() && !legacy.delete()) {
             error("Unable to remove legacy plaintext case.")
@@ -239,7 +248,9 @@ class CaseStore(private val context: Context) {
         val legacy = legacyFile(caseId)
         if (!legacy.exists()) return null
         val migrated = runCatching {
-            json.decodeFromString<DossierCase>(legacy.readText())
+            json.decodeFromString<DossierCase>(
+                readFileBounded(legacy, MAX_PLAINTEXT_BYTES.toLong()).toString(Charsets.UTF_8)
+            )
         }.getOrNull() ?: return null
         val normalized = normalizeCase(migrated)
         return if (saveInternal(normalized, attachSessionState = false)) normalized else migrated
@@ -402,11 +413,17 @@ class CaseStore(private val context: Context) {
         require(envelope.formatVersion == ENVELOPE_VERSION) {
             "Unsupported encrypted case format ${envelope.formatVersion}."
         }
+        require(envelope.ivBase64.length in 1..MAX_IV_BASE64_CHARS)
+        require(envelope.ciphertextBase64.length in 1..MAX_CIPHERTEXT_BASE64_CHARS)
+        require(envelope.plaintextSha256.length == SHA_256_HEX_LENGTH)
         val iv = Base64.getDecoder().decode(envelope.ivBase64)
+        require(iv.size == GCM_IV_BYTES)
         val ciphertext = Base64.getDecoder().decode(envelope.ciphertextBase64)
+        require(ciphertext.size in (GCM_TAG_BYTES + 1)..MAX_CIPHERTEXT_BYTES)
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
         val plaintext = cipher.doFinal(ciphertext)
+        require(plaintext.size <= MAX_PLAINTEXT_BYTES)
         require(sha256(plaintext).equals(envelope.plaintextSha256, ignoreCase = true)) {
             "Case integrity check failed."
         }
@@ -493,10 +510,41 @@ class CaseStore(private val context: Context) {
     }
 
     private fun readEncryptedCase(file: File): DossierCase? = runCatching {
-        val envelope = json.decodeFromString<EncryptedCaseEnvelope>(file.readText())
+        val envelope = json.decodeFromString<EncryptedCaseEnvelope>(
+            readFileBounded(file, MAX_ENVELOPE_BYTES).toString(Charsets.UTF_8)
+        )
         val plaintext = decrypt(envelope)
         normalizeCase(json.decodeFromString<DossierCase>(plaintext.toString(Charsets.UTF_8)))
     }.getOrNull()
+
+    private fun readFileBounded(file: File, maxBytes: Long): ByteArray {
+        require(maxBytes > 0)
+        if (!file.exists() || !file.isFile) throw IOException("Missing or invalid case file")
+        val length = file.length()
+        if (length > maxBytes) {
+            throw IOException("Case file size $length exceeds limit of $maxBytes bytes")
+        }
+        val initialCapacity = if (length > 0) {
+            minOf(length + 1L, maxBytes + 1L).toInt()
+        } else {
+            1024
+        }
+        val output = ByteArrayOutputStream(initialCapacity)
+        FileInputStream(file).use { input ->
+            val buffer = ByteArray(8192)
+            var total = 0L
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                total += read
+                if (total > maxBytes) {
+                    throw IOException("Case file read exceeded limit of $maxBytes bytes")
+                }
+                output.write(buffer, 0, read)
+            }
+        }
+        return output.toByteArray()
+    }
 
     private fun analysisFingerprint(case: DossierCase): String {
         val analysisSnapshot = case.copy(
@@ -535,7 +583,7 @@ class CaseStore(private val context: Context) {
         val plaintextSha256: String
     )
 
-    private companion object {
+    internal companion object {
         const val CASE_DIRECTORY = "dossier_cases"
         const val ENCRYPTED_EXTENSION = "dcase"
         const val LEGACY_EXTENSION = "json"
@@ -543,6 +591,14 @@ class CaseStore(private val context: Context) {
         const val BACKUP_EXTENSION = "bak"
         const val ENVELOPE_VERSION = 1
         const val MAX_EVIDENCE_RECORDS = 10_000
+        const val GCM_IV_BYTES = 12
+        const val GCM_TAG_BYTES = 16
+        const val MAX_PLAINTEXT_BYTES = 8 * 1024 * 1024
+        const val MAX_CIPHERTEXT_BYTES = MAX_PLAINTEXT_BYTES + GCM_TAG_BYTES
+        const val MAX_ENVELOPE_BYTES = 12 * 1024 * 1024L
+        const val MAX_IV_BASE64_CHARS = 32
+        const val MAX_CIPHERTEXT_BASE64_CHARS = ((MAX_CIPHERTEXT_BYTES + 2) / 3) * 4 + 16
+        const val SHA_256_HEX_LENGTH = 64
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         const val KEY_ALIAS = "dossier-case-storage-v1"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
