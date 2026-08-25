@@ -1,5 +1,6 @@
 package io.dossier.app
 
+import androidx.compose.foundation.layout.Column
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -19,19 +20,23 @@ class HudStatusPillAccessibilityTest {
 
     @Test
     fun severityIsExposedBeyondStatusColor() {
-        val expectedDescriptions = mapOf(
+        val expectedDescriptions = listOf(
             HudLevel.OK to "Positive status",
             HudLevel.WARN to "Warning status",
             HudLevel.CRIT to "Critical status",
             HudLevel.INFO to "Informational status"
         )
 
-        expectedDescriptions.forEach { (level, expectedDescription) ->
-            composeRule.setContent {
-                HudStatusPill(text = "STATUS", level = level)
+        composeRule.setContent {
+            Column {
+                expectedDescriptions.forEach { (level, _) ->
+                    HudStatusPill(text = level.name, level = level)
+                }
             }
+        }
 
-            val node = composeRule.onNodeWithText("STATUS").fetchSemanticsNode()
+        expectedDescriptions.forEach { (level, expectedDescription) ->
+            val node = composeRule.onNodeWithText(level.name).fetchSemanticsNode()
             assertEquals(
                 "HUD severity must be available to assistive technology for $level",
                 expectedDescription,
