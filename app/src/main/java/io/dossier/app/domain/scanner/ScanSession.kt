@@ -416,6 +416,7 @@ object ScanSession {
             val scanResults = profileScanner.scanIdentity(inputToUse, deepResearch = deepResearch, requestId = requestId)
             currentCoroutineContext().ensureActive()
             _profileScanResults.value = scanResults
+            MediaIntelligenceSession.recordVerifiedProfileAvatars(inputToUse, scanResults)
             checkpointStage(
                 context,
                 requestId,

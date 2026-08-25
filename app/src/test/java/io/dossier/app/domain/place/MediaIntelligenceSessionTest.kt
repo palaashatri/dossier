@@ -1,9 +1,14 @@
 package io.dossier.app.domain.place
 
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.Platform
+import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.model.ReverseImageLookupResult
+import io.dossier.app.domain.model.UsernameCandidate
+import io.dossier.app.domain.model.UsernameMatchType
 import io.dossier.app.domain.scanner.ScanSession
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -84,6 +89,62 @@ class MediaIntelligenceSessionTest {
         ScanSession.restoreFromCase(built)
 
         assertFalse(requireNotNull(ScanSession.buildCase()).mediaIntelligence.isEmpty)
+    }
+
+    @Test
+    fun verifiedProfileAvatarsAreAutomaticallyBoundAndRemainIndexedObservations() {
+        val target = IdentityInput(fullName = "Alice Target", primaryUsername = "alice")
+        val foreign = IdentityInput(fullName = "Foreign Subject", primaryUsername = "foreign")
+        MediaIntelligenceSession.beginFor(target)
+
+        assertTrue(
+            MediaIntelligenceSession.recordVerifiedProfileAvatars(
+                target,
+                listOf(
+                    ProfileScanResult(
+                        candidate = UsernameCandidate(
+                            username = "alice",
+                            platform = Platform.GitHub,
+                            url = "https://github.com/alice",
+                            matchType = UsernameMatchType.Exact,
+                            confidence = 0.9f
+                        ),
+                        exists = true,
+                        httpStatus = 200,
+                        displayName = "Alice",
+                        bio = null,
+                        profileImageUrl = "https://avatars.example.test/alice.jpg",
+                        links = emptyList(),
+                        extractedText = "Alice",
+                        findings = emptyList(),
+                        confidenceSignals = listOf("direct"),
+                        verified = true,
+                        verificationStatus = "Verified"
+                    )
+                )
+            )
+        )
+
+        val observation = MediaIntelligenceSession.snapshotFor(target).imageResults.single()
+        assertEquals(1, observation.visualCandidates.size)
+        assertEquals(
+            ReverseImageLookupResult.ImageCandidateState.Indexed,
+            observation.visualCandidates.single().state
+        )
+        assertTrue(observation.visualMatches.isEmpty())
+        assertTrue(observation.visualClusters.isEmpty())
+        assertTrue(observation.visualSearchNote.orEmpty().contains("no local image comparison"))
+        assertTrue(
+            observation.visualCandidates.single().accountLinkages.single().evidenceIds
+                .contains("profile:https://github.com/alice")
+        )
+
+        assertFalse(
+            MediaIntelligenceSession.recordVerifiedProfileAvatars(
+                foreign,
+                emptyList()
+            )
+        )
     }
 
     private fun sampleImage() = ReverseImageLookupResult(

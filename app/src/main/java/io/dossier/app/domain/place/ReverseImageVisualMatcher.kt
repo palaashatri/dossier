@@ -402,13 +402,17 @@ internal fun verifiedProfileMediaLinkage(
 ): ReverseImageLookupResult.ImageAccountLinkage? {
     if (!result.exists || !result.verified) return null
     val accountUrl = result.candidate.url.trim()
+    if (accountUrl.length > MAX_VERIFIED_PROFILE_URL_CHARS) return null
     val uri = runCatching { URI(accountUrl) }.getOrNull() ?: return null
     val scheme = uri.scheme?.lowercase() ?: return null
     if (scheme != "http" && scheme != "https") return null
     if (uri.host.isNullOrBlank()) return null
+    if (uri.userInfo != null) return null
     return ReverseImageLookupResult.ImageAccountLinkage(
         accountUrl = accountUrl,
         basis = ReverseImageLookupResult.ImageAccountLinkageBasis.VerifiedProfile,
         evidenceIds = listOf("profile:$accountUrl")
     )
 }
+
+private const val MAX_VERIFIED_PROFILE_URL_CHARS = 2_048

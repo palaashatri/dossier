@@ -3,6 +3,7 @@ package io.dossier.app.domain.place
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.ReverseVideoLookupResult
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.ProfileScanResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.Serializable
@@ -50,6 +51,46 @@ object MediaIntelligenceSession {
         val current = _snapshot.value
         _snapshot.value = current.copy(
             videoResults = (current.videoResults + result).takeLast(MAX_VIDEO_RESULTS)
+        )
+        true
+    }
+
+    /**
+     * Persists bounded avatar observations from the current direct profile scan.
+     * This is deliberately separate from [recordImage]: no selected image was
+     * compared, so the resulting candidates remain Indexed with no visual score.
+     */
+    fun recordVerifiedProfileAvatars(
+        input: IdentityInput,
+        profiles: List<ProfileScanResult>
+    ): Boolean = synchronized(lock) {
+        if (boundInputFingerprint != fingerprint(input)) return@synchronized false
+
+        val existingCandidateIds = _snapshot.value.imageResults
+            .asSequence()
+            .flatMap { it.visualCandidates.asSequence() }
+            .map { it.id }
+            .toHashSet()
+        val candidates = VerifiedProfileAvatarProducer
+            .produce(profiles)
+            .filterNot { it.id in existingCandidateIds }
+        if (candidates.isEmpty()) return@synchronized true
+
+        val observation = ReverseImageLookupResult(
+            gps = null,
+            extractedText = null,
+            labels = emptyList(),
+            faceDetected = false,
+            faceWarning = null,
+            resolvedLocation = null,
+            mapsUrl = null,
+            webEvidence = emptyList(),
+            visualCandidates = candidates,
+            visualSearchNote = "Directly verified public profile avatars were recorded as source observations; no local image comparison or face analysis was performed."
+        )
+        val current = _snapshot.value
+        _snapshot.value = current.copy(
+            imageResults = (current.imageResults + observation).takeLast(MAX_IMAGE_RESULTS)
         )
         true
     }

@@ -8,6 +8,8 @@ import io.dossier.app.domain.discovery.sanitizeTerminalFailureCode
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
+import io.dossier.app.domain.graph.GraphEvidenceReconciliationReport
+import io.dossier.app.domain.graph.graphEvidenceReconciliation
 import io.dossier.app.domain.place.MediaIntelligenceSession
 import io.dossier.app.domain.place.MediaIntelligenceSnapshotPolicy
 import kotlinx.coroutines.CoroutineDispatcher
@@ -196,6 +198,15 @@ class CaseStore(private val context: Context) {
     fun load(caseId: String): DossierCase? = synchronized(CASE_MUTATION_LOCK) {
         loadUnlocked(caseId)
     }
+
+    /**
+     * Returns read-only diagnostics for divergence between persisted canonical
+     * evidence relationships and graph edges. Neither source is rewritten.
+     */
+    fun graphEvidenceDiagnostics(caseId: String): GraphEvidenceReconciliationReport? =
+        synchronized(CASE_MUTATION_LOCK) {
+            loadUnlocked(caseId)?.graphEvidenceReconciliation()
+        }
 
     /** Loads one encrypted case without doing disk/Keystore work on the caller's dispatcher. */
     suspend fun loadAsync(
