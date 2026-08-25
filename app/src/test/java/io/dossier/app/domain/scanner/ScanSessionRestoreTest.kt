@@ -10,6 +10,7 @@ import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationship
+import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.Finding
@@ -167,6 +168,76 @@ class ScanSessionRestoreTest {
         val relationship = snapshot.relationships.single()
         assertEquals("first assertion", relationship.evidence)
         assertEquals(listOf("evidence-a", "evidence-b"), relationship.evidenceIds)
+    }
+
+    @Test
+    fun buildAndRestorePreserveCanonicalRelationshipEvidence() {
+        val input = IdentityInput(fullName = "Authorized subject")
+        val snapshot = ScanSession.buildEvidenceSnapshot(
+            input = input,
+            profileResults = emptyList(),
+            pluginCollection = EvidenceCollection(
+                relationships = listOf(
+                    EvidenceRelationship(
+                        fromValue = "Subject",
+                        toValue = "https://example.test/profile",
+                        relation = "LINKS_TO",
+                        evidence = "verified profile link",
+                        evidenceIds = listOf("ev:Profile:https://example.test/profile:https://example.test/profile")
+                    )
+                )
+            ),
+            findings = emptyList(),
+            retrievedAtEpochMillis = 123_000L
+        )
+        val expectedRelationships = snapshot.relationships
+        val case = DossierCase(
+            createdAt = "2026-08-24 12:00",
+            subjectName = "Authorized subject",
+            input = input,
+            evidenceRecords = snapshot.evidence,
+            evidenceRelationships = expectedRelationships
+        )
+
+        ScanSession.restoreFromCase(case)
+
+        assertEquals(expectedRelationships, EvidenceRuntimeCache.collection.value.relationships)
+        assertEquals(expectedRelationships, ScanSession.buildCase()?.evidenceRelationships)
+        assertTrue(
+            expectedRelationships.single().evidenceIds.all { it.startsWith("ev2:") }
+        )
+    }
+
+    @Test
+    fun runtimeRelationshipAssertionsRemainBounded() {
+        val overflowingIds = EvidenceRelationship(
+            fromValue = "Subject",
+            toValue = "Profile",
+            relation = "LINKS_TO",
+            evidenceIds = List(EvidenceRelationshipPolicy.MAX_EVIDENCE_IDS_PER_RELATIONSHIP + 1) {
+                "evidence-$it"
+            }
+        )
+        val overflowingRelationships = List(EvidenceRelationshipPolicy.MAX_RELATIONSHIPS + 1) {
+            EvidenceRelationship(
+                fromValue = "Subject-$it",
+                toValue = "Profile-$it",
+                relation = "LINKS_TO",
+                evidenceIds = listOf("evidence-$it")
+            )
+        }
+
+        EvidenceRuntimeCache.replace(EvidenceCollection(relationships = listOf(overflowingIds)))
+        assertEquals(
+            EvidenceRelationshipPolicy.MAX_EVIDENCE_IDS_PER_RELATIONSHIP,
+            EvidenceRuntimeCache.collection.value.relationships.single().evidenceIds.size
+        )
+
+        EvidenceRuntimeCache.replace(EvidenceCollection(relationships = overflowingRelationships))
+        assertEquals(
+            EvidenceRelationshipPolicy.MAX_RELATIONSHIPS,
+            EvidenceRuntimeCache.collection.value.relationships.size
+        )
     }
 
     @Test

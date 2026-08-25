@@ -133,6 +133,53 @@ data class EvidenceRelationship(
 )
 
 /**
+ * Canonicalizes persisted/runtime relationship assertions without resolving
+ * identity. Relationships with the same normalized endpoints and relation
+ * are one assertion; their independent evidence IDs are unioned in input
+ * order, bounded for safe persistence.
+ */
+object EvidenceRelationshipPolicy {
+    const val MAX_RELATIONSHIPS = 10_000
+    const val MAX_EVIDENCE_IDS_PER_RELATIONSHIP = 256
+
+    fun normalize(relationships: List<EvidenceRelationship>): List<EvidenceRelationship> {
+        if (relationships.isEmpty()) return emptyList()
+
+        val merged = LinkedHashMap<String, EvidenceRelationship>()
+        relationships.take(MAX_RELATIONSHIPS).forEach { relationship ->
+            val key = listOf(
+                relationship.fromValue.trim().lowercase(Locale.ROOT),
+                relationship.toValue.trim().lowercase(Locale.ROOT),
+                relationship.relation.trim().uppercase(Locale.ROOT)
+            ).joinToString("\u001f")
+            val evidenceIds = relationship.evidenceIds
+                .map { it.trim() }
+                .filter(String::isNotBlank)
+                .map(EvidenceIdPolicy::migrate)
+                .distinct()
+                .take(MAX_EVIDENCE_IDS_PER_RELATIONSHIP)
+            val previous = merged[key]
+            if (previous == null) {
+                merged[key] = relationship.copy(evidenceIds = evidenceIds)
+            } else {
+                val description = previous.evidence?.takeIf(String::isNotBlank)
+                    ?: relationship.evidence?.takeIf(String::isNotBlank)
+                merged[key] = previous.copy(
+                    evidence = description,
+                    evidenceIds = (previous.evidenceIds + evidenceIds)
+                        .map { it.trim() }
+                        .filter(String::isNotBlank)
+                        .map(EvidenceIdPolicy::migrate)
+                        .distinct()
+                        .take(MAX_EVIDENCE_IDS_PER_RELATIONSHIP)
+                )
+            }
+        }
+        return merged.values.toList()
+    }
+}
+
+/**
  * Resolves relationship provenance without inventing evidence.
  *
  * A relationship may arrive from a legacy producer with only endpoint values

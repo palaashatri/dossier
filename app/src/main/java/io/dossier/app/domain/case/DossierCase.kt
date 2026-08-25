@@ -3,6 +3,7 @@ package io.dossier.app.domain.case
 import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.evidence.AttackPathFinder.AttackPath
 import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.ExposureEngine.ExposureResult
 import io.dossier.app.domain.evidence.RelationshipConfidence
 import io.dossier.app.domain.model.*
@@ -100,6 +101,8 @@ data class DossierCase(
     val authorizedScope: AuthorizedScope = AuthorizedScope.SelfAudit,
     val findings: List<Finding> = emptyList(),
     val evidenceRecords: List<Evidence> = emptyList(),
+    /** Canonical scanner/plugin assertions retained independently of graph edges. */
+    val evidenceRelationships: List<EvidenceRelationship> = emptyList(),
     val profileResults: List<ProfileScanResult> = emptyList(),
     val faceMatches: List<FaceConsistencyMatch> = emptyList(),
     val entityGraph: EntityGraph = EntityGraph(),
@@ -127,7 +130,7 @@ data class DossierCase(
         "${finding.type.name}|${finding.value}|${finding.sourceUrl.orEmpty()}"
 
     companion object {
-        /** v7 adds truthful failed-scan lifecycle state to the v6 provenance/media schema. */
-        const val CURRENT_SCHEMA_VERSION = 7
+        /** v8 persists canonical evidence relationships alongside evidence records. */
+        const val CURRENT_SCHEMA_VERSION = 8
     }
 }

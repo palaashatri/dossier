@@ -7,6 +7,7 @@ import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.case.UserCorrection
 import io.dossier.app.domain.case.UserCorrectionDecision
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.model.DossierEdge
 import io.dossier.app.domain.model.DossierEntity
 import io.dossier.app.domain.model.EntityGraph
@@ -38,6 +39,15 @@ class CaseStoreEvidenceIdMigrationTest {
             createdAt = "2026-08-08 00:00",
             subjectName = "Jane Example",
             input = IdentityInput(fullName = "Jane Example"),
+            evidenceRelationships = listOf(
+                EvidenceRelationship(
+                    fromValue = "Jane Example",
+                    toValue = "https://example.test/contact",
+                    relation = "LINKS_TO",
+                    evidence = "legacy direct link",
+                    evidenceIds = listOf(legacyId)
+                )
+            ),
             userCorrections = listOf(
                 UserCorrection(
                     correctionId = "correction-one",
@@ -76,6 +86,7 @@ class CaseStoreEvidenceIdMigrationTest {
         assertEquals(listOf(currentId), loaded.entityGraph.entities.single().evidenceIds)
         assertEquals(listOf(currentId), loaded.entityGraph.edges.single().evidenceIds)
         assertEquals(listOf(currentId), loaded.entityGraph.edges.single().contradictingEvidenceIds)
+        assertEquals(listOf(currentId), loaded.evidenceRelationships.single().evidenceIds)
         assertTrue(currentId.startsWith("ev2:"))
         assertFalse(currentId.contains("jane@example.test"))
     }

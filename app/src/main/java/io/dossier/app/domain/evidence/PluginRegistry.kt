@@ -19,6 +19,7 @@ object EvidenceRuntimeCache {
      * evidence bound while preserving the first record for each stable ID.
      */
     const val MAX_CASE_EVIDENCE = 10_000
+    const val MAX_CASE_RELATIONSHIPS = EvidenceRelationshipPolicy.MAX_RELATIONSHIPS
 
     private val _collection = MutableStateFlow(EvidenceCollection())
     val collection: StateFlow<EvidenceCollection> = _collection
@@ -26,15 +27,16 @@ object EvidenceRuntimeCache {
     fun replace(value: EvidenceCollection) {
         _collection.value = value.copy(
             evidence = value.evidence.distinctBy { it.id }.take(MAX_CASE_EVIDENCE),
-            relationships = value.relationships.distinctBy {
-                "${it.fromValue}|${it.toValue}|${it.relation}|${it.evidence.orEmpty()}"
-            }
+            relationships = EvidenceRelationshipPolicy.normalize(value.relationships)
         )
     }
 
-    /** Rehydrates only the bounded, ID-deduplicated evidence portion of a case. */
-    fun replaceCaseEvidence(records: List<Evidence>) {
-        replace(EvidenceCollection(evidence = records))
+    /** Rehydrates bounded, ID-deduplicated evidence and relationship assertions. */
+    fun replaceCaseEvidence(
+        records: List<Evidence>,
+        relationships: List<EvidenceRelationship> = emptyList()
+    ) {
+        replace(EvidenceCollection(evidence = records, relationships = relationships))
     }
 
     fun clear() {
@@ -91,9 +93,7 @@ suspend fun runPlugins(
     }
     val merged = EvidenceCollection(
         evidence = allEvidence.distinctBy { it.id },
-        relationships = allRelationships.distinctBy {
-            "${it.fromValue}|${it.toValue}|${it.relation}|${it.evidence.orEmpty()}"
-        }
+        relationships = EvidenceRelationshipPolicy.normalize(allRelationships)
     )
     EvidenceRuntimeCache.replace(merged)
     return merged

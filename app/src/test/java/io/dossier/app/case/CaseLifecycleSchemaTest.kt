@@ -9,6 +9,7 @@ import io.dossier.app.domain.case.UserCorrection
 import io.dossier.app.domain.case.UserCorrectionDecision
 import io.dossier.app.domain.case.normalizePersistedScanHistoryEntry
 import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -43,6 +44,7 @@ class CaseLifecycleSchemaTest {
         assertTrue(decoded.userCorrections.isEmpty())
         assertTrue(decoded.remediationRecords.isEmpty())
         assertTrue(decoded.exports.isEmpty())
+        assertTrue(decoded.evidenceRelationships.isEmpty())
     }
 
     @Test
@@ -51,6 +53,15 @@ class CaseLifecycleSchemaTest {
             createdAt = "2026-08-08T00:00:00Z",
             subjectName = "Synthetic Subject",
             input = IdentityInput(fullName = "Synthetic Subject"),
+            evidenceRelationships = listOf(
+                EvidenceRelationship(
+                    fromValue = "Synthetic Subject",
+                    toValue = "https://example.test/profile",
+                    relation = "LINKS_TO",
+                    evidence = "direct profile link",
+                    evidenceIds = listOf("ev2:relationship-proof")
+                )
+            ),
             authorizedScope = AuthorizedScope.ExplicitConsent,
             scanHistory = listOf(
                 CaseScanHistoryEntry(
@@ -87,6 +98,7 @@ class CaseLifecycleSchemaTest {
         assertEquals(null, decoded.scanHistory.single().failureCode)
         assertEquals(UserCorrectionDecision.ThisIsNotMe, decoded.userCorrections.single().decision)
         assertEquals(RemediationStatus.Submitted, decoded.remediationRecords.single().status)
+        assertEquals(dossierCase.evidenceRelationships, decoded.evidenceRelationships)
     }
 
     @Test

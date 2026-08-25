@@ -4,6 +4,7 @@ import io.dossier.app.domain.ai.AiAnalysisSnapshot
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.model.DossierEdge
 import io.dossier.app.domain.model.DossierEntity
 import io.dossier.app.domain.model.EntityGraph
@@ -128,5 +129,46 @@ class CaseEvidenceIdMigrationTest {
         assertEquals(EvidenceIdPolicy.migrate(rawId), migrated.userCorrections.single().evidenceId)
         assertTrue(snapshot.evidence.isEmpty())
         assertTrue(snapshot.findings.isEmpty())
+    }
+
+    @Test
+    fun relationshipAssertionsMigrateAndMergeEvidenceIdsWithoutInferringLinks() {
+        val rawId = "ev:Email:jane@example.test:https://example.test/contact"
+        val original = DossierCase(
+            schemaVersion = 7,
+            caseId = "legacy-relationships",
+            createdAt = "2026-08-08 00:00",
+            subjectName = "Jane Example",
+            input = IdentityInput(fullName = "Jane Example"),
+            evidenceRelationships = listOf(
+                EvidenceRelationship(
+                    fromValue = "Jane",
+                    toValue = "Profile",
+                    relation = "MENTIONS",
+                    evidence = "direct assertion",
+                    evidenceIds = listOf(rawId)
+                ),
+                EvidenceRelationship(
+                    fromValue = " jane ",
+                    toValue = " profile ",
+                    relation = "mentions",
+                    evidence = "secondary assertion",
+                    evidenceIds = listOf("evidence-explicit")
+                )
+            )
+        )
+
+        val migrated = CaseEvidenceIdMigration.migrate(original)
+
+        assertEquals(DossierCase.CURRENT_SCHEMA_VERSION, migrated.schemaVersion)
+        val relationship = migrated.evidenceRelationships.single()
+        assertEquals("Jane", relationship.fromValue)
+        assertEquals("Profile", relationship.toValue)
+        assertEquals("MENTIONS", relationship.relation)
+        assertEquals("direct assertion", relationship.evidence)
+        assertEquals(
+            listOf(EvidenceIdPolicy.migrate(rawId), "evidence-explicit"),
+            relationship.evidenceIds
+        )
     }
 }

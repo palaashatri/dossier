@@ -15,15 +15,15 @@ import io.dossier.app.domain.ai.LocalAiModelType
 import io.dossier.app.domain.case.CaseStore
 import io.dossier.app.domain.case.CaseScanHistoryEntry
 import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.case.CaseEvidenceIdMigration
 import io.dossier.app.domain.evidence.AttackPathFinder
 import io.dossier.app.domain.evidence.ConfidenceEngine
 import io.dossier.app.domain.evidence.EmailDomainContributor
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
-import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceKind
-import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
+import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.ExposureEngine
 import io.dossier.app.domain.evidence.RelationshipConfidence
 import io.dossier.app.domain.evidence.SharedDomainContributor
@@ -36,7 +36,6 @@ import io.dossier.app.domain.graph.EntityGraphBuilder
 import io.dossier.app.domain.model.BreachDigest
 import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.FaceConsistencyMatch
-import java.util.Locale
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.discovery.WhatsMyNameCatalog
 import io.dossier.app.data.platform.ProviderCatalogV2
@@ -282,12 +281,14 @@ object ScanSession {
         val input = _currentInput.value ?: return null
         val createdAt = java.time.LocalDateTime.now()
             .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+        val evidenceCollection = EvidenceRuntimeCache.collection.value
         return DossierCase(
             createdAt = createdAt,
             subjectName = input.fullName.trim().ifBlank { input.primaryUsername ?: "UNKNOWN SUBJECT" },
             input = input,
             findings = _findings.value,
-            evidenceRecords = EvidenceRuntimeCache.collection.value.evidence,
+            evidenceRecords = evidenceCollection.evidence,
+            evidenceRelationships = evidenceCollection.relationships,
             profileResults = _profileScanResults.value,
             faceMatches = _faceConsistencyMatches.value,
             entityGraph = _entityGraph.value,
@@ -304,23 +305,24 @@ object ScanSession {
 
     /** Restores a transient encrypted background result after process death. */
     fun restoreFromCase(case: DossierCase) {
-        EvidenceRuntimeCache.replaceCaseEvidence(case.evidenceRecords)
-        MediaIntelligenceSession.restoreFor(case.input, case.mediaIntelligence)
-        _scanHistory.value = case.scanHistory
-        _currentInput.value = case.input
-        _findings.value = case.findings
-        _profileScanResults.value = case.profileResults
-        _faceConsistencyMatches.value = case.faceMatches
-        _entityGraph.value = case.entityGraph
-        _breachDigests.value = case.breachDigests
-        _riskLevel.value = case.riskLevel
-        _exposure.value = case.exposure
-        _attackPaths.value = case.attackPaths
-        _relationshipConfidence.value = case.relationshipConfidence
-        _aiSummary.value = case.aiSummary
+        val migrated = CaseEvidenceIdMigration.migrate(case)
+        EvidenceRuntimeCache.replaceCaseEvidence(migrated.evidenceRecords, migrated.evidenceRelationships)
+        MediaIntelligenceSession.restoreFor(migrated.input, migrated.mediaIntelligence)
+        _scanHistory.value = migrated.scanHistory
+        _currentInput.value = migrated.input
+        _findings.value = migrated.findings
+        _profileScanResults.value = migrated.profileResults
+        _faceConsistencyMatches.value = migrated.faceMatches
+        _entityGraph.value = migrated.entityGraph
+        _breachDigests.value = migrated.breachDigests
+        _riskLevel.value = migrated.riskLevel
+        _exposure.value = migrated.exposure
+        _attackPaths.value = migrated.attackPaths
+        _relationshipConfidence.value = migrated.relationshipConfidence
+        _aiSummary.value = migrated.aiSummary
         val remediationProvider = RemediationProvider()
-        _remediationTips.value = remediationProvider.getGlobalTips(case.findings)
-        _remediationItems.value = remediationProvider.getStructuredTips(case.findings)
+        _remediationTips.value = remediationProvider.getGlobalTips(migrated.findings)
+        _remediationItems.value = remediationProvider.getStructuredTips(migrated.findings)
         _memoryDropped.value = 0
         _isScanning.value = false
         _progressText.value = BackgroundScanWorker.STAGE_COMPLETE
@@ -886,46 +888,10 @@ object ScanSession {
                     pluginCollection.evidence +
                     buildEvidence(input, findings, retrievedAtEpochMillis)
                 ).distinctBy { it.id },
-            relationships = mergeEvidenceRelationships(
+            relationships = EvidenceRelationshipPolicy.normalize(
                 scannerEvidence.relationships + pluginCollection.relationships
             )
         )
-    }
-
-    /**
-     * Merge duplicate assertions without dropping independent provenance. The
-     * endpoint/relation key is only a deterministic grouping key; it never
-     * creates a new relationship or performs fuzzy identity resolution.
-     */
-    private fun mergeEvidenceRelationships(
-        relationships: List<EvidenceRelationship>
-    ): List<EvidenceRelationship> {
-        val merged = LinkedHashMap<String, EvidenceRelationship>()
-        relationships.forEach { relationship ->
-            val key = listOf(
-                relationship.fromValue.trim().lowercase(Locale.ROOT),
-                relationship.toValue.trim().lowercase(Locale.ROOT),
-                relationship.relation.trim().uppercase(Locale.ROOT)
-            ).joinToString("\u001f")
-            val normalizedIds = relationship.evidenceIds
-                .map(EvidenceIdPolicy::migrate)
-                .filter(String::isNotBlank)
-            val previous = merged[key]
-            if (previous == null) {
-                merged[key] = relationship.copy(evidenceIds = normalizedIds.distinct())
-            } else {
-                val description = previous.evidence?.takeIf(String::isNotBlank)
-                    ?: relationship.evidence?.takeIf(String::isNotBlank)
-                merged[key] = previous.copy(
-                    evidence = description,
-                    evidenceIds = (previous.evidenceIds + normalizedIds)
-                        .map(EvidenceIdPolicy::migrate)
-                        .filter(String::isNotBlank)
-                        .distinct()
-                )
-            }
-        }
-        return merged.values.toList()
     }
 
     internal fun buildAiAnalysisSnapshot(

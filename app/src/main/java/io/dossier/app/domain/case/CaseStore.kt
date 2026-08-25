@@ -6,6 +6,7 @@ import android.security.keystore.KeyProperties
 import io.dossier.app.domain.discovery.ScanHistoryRuntime
 import io.dossier.app.domain.discovery.sanitizeTerminalFailureCode
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.place.MediaIntelligenceSession
 import io.dossier.app.domain.place.MediaIntelligenceSnapshotPolicy
@@ -147,10 +148,24 @@ class CaseStore(private val context: Context) {
         attachSessionState: Boolean
     ): Boolean = runCatching {
         val withEvidence = if (attachSessionState && case.evidenceRecords.isEmpty()) {
-            val evidence = EvidenceRuntimeCache.collection.value.evidence
+            val runtimeCollection = EvidenceRuntimeCache.collection.value
+            val evidence = runtimeCollection.evidence
                 .distinctBy { it.id }
                 .take(MAX_EVIDENCE_RECORDS)
-            if (evidence.isNotEmpty()) case.copy(evidenceRecords = evidence) else case
+            // Keep any explicit assertions already present on the case while attaching
+            // the current bounded working-session collection. This avoids dropping a
+            // relationship-only case when its runtime evidence cache is empty.
+            val relationships = EvidenceRelationshipPolicy.normalize(
+                case.evidenceRelationships + runtimeCollection.relationships
+            )
+            if (evidence.isNotEmpty() || relationships.isNotEmpty()) {
+                case.copy(
+                    evidenceRecords = evidence,
+                    evidenceRelationships = relationships
+                )
+            } else {
+                case
+            }
         } else {
             case
         }

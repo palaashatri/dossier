@@ -53,6 +53,36 @@ class PluginRegistryTest {
     }
 
     @Test
+    fun runPluginsMergesRelationshipEvidenceIdsFromIndependentProducers() = runBlocking {
+        fun relationshipPlugin(pluginId: String, evidenceId: String) = object : ScannerPlugin {
+            override val id = pluginId
+            override val displayName = pluginId
+
+            override suspend fun scan(input: IdentityInput): EvidenceCollection = EvidenceCollection(
+                relationships = listOf(
+                    EvidenceRelationship(
+                        fromValue = "Test User",
+                        toValue = "https://example.test/profile",
+                        relation = "LINKS_TO",
+                        evidence = "direct profile link",
+                        evidenceIds = listOf(evidenceId)
+                    )
+                )
+            )
+        }
+
+        val result = runPlugins(
+            input(),
+            plugins = listOf(
+                relationshipPlugin("relationship-one", "evidence-one"),
+                relationshipPlugin("relationship-two", "evidence-two")
+            )
+        )
+
+        assertEquals(listOf("evidence-one", "evidence-two"), result.relationships.single().evidenceIds)
+    }
+
+    @Test
     fun runPluginsNeverConvertsCancellationIntoProviderFailure() {
         val cancellingPlugin = object : ScannerPlugin {
             override val id = "cancel"

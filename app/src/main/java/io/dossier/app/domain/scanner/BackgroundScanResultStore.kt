@@ -5,6 +5,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import io.dossier.app.domain.analysis.OsintAnalysisBundle
 import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -163,6 +164,7 @@ class BackgroundScanResultStore internal constructor(
 
         requireCollection("case.findings", dossierCase.findings.size)
         requireCollection("case.evidenceRecords", dossierCase.evidenceRecords.size)
+        requireCollection("case.evidenceRelationships", dossierCase.evidenceRelationships.size)
         requireCollection("case.profileResults", dossierCase.profileResults.size)
         requireCollection("case.faceMatches", dossierCase.faceMatches.size)
         requireCollection("case.breachDigests", dossierCase.breachDigests.size)
@@ -186,6 +188,11 @@ class BackgroundScanResultStore internal constructor(
         }
         dossierCase.evidenceRecords.forEach { evidence ->
             requireCollection("evidence.signals", evidence.signals.size)
+        }
+        dossierCase.evidenceRelationships.forEach { relationship ->
+            require(relationship.evidenceIds.size <= EvidenceRelationshipPolicy.MAX_EVIDENCE_IDS_PER_RELATIONSHIP) {
+                "evidence relationship has too many evidence IDs"
+            }
         }
         dossierCase.profileResults.forEach { profile ->
             requireCollection("profile.links", profile.links.size)

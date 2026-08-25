@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.ContextWrapper
 import io.dossier.app.domain.analysis.OsintAnalysisBundle
 import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.evidence.EvidenceRelationship
+import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.model.DossierEntity
 import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.EntityType
@@ -76,6 +78,15 @@ class BackgroundScanResultStoreTest {
             createdAt = "2026-08-24T00:00:00Z",
             subjectName = "Test Subject",
             input = IdentityInput(fullName = "Test Subject", primaryUsername = "testuser"),
+            evidenceRelationships = listOf(
+                EvidenceRelationship(
+                    fromValue = "Test Subject",
+                    toValue = "https://example.com/testuser",
+                    relation = "LINKS_TO",
+                    evidence = "direct profile link",
+                    evidenceIds = listOf("ev2:profile-link")
+                )
+            ),
             findings = listOf(
                 Finding(
                     type = FindingType.Username,
@@ -101,8 +112,63 @@ class BackgroundScanResultStoreTest {
         assertEquals(case.input.fullName, loaded.dossierCase.input.fullName)
         assertEquals(case.findings.size, loaded.dossierCase.findings.size)
         assertEquals(case.findings.first().value, loaded.dossierCase.findings.first().value)
+        assertEquals(case.evidenceRelationships, loaded.dossierCase.evidenceRelationships)
         assertEquals(analysis, loaded.analysis)
         assertTrue(loaded.completedAtUtc.isNotBlank())
+    }
+
+    @Test
+    fun oversizedRelationshipCollectionIsRejectedBeforeEncryption() {
+        val syncer = RecordingDirectorySyncer()
+        val context = FakeContext(root)
+        val crypto = JvmBackgroundResultCrypto()
+        val store = BackgroundScanResultStore(context, syncer, crypto)
+        val oversizedCase = DossierCase(
+            caseId = "oversized-relationships",
+            createdAt = "2026-08-24T00:00:00Z",
+            subjectName = "Oversized",
+            input = IdentityInput(fullName = "Oversized"),
+            evidenceRelationships = List(BackgroundScanResultStore.MAX_COLLECTION_ITEMS + 1) { index ->
+                EvidenceRelationship(
+                    fromValue = "Subject-$index",
+                    toValue = "Profile-$index",
+                    relation = "LINKS_TO",
+                    evidenceIds = listOf("evidence-$index")
+                )
+            }
+        )
+
+        assertFalse(store.save("work-oversized-relationships", oversizedCase))
+        assertNull(store.load())
+        assertFalse(File(root, BackgroundScanResultStore.FILE_NAME).exists())
+    }
+
+    @Test
+    fun oversizedRelationshipEvidenceIdsAreRejectedBeforeEncryption() {
+        val syncer = RecordingDirectorySyncer()
+        val context = FakeContext(root)
+        val crypto = JvmBackgroundResultCrypto()
+        val store = BackgroundScanResultStore(context, syncer, crypto)
+        val oversizedCase = DossierCase(
+            caseId = "oversized-relationship-ids",
+            createdAt = "2026-08-24T00:00:00Z",
+            subjectName = "Oversized",
+            input = IdentityInput(fullName = "Oversized"),
+            evidenceRelationships = listOf(
+                EvidenceRelationship(
+                    fromValue = "Subject",
+                    toValue = "Profile",
+                    relation = "LINKS_TO",
+                    evidenceIds = List(EvidenceRelationshipPolicy.MAX_EVIDENCE_IDS_PER_RELATIONSHIP + 1) {
+                        "evidence-$it"
+                    }
+                )
+            )
+        )
+
+        assertFalse(store.save("work-oversized-relationship-ids", oversizedCase))
+        assertNull(store.load())
+        assertFalse(File(root, BackgroundScanResultStore.FILE_NAME).exists())
     }
 
     @Test

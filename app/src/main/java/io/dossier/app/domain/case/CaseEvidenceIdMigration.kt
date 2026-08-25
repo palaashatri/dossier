@@ -1,14 +1,19 @@
 package io.dossier.app.domain.case
 
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 
 /** Pure metadata migration used by encrypted case loading/saving and JVM tests. */
 object CaseEvidenceIdMigration {
     fun migrate(case: DossierCase): DossierCase {
         val migratedEvidence = case.evidenceRecords
-            .map { evidence -> evidence.copy(id = EvidenceIdPolicy.migrate(evidence.id)) }
+            .map { evidence ->
+                val migratedId = EvidenceIdPolicy.migrate(evidence.id)
+                if (migratedId == evidence.id) evidence else evidence.copy(id = migratedId)
+            }
             .distinctBy { it.id }
             .take(MAX_EVIDENCE_RECORDS)
+        val migratedRelationships = EvidenceRelationshipPolicy.normalize(case.evidenceRelationships)
         val migratedCorrections = case.userCorrections.map { correction ->
             correction.copy(evidenceId = correction.evidenceId?.let(EvidenceIdPolicy::migrate))
         }
@@ -29,6 +34,7 @@ object CaseEvidenceIdMigration {
         return case.copy(
             schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION,
             evidenceRecords = migratedEvidence,
+            evidenceRelationships = migratedRelationships,
             userCorrections = migratedCorrections,
             remediationRecords = migratedRemediation,
             entityGraph = case.entityGraph.copy(
