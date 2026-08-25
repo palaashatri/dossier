@@ -446,6 +446,59 @@ class BackgroundScanWorkerTest {
     }
 
     @Test
+    fun durablePublishedRunningResultIsRecoverableOnlyForExactOwnerGeneration() {
+        val owner = "11111111-1111-4111-8111-111111111111"
+        val request = "22222222-2222-4222-8222-222222222222"
+        val generation = "33333333-3333-4333-8333-333333333333"
+        val published = ScanLifecycleRecord(
+            ownerId = owner,
+            requestId = request,
+            generation = generation,
+            phase = ScanLifecyclePhase.Running,
+            updatedAtEpochMillis = 10L,
+            resultReady = true,
+            errorCode = null
+        )
+
+        assertTrue(
+            BackgroundScanManager.isDurableSuccess(
+                lifecycle = ScanLifecycleReadResult.Available(published),
+                resultWorkId = owner,
+                workerId = owner,
+                requestId = request,
+                generation = generation
+            )
+        )
+        assertFalse(
+            BackgroundScanManager.isDurableSuccess(
+                lifecycle = ScanLifecycleReadResult.Available(published.copy(resultReady = false)),
+                resultWorkId = owner,
+                workerId = owner,
+                requestId = request,
+                generation = generation
+            )
+        )
+        assertFalse(
+            BackgroundScanManager.isDurableSuccess(
+                lifecycle = ScanLifecycleReadResult.Available(published),
+                resultWorkId = "44444444-4444-4444-8444-444444444444",
+                workerId = owner,
+                requestId = request,
+                generation = generation
+            )
+        )
+        assertFalse(
+            BackgroundScanManager.isDurableSuccess(
+                lifecycle = ScanLifecycleReadResult.Available(published),
+                resultWorkId = owner,
+                workerId = owner,
+                requestId = request,
+                generation = "55555555-5555-4555-8555-555555555555"
+            )
+        )
+    }
+
+    @Test
     fun fastWorkerTransitionStillAllowsExactPriorResultCleanup() {
         val owner = "11111111-1111-4111-8111-111111111111"
         val request = "22222222-2222-4222-8222-222222222222"

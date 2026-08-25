@@ -105,6 +105,17 @@ class BackgroundScanWorker(
                 generation = generation
             )
         ) {
+            // A process can die after the encrypted result and its published
+            // lifecycle marker are durable but before the worker's terminal
+            // WorkManager result is committed.  Close that exact owner-bound
+            // lifecycle here so an immediate retry does not rerun every scan
+            // stage or leave the durable marker looking active.
+            BackgroundScanManager.finishOwner(
+                context = applicationContext,
+                workerId = workerId,
+                completion = BackgroundScanCompletion.Succeeded,
+                generation = generation
+            )
             FaceCorrelationSessionPolicy.useBasicMatching()
             return@coroutineScope Result.success(workDataOf(KEY_STAGE to STAGE_COMPLETE))
         }
@@ -982,7 +993,11 @@ object BackgroundScanManager {
                 record.ownerId == workerId &&
                     record.requestId == requestId &&
                     (generation == null || record.generation == generation) &&
-                    record.phase in setOf(ScanLifecyclePhase.Succeeded, ScanLifecyclePhase.Paused) &&
+                    record.phase in setOf(
+                        ScanLifecyclePhase.Running,
+                        ScanLifecyclePhase.Succeeded,
+                        ScanLifecyclePhase.Paused
+                    ) &&
                     record.resultReady
             }
             is ScanLifecycleReadResult.Invalid,

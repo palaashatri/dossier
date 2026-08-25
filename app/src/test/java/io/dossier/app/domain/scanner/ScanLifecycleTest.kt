@@ -158,6 +158,40 @@ class ScanLifecycleTest {
     }
 
     @Test
+    fun publishedRunningResultRecoversBeforeRerunOnlyForExactOwner() {
+        val published = record(ScanLifecyclePhase.Running, resultReady = true)
+
+        assertEquals(
+            ScanReconciliationAction.RecoverSucceeded(published),
+            ScanLifecycleReconciler.plan(
+                lifecycle = published,
+                workInfo = work(ScanWorkState.Running),
+                checkpoint = ScanCheckpointAvailability.Available,
+                resultWorkId = owner
+            )
+        )
+        assertEquals(
+            ScanReconciliationAction.KeepOrRecover(published, ScanWorkState.Running),
+            ScanLifecycleReconciler.plan(
+                lifecycle = published,
+                workInfo = work(ScanWorkState.Running),
+                checkpoint = ScanCheckpointAvailability.Available,
+                resultWorkId = otherOwner
+            )
+        )
+        val unpublished = published.copy(resultReady = false)
+        assertEquals(
+            ScanReconciliationAction.KeepOrRecover(unpublished, ScanWorkState.Running),
+            ScanLifecycleReconciler.plan(
+                lifecycle = unpublished,
+                workInfo = work(ScanWorkState.Running),
+                checkpoint = ScanCheckpointAvailability.Available,
+                resultWorkId = owner
+            )
+        )
+    }
+
+    @Test
     fun pendingWorkerCanClaimBeforeEnqueueCallback() {
         val pending = record(ScanLifecyclePhase.EnqueuePending, resultReady = false)
         val transition = ScanLifecycleReducer.reduce(

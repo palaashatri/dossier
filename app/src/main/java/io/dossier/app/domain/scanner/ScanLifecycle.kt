@@ -639,6 +639,18 @@ object ScanLifecycleReconciler {
             return ScanReconciliationAction.DoNotAdopt
         }
 
+        // Result publication precedes the final lifecycle/WorkManager commit.
+        // If the process dies in that narrow window, the exact owner-bound
+        // result marker is enough to recover the lifecycle without rerunning
+        // the full scan.  The marker must already be durable; an encrypted
+        // file alone is intentionally not sufficient evidence.
+        if (lifecycle.phase == ScanLifecyclePhase.Running &&
+            lifecycle.resultReady &&
+            resultWorkId == lifecycle.ownerId
+        ) {
+            return ScanReconciliationAction.RecoverSucceeded(lifecycle)
+        }
+
         // A matching encrypted result is stronger than a cancellation race:
         // it proves this exact owner published before WorkManager disappeared.
         // Promote it to Succeeded rather than ever hiding or replacing it.
