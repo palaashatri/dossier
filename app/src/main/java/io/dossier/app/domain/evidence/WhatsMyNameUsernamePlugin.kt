@@ -124,7 +124,8 @@ class WhatsMyNameUsernamePlugin(
                 fromValue = observation.username,
                 toValue = observation.profileUrl,
                 relation = "PUBLIC_PROFILE_EXISTS",
-                evidence = "Direct public username-existence observation via WhatsMyName response rule; identity ownership unverified"
+                evidence = "Direct public username-existence observation via WhatsMyName response rule; identity ownership unverified",
+                evidenceIds = listOf(ev.id)
             )
         }
 

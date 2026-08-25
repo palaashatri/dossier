@@ -130,6 +130,7 @@ class WhatsMyNameUsernamePluginTest {
         assertEquals(1, evidence.relationships.size)
         val rel = evidence.relationships.first()
         assertEquals("PUBLIC_PROFILE_EXISTS", rel.relation)
+        assertEquals(listOf(ev.id), rel.evidenceIds)
 
         val cached = UsernameSurfaceRuntimeCache.observations.value
         assertEquals(1, cached.size)
