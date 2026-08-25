@@ -43,8 +43,8 @@ data class EntityResolutionPolicy(
         }
         require(featureWeights
             .filterKeys { it == CorrelationFeature.ConflictingDisplayName || it == CorrelationFeature.ConflictingPersonalWebsite }
-            .values.all { it <= 0.0 }) {
-            "Contradiction feature weights cannot be positive."
+            .values.all { it < 0.0 }) {
+            "Contradiction feature weights must remain strictly negative."
         }
     }
 

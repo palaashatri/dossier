@@ -1,5 +1,6 @@
 package io.dossier.app.identity
 
+import io.dossier.app.domain.identity.CorrelationFeature
 import io.dossier.app.domain.identity.EntityResolutionBenchmark
 import io.dossier.app.domain.identity.EntityResolutionBenchmarkFixtures
 import io.dossier.app.domain.identity.EntityResolutionBenchmarkMetrics
@@ -321,6 +322,36 @@ class EntityResolutionBenchmarkTest {
         )
         val legacySchema = EntityResolutionCalibrationLoader.load(legacySchemaJson)
         assertTrue(legacySchema is EntityResolutionCalibrationLoadResult.Rejected)
+    }
+
+    @Test
+    fun calibratedContradictionWeightsCannotDisableNegativeEvidence() {
+        val displayNameDisabled = runCatching {
+            EntityResolutionPolicy(
+                featureWeights = mapOf(CorrelationFeature.ConflictingDisplayName to 0.0)
+            )
+        }.exceptionOrNull()
+        val websiteDisabled = runCatching {
+            EntityResolutionPolicy(
+                featureWeights = mapOf(CorrelationFeature.ConflictingPersonalWebsite to -0.0)
+            )
+        }.exceptionOrNull()
+
+        assertTrue(displayNameDisabled is IllegalArgumentException)
+        assertTrue(websiteDisabled is IllegalArgumentException)
+    }
+
+    @Test
+    fun calibratedContradictionWeightsRemainNegativeAndConfigurable() {
+        val policy = EntityResolutionPolicy(
+            featureWeights = mapOf(
+                CorrelationFeature.ConflictingDisplayName to -0.10,
+                CorrelationFeature.ConflictingPersonalWebsite to -0.20
+            )
+        )
+
+        assertEquals(-0.10, policy.weight(CorrelationFeature.ConflictingDisplayName, -0.45), 0.0)
+        assertEquals(-0.20, policy.weight(CorrelationFeature.ConflictingPersonalWebsite, -0.45), 0.0)
     }
 
     private fun profile(
