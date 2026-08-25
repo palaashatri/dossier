@@ -11,10 +11,10 @@ The current implementation branch is **83/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-0cfa3c6
+665e69d
 ```
 
-`0cfa3c6` is the bounded live evidence-correction tranche; the validated tree also includes source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, report-evidence accessibility semantics, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
+`665e69d` is the held-out calibration provenance propagation tranche; the validated tree also includes exact published-result owner recovery, pinned source-catalog maintenance diagnostics, bounded live evidence corrections, source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, report-evidence accessibility semantics, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
 
@@ -22,14 +22,14 @@ That exact implementation passed the current final-tree build and deterministic 
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
-Provider maintenance audit tests    PASS — 5 tests / no-network schema fixtures
-Debug JVM unit tests                PASS — 729 tests / 120 result XML files / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 729 tests / 120 result XML files / 0 failures, errors, or skips
+Provider maintenance audit tests    PASS — 7 tests / no-network schema + pinned source-catalog fixtures
+Debug JVM unit tests                PASS — 734 tests / 120 result XML files / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 734 tests / 120 result XML files / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
 Debug APK assembly                  PASS — 115,515,880 bytes
-Debug APK SHA-256                   B5FA2DA1211C05A74643E3E963CC52528E6E81D9E7385C916FE08032F6E37EAF
+Debug APK SHA-256                   1F90FB4A6EA1E06FD10E0B1718B988E8B238218B82E506D85AF1B55D30326B47
 uiTest APK assembly                 PASS — 243,014,073 bytes
-uiTest APK SHA-256                  F522097FE17F860C267A6676A4D44AE694F8A4378A7DAE2AFD7F8C0BC9C67573
+uiTest APK SHA-256                  EBE8D67B2A88AC087EAE719478FD508AB0856931D838B56F1CFC1599884F917E
 Android-test APK                    PASS — 1,021,836 bytes
 Android-test APK SHA-256             27985DAD3304662CB69B2021606144E9CD83C1C9A0811AECAEECE374E5E01B42
 Debug lint                          PASS — 0 errors / 69 warnings
@@ -37,7 +37,7 @@ uiTest lint                         PASS — 0 errors / 72 warnings
 Connected uiTest suite              PASS — 48 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, live draft evidence-correction semantics, report-evidence button semantics, async saved-case persistence, HUD status semantics and reverse-video picker semantics. A separate ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified restoration after an external `am force-stop`/relaunch and after an emulator reboot. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
+The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, live draft evidence-correction semantics, report-evidence button semantics, async saved-case persistence, HUD status semantics and reverse-video picker semantics. A fresh ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified restoration after an external `am force-stop`/relaunch and after an emulator reboot. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
@@ -74,6 +74,7 @@ These captures come from the API 36 Medium Phone emulator. Analysis, report, cas
 - The username-discovery flow surfaces the persisted catalog-health report with a bounded nonhealthy preview and explicit wording that catalog membership, HTTP 200 or search hits are not live validation; internally inconsistent counters and future validation timestamps are shown as unavailable rather than healthy.
 - A deterministic no-network contract harness exercises present, absent, soft-error, redirect, challenge and malformed observations for every catalog definition; fixture outcomes are not promoted to provider health or evidence.
 - Registry validation for duplicates, case-insensitive ID drift, malformed templates/hosts, unsupported placeholders, metadata categories/capabilities/reliabilities, parser drift and inventory drift; `tools/provider_registry_audit.py --json` exposes machine-readable maintenance diagnostics without performing network requests.
+- The same audit verifies pinned WhatsMyName data/license hashes, byte size, generated rule IDs and runtime-equivalent policy exclusions (716 source records / 644 executable rules / 72 excluded) without counting source rules as registry providers.
 - Deterministic response states for present, not-found, soft-404, authentication-required, challenged, rate-limited, timed-out, network-unavailable, redirect, unexpected and invalid responses.
 - Multiple bounded public-search sources, direct source verification, retries, `Retry-After`, caches and circuit breakers.
 - Configured-depth bounded pivots (default two, hard maximum four) with admission rules: weak name/location/occupation/face-only signals do not recursively expand by themselves, and only verified results seed the next depth.
@@ -107,6 +108,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
 - Background enqueue now publishes a generation-bound lifecycle before replacing the old exact WorkManager UUID, promotes only that prepared encrypted request, and reenqueues the same UUID after an authoritative missing-row crash boundary.
 - The worker claims the exact owner/request/generation, publishes the encrypted result before durable success, and treats an exact matching result as idempotent success if WorkManager retries after the success-commit boundary.
+- If a retry observes the exact owner with the result already durably published, lifecycle reconciliation promotes that request to success before rerunning stages; owner and result identity must match and paused/mismatched records remain fail-closed.
 - Process startup reconciles only `getWorkInfoById` for the persisted owner, retries unavailable lookups without mutation, and never adopts a unique-work-list result by ordering.
 - Cancellation persists intent first and reports cancellation only after the exact WorkInfo row is terminal; completion/failure races return through result-aware reconciliation.
 - Result replacement uses file and parent-directory sync plus atomic replacement, while cleanup is exact owner/request/generation scoped.
@@ -128,6 +130,7 @@ Recovery now covers stable initial direct-profile outcomes, the configured-depth
 - Multi-signal account resolution is integrated into the production graph.
 - A deterministic benchmark harness reports confusion-matrix counts, precision, recall, F1, false-positive rate, false-negative rate and unverifiable-case accuracy over digest-bound corpora.
 - Calibration artifacts are schema/version/digest/policy checked; synthetic fixtures cannot activate production policy, and consented artifacts must meet minimum positive/negative sample counts before exact-corpus activation.
+- Production activation also requires explicit `HELD_OUT` split metadata, a distinct training-corpus digest, an authorization-record digest and caller-supplied matches for all provenance values; regression/synthetic artifacts fail closed and cannot masquerade as representative calibration.
 - **A shared username alone is not sufficient to confirm identity.**
 - Contradictory evidence is preserved.
 
