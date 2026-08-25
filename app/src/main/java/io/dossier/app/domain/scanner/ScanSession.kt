@@ -644,7 +644,19 @@ object ScanSession {
                 .filter { it.isNotBlank() }
                 .map { it.lowercase() }
                 .toSet()
-            _relationshipConfidence.value = ConfidenceEngine(
+            val confidenceInputDigest = ConfidenceCheckpointCodec.inputDigest(
+                input = inputToUse,
+                graph = graph,
+                evidence = evidence,
+                usernameSeeds = usernameSeeds.toList()
+            )
+            _relationshipConfidence.value = loadReusableRelationshipConfidenceCheckpoint(
+                context = context,
+                requestId = requestId,
+                ownerId = checkpointOwnerId,
+                planFingerprint = graphPlanFingerprint,
+                inputDigest = confidenceInputDigest
+            ) ?: ConfidenceEngine(
                 contributors = listOf(
                     UsernameSimilarityContributor(),
                     EmailDomainContributor(),
@@ -652,6 +664,13 @@ object ScanSession {
                     SharedDomainContributor()
                 )
             ).score(graph, evidence)
+            val relationshipConfidenceCheckpoint = buildRelationshipConfidenceCheckpoint(
+                requestId = requestId,
+                ownerId = checkpointOwnerId,
+                planFingerprint = graphPlanFingerprint,
+                inputDigest = confidenceInputDigest,
+                confidence = _relationshipConfidence.value
+            )
             checkpointStage(
                 context,
                 requestId,
@@ -659,7 +678,8 @@ object ScanSession {
                 checkpointGeneration,
                 ScanCheckpointStage.ScoringRelationshipConfidence,
                 completed = true,
-                output = ScanStageOutput(itemCount = _relationshipConfidence.value.size)
+                output = ScanStageOutput(itemCount = _relationshipConfidence.value.size),
+                relationshipConfidenceCheckpoint = relationshipConfidenceCheckpoint
             )
 
             checkpointStage(
@@ -816,10 +836,14 @@ object ScanSession {
         output: ScanStageOutput? = null,
         payloads: List<ScanPayloadSummary> = emptyList(),
         breachCheckpoint: BreachStageCheckpoint? = null,
-        entityGraphCheckpoint: EntityGraphStageCheckpoint? = null
+        entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
+        relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null
     ) {
         if (requestId == null || ownerId == null || generation == null) return
-        fun writeCheckpoint(graphCheckpoint: EntityGraphStageCheckpoint?): ResumeCheckpointWriteState =
+        fun writeCheckpoint(
+            graphCheckpoint: EntityGraphStageCheckpoint?,
+            confidenceCheckpoint: RelationshipConfidenceStageCheckpoint?
+        ): ResumeCheckpointWriteState =
             ScanCoordinatorRuntime.recordCheckpoint(
                 context = context,
                 requestId = requestId,
@@ -830,18 +854,19 @@ object ScanSession {
                 output = output,
                 payloads = payloads,
                 breachCheckpoint = breachCheckpoint,
-                entityGraphCheckpoint = graphCheckpoint
+                entityGraphCheckpoint = graphCheckpoint,
+                relationshipConfidenceCheckpoint = confidenceCheckpoint
             )
-        val first = writeCheckpoint(entityGraphCheckpoint)
-        // Graph output is an optional acceleration. If the encrypted request
-        // record cannot fit both deterministic outputs, retain the semantic
-        // stage boundary without the graph payload and let a retry rebuild it.
+        val first = writeCheckpoint(entityGraphCheckpoint, relationshipConfidenceCheckpoint)
+        // Deterministic outputs are optional accelerators. If the encrypted
+        // request record cannot fit the new payload, retain the semantic stage
+        // boundary and let a retry rebuild that output.
         val result = if (
             first is ResumeCheckpointWriteState.Invalid &&
             first.reason == ResumeInvalidReason.RecordTooLarge &&
-            entityGraphCheckpoint != null
+            (entityGraphCheckpoint != null || relationshipConfidenceCheckpoint != null)
         ) {
-            writeCheckpoint(null)
+            writeCheckpoint(null, null)
         } else {
             first
         }
@@ -1073,6 +1098,54 @@ object ScanSession {
             capturedAtEpochMillis = System.currentTimeMillis(),
             inputDigest = inputDigest,
             graphJson = graphJson
+        )
+    }
+
+    private fun loadReusableRelationshipConfidenceCheckpoint(
+        context: Context,
+        requestId: String?,
+        ownerId: String?,
+        planFingerprint: String?,
+        inputDigest: String
+    ): Map<String, RelationshipConfidence>? {
+        if (requestId == null || ownerId == null || !ProviderPlanFingerprint.isValid(planFingerprint)) {
+            return null
+        }
+        if (!ConfidenceCheckpointCodec.isValidDigest(inputDigest)) return null
+        val point = (runCatching {
+            ScanResumeStore(context).loadRequestDetailed(requestId)
+        }.getOrNull() as? ResumeReadState.Available)?.point ?: return null
+        if (point.checkpointOwnerId != ownerId ||
+            point.planFingerprint != planFingerprint ||
+            ScanCheckpointStage.ScoringRelationshipConfidence !in point.completedCheckpointStages
+        ) return null
+        val checkpoint = point.relationshipConfidenceCheckpoint ?: return null
+        if (checkpoint.requestId != requestId ||
+            checkpoint.ownerId != ownerId ||
+            checkpoint.planFingerprint != planFingerprint ||
+            checkpoint.inputDigest != inputDigest
+        ) return null
+        return ConfidenceCheckpointCodec.decode(checkpoint.confidenceJson)
+    }
+
+    private fun buildRelationshipConfidenceCheckpoint(
+        requestId: String?,
+        ownerId: String?,
+        planFingerprint: String?,
+        inputDigest: String,
+        confidence: Map<String, RelationshipConfidence>
+    ): RelationshipConfidenceStageCheckpoint? {
+        if (requestId == null || ownerId == null) return null
+        val plan = planFingerprint?.takeIf(ProviderPlanFingerprint::isValid) ?: return null
+        if (!ConfidenceCheckpointCodec.isValidDigest(inputDigest)) return null
+        val confidenceJson = ConfidenceCheckpointCodec.encode(confidence) ?: return null
+        return RelationshipConfidenceStageCheckpoint(
+            requestId = requestId,
+            planFingerprint = plan,
+            ownerId = ownerId,
+            capturedAtEpochMillis = System.currentTimeMillis(),
+            inputDigest = inputDigest,
+            confidenceJson = confidenceJson
         )
     }
 

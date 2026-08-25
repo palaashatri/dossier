@@ -16,6 +16,7 @@ import io.dossier.app.domain.scanner.ScanStageOutput
 import io.dossier.app.domain.scanner.BreachStageCheckpoint
 import io.dossier.app.domain.scanner.PostProcessingStageCheckpoint
 import io.dossier.app.domain.scanner.EntityGraphStageCheckpoint
+import io.dossier.app.domain.scanner.RelationshipConfidenceStageCheckpoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -378,7 +379,8 @@ object ScanCoordinatorRuntime {
         payloads: List<ScanPayloadSummary> = emptyList(),
         breachCheckpoint: BreachStageCheckpoint? = null,
         postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
-        entityGraphCheckpoint: EntityGraphStageCheckpoint? = null
+        entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
+        relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null
     ): ResumeCheckpointWriteState =
         BackgroundScanManager.advanceCheckpointIfOwner(
             context = context,
@@ -391,7 +393,8 @@ object ScanCoordinatorRuntime {
             payloads = payloads,
             breachCheckpoint = breachCheckpoint,
             postProcessingCheckpoint = postProcessingCheckpoint,
-            entityGraphCheckpoint = entityGraphCheckpoint
+            entityGraphCheckpoint = entityGraphCheckpoint,
+            relationshipConfidenceCheckpoint = relationshipConfidenceCheckpoint
         ).also(::publishCheckpointState)
 
     private fun publishCheckpointState(state: ResumeCheckpointWriteState) {
