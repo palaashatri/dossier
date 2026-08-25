@@ -300,6 +300,7 @@ private fun RenderCaseReviewItem(
                 entityGraphSummary = case.entityGraph.entities.joinToString("\n") { entity ->
                     "${entity.type}: ${entity.label}"
                 },
+                canonicalRelationships = case.canonicalEvidenceRelationships(),
                 breachDigests = case.breachDigests.map { digest ->
                     "${digest.email}: ${digest.breachCount} breach record(s)"
                 },

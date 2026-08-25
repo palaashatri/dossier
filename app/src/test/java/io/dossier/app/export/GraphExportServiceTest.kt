@@ -1,11 +1,14 @@
 package io.dossier.app.export
 
+import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.model.DossierEdge
 import io.dossier.app.domain.model.DossierEntity
 import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.EntityType
 import io.dossier.app.domain.model.GraphEntityKind
 import io.dossier.app.domain.model.GraphNodeState
+import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RelationshipType
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -174,5 +177,94 @@ class GraphExportServiceTest {
         assertTrue(rawEdges.contains("Direct profile link in user bio"))
         assertFalse(redactedEdges.contains("Direct profile link in user bio"))
         assertTrue(redactedEdges.contains("USES_ACCOUNT"))
+    }
+
+    @Test
+    fun caseBundleKeepsCanonicalAssertionsInSeparateSidecar() {
+        val outputDir = tempFolder.newFolder("case-exports")
+        val canonical = listOf(
+            EvidenceRelationship(
+                fromValue = "Jane Doe",
+                toValue = "@janedoe",
+                relation = "USES_ACCOUNT",
+                evidence = "Scanner observed the public profile link",
+                evidenceIds = listOf("ev2:profile")
+            )
+        )
+        val case = DossierCase(
+            createdAt = "2026-08-25T00:00:00Z",
+            subjectName = "Jane Doe",
+            input = IdentityInput(fullName = "Jane Doe"),
+            evidenceRelationships = canonical,
+            entityGraph = testGraph
+        )
+
+        val bundle = GraphExportService.createBundle(
+            directory = outputDir,
+            case = case,
+            label = "case-alpha",
+            redactionMode = ExportRedactionMode.None
+        )
+
+        assertFalse(bundle.isRedacted)
+        assertNotNull(bundle.canonicalAssertionsCsv)
+        assertEquals(5, bundle.files().size)
+        assertEquals(testGraph, json.decodeFromString<EntityGraph>(bundle.jsonFile.readText()))
+
+        val assertions = requireNotNull(bundle.canonicalAssertionsCsv).readText()
+        assertTrue(assertions.startsWith("from_value,to_value,relation,evidence,evidence_ids"))
+        assertTrue(assertions.contains("Jane Doe"))
+        assertTrue(assertions.contains("@janedoe"))
+        assertTrue(assertions.contains("ev2:profile"))
+        assertTrue(assertions.contains("Scanner observed the public profile link"))
+        // The graph export remains the EntityGraph projection; the sidecar is
+        // the only file carrying the separate canonical assertion record.
+        assertFalse(bundle.edgesCsv.readText().contains("Scanner observed the public profile link"))
+    }
+
+    @Test
+    fun shareSafeCaseBundleRedactsCanonicalAssertionValuesAndEvidence() {
+        val outputDir = tempFolder.newFolder("case-redacted-exports")
+        val case = DossierCase(
+            createdAt = "2026-08-25T00:00:00Z",
+            subjectName = "Jane Doe",
+            input = IdentityInput(fullName = "Jane Doe"),
+            evidenceRelationships = listOf(
+                EvidenceRelationship(
+                    fromValue = "Jane Doe",
+                    toValue = "@janedoe",
+                    relation = "USES_ACCOUNT",
+                    evidence = "https://example.test/jane",
+                    evidenceIds = listOf("ev2:profile")
+                ),
+                EvidenceRelationship(
+                    fromValue = "@janedoe",
+                    toValue = "Jane Doe",
+                    relation = "CLAIMS_IDENTITY",
+                    evidence = "private-looking snippet",
+                    evidenceIds = listOf("ev2:claim")
+                )
+            ),
+            entityGraph = testGraph
+        )
+
+        val bundle = GraphExportService.createBundle(
+            directory = outputDir,
+            case = case,
+            label = "case-alpha",
+            redactionMode = ExportRedactionMode.ShareSafe
+        )
+
+        assertTrue(bundle.isRedacted)
+        val assertions = requireNotNull(bundle.canonicalAssertionsCsv).readText()
+        assertFalse(assertions.contains("Jane Doe"))
+        assertFalse(assertions.contains("@janedoe"))
+        assertFalse(assertions.contains("example.test"))
+        assertFalse(assertions.contains("private-looking snippet"))
+        assertFalse(assertions.contains("ev2:profile"))
+        assertFalse(assertions.contains("ev2:claim"))
+        assertTrue(assertions.contains("[Redacted Assertion Endpoint 1]"))
+        assertTrue(assertions.contains("USES_ACCOUNT"))
+        assertTrue(assertions.contains("CLAIMS_IDENTITY"))
     }
 }

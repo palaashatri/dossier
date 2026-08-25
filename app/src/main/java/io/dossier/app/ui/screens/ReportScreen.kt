@@ -161,13 +161,28 @@ fun ReportScreen(
     val reportEntityGraph = effectiveCase?.entityGraph ?: entityGraph
     val reportRiskLevel = effectiveCase?.riskLevel ?: riskLevel
     val reportExposure = effectiveCase?.exposure ?: exposure
+    // Keep scanner/plugin assertions separate from the graph projection. When
+    // corrections are absent this reads the current DossierCase snapshot;
+    // it never reconstructs assertions from graph edges.
+    val reportCanonicalRelationships = effectiveCase?.canonicalEvidenceRelationships()
+        ?: ScanSession.buildCase()?.canonicalEvidenceRelationships().orEmpty()
     val onShareSafeGraphExport: (() -> Unit)? = if (reportEntityGraph.entities.isNotEmpty()) {
         {
-            graphExporter.share(
-                graph = reportEntityGraph,
-                label = subject,
-                redactionMode = ExportRedactionMode.ShareSafe
-            )
+            val exportCase = (effectiveCase ?: ScanSession.buildCase())
+                ?.copy(entityGraph = reportEntityGraph)
+            if (exportCase != null) {
+                graphExporter.share(
+                    case = exportCase,
+                    label = subject,
+                    redactionMode = ExportRedactionMode.ShareSafe
+                )
+            } else {
+                graphExporter.share(
+                    graph = reportEntityGraph,
+                    label = subject,
+                    redactionMode = ExportRedactionMode.ShareSafe
+                )
+            }
         }
     } else null
     val draftCorrectionByEvidence = remember(draftCorrections) {
@@ -378,6 +393,7 @@ fun ReportScreen(
                             aiSummary = aiSummary,
                             faceMatches = faceMatches,
                             entityGraphSummary = entityGraphLines.joinToString("\n"),
+                            canonicalRelationships = reportCanonicalRelationships,
                             breachDigests = breachLines,
                             riskLevel = reportRiskLevel.name
                         )

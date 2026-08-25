@@ -199,7 +199,7 @@ fun AnalysisScreen(
                 OutlinedButton(
                     onClick = {
                         graphExporter.share(
-                            graph = completedCase.entityGraph,
+                            case = completedCase,
                             label = completedCase.subjectName.ifBlank { "investigation" }
                         )
                     },

@@ -1,5 +1,6 @@
 package io.dossier.app.export
 
+import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
@@ -73,5 +74,40 @@ class ReportRedactionTest {
         assertFalse(prepared.redacted)
         assertEquals("Jane Example", prepared.subjectName)
         assertEquals(finding, prepared.findings.single())
+    }
+
+    @Test
+    fun canonicalAssertionsRemainSeparateAndShareSafeRedactionRemovesValues() {
+        val assertion = EvidenceRelationship(
+            fromValue = "Jane Doe",
+            toValue = "@janedoe",
+            relation = "USES_ACCOUNT",
+            evidence = "https://example.test/jane",
+            evidenceIds = listOf("ev2:profile")
+        )
+
+        val raw = ReportExporter.prepareExport(
+            findings = emptyList(),
+            entityGraphSummary = "graph edge projection",
+            canonicalRelationships = listOf(assertion),
+            redactionMode = ExportRedactionMode.None
+        )
+        assertEquals(listOf(assertion), raw.canonicalRelationships)
+        assertEquals("graph edge projection", raw.entityGraphSummary)
+
+        val redacted = ReportExporter.prepareExport(
+            findings = emptyList(),
+            entityGraphSummary = "Jane Doe graph edge projection",
+            canonicalRelationships = listOf(assertion),
+            redactionMode = ExportRedactionMode.ShareSafe
+        )
+        val redactedAssertion = redacted.canonicalRelationships.single()
+        assertTrue(redacted.redacted)
+        assertFalse(redactedAssertion.fromValue.contains("Jane", ignoreCase = true))
+        assertFalse(redactedAssertion.toValue.contains("janedoe", ignoreCase = true))
+        assertEquals("USES_ACCOUNT", redactedAssertion.relation)
+        assertEquals(null, redactedAssertion.evidence)
+        assertTrue(redactedAssertion.evidenceIds.isEmpty())
+        assertFalse(redacted.entityGraphSummary.orEmpty().contains("Jane Doe"))
     }
 }

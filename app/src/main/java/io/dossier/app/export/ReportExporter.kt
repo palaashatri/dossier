@@ -8,6 +8,7 @@ import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import androidx.core.content.FileProvider
+import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import io.dossier.app.domain.model.Finding
 import kotlinx.serialization.encodeToString
@@ -52,7 +53,8 @@ class ReportExporter(private val context: Context) {
         entityGraphSummary: String? = null,
         breachDigests: List<String> = emptyList(),
         riskLevel: String? = null,
-        redactionMode: ExportRedactionMode = ExportRedactionMode.None
+        redactionMode: ExportRedactionMode = ExportRedactionMode.None,
+        canonicalRelationships: List<EvidenceRelationship> = emptyList()
     ) {
         val generatedAt = Instant.now()
         val prepared = prepareExport(
@@ -62,6 +64,7 @@ class ReportExporter(private val context: Context) {
             aiSummary = aiSummary,
             faceMatches = faceMatches,
             entityGraphSummary = entityGraphSummary,
+            canonicalRelationships = canonicalRelationships,
             breachDigests = breachDigests,
             redactionMode = redactionMode
         )
@@ -72,6 +75,7 @@ class ReportExporter(private val context: Context) {
             prepared.aiSummary,
             prepared.faceMatches,
             prepared.entityGraphSummary,
+            prepared.canonicalRelationships,
             prepared.breachDigests,
             riskLevel,
             generatedAt,
@@ -99,6 +103,7 @@ class ReportExporter(private val context: Context) {
                 aiSummary = prepared.aiSummary,
                 faceMatches = prepared.faceMatches,
                 entityGraphSummary = prepared.entityGraphSummary,
+                canonicalRelationships = prepared.canonicalRelationships,
                 breachDigests = prepared.breachDigests,
                 riskLevel = riskLevel,
                 reportText = reportText,
@@ -145,6 +150,7 @@ class ReportExporter(private val context: Context) {
         aiSummary: String?,
         faceMatches: List<FaceConsistencyMatch>,
         entityGraphSummary: String?,
+        canonicalRelationships: List<EvidenceRelationship>,
         breachDigests: List<String>,
         riskLevel: String?,
         generatedAt: Instant,
@@ -222,8 +228,26 @@ class ReportExporter(private val context: Context) {
             }
 
             if (!entityGraphSummary.isNullOrBlank()) {
-                appendSection("RECORDED RELATIONSHIPS")
+                appendSection("GRAPH PROJECTION")
+                appendLine("These are persisted EntityGraph edges. They may include derived or resolved material and are not the canonical scanner assertion ledger.")
+                appendLine()
                 appendLine(entityGraphSummary.trim())
+                appendLine()
+            }
+
+            if (canonicalRelationships.isNotEmpty()) {
+                appendSection("CANONICAL SCANNER ASSERTIONS")
+                appendLine("These assertions are retained separately from graph edges. They record scanner/plugin claims and do not, by themselves, prove identity or account ownership.")
+                appendLine()
+                canonicalRelationships.forEachIndexed { index, relationship ->
+                    appendLine("[A${index + 1}] ${relationship.fromValue} —${relationship.relation}→ ${relationship.toValue}")
+                    relationship.evidence?.takeIf(String::isNotBlank)?.let { evidence ->
+                        appendLine("     EVIDENCE: $evidence")
+                    }
+                    if (relationship.evidenceIds.isNotEmpty()) {
+                        appendLine("     EVIDENCE IDS: ${relationship.evidenceIds.joinToString(" | ")}")
+                    }
+                }
                 appendLine()
             }
 
@@ -259,6 +283,7 @@ class ReportExporter(private val context: Context) {
         aiSummary: String?,
         faceMatches: List<FaceConsistencyMatch>,
         entityGraphSummary: String?,
+        canonicalRelationships: List<EvidenceRelationship>,
         breachDigests: List<String>,
         riskLevel: String?,
         reportText: String,
@@ -271,13 +296,14 @@ class ReportExporter(private val context: Context) {
             "breachDigests" to json.encodeToString(breachDigests),
             "analysis" to (aiSummary ?: ""),
             "entityGraphSummary" to (entityGraphSummary ?: ""),
+            "canonicalAssertions" to json.encodeToString(canonicalRelationships),
             "reportText" to reportText
         )
         val sectionHashes = sections.mapValues { sha256(it.value.toByteArray(Charsets.UTF_8)) }
         val manifestCanonical = sectionHashes.entries.joinToString("\n") { "${it.key}:${it.value}" }
 
         val root = buildJsonObject {
-            put("schemaVersion", JsonPrimitive(2))
+            put("schemaVersion", JsonPrimitive(EVIDENCE_PACKAGE_SCHEMA_VERSION))
             put("generatedAtUtc", JsonPrimitive(generatedAt.toString()))
             put("subject", JsonPrimitive(subjectName))
             put("riskLevel", JsonPrimitive(riskLevel ?: "Unknown"))
@@ -294,6 +320,7 @@ class ReportExporter(private val context: Context) {
             put("breachDigests", json.parseToJsonElement(sections.getValue("breachDigests")))
             put("analysis", JsonPrimitive(aiSummary ?: ""))
             put("entityGraphSummary", JsonPrimitive(entityGraphSummary ?: ""))
+            put("canonicalAssertions", json.parseToJsonElement(sections.getValue("canonicalAssertions")))
             put("reportText", JsonPrimitive(reportText))
         }
         file.writeText(json.encodeToString(root))
@@ -367,6 +394,7 @@ class ReportExporter(private val context: Context) {
         val aiSummary: String?,
         val faceMatches: List<FaceConsistencyMatch>,
         val entityGraphSummary: String?,
+        val canonicalRelationships: List<EvidenceRelationship>,
         val breachDigests: List<String>,
         val redacted: Boolean
     )
@@ -380,7 +408,8 @@ class ReportExporter(private val context: Context) {
             faceMatches: List<FaceConsistencyMatch> = emptyList(),
             entityGraphSummary: String? = null,
             breachDigests: List<String> = emptyList(),
-            redactionMode: ExportRedactionMode = ExportRedactionMode.None
+            redactionMode: ExportRedactionMode = ExportRedactionMode.None,
+            canonicalRelationships: List<EvidenceRelationship> = emptyList()
         ): PreparedExport {
             if (redactionMode == ExportRedactionMode.None) {
                 return PreparedExport(
@@ -390,6 +419,7 @@ class ReportExporter(private val context: Context) {
                     aiSummary = aiSummary,
                     faceMatches = faceMatches,
                     entityGraphSummary = entityGraphSummary,
+                    canonicalRelationships = canonicalRelationships,
                     breachDigests = breachDigests,
                     redacted = false
                 )
@@ -414,6 +444,7 @@ class ReportExporter(private val context: Context) {
             val redactedBreaches = breachDigests.mapIndexed { index, _ ->
                 "Breach/exposure record ${index + 1}: identifying details redacted"
             }
+            val redactedCanonicalRelationships = redactCanonicalRelationships(canonicalRelationships)
 
             return PreparedExport(
                 subjectName = "Redacted subject",
@@ -424,6 +455,7 @@ class ReportExporter(private val context: Context) {
                 faceMatches = redactedFaces,
                 entityGraphSummary = if (entityGraphSummary.isNullOrBlank()) null else
                     "Relationship details omitted from share-safe export because graph labels may contain identifying values.",
+                canonicalRelationships = redactedCanonicalRelationships,
                 breachDigests = redactedBreaches,
                 redacted = true
             )
@@ -435,5 +467,26 @@ class ReportExporter(private val context: Context) {
         const val PDF_LINE_HEIGHT = 12f
         const val PDF_LINES_PER_PAGE = 62
         const val PDF_LINE_CHARACTERS = 94
+        const val EVIDENCE_PACKAGE_SCHEMA_VERSION = 3
+
+        private fun redactCanonicalRelationships(
+            relationships: List<EvidenceRelationship>
+        ): List<EvidenceRelationship> {
+            val endpointLabels = linkedMapOf<String, String>()
+            fun redactEndpoint(raw: String): String {
+                val key = raw.trim().lowercase(Locale.US)
+                return endpointLabels.getOrPut(key) {
+                    "[redacted assertion endpoint ${endpointLabels.size + 1}]"
+                }
+            }
+            return relationships.map { relationship ->
+                relationship.copy(
+                    fromValue = redactEndpoint(relationship.fromValue),
+                    toValue = redactEndpoint(relationship.toValue),
+                    evidence = null,
+                    evidenceIds = emptyList()
+                )
+            }
+        }
     }
 }
