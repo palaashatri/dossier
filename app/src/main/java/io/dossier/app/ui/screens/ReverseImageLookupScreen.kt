@@ -38,6 +38,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -643,13 +646,20 @@ private fun RenderVideoLookupResult(
 private fun VideoSourcePicker(label: String, selectedUri: Uri?, onClick: () -> Unit) {
     Column(Modifier.fillMaxWidth()) {
         Text(label, color = NeuralTheme.TextSecondary, fontSize = 11.sp, modifier = Modifier.padding(bottom = 8.dp))
+        val selectedVideoName = selectedUri?.path?.substringAfterLast('/')
+        val pickerDescription = selectedVideoName?.let {
+            "Selected video $it. Double tap to choose a different video."
+        } ?: "Select a video for analysis."
         Card(
             colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground),
-            modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(role = Role.Button, onClick = onClick)
+                .semantics { contentDescription = pickerDescription },
             shape = io.dossier.app.ui.theme.DossierCardShape
         ) {
             Text(
-                selectedUri?.path?.substringAfterLast('/') ?: "Select Video",
+                selectedVideoName ?: "Select Video",
                 color = if (selectedUri != null) NeuralTheme.Cobalt else NeuralTheme.TextSecondary,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
