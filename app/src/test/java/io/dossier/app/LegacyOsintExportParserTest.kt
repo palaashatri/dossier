@@ -70,7 +70,7 @@ class LegacyOsintExportParserTest {
     @Test
     fun credentialMaterialInLegacyRowIsRejected() {
         val raw = """
-            [{"username":"alice","tweet":"public post password=do-not-import","link":"https://x.com/alice/status/1"}]
+            [{"username":"alice","tweet":"public post","link":"https://x.com/alice/status/1","password":"do-not-import"}]
         """.trimIndent()
 
         val result = LegacyOsintExportParser.parse(

@@ -60,6 +60,10 @@ object LegacyOsintExportParser {
         var rejected = 0
 
         records.take(MAX_RECORDS).forEach { record ->
+            if (containsCredentialFields(record)) {
+                rejected++
+                return@forEach
+            }
             val parsed = when (source) {
                 Source.TwintJson -> parseTwint(record)
                 Source.SnscrapeJsonl -> parseSnscrape(record)
@@ -314,6 +318,27 @@ object LegacyOsintExportParser {
         }
     }
 
+    private fun containsCredentialFields(record: JsonObject): Boolean {
+        fun visit(element: JsonElement, depth: Int): Boolean {
+            if (depth > MAX_JSON_DEPTH) return false
+            return when (element) {
+                is JsonObject -> element.entries.any { (key, value) ->
+                    sensitiveKey(key) || visit(value, depth + 1)
+                }
+                is JsonArray -> element.any { visit(it, depth + 1) }
+                is JsonPrimitive -> element.contentOrNull?.lowercase(Locale.ROOT)?.let { value ->
+                    CREDENTIAL_MARKERS.any { marker -> value.contains(marker) }
+                } == true
+            }
+        }
+        return visit(record, 0)
+    }
+
+    private fun sensitiveKey(raw: String): Boolean {
+        val normalized = raw.lowercase(Locale.ROOT).replace("[^a-z0-9]".toRegex(), "")
+        return SENSITIVE_KEYS.any(normalized::contains)
+    }
+
     private fun sourceLabel(source: Source): String = when (source) {
         Source.TwintJson -> "Twint JSON"
         Source.SnscrapeJsonl -> "snscrape JSONL"
@@ -333,6 +358,7 @@ object LegacyOsintExportParser {
     private fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
 
     private const val MAX_RECORDS = 2_000
+    private const val MAX_JSON_DEPTH = 4
     private const val MAX_SNIPPET_CHARS = 900
     private const val MAX_INTERACTIONS_PER_RECORD = 24
     private const val IMPORT_CONFIDENCE = 0.52f
@@ -350,6 +376,21 @@ object LegacyOsintExportParser {
         "authorization: bearer",
         "private key",
         "stealer log"
+    )
+    private val SENSITIVE_KEYS = setOf(
+        "password",
+        "passwd",
+        "pwd",
+        "hash",
+        "cookie",
+        "session",
+        "token",
+        "secret",
+        "credential",
+        "privatekey",
+        "apikey",
+        "authorization",
+        "stealer"
     )
     private val HANDLE_MENTION = Regex("(?<![A-Za-z0-9_])@([A-Za-z0-9_][A-Za-z0-9_.-]{1,63})")
     private val HANDLE_VALUE = Regex("[a-z0-9_][a-z0-9_.-]{1,63}")
