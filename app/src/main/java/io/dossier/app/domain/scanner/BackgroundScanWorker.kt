@@ -1397,7 +1397,8 @@ object BackgroundScanManager {
         breachCheckpoint: BreachStageCheckpoint? = null,
         postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
         entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
-        relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null
+        relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
+        attackPathsCheckpoint: AttackPathsStageCheckpoint? = null
     ): ResumeCheckpointWriteState = synchronized(LIFECYCLE_LOCK) {
         val appContext = context.applicationContext
         val lifecycle = (lifecycleStoreProvider(appContext).read()
@@ -1420,7 +1421,8 @@ object BackgroundScanManager {
             breachCheckpoint = breachCheckpoint,
             postProcessingCheckpoint = postProcessingCheckpoint,
             entityGraphCheckpoint = entityGraphCheckpoint,
-            relationshipConfidenceCheckpoint = relationshipConfidenceCheckpoint
+            relationshipConfidenceCheckpoint = relationshipConfidenceCheckpoint,
+            attackPathsCheckpoint = attackPathsCheckpoint
         )
     }
 

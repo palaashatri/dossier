@@ -641,6 +641,9 @@ internal class ScanResumeStore internal constructor(
                 ?.copy(ownerId = ownerId),
             relationshipConfidenceCheckpoint = record.relationshipConfidenceCheckpoint
                 ?.takeIf { isValidRelationshipConfidenceCheckpoint(it, record, record.checkpointOwnerId) }
+                ?.copy(ownerId = ownerId),
+            attackPathsCheckpoint = record.attackPathsCheckpoint
+                ?.takeIf { isValidAttackPathsCheckpoint(it, record, record.checkpointOwnerId) }
                 ?.copy(ownerId = ownerId)
         )
         persistUpdatedRecord(rebound)
@@ -662,7 +665,8 @@ internal class ScanResumeStore internal constructor(
         breachCheckpoint: BreachStageCheckpoint? = null,
         postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
         entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
-        relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null
+        relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
+        attackPathsCheckpoint: AttackPathsStageCheckpoint? = null
     ): ResumeCheckpointWriteState = synchronized(STORE_LOCK) {
         if (!isValidRequestId(requestId) || !isValidRequestId(ownerId)) {
             return@synchronized ResumeCheckpointWriteState.Invalid(
@@ -749,6 +753,18 @@ internal class ScanResumeStore internal constructor(
         ) {
             return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
         }
+        if (attackPathsCheckpoint != null &&
+            (!completed ||
+                stage != ScanCheckpointStage.TracingAttackPaths ||
+                !isValidAttackPathsCheckpoint(
+                    attackPathsCheckpoint,
+                    recordForPoint(available.point),
+                    ownerId,
+                    requireCompletedStage = false
+                ))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
 
         val current = available.point.checkpointStage
         val completedStages = available.point.completedCheckpointStages
@@ -772,6 +788,10 @@ internal class ScanResumeStore internal constructor(
         val retainedRelationshipConfidenceCheckpoint = when {
             stage == ScanCheckpointStage.ScoringRelationshipConfidence && completed -> relationshipConfidenceCheckpoint
             else -> available.point.relationshipConfidenceCheckpoint
+        }
+        val retainedAttackPathsCheckpoint = when {
+            stage == ScanCheckpointStage.TracingAttackPaths && completed -> attackPathsCheckpoint
+            else -> available.point.attackPathsCheckpoint
         }
         val nextCurrent = if (stage.order >= current.order) stage else current
         val now = runCatching { nowMillis() }.getOrElse {
@@ -806,6 +826,7 @@ internal class ScanResumeStore internal constructor(
             postProcessingCheckpoint = retainedPostProcessingCheckpoint,
             entityGraphCheckpoint = retainedEntityGraphCheckpoint,
             relationshipConfidenceCheckpoint = retainedRelationshipConfidenceCheckpoint,
+            attackPathsCheckpoint = retainedAttackPathsCheckpoint,
             checkpointOwnerId = ownerId
         )
         persistUpdatedRecord(updated)
@@ -1305,6 +1326,8 @@ internal class ScanResumeStore internal constructor(
                     ?.takeIf { isValidEntityGraphCheckpoint(it, record, record.checkpointOwnerId) },
                 relationshipConfidenceCheckpoint = record.relationshipConfidenceCheckpoint
                     ?.takeIf { isValidRelationshipConfidenceCheckpoint(it, record, record.checkpointOwnerId) },
+                attackPathsCheckpoint = record.attackPathsCheckpoint
+                    ?.takeIf { isValidAttackPathsCheckpoint(it, record, record.checkpointOwnerId) },
                 checkpointOwnerId = record.checkpointOwnerId
             )
         )
@@ -1486,6 +1509,34 @@ internal class ScanResumeStore internal constructor(
         return ConfidenceCheckpointCodec.decode(checkpoint.confidenceJson) != null
     }
 
+    private fun isValidAttackPathsCheckpoint(
+        checkpoint: AttackPathsStageCheckpoint,
+        record: ResumeRecord,
+        expectedOwnerId: String?,
+        requireCompletedStage: Boolean = true
+    ): Boolean {
+        if (requireCompletedStage &&
+            ScanCheckpointStage.TracingAttackPaths.wireName !in record.completedCheckpointStages
+        ) {
+            return false
+        }
+        if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
+        if (record.planFingerprint.isNullOrBlank() ||
+            checkpoint.planFingerprint != record.planFingerprint ||
+            !ProviderPlanFingerprint.isValid(checkpoint.planFingerprint)
+        ) return false
+        if (!isValidRequestId(checkpoint.ownerId) ||
+            expectedOwnerId == null ||
+            checkpoint.ownerId != expectedOwnerId ||
+            record.checkpointOwnerId != expectedOwnerId
+        ) return false
+        if (checkpoint.capturedAtEpochMillis !in record.createdAtEpochMillis..record.expiresAtEpochMillis) {
+            return false
+        }
+        if (!AttackPathsCheckpointCodec.isValidDigest(checkpoint.inputDigest)) return false
+        return AttackPathsCheckpointCodec.decode(checkpoint.attackPathsJson) != null
+    }
+
     private fun isSafeCheckpointText(value: String, maxChars: Int): Boolean =
         value.length in 1..maxChars && value.none { it.code < 0x20 || it.code == 0x7f }
 
@@ -1537,6 +1588,7 @@ internal class ScanResumeStore internal constructor(
         postProcessingCheckpoint = point.postProcessingCheckpoint,
         entityGraphCheckpoint = point.entityGraphCheckpoint,
         relationshipConfidenceCheckpoint = point.relationshipConfidenceCheckpoint,
+        attackPathsCheckpoint = point.attackPathsCheckpoint,
         checkpointOwnerId = point.checkpointOwnerId
     )
 
@@ -1613,6 +1665,7 @@ internal class ScanResumeStore internal constructor(
         postProcessingCheckpoint = postProcessingCheckpoint,
         entityGraphCheckpoint = entityGraphCheckpoint,
         relationshipConfidenceCheckpoint = relationshipConfidenceCheckpoint,
+        attackPathsCheckpoint = attackPathsCheckpoint,
         checkpointOwnerId = checkpointOwnerId
     )
 
@@ -2479,6 +2532,8 @@ internal class ScanResumeStore internal constructor(
         val entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
         /** Exact bounded output of deterministic relationship confidence scoring, when available. */
         val relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
+        /** Exact bounded output of deterministic attack-path tracing, when available. */
+        val attackPathsCheckpoint: AttackPathsStageCheckpoint? = null,
         /** Exact WorkManager owner bound after lifecycle CAS succeeds. */
         val checkpointOwnerId: String? = null
     )
@@ -2611,6 +2666,7 @@ internal data class ResumePoint(
     val postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
     val entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
     val relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
+    val attackPathsCheckpoint: AttackPathsStageCheckpoint? = null,
     val checkpointOwnerId: String? = null
 )
 

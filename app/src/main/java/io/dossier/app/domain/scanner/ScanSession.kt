@@ -691,7 +691,25 @@ object ScanSession {
                 completed = false
             )
             _progressText.value = "TRACING_ATTACK_PATHS..."
-            _attackPaths.value = AttackPathFinder().findPaths(graph, _relationshipConfidence.value)
+            val attackPathsInputDigest = AttackPathsCheckpointCodec.inputDigest(
+                input = inputToUse,
+                graph = graph,
+                confidenceByEdge = _relationshipConfidence.value
+            )
+            _attackPaths.value = loadReusableAttackPathsCheckpoint(
+                context = context,
+                requestId = requestId,
+                ownerId = checkpointOwnerId,
+                planFingerprint = graphPlanFingerprint,
+                inputDigest = attackPathsInputDigest
+            ) ?: AttackPathFinder().findPaths(graph, _relationshipConfidence.value)
+            val attackPathsCheckpoint = buildAttackPathsCheckpoint(
+                requestId = requestId,
+                ownerId = checkpointOwnerId,
+                planFingerprint = graphPlanFingerprint,
+                inputDigest = attackPathsInputDigest,
+                paths = _attackPaths.value
+            )
             checkpointStage(
                 context,
                 requestId,
@@ -699,7 +717,8 @@ object ScanSession {
                 checkpointGeneration,
                 ScanCheckpointStage.TracingAttackPaths,
                 completed = true,
-                output = ScanStageOutput(itemCount = _attackPaths.value.size)
+                output = ScanStageOutput(itemCount = _attackPaths.value.size),
+                attackPathsCheckpoint = attackPathsCheckpoint
             )
 
             checkpointStage(
@@ -837,12 +856,14 @@ object ScanSession {
         payloads: List<ScanPayloadSummary> = emptyList(),
         breachCheckpoint: BreachStageCheckpoint? = null,
         entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
-        relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null
+        relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
+        attackPathsCheckpoint: AttackPathsStageCheckpoint? = null
     ) {
         if (requestId == null || ownerId == null || generation == null) return
         fun writeCheckpoint(
             graphCheckpoint: EntityGraphStageCheckpoint?,
-            confidenceCheckpoint: RelationshipConfidenceStageCheckpoint?
+            confidenceCheckpoint: RelationshipConfidenceStageCheckpoint?,
+            attackPathsCheckpoint: AttackPathsStageCheckpoint?
         ): ResumeCheckpointWriteState =
             ScanCoordinatorRuntime.recordCheckpoint(
                 context = context,
@@ -855,18 +876,25 @@ object ScanSession {
                 payloads = payloads,
                 breachCheckpoint = breachCheckpoint,
                 entityGraphCheckpoint = graphCheckpoint,
-                relationshipConfidenceCheckpoint = confidenceCheckpoint
+                relationshipConfidenceCheckpoint = confidenceCheckpoint,
+                attackPathsCheckpoint = attackPathsCheckpoint
             )
-        val first = writeCheckpoint(entityGraphCheckpoint, relationshipConfidenceCheckpoint)
+        val first = writeCheckpoint(
+            entityGraphCheckpoint,
+            relationshipConfidenceCheckpoint,
+            attackPathsCheckpoint
+        )
         // Deterministic outputs are optional accelerators. If the encrypted
         // request record cannot fit the new payload, retain the semantic stage
         // boundary and let a retry rebuild that output.
         val result = if (
             first is ResumeCheckpointWriteState.Invalid &&
             first.reason == ResumeInvalidReason.RecordTooLarge &&
-            (entityGraphCheckpoint != null || relationshipConfidenceCheckpoint != null)
+            (entityGraphCheckpoint != null ||
+                relationshipConfidenceCheckpoint != null ||
+                attackPathsCheckpoint != null)
         ) {
-            writeCheckpoint(null, null)
+            writeCheckpoint(null, null, null)
         } else {
             first
         }
@@ -1146,6 +1174,54 @@ object ScanSession {
             capturedAtEpochMillis = System.currentTimeMillis(),
             inputDigest = inputDigest,
             confidenceJson = confidenceJson
+        )
+    }
+
+    private fun loadReusableAttackPathsCheckpoint(
+        context: Context,
+        requestId: String?,
+        ownerId: String?,
+        planFingerprint: String?,
+        inputDigest: String
+    ): List<AttackPathFinder.AttackPath>? {
+        if (requestId == null || ownerId == null || !ProviderPlanFingerprint.isValid(planFingerprint)) {
+            return null
+        }
+        if (!AttackPathsCheckpointCodec.isValidDigest(inputDigest)) return null
+        val point = (runCatching {
+            ScanResumeStore(context).loadRequestDetailed(requestId)
+        }.getOrNull() as? ResumeReadState.Available)?.point ?: return null
+        if (point.checkpointOwnerId != ownerId ||
+            point.planFingerprint != planFingerprint ||
+            ScanCheckpointStage.TracingAttackPaths !in point.completedCheckpointStages
+        ) return null
+        val checkpoint = point.attackPathsCheckpoint ?: return null
+        if (checkpoint.requestId != requestId ||
+            checkpoint.ownerId != ownerId ||
+            checkpoint.planFingerprint != planFingerprint ||
+            checkpoint.inputDigest != inputDigest
+        ) return null
+        return AttackPathsCheckpointCodec.decode(checkpoint.attackPathsJson)
+    }
+
+    private fun buildAttackPathsCheckpoint(
+        requestId: String?,
+        ownerId: String?,
+        planFingerprint: String?,
+        inputDigest: String,
+        paths: List<AttackPathFinder.AttackPath>
+    ): AttackPathsStageCheckpoint? {
+        if (requestId == null || ownerId == null) return null
+        val plan = planFingerprint?.takeIf(ProviderPlanFingerprint::isValid) ?: return null
+        if (!AttackPathsCheckpointCodec.isValidDigest(inputDigest)) return null
+        val attackPathsJson = AttackPathsCheckpointCodec.encode(paths) ?: return null
+        return AttackPathsStageCheckpoint(
+            requestId = requestId,
+            planFingerprint = plan,
+            ownerId = ownerId,
+            capturedAtEpochMillis = System.currentTimeMillis(),
+            inputDigest = inputDigest,
+            attackPathsJson = attackPathsJson
         )
     }
 
