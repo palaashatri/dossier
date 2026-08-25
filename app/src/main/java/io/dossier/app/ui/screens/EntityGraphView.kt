@@ -40,7 +40,9 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -225,6 +227,10 @@ private fun GraphViewTab(
             .clip(RoundedCornerShape(9.dp))
             .background(if (selected) accent.copy(alpha = 0.12f) else Color.Transparent)
             .border(1.dp, if (selected) accent else border, RoundedCornerShape(9.dp))
+            .semantics {
+                this.selected = selected
+                stateDescription = if (selected) "Selected" else "Not selected"
+            }
     ) {
         Text(
             text = label,
@@ -383,6 +389,10 @@ private fun AdjacencyList(
                     .clip(RoundedCornerShape(8.dp))
                     .background(if (selected) accent.copy(alpha = 0.12f) else Color.Transparent)
                     .clickable { onSelect(entity.id) }
+                    .semantics {
+                        this.selected = selected
+                        stateDescription = if (selected) "Selected" else "Not selected"
+                    }
                     .padding(horizontal = 10.dp, vertical = 10.dp)
             ) {
                 Text(
