@@ -70,6 +70,12 @@ internal class ScanExecutionException(
     val failureCode: String = ScanLifecycleErrors.SCAN_EXECUTION_FAILED
 ) : Exception()
 
+private data class BreachStageRun(
+    val digests: List<BreachDigest>,
+    val findings: List<Finding>,
+    val checkpointResults: List<BreachStageCheckpointResult>
+)
+
 /**
  * Observable scan/session state shared by the Compose UI and durable WorkManager
  * execution. Scan results remain transient unless the user explicitly saves a case.
@@ -511,14 +517,33 @@ object ScanSession {
                 completed = false
             )
             _progressText.value = "CHECKING_BREACH_EXPOSURE..."
-            val digests = runBreachChecks(
+            val persistedBreach = loadReusableBreachCheckpoint(
                 context = context,
-                emails = inputToUse.emails,
-                deepResearch = deepResearch,
-                findingsOut = allFindings
+                requestId = requestId,
+                ownerId = checkpointOwnerId
             )
+            val breachRun = if (persistedBreach != null) {
+                BreachStageRun(
+                    digests = persistedBreach.results.map { it.toDigest() },
+                    findings = findingsFromBreachCheckpoint(persistedBreach),
+                    checkpointResults = persistedBreach.results
+                )
+            } else {
+                runBreachChecks(
+                    context = context,
+                    emails = inputToUse.emails,
+                    deepResearch = deepResearch
+                )
+            }
             currentCoroutineContext().ensureActive()
+            val digests = breachRun.digests
+            allFindings.addAll(breachRun.findings)
             _breachDigests.value = digests
+            val breachCheckpoint = persistedBreach ?: buildBreachCheckpoint(
+                requestId = requestId,
+                ownerId = checkpointOwnerId,
+                results = breachRun.checkpointResults
+            )
             checkpointStage(
                 context,
                 requestId,
@@ -529,7 +554,8 @@ object ScanSession {
                 output = ScanStageOutput(
                     itemCount = digests.size,
                     verifiedCount = digests.count { it.breachCount > 0 }
-                )
+                ),
+                breachCheckpoint = breachCheckpoint
             )
 
             checkpointStage(
@@ -759,7 +785,8 @@ object ScanSession {
         stage: ScanCheckpointStage,
         completed: Boolean,
         output: ScanStageOutput? = null,
-        payloads: List<ScanPayloadSummary> = emptyList()
+        payloads: List<ScanPayloadSummary> = emptyList(),
+        breachCheckpoint: BreachStageCheckpoint? = null
     ) {
         if (requestId == null || ownerId == null || generation == null) return
         when (
@@ -771,7 +798,8 @@ object ScanSession {
                 stage = stage,
                 completed = completed,
                 output = output,
-                payloads = payloads
+                payloads = payloads,
+                breachCheckpoint = breachCheckpoint
             )
         ) {
             is ResumeCheckpointWriteState.Saved -> Unit
@@ -828,13 +856,12 @@ object ScanSession {
     private suspend fun runBreachChecks(
         context: Context,
         emails: List<String>,
-        deepResearch: Boolean,
-        findingsOut: MutableList<Finding>
-    ): List<BreachDigest> {
+        deepResearch: Boolean
+    ): BreachStageRun {
         val cleanEmails = emails.map { it.trim() }
             .filter { it.isNotBlank() }
             .distinctBy { it.lowercase() }
-        if (cleanEmails.isEmpty()) return emptyList()
+        if (cleanEmails.isEmpty()) return BreachStageRun(emptyList(), emptyList(), emptyList())
 
         return try {
             val results = BreachCheckService(context).checkEmails(
@@ -842,48 +869,162 @@ object ScanSession {
                 hibpApiKey = null,
                 deepResearch = deepResearch
             )
-            results.map { result ->
+            val digests = results.map { result ->
                 val sources = buildList {
                     addAll(result.breaches.map { it.title.ifBlank { it.name } })
                     addAll(result.publicEvidence.map { it.url }.filter { it.isNotBlank() })
                 }.distinct()
                 val breachCount = result.breaches.size
-                val publicHits = result.publicEvidence.size
-
-                if (breachCount > 0) {
-                    findingsOut += Finding(
-                        type = FindingType.Email,
-                        value = result.email,
-                        sourceUrl = null,
-                        evidenceSnippet = "Appears in $breachCount known breach(es): ${result.breaches.take(5).joinToString { it.title.ifBlank { it.name } }}",
-                        confidence = 0.95f,
-                        risk = RiskLevel.High,
-                        remediation = "Change passwords for this address, enable MFA, and monitor for account takeover."
-                    )
-                } else if (publicHits > 0) {
-                    findingsOut += Finding(
-                        type = FindingType.SensitiveSnippet,
-                        value = result.email,
-                        sourceUrl = result.publicEvidence.firstOrNull()?.url,
-                        evidenceSnippet = "Public index mentions this email ($publicHits hit(s)). ${result.error ?: ""}".trim(),
-                        confidence = 0.55f,
-                        risk = RiskLevel.Medium,
-                        remediation = "Review indexed pages and request de-indexing where personal data is exposed."
-                    )
-                }
-
                 BreachDigest(
                     email = result.email,
                     breachCount = breachCount,
                     sources = sources,
-                    note = result.error
+                    note = safeBreachNote(result.error)
                 )
             }
+            val checkpointResults = results.map { result ->
+                val sourceUrls = result.publicEvidence.map { it.url }.filter { it.isNotBlank() }
+                BreachStageCheckpointResult(
+                    email = result.email.trim(),
+                    breachCount = result.breaches.size,
+                    breachTitles = result.breaches.map { it.title.ifBlank { it.name } },
+                    publicHitCount = result.publicEvidence.size,
+                    publicEvidenceUrls = sourceUrls,
+                    sources = buildList {
+                        addAll(result.breaches.map { it.title.ifBlank { it.name } })
+                        addAll(sourceUrls)
+                    }.distinct(),
+                    note = safeBreachNote(result.error)
+                )
+            }
+            BreachStageRun(
+                digests = digests,
+                findings = checkpointResults.flatMap(::findingsFromBreachResult),
+                checkpointResults = checkpointResults
+            )
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            emptyList()
+            BreachStageRun(emptyList(), emptyList(), emptyList())
         }
+    }
+
+    private fun buildBreachCheckpoint(
+        requestId: String?,
+        ownerId: String?,
+        results: List<BreachStageCheckpointResult>
+    ): BreachStageCheckpoint? {
+        if (requestId == null || ownerId == null || results.size > ScanResumeStore.MAX_BREACH_RESULTS) {
+            return null
+        }
+        val fingerprint = runCatching {
+            ProviderPlanFingerprint.forPlan(
+                ProviderCatalogV2.plan(DiscoveryScanPreferences.selectedMode.value)
+            )
+        }.getOrNull() ?: return null
+        val candidate = BreachStageCheckpoint(
+            requestId = requestId,
+            planFingerprint = fingerprint,
+            ownerId = ownerId,
+            capturedAtEpochMillis = System.currentTimeMillis(),
+            results = results
+        )
+        return candidate.takeIf { isLocallyBoundedBreachCheckpoint(it) }
+    }
+
+    private fun isLocallyBoundedBreachCheckpoint(checkpoint: BreachStageCheckpoint): Boolean =
+        checkpoint.results.size <= ScanResumeStore.MAX_BREACH_RESULTS &&
+            checkpoint.results.all { result ->
+                result.email.length in 1..ScanResumeStore.MAX_BREACH_EMAIL_CHARS &&
+                    result.email.none { it.code < 0x20 || it.code == 0x7f } &&
+                    result.breachCount in 0..ScanResumeStore.MAX_BREACH_COUNT &&
+                    result.publicHitCount in 0..ScanResumeStore.MAX_BREACH_COUNT &&
+                    result.breachTitles.size <= ScanResumeStore.MAX_BREACH_TITLES &&
+                    result.sources.size <= ScanResumeStore.MAX_BREACH_SOURCES &&
+                    result.publicEvidenceUrls.size <= ScanResumeStore.MAX_BREACH_SOURCES &&
+                    result.breachTitles.all { it.length in 1..ScanResumeStore.MAX_BREACH_TITLE_CHARS && it.none { c -> c.code < 0x20 || c.code == 0x7f } } &&
+                    result.sources.all { it.length in 1..ScanResumeStore.MAX_BREACH_SOURCE_CHARS && it.none { c -> c.code < 0x20 || c.code == 0x7f } } &&
+                    result.publicEvidenceUrls.all { url ->
+                        url.length in 1..ScanResumeStore.MAX_BREACH_URL_CHARS &&
+                            runCatching {
+                                val parsed = java.net.URI(url)
+                                parsed.scheme.lowercase() in setOf("http", "https") &&
+                                    !parsed.host.isNullOrBlank() && parsed.userInfo == null
+                            }.getOrDefault(false)
+                    } &&
+                    result.note?.length?.let { it <= ScanResumeStore.MAX_BREACH_NOTE_CHARS } != false
+            }
+
+    private fun loadReusableBreachCheckpoint(
+        context: Context,
+        requestId: String?,
+        ownerId: String?
+    ): BreachStageCheckpoint? {
+        if (requestId == null || ownerId == null) return null
+        val point = (runCatching {
+            ScanResumeStore(context).loadRequestDetailed(requestId)
+        }.getOrNull() as? ResumeReadState.Available)?.point ?: return null
+        if (point.checkpointOwnerId != ownerId ||
+            point.planFingerprint.isNullOrBlank() ||
+            ScanCheckpointStage.CheckingBreachExposure !in point.completedCheckpointStages
+        ) return null
+        return point.breachCheckpoint?.takeIf { checkpoint ->
+            checkpoint.requestId == requestId &&
+                checkpoint.ownerId == ownerId &&
+                checkpoint.planFingerprint == point.planFingerprint
+        }
+    }
+
+    internal fun findingsFromBreachCheckpoint(
+        checkpoint: BreachStageCheckpoint
+    ): List<Finding> = checkpoint.results.flatMap(::findingsFromBreachResult)
+
+    private fun BreachStageCheckpointResult.toDigest(): BreachDigest = BreachDigest(
+        email = email,
+        breachCount = breachCount,
+        sources = sources,
+        note = note
+    )
+
+    private fun findingsFromBreachResult(result: BreachStageCheckpointResult): List<Finding> =
+        when {
+            result.breachCount > 0 -> listOf(
+                Finding(
+                    type = FindingType.Email,
+                    value = result.email,
+                    sourceUrl = null,
+                    evidenceSnippet = "Appears in ${result.breachCount} known breach(es): ${result.breachTitles.take(5).joinToString()}",
+                    confidence = 0.95f,
+                    risk = RiskLevel.High,
+                    remediation = "Change passwords for this address, enable MFA, and monitor for account takeover."
+                )
+            )
+            result.publicHitCount > 0 -> listOf(
+                Finding(
+                    type = FindingType.SensitiveSnippet,
+                    value = result.email,
+                    sourceUrl = result.publicEvidenceUrls.firstOrNull(),
+                    evidenceSnippet = "Public index mentions this email (${result.publicHitCount} hit(s)). ${result.note.orEmpty()}".trim(),
+                    confidence = 0.55f,
+                    risk = RiskLevel.Medium,
+                    remediation = "Review indexed pages and request de-indexing where personal data is exposed."
+                )
+            )
+            else -> emptyList()
+        }
+
+    private fun safeBreachNote(value: String?): String? {
+        val normalized = value
+            ?.replace(Regex("[\\r\\n\\t]+"), " ")
+            ?.trim()
+            ?.take(ScanResumeStore.MAX_BREACH_NOTE_CHARS)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        if (normalized.any { it.code < 0x20 || it.code == 0x7f }) return null
+        if (Regex("(?i)(password|passwd|token|secret|cookie|authorization|bearer|api[ -_]?key)")
+                .containsMatchIn(normalized)
+        ) return null
+        return normalized
     }
 
     private suspend fun runFaceConsistency(

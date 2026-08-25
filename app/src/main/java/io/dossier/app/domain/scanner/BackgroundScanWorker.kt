@@ -1282,7 +1282,8 @@ object BackgroundScanManager {
         stage: ScanCheckpointStage,
         completed: Boolean,
         output: ScanStageOutput? = null,
-        payloads: List<ScanPayloadSummary> = emptyList()
+        payloads: List<ScanPayloadSummary> = emptyList(),
+        breachCheckpoint: BreachStageCheckpoint? = null
     ): ResumeCheckpointWriteState = synchronized(LIFECYCLE_LOCK) {
         val appContext = context.applicationContext
         val lifecycle = (lifecycleStoreProvider(appContext).read()
@@ -1301,7 +1302,8 @@ object BackgroundScanManager {
             stage = stage,
             completed = completed,
             output = output,
-            payloads = payloads
+            payloads = payloads,
+            breachCheckpoint = breachCheckpoint
         )
     }
 

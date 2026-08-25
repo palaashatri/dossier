@@ -92,6 +92,34 @@ internal data class ScanStageOutput(
     val omittedCount: Int = 0
 )
 
+/**
+ * The allow-listed output of the breach stage.  This is deliberately a
+ * summary, not a provider response cache: no password, API key, response
+ * body, cookie, token or other credential material is accepted here.  The
+ * surrounding request record is encrypted and authenticated; the explicit
+ * request/plan/owner fields make accidental cross-generation reuse fail
+ * closed even if a caller hands the value to the wrong checkpoint boundary.
+ */
+@Serializable
+internal data class BreachStageCheckpoint(
+    val requestId: String,
+    val planFingerprint: String,
+    val ownerId: String,
+    val capturedAtEpochMillis: Long,
+    val results: List<BreachStageCheckpointResult>
+)
+
+@Serializable
+internal data class BreachStageCheckpointResult(
+    val email: String,
+    val breachCount: Int,
+    val breachTitles: List<String> = emptyList(),
+    val publicHitCount: Int = 0,
+    val publicEvidenceUrls: List<String> = emptyList(),
+    val sources: List<String> = emptyList(),
+    val note: String? = null
+)
+
 internal sealed interface ResumeCheckpointWriteState {
     data class Saved(val point: ResumePoint) : ResumeCheckpointWriteState
     data object Missing : ResumeCheckpointWriteState
@@ -581,7 +609,15 @@ internal class ScanResumeStore internal constructor(
         val rebound = record.copy(
             updatedAtEpochMillis = now.coerceAtLeast(record.updatedAtEpochMillis),
             checkpointStage = ScanCheckpointStage.Queued.wireName,
-            checkpointOwnerId = ownerId
+            checkpointOwnerId = ownerId,
+            // A paused generation may be resumed by a fresh WorkManager UUID.
+            // Retain a completed breach result only after validating its
+            // original request/plan/owner binding, then rebind it to the new
+            // exact owner. Any malformed or cross-request value is discarded
+            // rather than being exposed to a retry.
+            breachCheckpoint = record.breachCheckpoint
+                ?.takeIf { isValidBreachCheckpoint(it, record, record.checkpointOwnerId) }
+                ?.copy(ownerId = ownerId)
         )
         persistUpdatedRecord(rebound)
     }
@@ -598,7 +634,8 @@ internal class ScanResumeStore internal constructor(
         stage: ScanCheckpointStage,
         completed: Boolean,
         output: ScanStageOutput? = null,
-        payloads: List<ScanPayloadSummary> = emptyList()
+        payloads: List<ScanPayloadSummary> = emptyList(),
+        breachCheckpoint: BreachStageCheckpoint? = null
     ): ResumeCheckpointWriteState = synchronized(STORE_LOCK) {
         if (!isValidRequestId(requestId) || !isValidRequestId(ownerId)) {
             return@synchronized ResumeCheckpointWriteState.Invalid(
@@ -640,6 +677,17 @@ internal class ScanResumeStore internal constructor(
         ) {
             return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
         }
+        if (breachCheckpoint != null &&
+            (!completed ||
+                stage != ScanCheckpointStage.CheckingBreachExposure ||
+                !isValidBreachCheckpoint(
+                    breachCheckpoint,
+                    recordForPoint(available.point),
+                    ownerId
+                ))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
 
         val current = available.point.checkpointStage
         val completedStages = available.point.completedCheckpointStages
@@ -651,6 +699,7 @@ internal class ScanResumeStore internal constructor(
             .associateBy(ScanPayloadSummary::stage)
             .toMutableMap()
         if (completed) payloads.forEach { payloadSummaries[it.stage] = it }
+        val retainedBreachCheckpoint = breachCheckpoint ?: available.point.breachCheckpoint
         val nextCurrent = if (stage.order >= current.order) stage else current
         val now = runCatching { nowMillis() }.getOrElse {
             return@synchronized ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
@@ -680,6 +729,7 @@ internal class ScanResumeStore internal constructor(
                 .sortedBy { it.first.ordinal }
                 .take(MAX_PAYLOAD_SUMMARIES)
                 .map { it.second },
+            breachCheckpoint = retainedBreachCheckpoint,
             checkpointOwnerId = ownerId
         )
         persistUpdatedRecord(updated)
@@ -1168,6 +1218,7 @@ internal class ScanResumeStore internal constructor(
                 payloadSummaries = record.payloadSummaries
                     .take(MAX_PAYLOAD_SUMMARIES)
                     .filter(ScanPayloadSummary::isWellFormed),
+                breachCheckpoint = record.breachCheckpoint,
                 checkpointOwnerId = record.checkpointOwnerId
             )
         )
@@ -1218,6 +1269,10 @@ internal class ScanResumeStore internal constructor(
         if (record.payloadSummaries.isNotEmpty() &&
             ScanCheckpointStage.DiscoveringUsernames.wireName !in completed
         ) return false
+        if (record.breachCheckpoint != null &&
+            (ScanCheckpointStage.CheckingBreachExposure.wireName !in completed ||
+                !isValidBreachCheckpoint(record.breachCheckpoint, record, record.checkpointOwnerId))
+        ) return false
         return record.checkpointOwnerId == null || isValidRequestId(record.checkpointOwnerId)
     }
 
@@ -1230,6 +1285,65 @@ internal class ScanResumeStore internal constructor(
         payloads.size <= MAX_PAYLOAD_SUMMARIES &&
             payloads.map(ScanPayloadSummary::stage).distinct().size == payloads.size &&
             payloads.all(ScanPayloadSummary::isWellFormed)
+
+    private fun isValidBreachCheckpoint(
+        checkpoint: BreachStageCheckpoint,
+        record: ResumeRecord,
+        expectedOwnerId: String?
+    ): Boolean {
+        if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
+        if (record.planFingerprint.isNullOrBlank() ||
+            checkpoint.planFingerprint != record.planFingerprint ||
+            !ProviderPlanFingerprint.isValid(checkpoint.planFingerprint)
+        ) return false
+        if (!isValidRequestId(checkpoint.ownerId) ||
+            expectedOwnerId == null ||
+            checkpoint.ownerId != expectedOwnerId ||
+            record.checkpointOwnerId != expectedOwnerId
+        ) return false
+        if (checkpoint.capturedAtEpochMillis !in record.createdAtEpochMillis..record.expiresAtEpochMillis) {
+            return false
+        }
+        if (checkpoint.results.size > MAX_BREACH_RESULTS) return false
+        val allowedEmails = record.input.emails
+            .map { it.trim().lowercase(Locale.ROOT) }
+            .filter { it.isNotBlank() }
+            .toSet()
+        if (checkpoint.results.map { it.email.trim().lowercase(Locale.ROOT) }.distinct().size != checkpoint.results.size) {
+            return false
+        }
+        return checkpoint.results.all { result ->
+            val email = result.email.trim()
+            email.length in 1..MAX_BREACH_EMAIL_CHARS &&
+                email.lowercase(Locale.ROOT) in allowedEmails &&
+                isSafeCheckpointText(email, MAX_BREACH_EMAIL_CHARS) &&
+                result.breachCount in 0..MAX_BREACH_COUNT &&
+                result.publicHitCount in 0..MAX_BREACH_COUNT &&
+                result.breachTitles.size <= MAX_BREACH_TITLES &&
+                result.sources.size <= MAX_BREACH_SOURCES &&
+                result.publicEvidenceUrls.size <= MAX_BREACH_SOURCES &&
+                result.breachTitles.all { isSafeCheckpointText(it, MAX_BREACH_TITLE_CHARS) } &&
+                result.sources.all { isSafeCheckpointText(it, MAX_BREACH_SOURCE_CHARS) } &&
+                result.publicEvidenceUrls.all(::isSafePublicUrl) &&
+                (result.note == null || isSafeCheckpointNote(result.note))
+        }
+    }
+
+    private fun isSafeCheckpointText(value: String, maxChars: Int): Boolean =
+        value.length in 1..maxChars && value.none { it.code < 0x20 || it.code == 0x7f }
+
+    private fun isSafeCheckpointNote(value: String): Boolean =
+        isSafeCheckpointText(value, MAX_BREACH_NOTE_CHARS) &&
+            !UNSAFE_BREACH_NOTE_PATTERN.containsMatchIn(value)
+
+    private fun isSafePublicUrl(value: String): Boolean =
+        isSafeCheckpointText(value, MAX_BREACH_URL_CHARS) &&
+            runCatching {
+                val uri = java.net.URI(value)
+                uri.scheme.lowercase(Locale.ROOT) in setOf("http", "https") &&
+                    !uri.host.isNullOrBlank() &&
+                    uri.userInfo == null
+            }.getOrDefault(false)
 
     private fun recordForPoint(point: ResumePoint): ResumeRecord = ResumeRecord(
         formatVersion = FORMAT_VERSION,
@@ -1262,6 +1376,7 @@ internal class ScanResumeStore internal constructor(
         payloadSummaries = point.payloadSummaries
             .sortedBy(ScanPayloadSummary::stage)
             .take(MAX_PAYLOAD_SUMMARIES),
+        breachCheckpoint = point.breachCheckpoint,
         checkpointOwnerId = point.checkpointOwnerId
     )
 
@@ -1334,6 +1449,7 @@ internal class ScanResumeStore internal constructor(
         payloadSummaries = payloadSummaries
             .take(MAX_PAYLOAD_SUMMARIES)
             .filter(ScanPayloadSummary::isWellFormed),
+        breachCheckpoint = breachCheckpoint,
         checkpointOwnerId = checkpointOwnerId
     )
 
@@ -2192,6 +2308,8 @@ internal class ScanResumeStore internal constructor(
         val stageOutputs: List<StageOutputRecord> = emptyList(),
         /** Bounded metadata for encrypted public discovery payloads. */
         val payloadSummaries: List<ScanPayloadSummary> = emptyList(),
+        /** Exact safe output of the completed breach stage, when available. */
+        val breachCheckpoint: BreachStageCheckpoint? = null,
         /** Exact WorkManager owner bound after lifecycle CAS succeeds. */
         val checkpointOwnerId: String? = null
     )
@@ -2258,6 +2376,15 @@ internal class ScanResumeStore internal constructor(
         const val MAX_CHECKPOINT_STAGES = 16
         const val MAX_STAGE_OUTPUT_COUNT = 100_000
         const val MAX_PAYLOAD_SUMMARIES = 2
+        const val MAX_BREACH_RESULTS = 128
+        const val MAX_BREACH_COUNT = 10_000
+        const val MAX_BREACH_TITLES = 128
+        const val MAX_BREACH_SOURCES = 128
+        const val MAX_BREACH_EMAIL_CHARS = 320
+        const val MAX_BREACH_TITLE_CHARS = 512
+        const val MAX_BREACH_SOURCE_CHARS = 2_048
+        const val MAX_BREACH_URL_CHARS = 2_048
+        const val MAX_BREACH_NOTE_CHARS = 512
         const val MAX_POINTER_BYTES = 64L
         const val GCM_IV_BYTES = 12
         const val GCM_TAG_BYTES = 16
@@ -2278,6 +2405,8 @@ internal class ScanResumeStore internal constructor(
         const val KEY_ALIAS = "dossier-scan-resume-v1"
         private val REQUEST_ID_PATTERN =
             Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+        private val UNSAFE_BREACH_NOTE_PATTERN =
+            Regex("(?i)(password|passwd|token|secret|cookie|authorization|bearer|api[ -_]?key)")
     }
 
     private val pointerFile: File
@@ -2309,6 +2438,7 @@ internal data class ResumePoint(
     val completedCheckpointStages: List<ScanCheckpointStage> = emptyList(),
     val stageOutputs: Map<ScanCheckpointStage, ScanStageOutput> = emptyMap(),
     val payloadSummaries: List<ScanPayloadSummary> = emptyList(),
+    val breachCheckpoint: BreachStageCheckpoint? = null,
     val checkpointOwnerId: String? = null
 )
 

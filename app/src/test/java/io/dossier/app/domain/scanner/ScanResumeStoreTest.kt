@@ -224,6 +224,154 @@ class ScanResumeStoreTest {
     }
 
     @Test
+    fun breachCheckpointRoundTripsAsEncryptedCompleteStageOutput() {
+        val fixture = fixture()
+        val store = store(fixture)
+        val saved = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        assertTrue(store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE) is ResumeCheckpointWriteState.Saved)
+        val checkpoint = breachCheckpoint(saved.point, OWNER_ONE)
+
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.CheckingBreachExposure,
+                completed = true,
+                output = ScanStageOutput(itemCount = 1, verifiedCount = 1),
+                breachCheckpoint = checkpoint
+            ) is ResumeCheckpointWriteState.Saved
+        )
+
+        val loaded = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertEquals(checkpoint, loaded.point.breachCheckpoint)
+        assertTrue(ScanCheckpointStage.CheckingBreachExposure in loaded.point.completedCheckpointStages)
+        val record = fixture.records.listFiles().orEmpty()
+            .single { it.name.endsWith(ScanResumeStore.RECORD_EXTENSION) }
+            .readText()
+        assertFalse(record.contains("jane@example.com"))
+        assertFalse(record.contains("ExampleBreach"))
+        assertFalse(record.contains("password"))
+    }
+
+    @Test
+    fun breachCheckpointRejectsMismatchedBindingAndUnsafeMetadata() {
+        val fixture = fixture()
+        val store = store(fixture)
+        val saved = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+        val checkpoint = breachCheckpoint(saved.point, OWNER_ONE)
+
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.CheckingBreachExposure,
+                completed = true,
+                breachCheckpoint = checkpoint.copy(ownerId = OWNER_TWO)
+            ) is ResumeCheckpointWriteState.Invalid
+        )
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.CheckingBreachExposure,
+                completed = true,
+                breachCheckpoint = checkpoint.copy(
+                    results = listOf(
+                        checkpoint.results.single().copy(note = "api-key=secret")
+                    )
+                )
+            ) is ResumeCheckpointWriteState.Invalid
+        )
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.CheckingBreachExposure,
+                completed = true,
+                breachCheckpoint = checkpoint.copy(
+                    results = listOf(
+                        checkpoint.results.single().copy(
+                            breachCount = 0,
+                            publicHitCount = 1,
+                            publicEvidenceUrls = listOf("file:///private/secret")
+                        )
+                    )
+                )
+            ) is ResumeCheckpointWriteState.Invalid
+        )
+        val retained = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertEquals(null, retained.point.breachCheckpoint)
+    }
+
+    @Test
+    fun breachCheckpointRebindsOnlyExactCompletedGenerationToFreshOwner() {
+        val fixture = fixture()
+        val store = store(fixture)
+        val saved = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+        val checkpoint = breachCheckpoint(saved.point, OWNER_ONE)
+        store.advanceCheckpoint(
+            requestId = saved.point.requestId,
+            ownerId = OWNER_ONE,
+            stage = ScanCheckpointStage.CheckingBreachExposure,
+            completed = true,
+            breachCheckpoint = checkpoint
+        )
+
+        assertTrue(store.bindCheckpointOwner(saved.point.requestId, OWNER_TWO) is ResumeCheckpointWriteState.Saved)
+        val rebound = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertEquals(checkpoint.copy(ownerId = OWNER_TWO), rebound.point.breachCheckpoint)
+        assertEquals(OWNER_TWO, rebound.point.checkpointOwnerId)
+    }
+
+    @Test
+    fun breachCheckpointOversizedCollectionIsRejectedWithoutPersistingOutput() {
+        val fixture = fixture()
+        val store = store(fixture)
+        val saved = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+        val oversized = breachCheckpoint(saved.point, OWNER_ONE).copy(
+            results = List(ScanResumeStore.MAX_BREACH_RESULTS + 1) {
+                breachCheckpoint(saved.point, OWNER_ONE).results.single()
+            }
+        )
+
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.CheckingBreachExposure,
+                completed = true,
+                breachCheckpoint = oversized
+            ) is ResumeCheckpointWriteState.Invalid
+        )
+        val retained = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertEquals(null, retained.point.breachCheckpoint)
+    }
+
+    @Test
+    fun breachCheckpointUsesTheExistingEncryptedRequestTtl() {
+        val fixture = fixture()
+        var now = 1_000L
+        val store = store(fixture, nowMillis = { now })
+        val saved = store.saveRequestDetailed(completeInput(), false, false) as ResumeWriteState.Saved
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.CheckingBreachExposure,
+                completed = true,
+                breachCheckpoint = breachCheckpoint(saved.point, OWNER_ONE)
+            ) is ResumeCheckpointWriteState.Saved
+        )
+
+        now = saved.point.expiresAtEpochMillis
+        assertEquals(ResumeReadState.Expired, store.loadRequestDetailed(saved.point.requestId))
+    }
+
+    @Test
     fun invalidStageOutputIsRejectedWithoutPersistingMetadata() {
         val fixture = fixture()
         val store = store(fixture)
@@ -1205,6 +1353,24 @@ class ScanResumeStoreTest {
             idFactory = { if (sequence.hasNext()) sequence.next() else ID_ONE }
         )
     }
+
+    private fun breachCheckpoint(point: ResumePoint, ownerId: String) = BreachStageCheckpoint(
+        requestId = point.requestId,
+        planFingerprint = point.planFingerprint!!,
+        ownerId = ownerId,
+        capturedAtEpochMillis = point.createdAtEpochMillis,
+        results = listOf(
+            BreachStageCheckpointResult(
+                email = "jane@example.com",
+                breachCount = 1,
+                breachTitles = listOf("ExampleBreach"),
+                publicHitCount = 0,
+                publicEvidenceUrls = emptyList(),
+                sources = listOf("ExampleBreach"),
+                note = "HTTP 429"
+            )
+        )
+    )
 
     private fun completeInput() = IdentityInput(
         fullName = "Jane Doe",
