@@ -1,6 +1,9 @@
 package io.dossier.app.domain.graph
 
 import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.model.DossierEdge
 import io.dossier.app.domain.model.DossierEntity
@@ -47,6 +50,96 @@ class GraphEvidenceReconciliationTest {
         assertTrue(report.isConsistent)
         assertEquals(1, report.matchedRelationships)
         assertTrue(report.diagnostics.isEmpty())
+    }
+
+    @Test
+    fun explicitEvidenceLedgerFlagsDanglingCanonicalAndGraphIds() {
+        val danglingId = "ev2:missing-proof"
+        val relationship = EvidenceRelationship(
+            fromValue = "Alice",
+            toValue = "Profile",
+            relation = "MENTIONS",
+            evidenceIds = listOf(danglingId)
+        )
+        val graph = graph(
+            edge = DossierEdge(
+                fromId = "person:alice",
+                toId = "profile:alice",
+                relation = "MENTIONS",
+                evidenceIds = listOf(danglingId)
+            ),
+            entities = listOf(
+                DossierEntity("person:alice", EntityType.Person, "Alice"),
+                DossierEntity("profile:alice", EntityType.Profile, "Profile")
+            )
+        )
+
+        val report = GraphEvidenceReconciliation.validate(
+            canonicalRelationships = listOf(relationship),
+            graph = graph,
+            evidenceRecords = listOf(
+                Evidence(
+                    id = "ev2:present-proof",
+                    kind = EvidenceKind.Profile,
+                    value = "Profile"
+                )
+            )
+        )
+
+        assertEquals(1, report.matchedRelationships)
+        assertEquals(1, report.danglingCanonicalEvidenceIds)
+        assertEquals(1, report.danglingGraphEvidenceIds)
+        assertFalse(report.isConsistent)
+        assertEquals(
+            2,
+            report.diagnostics.count {
+                it.kind == GraphEvidenceReconciliationKind.DanglingEvidenceReference
+            }
+        )
+        assertTrue(report.diagnostics.any { danglingId in it.canonicalEvidenceIds })
+        assertTrue(report.diagnostics.any { danglingId in it.graphEvidenceIds })
+    }
+
+    @Test
+    fun explicitEvidenceLedgerMigratesLegacyIdsBeforeCheckingReferences() {
+        val legacyId = "ev:Profile:Profile:https://example.test/profile"
+        val migratedId = EvidenceIdPolicy.migrate(legacyId)
+        val graph = graph(
+            edge = DossierEdge(
+                fromId = "person:alice",
+                toId = "profile:alice",
+                relation = "MENTIONS",
+                evidenceIds = listOf(legacyId)
+            ),
+            entities = listOf(
+                DossierEntity("person:alice", EntityType.Person, "Alice"),
+                DossierEntity("profile:alice", EntityType.Profile, "Profile")
+            )
+        )
+
+        val report = GraphEvidenceReconciliation.validate(
+            canonicalRelationships = listOf(
+                EvidenceRelationship(
+                    fromValue = "Alice",
+                    toValue = "Profile",
+                    relation = "MENTIONS",
+                    evidenceIds = listOf(legacyId)
+                )
+            ),
+            graph = graph,
+            evidenceRecords = listOf(
+                Evidence(
+                    id = migratedId,
+                    kind = EvidenceKind.Profile,
+                    value = "Profile",
+                    sourceUrl = "https://example.test/profile"
+                )
+            )
+        )
+
+        assertTrue(report.isConsistent)
+        assertEquals(0, report.danglingCanonicalEvidenceIds)
+        assertEquals(0, report.danglingGraphEvidenceIds)
     }
 
     @Test

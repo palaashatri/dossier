@@ -1,6 +1,7 @@
 package io.dossier.app.domain.graph
 
 import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.model.DossierEdge
@@ -24,7 +25,11 @@ data class GraphEvidenceReconciliationReport(
     val truncatedCanonicalRelationships: Int = 0,
     val truncatedGraphEdges: Int = 0,
     val truncatedCanonicalEvidenceIds: Int = 0,
-    val truncatedGraphEvidenceIds: Int = 0
+    val truncatedGraphEvidenceIds: Int = 0,
+    /** Distinct relationship IDs that do not resolve to a persisted evidence record. */
+    val danglingCanonicalEvidenceIds: Int = 0,
+    /** Distinct graph-edge IDs that do not resolve to a persisted evidence record. */
+    val danglingGraphEvidenceIds: Int = 0
 ) {
     val isConsistent: Boolean
         get() = missingGraphEdges == 0 &&
@@ -34,14 +39,18 @@ data class GraphEvidenceReconciliationReport(
             truncatedCanonicalRelationships == 0 &&
             truncatedGraphEdges == 0 &&
             truncatedCanonicalEvidenceIds == 0 &&
-            truncatedGraphEvidenceIds == 0
+            truncatedGraphEvidenceIds == 0 &&
+            danglingCanonicalEvidenceIds == 0 &&
+            danglingGraphEvidenceIds == 0
 }
 
 enum class GraphEvidenceReconciliationKind {
     MissingGraphEdge,
     ExtraGraphEdge,
     ConflictingEvidence,
-    Ambiguous
+    Ambiguous,
+    /** A provenance ID is present but absent from the case evidence ledger. */
+    DanglingEvidenceReference
 }
 
 data class GraphEvidenceReconciliationDiagnostic(
@@ -70,7 +79,14 @@ object GraphEvidenceReconciliation {
 
     fun validate(
         canonicalRelationships: List<EvidenceRelationship>,
-        graph: EntityGraph
+        graph: EntityGraph,
+        /**
+         * Optional evidence ledger. A null value preserves the legacy
+         * two-argument diagnostic semantics when callers only have a graph
+         * projection. An explicitly supplied ledger enables fail-closed
+         * dangling-reference checks without inventing evidence.
+         */
+        evidenceRecords: List<Evidence>? = null
     ): GraphEvidenceReconciliationReport {
         val boundedCanonical = canonicalRelationships.take(MAX_RELATIONSHIPS)
         val boundedEdges = graph.edges.take(MAX_RELATIONSHIPS)
@@ -252,6 +268,63 @@ object GraphEvidenceReconciliation {
                 )
             }
 
+        val evidenceLedger = evidenceRecords
+            ?.mapNotNull { record ->
+                val id = EvidenceIdPolicy.migrate(record.id.trim())
+                id.takeIf(String::isNotBlank)
+            }
+            ?.toSet()
+        val danglingCanonicalEvidenceIds = evidenceLedger?.let { available ->
+            boundedCanonical.asSequence()
+                .flatMap { relationship ->
+                    relationship.normalizedEvidenceIds().ids.asSequence()
+                }
+                .filterNot(available::contains)
+                .toSet()
+                .also { missingIds ->
+                    if (missingIds.isNotEmpty()) {
+                        addDiagnostic(
+                            GraphEvidenceReconciliationDiagnostic(
+                                kind = GraphEvidenceReconciliationKind.DanglingEvidenceReference,
+                                fromValue = "[canonical relationship ledger]",
+                                toValue = "",
+                                relation = "EVIDENCE_REFERENCE",
+                                canonicalEvidenceIds = missingIds.sorted()
+                                    .take(MAX_EVIDENCE_IDS_PER_DIAGNOSTIC),
+                                truncatedCanonicalEvidenceIds =
+                                    (missingIds.size - MAX_EVIDENCE_IDS_PER_DIAGNOSTIC).coerceAtLeast(0),
+                                reason = "canonical relationship evidence IDs do not resolve to persisted evidence records"
+                            )
+                        )
+                    }
+                }
+                .size
+        } ?: 0
+        val danglingGraphEvidenceIds = evidenceLedger?.let { available ->
+            allGraphProjections
+                .flatMap { projection -> projection.normalizedEvidenceIds.asSequence() }
+                .filterNot(available::contains)
+                .toSet()
+                .also { missingIds ->
+                    if (missingIds.isNotEmpty()) {
+                        addDiagnostic(
+                            GraphEvidenceReconciliationDiagnostic(
+                                kind = GraphEvidenceReconciliationKind.DanglingEvidenceReference,
+                                fromValue = "[graph edge projection]",
+                                toValue = "",
+                                relation = "EVIDENCE_REFERENCE",
+                                graphEvidenceIds = missingIds.sorted()
+                                    .take(MAX_EVIDENCE_IDS_PER_DIAGNOSTIC),
+                                truncatedGraphEvidenceIds =
+                                    (missingIds.size - MAX_EVIDENCE_IDS_PER_DIAGNOSTIC).coerceAtLeast(0),
+                                reason = "graph edge evidence IDs do not resolve to persisted evidence records"
+                            )
+                        )
+                    }
+                }
+                .size
+        } ?: 0
+
         return GraphEvidenceReconciliationReport(
             matchedRelationships = matched,
             missingGraphEdges = missing,
@@ -262,12 +335,21 @@ object GraphEvidenceReconciliation {
             truncatedCanonicalRelationships = (canonicalRelationships.size - boundedCanonical.size).coerceAtLeast(0),
             truncatedGraphEdges = (graph.edges.size - boundedEdges.size).coerceAtLeast(0),
             truncatedCanonicalEvidenceIds = truncatedCanonicalEvidenceIds,
-            truncatedGraphEvidenceIds = truncatedGraphEvidenceIds
+            truncatedGraphEvidenceIds = truncatedGraphEvidenceIds,
+            danglingCanonicalEvidenceIds = danglingCanonicalEvidenceIds,
+            danglingGraphEvidenceIds = danglingGraphEvidenceIds
         )
     }
 
     fun validate(case: DossierCase): GraphEvidenceReconciliationReport =
-        validate(case.canonicalEvidenceRelationships(), case.entityGraph)
+        // Empty evidence records mean the legacy case has no available ledger;
+        // do not reinterpret every legacy ID as dangling solely because the
+        // record was not persisted by an older schema.
+        validate(
+            case.canonicalEvidenceRelationships(),
+            case.entityGraph,
+            case.evidenceRecords.takeIf(List<Evidence>::isNotEmpty)
+        )
 
     private fun diagnostic(
         kind: GraphEvidenceReconciliationKind,
