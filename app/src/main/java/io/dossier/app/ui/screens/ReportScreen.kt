@@ -45,15 +45,20 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.dossier.app.domain.case.EffectiveCaseProjection
+import io.dossier.app.domain.case.UserCorrection
+import io.dossier.app.domain.case.UserCorrectionDecision
 import io.dossier.app.domain.evidence.AttackPathFinder
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.ExposureEngine
+import io.dossier.app.domain.evidence.toEvidence
 import io.dossier.app.domain.discovery.ScanHistoryRuntime
 import io.dossier.app.domain.model.BreachDigest
 import io.dossier.app.domain.model.EntityGraph
@@ -72,6 +77,7 @@ import io.dossier.app.ui.labels.userFacingStatusLabel
 import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.DossierCardShape
 import io.dossier.app.ui.theme.NeuralTheme
+import java.time.Instant
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.launch
@@ -106,10 +112,12 @@ fun ReportScreen(
     val attackPaths by ScanSession.attackPaths.collectAsState()
     val breachDigests by ScanSession.breachDigests.collectAsState()
     val scanHistory by ScanSession.scanHistory.collectAsState()
+    val draftCorrections by ScanSession.userCorrections.collectAsState()
     val evidenceCollection by EvidenceRuntimeCache.collection.collectAsState()
 
     var selectedViewIndex by rememberSaveable { mutableIntStateOf(0) }
     var actionMessage by remember { mutableStateOf<String?>(null) }
+    var draftCorrectionMessage by remember { mutableStateOf<String?>(null) }
     var confirmSessionDelete by remember { mutableStateOf(false) }
     val generatedAt by rememberSaveable {
         mutableStateOf(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")))
@@ -122,18 +130,52 @@ fun ReportScreen(
         .ifBlank { input?.primaryUsername?.let { "@$it" }.orEmpty() }
         .ifBlank { input?.emails?.firstOrNull().orEmpty() }
         .ifBlank { "Unnamed subject" }
-    val onShareSafeGraphExport: (() -> Unit)? = if (entityGraph.entities.isNotEmpty()) {
+    val effectiveCase = remember(
+        input,
+        findings,
+        profileResults,
+        entityGraph,
+        breachDigests,
+        exposure,
+        scanHistory,
+        evidenceCollection,
+        draftCorrections
+    ) {
+        if (draftCorrections.isEmpty() || evidenceCollection.evidence.isEmpty()) {
+            null
+        } else {
+            ScanSession.buildCase()?.let { current ->
+                EffectiveCaseProjection.from(
+                    current.copy(
+                        evidenceRecords = evidenceCollection.evidence,
+                        userCorrections = draftCorrections
+                    )
+                ).presentationCase()
+            }
+        }
+    }
+    val reportFindings = effectiveCase?.findings ?: findings
+    val reportProfileResults = effectiveCase?.profileResults ?: profileResults
+    val reportEntityGraph = effectiveCase?.entityGraph ?: entityGraph
+    val reportRiskLevel = effectiveCase?.riskLevel ?: riskLevel
+    val reportExposure = effectiveCase?.exposure ?: exposure
+    val onShareSafeGraphExport: (() -> Unit)? = if (reportEntityGraph.entities.isNotEmpty()) {
         {
             graphExporter.share(
-                graph = entityGraph,
+                graph = reportEntityGraph,
                 label = subject,
                 redactionMode = ExportRedactionMode.ShareSafe
             )
         }
     } else null
-    val verifiedProfiles = profileResults.count { it.exists && it.verified }
-    val reviewProfiles = profileResults.count { it.exists && !it.verified }
-    val unavailableProfiles = profileResults.count {
+    val draftCorrectionByEvidence = remember(draftCorrections) {
+        draftCorrections
+            .filter { it.evidenceId != null }
+            .associateBy { it.evidenceId!! }
+    }
+    val verifiedProfiles = reportProfileResults.count { it.exists && it.verified }
+    val reviewProfiles = reportProfileResults.count { it.exists && !it.verified }
+    val unavailableProfiles = reportProfileResults.count {
         !it.exists && it.verificationStatus?.contains("unverifiable", true) == true
     }
     val confirmedBreaches = breachDigests.sumOf(BreachDigest::breachCount)
@@ -142,13 +184,13 @@ fun ReportScreen(
             (match.warning.contains("high visual similarity", true) ||
                 match.warning.contains("review-range", true))
     }
-    val entityGraphLines = remember(entityGraph, findings, profileResults) {
-        formatEntityGraphFromSession(entityGraph)
-            .ifEmpty { formatEntityGraphLines(findings, profileResults) }
+    val entityGraphLines = remember(reportEntityGraph, reportFindings, reportProfileResults) {
+        formatEntityGraphFromSession(reportEntityGraph)
+            .ifEmpty { formatEntityGraphLines(reportFindings, reportProfileResults) }
     }
-    val breachLines = remember(breachDigests, findings) {
+    val breachLines = remember(breachDigests, reportFindings) {
         formatBreachDigestsFromSession(breachDigests)
-            .ifEmpty { formatBreachDigestLines(findings) }
+            .ifEmpty { formatBreachDigestLines(reportFindings) }
     }
     val timelineCase = remember(
         input,
@@ -158,7 +200,8 @@ fun ReportScreen(
         entityGraph,
         breachDigests,
         scanHistory,
-        evidenceCollection
+        evidenceCollection,
+        draftCorrections
     ) {
         ScanSession.buildCase()?.let { current ->
             val history = if (current.scanHistory.isNotEmpty()) {
@@ -253,9 +296,9 @@ fun ReportScreen(
             when (ReportView.entries[selectedViewIndex]) {
                 ReportView.Overview -> OverviewReport(
                     modifier = Modifier.weight(1f),
-                    riskLevel = riskLevel,
-                    exposure = exposure,
-                    findings = findings,
+                    riskLevel = reportRiskLevel,
+                    exposure = reportExposure,
+                    findings = reportFindings,
                     verifiedProfiles = verifiedProfiles,
                     reviewProfiles = reviewProfiles,
                     unavailableProfiles = unavailableProfiles,
@@ -269,10 +312,26 @@ fun ReportScreen(
                 ReportView.Evidence -> EvidenceReport(
                     modifier = Modifier.weight(1f),
                     findings = findings,
-                    profileResults = profileResults,
+                    profileResults = reportProfileResults,
                     faceMatches = faceMatches,
                     breachDigests = breachDigests,
-                    onNavigateToBrowser = onNavigateToBrowser
+                    onNavigateToBrowser = onNavigateToBrowser,
+                    draftCorrections = draftCorrectionByEvidence,
+                    draftCorrectionMessage = draftCorrectionMessage,
+                    onDraftCorrection = { finding, decision ->
+                        val accepted = ScanSession.recordDraftCorrection(
+                            UserCorrection(
+                                evidenceId = finding.toEvidence().id,
+                                decision = decision,
+                                createdAtUtc = Instant.now().toString()
+                            )
+                        )
+                        draftCorrectionMessage = if (accepted) {
+                            "Draft evidence decision applied locally. Use Actions → Save encrypted case to persist it."
+                        } else {
+                            "Draft correction limit reached; no change was applied."
+                        }
+                    }
                 )
                 ReportView.Timeline -> if (timelineCase != null) {
                     HistoricalTimelinePanel(
@@ -285,7 +344,7 @@ fun ReportScreen(
                 }
                 ReportView.Connections -> ConnectionsReport(
                     modifier = Modifier.weight(1f),
-                    entityGraph = entityGraph,
+                    entityGraph = reportEntityGraph,
                     relationshipConfidence = relationshipConfidence,
                     attackPaths = attackPaths,
                     onShareSafeGraphExport = onShareSafeGraphExport
@@ -307,17 +366,17 @@ fun ReportScreen(
                     },
                     onExport = {
                         exporter.shareReport(
-                            findings = findings,
+                            findings = reportFindings,
                             subjectName = subject,
-                            profileSummaries = profileResults.map(::profileExportLine),
+                            profileSummaries = reportProfileResults.map(::profileExportLine),
                             aiSummary = aiSummary,
                             faceMatches = faceMatches,
                             entityGraphSummary = entityGraphLines.joinToString("\n"),
                             breachDigests = breachLines,
-                            riskLevel = riskLevel.name
+                            riskLevel = reportRiskLevel.name
                         )
                     },
-                    onShareSafeGraphExport = if (entityGraph.entities.isNotEmpty()) onShareSafeGraphExport else null,
+                    onShareSafeGraphExport = if (reportEntityGraph.entities.isNotEmpty()) onShareSafeGraphExport else null,
                     onDeepResearch = onDeepResearch,
                     onNewAudit = {
                         purgeScope.launch {
@@ -473,7 +532,10 @@ private fun EvidenceReport(
     profileResults: List<ProfileScanResult>,
     faceMatches: List<FaceConsistencyMatch>,
     breachDigests: List<BreachDigest>,
-    onNavigateToBrowser: (String) -> Unit
+    onNavigateToBrowser: (String) -> Unit,
+    draftCorrections: Map<String, UserCorrection>,
+    draftCorrectionMessage: String?,
+    onDraftCorrection: (Finding, UserCorrectionDecision) -> Unit
 ) {
     LazyColumn(
         modifier = modifier.fillMaxWidth(),
@@ -485,12 +547,27 @@ private fun EvidenceReport(
                 "Evidence",
                 "Open sources to verify them manually. Confidence measures attribution support; risk measures potential impact."
             )
+            Text(
+                "Draft decisions update this report locally. Use Actions → Save encrypted case to persist the raw evidence and decisions.",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(top = 5.dp)
+            )
+            draftCorrectionMessage?.let { message ->
+                NoticeCard(message, NeuralTheme.Cobalt)
+            }
         }
         if (findings.isEmpty()) {
             item { NoticeCard("No reportable evidence in the inspected source set.", NeuralTheme.TextSecondary) }
         } else {
             items(findings.sortedWith(findingOrder()), key = { findingKey(it) }) { finding ->
-                FindingCard(finding, onNavigateToBrowser)
+                FindingCard(
+                    finding = finding,
+                    onNavigateToBrowser = onNavigateToBrowser,
+                    currentCorrection = draftCorrections[finding.toEvidence().id]?.decision,
+                    onDraftCorrection = { decision -> onDraftCorrection(finding, decision) }
+                )
             }
         }
 
@@ -719,7 +796,12 @@ private fun ActionsReport(
 }
 
 @Composable
-private fun FindingCard(finding: Finding, onNavigateToBrowser: ((String) -> Unit)?) {
+private fun FindingCard(
+    finding: Finding,
+    onNavigateToBrowser: ((String) -> Unit)?,
+    currentCorrection: UserCorrectionDecision? = null,
+    onDraftCorrection: ((UserCorrectionDecision) -> Unit)? = null
+) {
     ReportCard(borderColor = riskColor(finding.risk).copy(alpha = 0.5f)) {
         Row(verticalAlignment = Alignment.Top) {
             Column(modifier = Modifier.weight(1f)) {
@@ -778,7 +860,109 @@ private fun FindingCard(finding: Finding, onNavigateToBrowser: ((String) -> Unit
                 modifier = Modifier.padding(top = 6.dp)
             )
         }
+        if (onDraftCorrection != null) {
+            currentCorrection?.let { decision ->
+                Text(
+                    "Draft decision: ${decision.draftLabel()}. Raw evidence remains retained until encrypted case save.",
+                    color = NeuralTheme.Amber,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+            DraftCorrectionRow(
+                current = currentCorrection,
+                onDecision = onDraftCorrection
+            )
+        }
     }
+}
+
+@Composable
+private fun DraftCorrectionRow(
+    current: UserCorrectionDecision?,
+    onDecision: (UserCorrectionDecision) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            "Draft evidence decision · not saved",
+            color = NeuralTheme.TextSecondary,
+            fontSize = 10.5.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            DraftCorrectionButton(
+                label = "Confirm",
+                decision = UserCorrectionDecision.ThisIsMe,
+                selected = current == UserCorrectionDecision.ThisIsMe,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+            DraftCorrectionButton(
+                label = "Reject",
+                decision = UserCorrectionDecision.ThisIsNotMe,
+                selected = current == UserCorrectionDecision.ThisIsNotMe,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            DraftCorrectionButton(
+                label = "Unsure",
+                decision = UserCorrectionDecision.Unsure,
+                selected = current == UserCorrectionDecision.Unsure,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+            DraftCorrectionButton(
+                label = "Ignore",
+                decision = UserCorrectionDecision.IgnoreEvidence,
+                selected = current == UserCorrectionDecision.IgnoreEvidence,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+        }
+    }
+}
+
+@Composable
+private fun DraftCorrectionButton(
+    label: String,
+    decision: UserCorrectionDecision,
+    selected: Boolean,
+    modifier: Modifier,
+    onClick: (UserCorrectionDecision) -> Unit
+) {
+    OutlinedButton(
+        onClick = { onClick(decision) },
+        modifier = modifier
+            .heightIn(min = 48.dp)
+            .semantics {
+                contentDescription = "$label evidence correction"
+                stateDescription = if (selected) "Selected" else "Not selected"
+            },
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt)
+    ) {
+        Text(label, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+    }
+}
+
+private fun UserCorrectionDecision.draftLabel(): String = when (this) {
+    UserCorrectionDecision.ThisIsMe -> "confirmed by you"
+    UserCorrectionDecision.ThisIsNotMe -> "rejected by you"
+    UserCorrectionDecision.Unsure -> "marked unsure"
+    UserCorrectionDecision.IgnoreEvidence -> "ignored in active analysis"
 }
 
 @Composable

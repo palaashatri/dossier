@@ -3,6 +3,7 @@ package io.dossier.app
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -14,10 +15,13 @@ import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.domain.scanner.ScanSession
+import io.dossier.app.domain.case.UserCorrectionDecision
+import io.dossier.app.domain.evidence.toEvidence
 import io.dossier.app.ui.screens.ReportScreen
 import io.dossier.app.ui.theme.DossierTheme
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -51,6 +55,17 @@ class ReportEvidenceAccessibilityTest {
                         risk = RiskLevel.Medium,
                         remediation = "Review the source manually."
                     )
+                ),
+                evidenceRecords = listOf(
+                    Finding(
+                        type = FindingType.Profile,
+                        value = "profile evidence",
+                        sourceUrl = source,
+                        evidenceSnippet = "Direct public profile evidence",
+                        confidence = 0.8f,
+                        risk = RiskLevel.Medium,
+                        remediation = "Review the source manually."
+                    ).toEvidence()
                 )
             )
         )
@@ -76,5 +91,63 @@ class ReportEvidenceAccessibilityTest {
         composeRule.runOnIdle {
             assertEquals(source, openedSource)
         }
+    }
+
+    @Test
+    fun draftCorrectionUpdatesEffectiveReportAndRetainsRawFindingUntilSave() {
+        val source = "https://evidence.example.test/profile"
+        val finding = Finding(
+            type = FindingType.Profile,
+            value = "profile evidence",
+            sourceUrl = source,
+            evidenceSnippet = "Direct public profile evidence",
+            confidence = 0.8f,
+            risk = RiskLevel.Medium,
+            remediation = "Review the source manually."
+        )
+        ScanSession.restoreFromCase(
+            DossierCase(
+                createdAt = "2026-08-25 00:00",
+                subjectName = "Authorized subject",
+                input = IdentityInput(fullName = "Authorized subject"),
+                findings = listOf(finding),
+                evidenceRecords = listOf(finding.toEvidence())
+            )
+        )
+
+        composeRule.setContent {
+            DossierTheme(darkTheme = false) {
+                ReportScreen(
+                    onReset = {},
+                    onNavigateToBrowser = {}
+                )
+            }
+        }
+        composeRule.onNodeWithText("Evidence").performClick()
+
+        val reject = composeRule.onNodeWithContentDescription("Reject evidence correction")
+        assertEquals(
+            "Not selected",
+            reject.fetchSemanticsNode().config[SemanticsProperties.StateDescription]
+        )
+        reject.performClick()
+        composeRule.waitForIdle()
+
+        assertEquals(UserCorrectionDecision.ThisIsNotMe, ScanSession.userCorrections.value.single().decision)
+        assertEquals(listOf(finding), ScanSession.findings.value)
+        assertEquals(
+            "Selected",
+            reject.fetchSemanticsNode().config[SemanticsProperties.StateDescription]
+        )
+        assertTrue(
+            composeRule.onAllNodesWithText("Draft evidence decision · not saved")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        )
+        assertTrue(
+            composeRule.onAllNodesWithText("Draft decision: rejected by you", substring = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        )
     }
 }

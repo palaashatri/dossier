@@ -16,11 +16,13 @@ import io.dossier.app.domain.case.CaseStore
 import io.dossier.app.domain.case.CaseScanHistoryEntry
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.case.CaseEvidenceIdMigration
+import io.dossier.app.domain.case.UserCorrection
 import io.dossier.app.domain.evidence.AttackPathFinder
 import io.dossier.app.domain.evidence.ConfidenceEngine
 import io.dossier.app.domain.evidence.EmailDomainContributor
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
+import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
@@ -72,6 +74,9 @@ internal class ScanExecutionException(
  * execution. Scan results remain transient unless the user explicitly saves a case.
  */
 object ScanSession {
+    /** Keep draft correction metadata bounded until the user explicitly saves a case. */
+    const val MAX_DRAFT_CORRECTIONS = 256
+
     var tempInput: IdentityInput? = null
     val selectedModel = MutableStateFlow(LocalAiModelType.DEFAULT)
 
@@ -119,6 +124,9 @@ object ScanSession {
 
     private val _scanHistory = MutableStateFlow<List<CaseScanHistoryEntry>>(emptyList())
     val scanHistory: StateFlow<List<CaseScanHistoryEntry>> = _scanHistory
+
+    private val _userCorrections = MutableStateFlow<List<UserCorrection>>(emptyList())
+    val userCorrections: StateFlow<List<UserCorrection>> = _userCorrections
 
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning
@@ -184,6 +192,7 @@ object ScanSession {
         EvidenceRuntimeCache.clear()
         MediaIntelligenceSession.beginFor(input)
         _scanHistory.value = emptyList()
+        _userCorrections.value = emptyList()
         _currentInput.value = input
         setDeepResearch(deepResearch)
         _progressText.value = BackgroundScanWorker.STAGE_STARTING
@@ -299,7 +308,8 @@ object ScanSession {
             attackPaths = _attackPaths.value,
             relationshipConfidence = _relationshipConfidence.value,
             aiSummary = _aiSummary.value,
-            scanHistory = _scanHistory.value
+            scanHistory = _scanHistory.value,
+            userCorrections = _userCorrections.value
         )
     }
 
@@ -309,6 +319,8 @@ object ScanSession {
         EvidenceRuntimeCache.replaceCaseEvidence(migrated.evidenceRecords, migrated.evidenceRelationships)
         MediaIntelligenceSession.restoreFor(migrated.input, migrated.mediaIntelligence)
         _scanHistory.value = migrated.scanHistory
+        _userCorrections.value = migrated.userCorrections
+            .takeLast(MAX_DRAFT_CORRECTIONS)
         _currentInput.value = migrated.input
         _findings.value = migrated.findings
         _profileScanResults.value = migrated.profileResults
@@ -326,6 +338,37 @@ object ScanSession {
         _memoryDropped.value = 0
         _isScanning.value = false
         _progressText.value = BackgroundScanWorker.STAGE_COMPLETE
+    }
+
+    /**
+     * Applies one draft correction to the in-memory working session. Raw
+     * evidence remains in [EvidenceRuntimeCache] and the correction is only
+     * durable after the existing explicit encrypted Save Case action.
+     */
+    fun recordDraftCorrection(correction: UserCorrection): Boolean {
+        val normalized = correction.copy(
+            evidenceId = correction.evidenceId?.let(EvidenceIdPolicy::migrate)
+        )
+        if (normalized.evidenceId.isNullOrBlank() && normalized.entityId.isNullOrBlank()) {
+            return false
+        }
+        val current = _userCorrections.value
+        val replacesExisting = current.any { existing ->
+            existing.correctionId == normalized.correctionId ||
+                (existing.evidenceId != null && existing.evidenceId == normalized.evidenceId) ||
+                (existing.entityId != null && existing.entityId == normalized.entityId)
+        }
+        if (!replacesExisting && current.size >= MAX_DRAFT_CORRECTIONS) return false
+
+        _userCorrections.value = current.filterNot { existing ->
+            existing.correctionId == normalized.correctionId ||
+                (existing.evidenceId != null && existing.evidenceId == normalized.evidenceId) ||
+                (existing.entityId != null && existing.entityId == normalized.entityId)
+        } + normalized
+        // Existing analysis was produced before this draft decision and is no
+        // longer a truthful summary of the corrected working session.
+        _aiSummary.value = null
+        return true
     }
 
     fun restoreLatestBackgroundResult(context: Context): Boolean {
@@ -366,6 +409,7 @@ object ScanSession {
         EvidenceRuntimeCache.clear()
         MediaIntelligenceSession.beginFor(inputToUse)
         _scanHistory.value = emptyList()
+        _userCorrections.value = emptyList()
         _findings.value = emptyList()
         _placeScanResult.value = null
         _profileScanResults.value = emptyList()
@@ -757,6 +801,7 @@ object ScanSession {
         _remediationTips.value = emptyList()
         _remediationItems.value = emptyList()
         _aiSummary.value = null
+        _userCorrections.value = emptyList()
         _memoryDropped.value = 0
         _isScanning.value = false
         _progressText.value = ""
