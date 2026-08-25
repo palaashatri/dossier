@@ -1,0 +1,80 @@
+package io.dossier.app
+
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.dossier.app.domain.case.DossierCase
+import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingType
+import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.scanner.ScanSession
+import io.dossier.app.ui.screens.ReportScreen
+import io.dossier.app.ui.theme.DossierTheme
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+
+@RunWith(AndroidJUnit4::class)
+class ReportEvidenceAccessibilityTest {
+
+    @get:Rule
+    val composeRule = createComposeRule()
+
+    @After
+    fun clearSession() {
+        ScanSession.purgeSession(ApplicationProvider.getApplicationContext())
+    }
+
+    @Test
+    fun findingSourceExposesMeaningfulButtonSemanticsAndOpensSource() {
+        val source = "https://evidence.example.test/profile"
+        ScanSession.restoreFromCase(
+            DossierCase(
+                createdAt = "2026-08-25 00:00",
+                subjectName = "Authorized subject",
+                input = IdentityInput(fullName = "Authorized subject"),
+                findings = listOf(
+                    Finding(
+                        type = FindingType.Profile,
+                        value = "profile evidence",
+                        sourceUrl = source,
+                        evidenceSnippet = "Direct public profile evidence",
+                        confidence = 0.8f,
+                        risk = RiskLevel.Medium,
+                        remediation = "Review the source manually."
+                    )
+                )
+            )
+        )
+        var openedSource: String? = null
+
+        composeRule.setContent {
+            DossierTheme(darkTheme = false) {
+                ReportScreen(
+                    onReset = {},
+                    onNavigateToBrowser = { openedSource = it }
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Evidence").performClick()
+        val sourceDescription = "Open evidence source $source"
+        val sourceNode = composeRule
+            .onNodeWithContentDescription(sourceDescription)
+            .fetchSemanticsNode()
+        assertEquals(Role.Button, sourceNode.config[SemanticsProperties.Role])
+
+        composeRule.onNodeWithContentDescription(sourceDescription).performClick()
+        composeRule.runOnIdle {
+            assertEquals(source, openedSource)
+        }
+    }
+}

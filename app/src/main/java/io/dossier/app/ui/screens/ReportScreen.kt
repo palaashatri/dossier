@@ -42,6 +42,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -756,7 +759,13 @@ private fun FindingCard(finding: Finding, onNavigateToBrowser: ((String) -> Unit
                 textDecoration = TextDecoration.Underline,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(enabled = onNavigateToBrowser != null) { onNavigateToBrowser?.invoke(source) }
+                    .clickable(
+                        enabled = onNavigateToBrowser != null,
+                        role = Role.Button
+                    ) { onNavigateToBrowser?.invoke(source) }
+                    .semantics {
+                        contentDescription = "Open evidence source $source"
+                    }
                     .padding(top = 9.dp, bottom = 4.dp)
             )
         }
