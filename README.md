@@ -11,10 +11,10 @@ The current implementation branch is **80/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-0b982b1
+416d625
 ```
 
-`0b982b1` is the final producer-provenance follow-up; the validated tree also includes the direct verified-profile media linkage (`2bd9430`), reverse-video picker semantics (`8fd5fff`) and Reddit activity provenance (`86a5d1f`).
+`416d625` is the evidence-relationship persistence tranche; the validated tree also includes scanner/Reddit/WhatsMyName provenance, direct verified-profile media linkage, reverse-video picker semantics and bounded encrypted save/restore migration for canonical relationship assertions.
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
 
@@ -23,15 +23,15 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 5 tests / no-network schema fixtures
-Debug JVM unit tests                PASS — 694 tests / 115 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 694 tests / 115 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 700 tests / 115 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 700 tests / 115 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
 Debug APK assembly                  PASS — 115,483,112 bytes
-Debug APK SHA-256                   D0FBD5E4B07773AC73C6B4A4DD792A47A99CD9AC3E14C4F33E24E39B0F84CC4B
+Debug APK SHA-256                   D4F61C9034CE557934316120401F4CE7F124071F5F3031506616FAF1E425A936
 uiTest APK assembly                 PASS — 242,964,921 bytes
-uiTest APK SHA-256                  38152597E4544FAC620E30FB320A47DACEDBBBA88A3C69C44F22ADE7CF9DB68C
-Android-test APK                    PASS — 1,013,552 bytes
-Android-test APK SHA-256             49CA30C84A3CD7C97807B76DD5014BAFB8454DD0F7073F101BEEF83807BF0EFD
+uiTest APK SHA-256                  852472937126B7E52037651AD7CB907AF6AAC046F77FC87F8D3AF1FBEA49D1DE
+Android-test APK                    PASS — 1,013,716 bytes
+Android-test APK SHA-256             758E0AB7C94E1FB0C4B7EBA8BC41EC532B3ED60E665AAD4315BFFFA8E0E5E622
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
 Connected uiTest suite              PASS — 44 tests / 0 failures on API 36 `medium_phone` emulator
@@ -91,6 +91,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - Remediation cards expose reviewed provider-specific resources, manual-action fallback or explicit unavailable state; opening a settings page never asserts deletion and later scans remain required.
 - Saved-case comparison exposes source-scoped historical/provider changes and remediation rechecks with exact evidence IDs and only newer successful scan IDs; missing or unavailable observations are not reported as deletion.
 - Scanner/plugin relationship assertions with the same normalized endpoints and relation are merged deterministically while unioning their evidence IDs and retaining a nonblank description, so one producer cannot erase another producer's provenance.
+- Canonical relationship assertions are now stored in versioned encrypted cases alongside evidence records, restored into the runtime cache, migrated from legacy evidence IDs, and bounded to 10,000 relationships with at most 256 evidence IDs per relationship.
 - Scanner-produced profile and finding relationships now carry the exact stable `Evidence.id` values created for those observations; relationship provenance is not reconstructed from endpoint text.
 - Reddit public-activity and WhatsMyName username-surface relationships also carry the exact stable IDs of the emitted evidence records.
 - Scan HUD status pills expose positive, warning, critical and informational state through Compose `stateDescription` semantics, while color remains supplemental.
