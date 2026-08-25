@@ -6,6 +6,8 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import json
+from dataclasses import replace
 
 
 TOOLS = pathlib.Path(__file__).resolve().parent
@@ -16,7 +18,10 @@ from provider_registry_audit import (  # noqa: E402
     Entry,
     audit,
     audit_whats_my_name_catalog,
+    convert_whats_my_name_record,
+    map_whats_my_name_category,
     parse_catalog,
+    validate_whats_my_name_conversion,
 )
 
 
@@ -105,6 +110,10 @@ class ProviderRegistryAuditTest(unittest.TestCase):
         self.assertEqual(644, stats["executableRuleCount"])
         self.assertEqual(72, stats["excludedRecordCount"])
         self.assertEqual(644, stats["generatedRuleIdCount"])
+        self.assertEqual(644, stats["convertedRuleCount"])
+        self.assertEqual(644, stats["convertedRuleValidCount"])
+        self.assertEqual(0, stats["conversionErrorCount"])
+        self.assertIsNone(stats["primaryCatalogDisjoint"])
         self.assertEqual(37, stats["exclusionReasons"]["CategoryNSFW"])
         self.assertEqual(23, stats["exclusionReasons"]["ContainsPostBody"])
         self.assertEqual(7, stats["exclusionReasons"]["NotHttps"])
@@ -130,6 +139,105 @@ class ProviderRegistryAuditTest(unittest.TestCase):
         self.assertEqual(1, stats["sourceRecordCount"])
         self.assertEqual(0, stats["executableRuleCount"])
         self.assertEqual(1, stats["excludedRecordCount"])
+
+    def test_conversion_matches_kotlin_runtime_and_is_disjoint_from_primary_catalog(self) -> None:
+        catalog_path = TOOLS.parent / "app/src/main/java/io/dossier/app/data/platform/ProviderCatalogV2.kt"
+        _, primary_ids = parse_catalog(catalog_path.read_text(encoding="utf-8"))
+
+        errors, stats = audit_whats_my_name_catalog(primary_catalog_ids=primary_ids)
+
+        self.assertEqual([], errors)
+        self.assertEqual(644, stats["convertedRuleCount"])
+        self.assertEqual(644, stats["convertedRuleValidCount"])
+        self.assertEqual(0, stats["conversionErrorCount"])
+        self.assertEqual(0, stats["primaryCatalogCollisionCount"])
+        self.assertTrue(stats["primaryCatalogDisjoint"])
+
+    def test_category_mapping_mirrors_kotlin_and_falls_back_safely(self) -> None:
+        expected = {
+            "art": "Creative",
+            "images": "Creative",
+            "blog": "Publishing",
+            "news": "Publishing",
+            "political": "Publishing",
+            "business": "Professional",
+            "coding": "CodeHosting",
+            "finance": "Commerce",
+            "shopping": "Commerce",
+            "gaming": "Gaming",
+            "music": "Media",
+            "video": "Media",
+            "tech": "Developer",
+            "social": "Social",
+            "dating": "Social",
+            "unlisted": "PublicDirectory",
+        }
+        for raw, category in expected.items():
+            self.assertEqual(category, map_whats_my_name_category(raw.upper()))
+        self.assertEqual("PublicDirectory", map_whats_my_name_category(None))
+        self.assertEqual("PublicDirectory", map_whats_my_name_category(42))
+
+    def test_conversion_validator_detects_runtime_contract_drift(self) -> None:
+        record = {
+            "name": "Fixture",
+            "cat": "social",
+            "uri_check": "https://fixture.example/{account}",
+            "e_code": 200,
+            "e_string": "present",
+            "m_code": 404,
+            "m_string": "missing",
+        }
+        rule = convert_whats_my_name_record(record)
+        self.assertEqual([], validate_whats_my_name_conversion(rule, record))
+
+        tampered = replace(rule, timeout_ms=5_000, exists_marker="wrong")
+        issues = validate_whats_my_name_conversion(tampered, record)
+        self.assertTrue(any("request policy" in issue for issue in issues))
+        self.assertTrue(any("response markers" in issue for issue in issues))
+
+        with self.assertRaisesRegex(ValueError, "NotHttps"):
+            convert_whats_my_name_record(
+                {**record, "uri_check": "http://fixture.example/{account}"}
+            )
+
+    def test_primary_catalog_collision_is_reported_without_inflating_source_counts(self) -> None:
+        record = {
+            "name": "Fixture",
+            "cat": "social",
+            "uri_check": "https://fixture.example/{account}",
+            "e_code": 200,
+            "e_string": "present",
+            "m_code": 404,
+            "m_string": "missing",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            data_path = root / "wmn-data.json"
+            license_path = root / "LICENSE.md"
+            data_path.write_text(
+                json.dumps(
+                    {
+                        "license": ["fixture"],
+                        "authors": ["fixture"],
+                        "categories": ["social"],
+                        "sites": [record],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            license_path.write_text("fixture license", encoding="utf-8")
+            generated_id = convert_whats_my_name_record(record).entry.provider_id
+            errors, stats = audit_whats_my_name_catalog(
+                data_path,
+                license_path,
+                primary_catalog_ids=[generated_id],
+            )
+
+        self.assertTrue(any("collide" in error for error in errors))
+        self.assertEqual(1, stats["convertedRuleCount"])
+        self.assertEqual(1, stats["convertedRuleValidCount"])
+        self.assertEqual(1, stats["primaryCatalogCollisionCount"])
+        self.assertFalse(stats["primaryCatalogDisjoint"])
 
 
 if __name__ == "__main__":

@@ -73,6 +73,29 @@ class Entry:
     reliability: str | None = "DirectPublicProfile"
 
 
+@dataclass(frozen=True)
+class ConvertedWhatsMyNameRule:
+    """Python-side proof object for the Kotlin WhatsMyName conversion.
+
+    This is a maintenance representation only.  It is deliberately not merged
+    into :class:`ProviderCatalogV2` and carries the fields handled by the
+    dedicated ``WhatsMyNameResponseClassifier`` in addition to the shared
+    declarative ``Entry`` schema.
+    """
+
+    entry: Entry
+    required_status: frozenset[int]
+    not_found_status: frozenset[int]
+    exists_marker: str
+    missing_marker: str
+    maximum_concurrency: int
+    minimum_interval_ms: int
+    timeout_ms: int
+    retry_budget: int
+    cooldown_ms: int
+    legacy_template_compatible: bool
+
+
 def parse_catalog(text: str) -> tuple[list[Entry], list[str]]:
     entries = [
         Entry(
@@ -331,9 +354,133 @@ def _whats_my_name_provider_id(record: dict[str, object]) -> str:
     return f"wmn-{slug}-{digest}"
 
 
+def map_whats_my_name_category(raw_category: object) -> str:
+    """Mirror ``WhatsMyNameCatalog.mapCategory`` without network access."""
+
+    category = raw_category.strip().lower() if isinstance(raw_category, str) else ""
+    if category in {"art", "images"}:
+        return "Creative"
+    if category in {"blog", "news", "political"}:
+        return "Publishing"
+    if category == "business":
+        return "Professional"
+    if category == "coding":
+        return "CodeHosting"
+    if category in {"finance", "shopping"}:
+        return "Commerce"
+    if category == "gaming":
+        return "Gaming"
+    if category in {"music", "video"}:
+        return "Media"
+    if category == "tech":
+        return "Developer"
+    if category in {"social", "dating"}:
+        return "Social"
+    return "PublicDirectory"
+
+
+def convert_whats_my_name_record(record: dict[str, object]) -> ConvertedWhatsMyNameRule:
+    """Mirror ``WhatsMyNameSite.toProviderDefinition`` for one executable row.
+
+    Callers must apply :func:`_whats_my_name_exclusion_reason` first.  The
+    explicit checks below keep malformed maintenance fixtures fail-closed when
+    this helper is used directly.
+    """
+
+    exclusion = _whats_my_name_exclusion_reason(record)
+    if exclusion is not None:
+        raise ValueError(f"record is not executable under policy: {exclusion}")
+
+    name = record.get("name")
+    uri_check = record.get("uri_check")
+    exists_code = record.get("e_code")
+    missing_code = record.get("m_code")
+    exists_marker = record.get("e_string") or ""
+    missing_marker = record.get("m_string") or ""
+    if (
+        not isinstance(name, str)
+        or not isinstance(uri_check, str)
+        or not isinstance(exists_code, int)
+        or isinstance(exists_code, bool)
+        or not isinstance(missing_code, int)
+        or isinstance(missing_code, bool)
+        or not isinstance(exists_marker, str)
+        or not isinstance(missing_marker, str)
+    ):
+        raise ValueError("executable record fields have an invalid type")
+
+    return ConvertedWhatsMyNameRule(
+        entry=Entry(
+            provider_id=_whats_my_name_provider_id(record),
+            name=name.strip()[:120],
+            category=map_whats_my_name_category(record.get("cat")),
+            priority=50,
+            template=uri_check.replace("{account}", "{username}"),
+            kind="profile",
+            capabilities=("Username",),
+            reliability="DirectPublicProfile",
+        ),
+        required_status=frozenset({exists_code, missing_code}),
+        not_found_status=frozenset(),
+        exists_marker=exists_marker,
+        missing_marker=missing_marker,
+        maximum_concurrency=1,
+        minimum_interval_ms=350,
+        timeout_ms=6_000,
+        retry_budget=0,
+        cooldown_ms=60_000,
+        legacy_template_compatible=False,
+    )
+
+
+def validate_whats_my_name_conversion(
+    rule: ConvertedWhatsMyNameRule,
+    source_record: dict[str, object],
+) -> list[str]:
+    """Return conversion drift errors against the Kotlin runtime contract."""
+
+    errors = [f"schema: {error}" for error in validate_entry(rule.entry)]
+    expected_id = _whats_my_name_provider_id(source_record)
+    if rule.entry.provider_id != expected_id:
+        errors.append("generated provider ID does not match the Kotlin derivation")
+    if not rule.entry.provider_id.startswith("wmn-"):
+        errors.append("generated provider ID is outside the wmn namespace")
+
+    uri_check = source_record.get("uri_check")
+    if isinstance(uri_check, str):
+        expected_template = uri_check.replace("{account}", "{username}")
+        if rule.entry.template != expected_template:
+            errors.append("profile template does not preserve uri_check token semantics")
+    if rule.entry.category != map_whats_my_name_category(source_record.get("cat")):
+        errors.append("category mapping differs from WhatsMyNameCatalog.mapCategory")
+
+    expected_required = frozenset(
+        value for value in (source_record.get("e_code"), source_record.get("m_code"))
+        if isinstance(value, int) and not isinstance(value, bool)
+    )
+    if rule.required_status != expected_required:
+        errors.append("required status set does not match e_code/m_code")
+    if rule.not_found_status:
+        errors.append("generated declarative not-found status set must remain empty")
+    expected_markers = (source_record.get("e_string") or "", source_record.get("m_string") or "")
+    if (rule.exists_marker, rule.missing_marker) != expected_markers:
+        errors.append("response markers do not match the source rule")
+    if (
+        rule.maximum_concurrency,
+        rule.minimum_interval_ms,
+        rule.timeout_ms,
+        rule.retry_budget,
+        rule.cooldown_ms,
+        rule.legacy_template_compatible,
+    ) != (1, 350, 6_000, 0, 60_000, False):
+        errors.append("request policy or legacy compatibility differs from Kotlin conversion")
+    return errors
+
+
 def audit_whats_my_name_catalog(
     data_path: pathlib.Path = WHATS_MY_NAME_DATA,
     license_path: pathlib.Path = WHATS_MY_NAME_LICENSE,
+    primary_catalog_ids: list[str] | None = None,
 ) -> tuple[list[str], dict[str, object]]:
     """Audit the pinned source catalog as a distinct rule-surface contract.
 
@@ -354,6 +501,12 @@ def audit_whats_my_name_catalog(
         "excludedRecordCount": None,
         "exclusionReasons": {},
         "generatedRuleIdCount": None,
+        "convertedRuleCount": None,
+        "convertedRuleValidCount": None,
+        "conversionErrorCount": None,
+        "conversionErrors": [],
+        "primaryCatalogCollisionCount": None,
+        "primaryCatalogDisjoint": None,
     }
 
     try:
@@ -407,7 +560,10 @@ def audit_whats_my_name_catalog(
 
     reason_counts: collections.Counter[str] = collections.Counter()
     generated_ids: set[str] = set()
+    converted_ids: set[str] = set()
+    conversion_errors: list[str] = []
     executable_count = 0
+    converted_rule_valid_count = 0
     for record in sites:
         reason = _whats_my_name_exclusion_reason(record)
         if reason is not None:
@@ -419,8 +575,39 @@ def audit_whats_my_name_catalog(
         if generated_id in generated_ids:
             errors.append(f"WhatsMyName catalog contains duplicate generated rule id {generated_id}")
         generated_ids.add(generated_id)
+        try:
+            converted_rule = convert_whats_my_name_record(record)
+        except (TypeError, ValueError) as exc:
+            conversion_error = f"{generated_id}: conversion failed ({exc})"
+            errors.append(f"WhatsMyName {conversion_error}")
+            conversion_errors.append(conversion_error)
+            continue
+        issues = validate_whats_my_name_conversion(converted_rule, record)
+        if issues:
+            for issue in issues:
+                conversion_error = f"{generated_id}: {issue}"
+                errors.append(f"WhatsMyName conversion: {conversion_error}")
+                conversion_errors.append(conversion_error)
+        else:
+            converted_rule_valid_count += 1
+        converted_ids.add(converted_rule.entry.provider_id)
 
     excluded_count = len(sites) - executable_count
+    primary_collision_ids: list[str] | None = None
+    if primary_catalog_ids is not None:
+        primary_ids = {
+            provider_id.strip().lower()
+            for provider_id in primary_catalog_ids
+            if provider_id.strip()
+        }
+        primary_collision_ids = sorted(
+            provider_id for provider_id in converted_ids if provider_id.lower() in primary_ids
+        )
+        if primary_collision_ids:
+            errors.append(
+                "WhatsMyName generated IDs collide with the primary declarative catalog: "
+                + ", ".join(primary_collision_ids)
+            )
     stats.update(
         {
             "sourceRecordCount": len(sites),
@@ -428,6 +615,16 @@ def audit_whats_my_name_catalog(
             "excludedRecordCount": excluded_count,
             "exclusionReasons": dict(sorted(reason_counts.items())),
             "generatedRuleIdCount": len(generated_ids),
+            "convertedRuleCount": executable_count,
+            "convertedRuleValidCount": converted_rule_valid_count,
+            "conversionErrorCount": len(conversion_errors),
+            "conversionErrors": conversion_errors,
+            "primaryCatalogCollisionCount": (
+                len(primary_collision_ids) if primary_collision_ids is not None else None
+            ),
+            "primaryCatalogDisjoint": (
+                not primary_collision_ids if primary_collision_ids is not None else None
+            ),
         }
     )
     if len(sites) != WHATS_MY_NAME_EXPECTED_SOURCE_COUNT:
@@ -517,7 +714,9 @@ def main() -> int:
         return 2
 
     errors, stats = audit(entries, declared_ids, truth_text)
-    source_errors, source_stats = audit_whats_my_name_catalog()
+    source_errors, source_stats = audit_whats_my_name_catalog(
+        primary_catalog_ids=declared_ids
+    )
     errors.extend(source_errors)
     stats["whatsMyName"] = source_stats
     if args.json:
@@ -532,6 +731,12 @@ def main() -> int:
             f"{source_stats['sourceRecordCount']} "
             f"({source_stats['executableRuleCount']} executable, "
             f"{source_stats['excludedRecordCount']} excluded)"
+        )
+        print(
+            "WhatsMyName conversion preview: "
+            f"{source_stats['convertedRuleValidCount']}/"
+            f"{source_stats['convertedRuleCount']} runtime-equivalent rules valid; "
+            f"primary-catalog disjoint={source_stats['primaryCatalogDisjoint']}"
         )
         for category, count in stats["categories"].items():
             print(f"  {category}: {count}")
