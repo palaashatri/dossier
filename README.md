@@ -6,15 +6,15 @@ It collects public evidence, preserves provenance, separates verification from r
 
 ## Current status
 
-The current implementation branch is **82/100 under the strict production rubric**.
+The current implementation branch is **83/100 under the strict production rubric**.
 
 Validated implementation commit:
 
 ```text
-c4a8a00
+0cfa3c6
 ```
 
-`c4a8a00` is the structured face-comparison provenance tranche; the validated tree also includes report-evidence accessibility semantics, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
+`0cfa3c6` is the bounded live evidence-correction tranche; the validated tree also includes source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, report-evidence accessibility semantics, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
 
@@ -23,21 +23,21 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 5 tests / no-network schema fixtures
-Debug JVM unit tests                PASS — 723 tests / 115 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 723 tests / 115 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 729 tests / 120 result XML files / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 729 tests / 120 result XML files / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 115,499,496 bytes
-Debug APK SHA-256                   1FB19FD21C7CED17E7DD148162F5BC7547FD7DD17C76237C39580341DF44F531
-uiTest APK assembly                 PASS — 242,997,689 bytes
-uiTest APK SHA-256                  FEFCF23DB994511A43A784527054BBD7FAE201A8B6840A376BFE677271E3168F
-Android-test APK                    PASS — 1,020,008 bytes
-Android-test APK SHA-256             F49197FFFB67E5E7AF6338010EC82876C3D9D6ECB8B7C4572C32E9E4079B2E31
+Debug APK assembly                  PASS — 115,515,880 bytes
+Debug APK SHA-256                   B5FA2DA1211C05A74643E3E963CC52528E6E81D9E7385C916FE08032F6E37EAF
+uiTest APK assembly                 PASS — 243,014,073 bytes
+uiTest APK SHA-256                  F522097FE17F860C267A6676A4D44AE694F8A4378A7DAE2AFD7F8C0BC9C67573
+Android-test APK                    PASS — 1,021,836 bytes
+Android-test APK SHA-256             27985DAD3304662CB69B2021606144E9CD83C1C9A0811AECAEECE374E5E01B42
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
-Connected uiTest suite              PASS — 47 tests / 0 failures on API 36 `medium_phone` emulator
+Connected uiTest suite              PASS — 48 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, report-evidence button semantics, async saved-case persistence, HUD status semantics and reverse-video picker semantics. A separate ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified restoration after an external `am force-stop`/relaunch and after an emulator reboot. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
+The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, live draft evidence-correction semantics, report-evidence button semantics, async saved-case persistence, HUD status semantics and reverse-video picker semantics. A separate ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified restoration after an external `am force-stop`/relaunch and after an emulator reboot. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
@@ -153,6 +153,7 @@ Implemented whole-image duplicate/repost analysis:
 - deterministic exact-content and perceptual-near-duplicate clusters with stable IDs;
 - Reverse Media UI for candidate-state totals, cluster summaries, hash/dimension details and source drill-down.
 - bounded saved-case whole-image cluster history groups repeated fingerprints across saved cases while retaining case/cluster/source/retrieval provenance;
+- saved-case media comparison reports bounded source-page/image-URL keyed `ADDED`, `CHANGED`, `UNCHANGED`, `NOT_OBSERVED_IN_LATEST_CASE` and `UNAVAILABLE` observations from recorded hashes, dimensions, retrieval state and timestamps; it never uses candidate IDs or visual scores as identity keys;
 - explicit `ImageAccountLinkage` records can link a candidate to an exact account page only from a verified-profile association or a user review, with bounded evidence IDs and timestamps; visual scores and clusters never create this identity edge;
 - accessible review wording explicitly states that repeated whole-image content does not establish shared account or person identity.
 
@@ -211,10 +212,11 @@ A production-sized/adversarial AI evaluation corpus remains incomplete; correcte
 - Corrections affect effective analysis/graph membership without deleting raw encrypted evidence.
 - Remediation states: Not started, In progress, Submitted, Awaiting response, Completed, Rejected and Needs manual action.
 - Reviewed provider-settings resources are catalog-validated (HTTPS, provider ownership, no userinfo/query/fragment) with manual-action or unavailable fallback when no reviewed resource exists; the catalog currently covers eight providers and is not deletion proof.
-- Differential comparison classifies added, removed, changed and unchanged findings.
+- Differential comparison classifies added, removed, changed and unchanged findings; saved-case media review also reports bounded source-page/image-URL keyed added, changed, unchanged, not-observed and unavailable observations without using visual identity or candidate IDs as keys.
 - Recheck UI distinguishes **Still observed**, **Not observed in latest scan**, **Workflow status changed** and **Not rechecked**.
 - Recheck rows retain the exact observed evidence ID and only a newer successful verification scan ID; failed/cancelled scans remain **Not rechecked**.
 - `Not observed in latest scan` explicitly does **not** mean verified deletion from every live page, search index, cache or archive.
+- Live report Finding cards expose bounded Confirm / Reject / Unsure / Ignore draft decisions with explicit selected-state semantics; raw evidence remains retained and the decision is local until the user explicitly saves the encrypted case.
 
 ## Reports and share-safe export
 
