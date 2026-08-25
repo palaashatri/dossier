@@ -149,6 +149,40 @@ fun CoordinatedScanScreen(
                             .padding(horizontal = 8.dp, vertical = 5.dp)
                     )
                 }
+
+                if (snapshot.recoveryStage.isNotBlank()) {
+                    val recoveryText = buildString {
+                        append("Recovery stage: ${snapshot.recoveryStage}. ")
+                        append(
+                            if (snapshot.recoveryCheckpointAvailable) {
+                                "Checkpoint available. "
+                            } else {
+                                "No checkpoint available. "
+                            }
+                        )
+                        append("Reused ${snapshot.recoveryReusedCount}; reran ${snapshot.recoveryRerunCount}.")
+                    }
+                    Text(
+                        text = recoveryText,
+                        color = NeuralTheme.TextSecondary,
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 2,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .widthIn(max = 360.dp)
+                            .padding(top = 4.dp)
+                            .background(
+                                NeuralTheme.CardBackground.copy(alpha = 0.94f),
+                                RoundedCornerShape(7.dp)
+                            )
+                            .border(1.dp, NeuralTheme.BorderColor, RoundedCornerShape(7.dp))
+                            .semantics {
+                                contentDescription = recoveryText
+                            }
+                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                    )
+                }
             }
         }
     }

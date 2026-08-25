@@ -629,18 +629,29 @@ object ScanSession {
                 evidence = evidence,
                 relationships = relationships
             )
-            val graphPlanFingerprint = requestId?.let { durableRequestId ->
-                (runCatching {
-                    ScanResumeStore(context).loadRequestDetailed(durableRequestId)
-                }.getOrNull() as? ResumeReadState.Available)?.point?.planFingerprint
-            }
-            val graph = loadReusableEntityGraphCheckpoint(
+            val graphResumePoint = loadCheckpointPointForRecovery(
+                context = context,
+                requestId = requestId,
+                ownerId = checkpointOwnerId
+            )
+            val graphPlanFingerprint = graphResumePoint?.planFingerprint
+            val reusableGraph = loadReusableEntityGraphCheckpoint(
                 context = context,
                 requestId = requestId,
                 ownerId = checkpointOwnerId,
                 planFingerprint = graphPlanFingerprint,
                 inputDigest = graphInputDigest
-            ) ?: EntityGraphBuilder.build(
+            )
+            emitDeterministicCheckpointRecoveryDiagnostics(
+                requestId = requestId,
+                stage = ScanCheckpointStage.BuildingEntityGraph,
+                checkpointAvailable = graphResumePoint.hasCompletedCheckpoint(
+                    stage = ScanCheckpointStage.BuildingEntityGraph,
+                    payloadPresent = { it.entityGraphCheckpoint != null }
+                ),
+                reused = reusableGraph != null
+            )
+            val graph = reusableGraph ?: EntityGraphBuilder.build(
                 input = inputToUse,
                 profileResults = scanResults,
                 findings = allFindings,
@@ -690,13 +701,28 @@ object ScanSession {
                 evidence = evidence,
                 usernameSeeds = usernameSeeds.toList()
             )
-            _relationshipConfidence.value = loadReusableRelationshipConfidenceCheckpoint(
+            val confidenceResumePoint = loadCheckpointPointForRecovery(
+                context = context,
+                requestId = requestId,
+                ownerId = checkpointOwnerId
+            )
+            val reusableRelationshipConfidence = loadReusableRelationshipConfidenceCheckpoint(
                 context = context,
                 requestId = requestId,
                 ownerId = checkpointOwnerId,
                 planFingerprint = graphPlanFingerprint,
                 inputDigest = confidenceInputDigest
-            ) ?: ConfidenceEngine(
+            )
+            emitDeterministicCheckpointRecoveryDiagnostics(
+                requestId = requestId,
+                stage = ScanCheckpointStage.ScoringRelationshipConfidence,
+                checkpointAvailable = confidenceResumePoint.hasCompletedCheckpoint(
+                    stage = ScanCheckpointStage.ScoringRelationshipConfidence,
+                    payloadPresent = { it.relationshipConfidenceCheckpoint != null }
+                ),
+                reused = reusableRelationshipConfidence != null
+            )
+            _relationshipConfidence.value = reusableRelationshipConfidence ?: ConfidenceEngine(
                 contributors = listOf(
                     UsernameSimilarityContributor(),
                     EmailDomainContributor(),
@@ -736,13 +762,28 @@ object ScanSession {
                 graph = graph,
                 confidenceByEdge = _relationshipConfidence.value
             )
-            _attackPaths.value = loadReusableAttackPathsCheckpoint(
+            val attackPathsResumePoint = loadCheckpointPointForRecovery(
+                context = context,
+                requestId = requestId,
+                ownerId = checkpointOwnerId
+            )
+            val reusableAttackPaths = loadReusableAttackPathsCheckpoint(
                 context = context,
                 requestId = requestId,
                 ownerId = checkpointOwnerId,
                 planFingerprint = graphPlanFingerprint,
                 inputDigest = attackPathsInputDigest
-            ) ?: AttackPathFinder().findPaths(graph, _relationshipConfidence.value)
+            )
+            emitDeterministicCheckpointRecoveryDiagnostics(
+                requestId = requestId,
+                stage = ScanCheckpointStage.TracingAttackPaths,
+                checkpointAvailable = attackPathsResumePoint.hasCompletedCheckpoint(
+                    stage = ScanCheckpointStage.TracingAttackPaths,
+                    payloadPresent = { it.attackPathsCheckpoint != null }
+                ),
+                reused = reusableAttackPaths != null
+            )
+            _attackPaths.value = reusableAttackPaths ?: AttackPathFinder().findPaths(graph, _relationshipConfidence.value)
             val attackPathsCheckpoint = buildAttackPathsCheckpoint(
                 requestId = requestId,
                 ownerId = checkpointOwnerId,
@@ -797,14 +838,29 @@ object ScanSession {
             )
             _progressText.value = "COMPILING_EXPOSURE_SCORES..."
             val exposureInputDigest = ExposureCheckpointCodec.inputDigest(allFindings, digests)
-            _exposure.value = loadReusableExposureCheckpoint(
+            val exposureResumePoint = loadCheckpointPointForRecovery(
+                context = context,
+                requestId = requestId,
+                ownerId = checkpointOwnerId
+            )
+            val reusableExposure = loadReusableExposureCheckpoint(
                 context = context,
                 requestId = requestId,
                 ownerId = checkpointOwnerId,
                 planFingerprint = graphPlanFingerprint,
                 inputDigest = exposureInputDigest,
                 findings = allFindings
-            ) ?: ExposureEngine().score(allFindings, digests)
+            )
+            emitDeterministicCheckpointRecoveryDiagnostics(
+                requestId = requestId,
+                stage = ScanCheckpointStage.CompilingExposureScores,
+                checkpointAvailable = exposureResumePoint.hasCompletedCheckpoint(
+                    stage = ScanCheckpointStage.CompilingExposureScores,
+                    payloadPresent = { it.exposureCheckpoint != null }
+                ),
+                reused = reusableExposure != null
+            )
+            _exposure.value = reusableExposure ?: ExposureEngine().score(allFindings, digests)
             val exposureCheckpoint = buildExposureCheckpoint(
                 requestId = requestId,
                 ownerId = checkpointOwnerId,
@@ -892,6 +948,59 @@ object ScanSession {
         } finally {
             cache.close()
         }
+    }
+
+    /**
+     * Reads only the owner-bound durable point used to describe a later-stage
+     * recovery decision.  The stage loaders below still perform their own
+     * complete request/plan/digest validation before returning a value; this
+     * point is only used to distinguish an absent checkpoint from a present
+     * checkpoint whose current input digest no longer matches.
+     */
+    private fun loadCheckpointPointForRecovery(
+        context: Context,
+        requestId: String?,
+        ownerId: String?
+    ): ResumePoint? {
+        if (requestId == null || ownerId == null || !BackgroundScanWorker.isCanonicalUuid(requestId)) {
+            return null
+        }
+        return (runCatching {
+            ScanResumeStore(context).loadRequestDetailed(requestId)
+        }.getOrNull() as? ResumeReadState.Available)
+            ?.point
+            ?.takeIf { it.checkpointOwnerId == ownerId }
+    }
+
+    private fun ResumePoint?.hasCompletedCheckpoint(
+        stage: ScanCheckpointStage,
+        payloadPresent: (ResumePoint) -> Boolean
+    ): Boolean = this?.let { point ->
+        stage in point.completedCheckpointStages && payloadPresent(point)
+    } == true
+
+    /**
+     * Projects exact, bounded reuse/rerun accounting for one deterministic
+     * checkpoint payload.  This deliberately emits only for durable UUID
+     * requests; interactive scans have no resumable checkpoint boundary.
+     */
+    private fun emitDeterministicCheckpointRecoveryDiagnostics(
+        requestId: String?,
+        stage: ScanCheckpointStage,
+        checkpointAvailable: Boolean,
+        reused: Boolean
+    ) {
+        val scanId = requestId
+            ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
+            ?.let(::ScanId)
+            ?: return
+        ScanCoordinatorRuntime.onRecoveryDiagnostics(
+            scanId = scanId,
+            stage = stage,
+            checkpointAvailable = checkpointAvailable,
+            reusedCount = if (reused) 1 else 0,
+            rerunCount = if (reused) 0 else 1
+        )
     }
 
     /**

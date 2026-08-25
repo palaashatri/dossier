@@ -302,6 +302,22 @@ class BackgroundScanWorker(
                 planFingerprint = requestPoint.planFingerprint,
                 inputDigest = postProcessingInputDigest
             )
+            val postProcessingCheckpointAvailable =
+                ScanCheckpointStage.PostProcessing in requestPoint.completedCheckpointStages &&
+                    requestPoint.postProcessingCheckpoint != null
+            // This is a bounded, exact diagnostic for the deterministic
+            // post-processing output only. Earlier scan stages still execute
+            // on a recreated worker; a reusable analysis does not imply
+            // full-stage recovery. The envelope is already authenticated and
+            // validated by ScanResumeStore, while the digest check below
+            // decides whether this exact input can be reused.
+            ScanCoordinatorRuntime.onRecoveryDiagnostics(
+                scanId = durableScanId,
+                stage = ScanCheckpointStage.PostProcessing,
+                checkpointAvailable = postProcessingCheckpointAvailable,
+                reusedCount = if (reusableAnalysis != null) 1 else 0,
+                rerunCount = if (reusableAnalysis == null) 1 else 0
+            )
             val analysis = reusableAnalysis ?: run {
                 val baseAnalysis = OsintPostProcessor.analyze(
                     input = input,

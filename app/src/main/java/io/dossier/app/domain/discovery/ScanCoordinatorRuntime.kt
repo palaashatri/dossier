@@ -668,7 +668,18 @@ object ScanCoordinatorRuntime {
         )
         is ScanEvent.RecoveryDiagnosticsUpdated -> {
             val safeStage = ScanCheckpointStage.fromWire(event.stage)
-                ?.takeIf { it == ScanCheckpointStage.DiscoveringUsernames }
+                ?.takeIf {
+                    // Only stages with exact, owner-bound reuse accounting
+                    // are surfaced at this boundary. Face/breach and other
+                    // stage checkpoints remain internal until their own
+                    // accounting is wired end-to-end.
+                    it == ScanCheckpointStage.DiscoveringUsernames ||
+                        it == ScanCheckpointStage.BuildingEntityGraph ||
+                        it == ScanCheckpointStage.ScoringRelationshipConfidence ||
+                        it == ScanCheckpointStage.TracingAttackPaths ||
+                        it == ScanCheckpointStage.CompilingExposureScores ||
+                        it == ScanCheckpointStage.PostProcessing
+                }
                 ?: ScanCheckpointStage.Queued
             event.copy(
                 stage = safeStage.wireName,

@@ -101,6 +101,65 @@ class GraphEvidenceReconciliationTest {
     }
 
     @Test
+    fun explicitEvidenceLedgerFlagsDanglingGraphEntityIds() {
+        val legacyId = "ev:Profile:https://example.test/profile:https://example.test/profile"
+        val danglingId = "  ev2:entity-proof-missing  "
+        val graph = EntityGraph(
+            entities = listOf(
+                DossierEntity(
+                    id = "profile:alice",
+                    type = EntityType.Profile,
+                    label = "Profile",
+                    evidenceIds = listOf(legacyId, danglingId, "", danglingId)
+                )
+            )
+        )
+
+        val report = GraphEvidenceReconciliation.validate(
+            canonicalRelationships = emptyList(),
+            graph = graph,
+            evidenceRecords = listOf(
+                Evidence(
+                    id = EvidenceIdPolicy.migrate(legacyId),
+                    kind = EvidenceKind.Profile,
+                    value = "https://example.test/profile"
+                )
+            )
+        )
+
+        assertEquals(0, report.danglingGraphEvidenceIds)
+        assertEquals(1, report.danglingGraphEntityEvidenceIds)
+        assertFalse(report.isConsistent)
+        val diagnostic = report.diagnostics.single {
+            it.kind == GraphEvidenceReconciliationKind.DanglingEvidenceReference
+        }
+        assertEquals(listOf("ev2:entity-proof-missing"), diagnostic.graphEvidenceIds)
+        assertEquals(listOf("profile:alice"), diagnostic.graphEntityReferences)
+        assertTrue(diagnostic.graphEdgeReferences.isEmpty())
+    }
+
+    @Test
+    fun oversizedGraphEntityEvidenceIdsFailClosed() {
+        val graph = EntityGraph(
+            entities = listOf(
+                DossierEntity(
+                    id = "profile:oversized",
+                    type = EntityType.Profile,
+                    label = "Profile",
+                    evidenceIds = List(GraphEvidenceReconciliation.MAX_EVIDENCE_IDS_PER_DIAGNOSTIC + 1) {
+                        "ev2:entity-$it"
+                    }
+                )
+            )
+        )
+
+        val report = GraphEvidenceReconciliation.validate(emptyList(), graph)
+
+        assertFalse(report.isConsistent)
+        assertTrue(report.truncatedGraphEntityEvidenceIds > 0)
+    }
+
+    @Test
     fun explicitEvidenceLedgerMigratesLegacyIdsBeforeCheckingReferences() {
         val legacyId = "ev:Profile:Profile:https://example.test/profile"
         val migratedId = EvidenceIdPolicy.migrate(legacyId)

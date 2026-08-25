@@ -4,11 +4,15 @@ import android.content.ContextWrapper
 import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.scanner.BackgroundScanWorker
+import io.dossier.app.domain.scanner.ScanCheckpointStage
 import io.dossier.app.domain.scanner.ScanPayloadStage
 import io.dossier.app.domain.scanner.ScanPayloadSummary
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -259,6 +263,66 @@ class ScanCoordinatorRuntimeTest {
         assertEquals(event.stage, ScanCoordinatorRuntime.snapshot.value.recoveryStage)
         assertEquals(2, ScanCoordinatorRuntime.snapshot.value.recoveryReusedCount)
         assertEquals(3, ScanCoordinatorRuntime.snapshot.value.recoveryRerunCount)
+    }
+
+    @Test
+    fun `recovery diagnostics project post-processing checkpoint reuse`() = runBlocking {
+        val scanId = ScanId("post-processing-recovery-diagnostics")
+        ScanCoordinatorRuntime.resetCounts(scanId)
+        val nextEvent = async(start = CoroutineStart.UNDISPATCHED) {
+            ScanCoordinatorRuntime.events.first { it is ScanEvent.RecoveryDiagnosticsUpdated }
+        }
+
+        ScanCoordinatorRuntime.onRecoveryDiagnostics(
+            scanId = scanId,
+            stage = ScanCheckpointStage.PostProcessing,
+            checkpointAvailable = true,
+            reusedCount = 1,
+            rerunCount = 0
+        )
+
+        val event = nextEvent.await() as ScanEvent.RecoveryDiagnosticsUpdated
+        assertEquals("POST_PROCESSING", event.stage)
+        assertTrue(event.checkpointAvailable)
+        assertEquals(1, event.reusedCount)
+        assertEquals(0, event.rerunCount)
+        assertEquals(event.stage, ScanCoordinatorRuntime.snapshot.value.recoveryStage)
+        assertEquals(1, ScanCoordinatorRuntime.snapshot.value.recoveryReusedCount)
+        assertEquals(0, ScanCoordinatorRuntime.snapshot.value.recoveryRerunCount)
+    }
+
+    @Test
+    fun `recovery diagnostics allow deterministic later-stage checkpoints`() = runBlocking {
+        val scanId = ScanId("deterministic-stage-recovery-diagnostics")
+        val stages = listOf(
+            ScanCheckpointStage.BuildingEntityGraph,
+            ScanCheckpointStage.ScoringRelationshipConfidence,
+            ScanCheckpointStage.TracingAttackPaths,
+            ScanCheckpointStage.CompilingExposureScores
+        )
+        ScanCoordinatorRuntime.resetCounts(scanId)
+        val nextEvents = async(start = CoroutineStart.UNDISPATCHED) {
+            ScanCoordinatorRuntime.events
+                .filterIsInstance<ScanEvent.RecoveryDiagnosticsUpdated>()
+                .take(stages.size)
+                .toList()
+        }
+
+        stages.forEachIndexed { index, stage ->
+            ScanCoordinatorRuntime.onRecoveryDiagnostics(
+                scanId = scanId,
+                stage = stage,
+                checkpointAvailable = index % 2 == 0,
+                reusedCount = if (index % 2 == 0) 1 else 0,
+                rerunCount = if (index % 2 == 0) 0 else 1
+            )
+        }
+
+        val events = nextEvents.await()
+        assertEquals(stages.map { it.wireName }, events.map(ScanEvent.RecoveryDiagnosticsUpdated::stage))
+        assertEquals(listOf(true, false, true, false), events.map(ScanEvent.RecoveryDiagnosticsUpdated::checkpointAvailable))
+        assertEquals(listOf(1, 0, 1, 0), events.map(ScanEvent.RecoveryDiagnosticsUpdated::reusedCount))
+        assertEquals(listOf(0, 1, 0, 1), events.map(ScanEvent.RecoveryDiagnosticsUpdated::rerunCount))
     }
 
     @Test

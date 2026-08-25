@@ -29,7 +29,11 @@ data class GraphEvidenceReconciliationReport(
     /** Distinct relationship IDs that do not resolve to a persisted evidence record. */
     val danglingCanonicalEvidenceIds: Int = 0,
     /** Distinct graph-edge IDs that do not resolve to a persisted evidence record. */
-    val danglingGraphEvidenceIds: Int = 0
+    val danglingGraphEvidenceIds: Int = 0,
+    /** Distinct graph-entity IDs that do not resolve to a persisted evidence record. */
+    val danglingGraphEntityEvidenceIds: Int = 0,
+    /** Graph-entity provenance IDs omitted from the bounded comparison. */
+    val truncatedGraphEntityEvidenceIds: Int = 0
 ) {
     val isConsistent: Boolean
         get() = missingGraphEdges == 0 &&
@@ -41,7 +45,9 @@ data class GraphEvidenceReconciliationReport(
             truncatedCanonicalEvidenceIds == 0 &&
             truncatedGraphEvidenceIds == 0 &&
             danglingCanonicalEvidenceIds == 0 &&
-            danglingGraphEvidenceIds == 0
+            danglingGraphEvidenceIds == 0 &&
+            danglingGraphEntityEvidenceIds == 0 &&
+            truncatedGraphEntityEvidenceIds == 0
 }
 
 enum class GraphEvidenceReconciliationKind {
@@ -61,8 +67,10 @@ data class GraphEvidenceReconciliationDiagnostic(
     val canonicalEvidenceIds: List<String> = emptyList(),
     val graphEvidenceIds: List<String> = emptyList(),
     val graphEdgeReferences: List<String> = emptyList(),
+    val graphEntityReferences: List<String> = emptyList(),
     val truncatedCanonicalEvidenceIds: Int = 0,
     val truncatedGraphEvidenceIds: Int = 0,
+    val truncatedGraphEntityEvidenceIds: Int = 0,
     val reason: String
 )
 
@@ -119,6 +127,17 @@ object GraphEvidenceReconciliation {
         }
         val allGraphProjections = graphByKey.values.asSequence().flatten() + unresolvedEdges.asSequence()
         val truncatedGraphEvidenceIds = allGraphProjections.sumOf { it.truncatedEvidenceIds }
+        val graphEntityProjections = graph.entities.map { entity ->
+            val evidenceIds = normalizeEvidenceIds(entity.evidenceIds.asSequence())
+            GraphEntityProjection(
+                reference = entity.id,
+                normalizedEvidenceIds = evidenceIds.ids,
+                truncatedEvidenceIds = evidenceIds.truncated
+            )
+        }
+        val truncatedGraphEntityEvidenceIds = graphEntityProjections.sumOf {
+            it.truncatedEvidenceIds
+        }
 
         fun addDiagnostic(diagnostic: GraphEvidenceReconciliationDiagnostic) {
             if (diagnostics.size < MAX_DIAGNOSTICS) diagnostics += diagnostic
@@ -324,6 +343,39 @@ object GraphEvidenceReconciliation {
                 }
                 .size
         } ?: 0
+        val danglingGraphEntityEvidenceIds = evidenceLedger?.let { available ->
+            graphEntityProjections
+                .asSequence()
+                .flatMap { projection -> projection.normalizedEvidenceIds.asSequence() }
+                .filterNot(available::contains)
+                .toSet()
+                .also { missingIds ->
+                    if (missingIds.isNotEmpty()) {
+                        addDiagnostic(
+                            GraphEvidenceReconciliationDiagnostic(
+                                kind = GraphEvidenceReconciliationKind.DanglingEvidenceReference,
+                                fromValue = "[graph entity projection]",
+                                toValue = "",
+                                relation = "EVIDENCE_REFERENCE",
+                                graphEvidenceIds = missingIds.sorted()
+                                    .take(MAX_EVIDENCE_IDS_PER_DIAGNOSTIC),
+                                graphEntityReferences = graphEntityProjections
+                                    .filter { projection ->
+                                        projection.normalizedEvidenceIds.any(missingIds::contains)
+                                    }
+                                    .map(GraphEntityProjection::reference)
+                                    .distinct()
+                                    .sorted()
+                                    .take(MAX_EDGE_REFERENCES_PER_DIAGNOSTIC),
+                                truncatedGraphEntityEvidenceIds =
+                                    (missingIds.size - MAX_EVIDENCE_IDS_PER_DIAGNOSTIC).coerceAtLeast(0),
+                                reason = "graph entity evidence IDs do not resolve to persisted evidence records"
+                            )
+                        )
+                    }
+                }
+                .size
+        } ?: 0
 
         return GraphEvidenceReconciliationReport(
             matchedRelationships = matched,
@@ -337,7 +389,9 @@ object GraphEvidenceReconciliation {
             truncatedCanonicalEvidenceIds = truncatedCanonicalEvidenceIds,
             truncatedGraphEvidenceIds = truncatedGraphEvidenceIds,
             danglingCanonicalEvidenceIds = danglingCanonicalEvidenceIds,
-            danglingGraphEvidenceIds = danglingGraphEvidenceIds
+            danglingGraphEvidenceIds = danglingGraphEvidenceIds,
+            danglingGraphEntityEvidenceIds = danglingGraphEntityEvidenceIds,
+            truncatedGraphEntityEvidenceIds = truncatedGraphEntityEvidenceIds
         )
     }
 
@@ -357,8 +411,10 @@ object GraphEvidenceReconciliation {
         canonicalEvidenceIds: List<String> = emptyList(),
         graphEvidenceIds: List<String> = emptyList(),
         graphEdgeReferences: List<String> = emptyList(),
+        graphEntityReferences: List<String> = emptyList(),
         truncatedCanonicalEvidenceIds: Int = 0,
         truncatedGraphEvidenceIds: Int = 0,
+        truncatedGraphEntityEvidenceIds: Int = 0,
         reason: String
     ): GraphEvidenceReconciliationDiagnostic = GraphEvidenceReconciliationDiagnostic(
         kind = kind,
@@ -368,8 +424,10 @@ object GraphEvidenceReconciliation {
         canonicalEvidenceIds = canonicalEvidenceIds,
         graphEvidenceIds = graphEvidenceIds,
         graphEdgeReferences = graphEdgeReferences,
+        graphEntityReferences = graphEntityReferences,
         truncatedCanonicalEvidenceIds = truncatedCanonicalEvidenceIds,
         truncatedGraphEvidenceIds = truncatedGraphEvidenceIds,
+        truncatedGraphEntityEvidenceIds = truncatedGraphEntityEvidenceIds,
         reason = reason
     )
 
@@ -397,6 +455,12 @@ object GraphEvidenceReconciliation {
         val reference: String
     ) {
     }
+
+    private data class GraphEntityProjection(
+        val reference: String,
+        val normalizedEvidenceIds: List<String>,
+        val truncatedEvidenceIds: Int
+    )
 
     private data class BoundedEvidenceIds(
         val ids: List<String>,
