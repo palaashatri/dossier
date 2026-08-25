@@ -31,6 +31,7 @@ import io.dossier.app.domain.evidence.RelationshipConfidence
 import io.dossier.app.domain.evidence.SharedDomainContributor
 import io.dossier.app.domain.evidence.SharedIdentifierContributor
 import io.dossier.app.domain.evidence.UsernameSimilarityContributor
+import io.dossier.app.domain.evidence.withResolvedRelationshipEvidence
 import io.dossier.app.domain.evidence.runPlugins
 import io.dossier.app.domain.face.FaceConsistencyChecker
 import io.dossier.app.domain.face.FaceEmbeddingService
@@ -937,7 +938,7 @@ object ScanSession {
             relationships = EvidenceRelationshipPolicy.normalize(
                 scannerEvidence.relationships + pluginCollection.relationships
             )
-        )
+        ).withResolvedRelationshipEvidence()
     }
 
     internal fun buildAiAnalysisSnapshot(

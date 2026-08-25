@@ -183,10 +183,11 @@ object EvidenceRelationshipPolicy {
  * Resolves relationship provenance without inventing evidence.
  *
  * A relationship may arrive from a legacy producer with only endpoint values
- * and a human-readable description. When an evidence record exactly matches
- * either endpoint, the record's value/source URL, or an evidence description
- * that is itself an exact source/value, it is safe to attach that existing ID.
- * No fuzzy matching, provider inference, or new evidence is created here.
+ * and a human-readable description. When exactly one evidence record matches
+ * an endpoint, the record's value/source URL, or an evidence description that
+ * is itself an exact source/value, this attaches that existing ID. Ambiguous
+ * exact matches remain unresolved. No fuzzy matching, provider inference, or
+ * new evidence is created here.
  */
 fun EvidenceCollection.withResolvedRelationshipEvidence(): EvidenceCollection {
     if (relationships.isEmpty() || evidence.isEmpty()) return this
@@ -196,20 +197,31 @@ fun EvidenceCollection.withResolvedRelationshipEvidence(): EvidenceCollection {
             relationship.fromValue,
             relationship.toValue,
             relationship.evidence
-        ).map(::provenanceKey).filter(String::isNotBlank).toSet()
+        ).map(::provenanceKey).filter(String::isNotBlank).distinct()
 
-        val inferredIds = if (exactKeys.isEmpty()) {
-            emptyList()
-        } else {
-            evidence.asSequence()
-                .filter { record ->
-                    provenanceKey(record.id) in exactKeys ||
-                        provenanceKey(record.value) in exactKeys ||
-                        provenanceKey(record.sourceUrl) in exactKeys
-                }
-                .map(Evidence::id)
-                .toList()
-        }
+        /*
+         * Resolve each exact key independently. A URL/value can legitimately
+         * occur on more than one evidence record (for example a profile record
+         * and an extracted attribute sharing a source URL); attaching every
+         * matching ID would silently turn an ambiguous legacy assertion into a
+         * broad graph claim. Keep such a key unresolved and preserve only IDs
+         * that the producer supplied explicitly. This is deliberately exact and
+         * read-only: it never creates an Evidence record or guesses a provider.
+         */
+        val inferredIds = exactKeys.asSequence()
+            .mapNotNull { exactKey ->
+                val matchingIds = evidence.asSequence()
+                    .filter { record ->
+                        provenanceKey(record.id) == exactKey ||
+                            provenanceKey(record.value) == exactKey ||
+                            provenanceKey(record.sourceUrl) == exactKey
+                    }
+                    .map(Evidence::id)
+                    .distinct()
+                    .toList()
+                matchingIds.singleOrNull()
+            }
+            .toList()
 
         relationship.copy(
             evidenceIds = (relationship.evidenceIds + inferredIds)

@@ -199,6 +199,8 @@ class WaybackHistoryPluginTest {
         )
 
         val snapshot = result.evidence.first { it.providerId == "wayback-snapshot" && it.attributeKind == null }
+        val archivedRelationship = result.relationships.single { it.relation == "ARCHIVED_AS" }
+        assertEquals(listOf(snapshot.id), archivedRelationship.evidenceIds)
         val attributes = result.evidence.filter { it.attributeKind != null }
         assertTrue(attributes.isNotEmpty())
         assertTrue(attributes.any { it.attributeKind == HistoricalAttributeKind.DisplayName && it.value == "Archived Alice" })

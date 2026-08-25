@@ -171,6 +171,77 @@ class ScanSessionRestoreTest {
     }
 
     @Test
+    fun buildEvidenceSnapshotPersistsExactLegacyRelationshipProvenance() {
+        val snapshotUrl = "https://web.archive.org/web/20240102030405id_/https://example.test/profile"
+        val archivedEvidence = Evidence(
+            id = "wayback:snapshot-1",
+            kind = EvidenceKind.PublicSearchEvidence,
+            value = snapshotUrl,
+            sourceUrl = snapshotUrl,
+            state = io.dossier.app.domain.evidence.EvidenceState.Verified
+        )
+
+        val snapshot = ScanSession.buildEvidenceSnapshot(
+            input = IdentityInput(fullName = "Authorized subject"),
+            profileResults = emptyList(),
+            pluginCollection = EvidenceCollection(
+                evidence = listOf(archivedEvidence),
+                relationships = listOf(
+                    EvidenceRelationship(
+                        fromValue = "https://example.test/profile",
+                        toValue = snapshotUrl,
+                        relation = "ARCHIVED_AS",
+                        evidence = "legacy archive assertion"
+                    )
+                )
+            ),
+            findings = emptyList()
+        )
+
+        assertEquals(listOf(archivedEvidence), snapshot.evidence.filter { it.id == archivedEvidence.id })
+        assertEquals(listOf(archivedEvidence.id), snapshot.relationships.single().evidenceIds)
+    }
+
+    @Test
+    fun buildEvidenceSnapshotLeavesAmbiguousExactRelationshipIdless() {
+        val sourceUrl = "https://web.archive.org/web/20240102030405id_/https://example.test/profile"
+        val records = listOf(
+            Evidence(
+                id = "wayback:snapshot-1",
+                kind = EvidenceKind.PublicSearchEvidence,
+                value = sourceUrl,
+                sourceUrl = sourceUrl
+            ),
+            Evidence(
+                id = "wayback:attribute-1",
+                kind = EvidenceKind.Profile,
+                value = "Archived name",
+                sourceUrl = sourceUrl
+            )
+        )
+
+        val snapshot = ScanSession.buildEvidenceSnapshot(
+            input = IdentityInput(fullName = "Authorized subject"),
+            profileResults = emptyList(),
+            pluginCollection = EvidenceCollection(
+                evidence = records,
+                relationships = listOf(
+                    EvidenceRelationship(
+                        fromValue = "https://example.test/profile",
+                        toValue = sourceUrl,
+                        relation = "ARCHIVED_AS",
+                        evidence = "legacy archive assertion"
+                    )
+                )
+            ),
+            findings = emptyList()
+        )
+
+        assertTrue(snapshot.relationships.single().evidenceIds.isEmpty())
+        assertEquals(records, snapshot.evidence.filter { it.id.startsWith("wayback:") })
+    }
+
+    @Test
     fun buildAndRestorePreserveCanonicalRelationshipEvidence() {
         val input = IdentityInput(fullName = "Authorized subject")
         val snapshot = ScanSession.buildEvidenceSnapshot(

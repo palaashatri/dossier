@@ -70,8 +70,9 @@ class WaybackHistoryPlugin(
                     val now = System.currentTimeMillis()
                     val observedTimestamp = timestampMillis(capture.timestamp)
 
+                    val snapshotEvidenceId = "wayback:${sha256("$originalUrl|${capture.timestamp}|${capture.digest}").take(32)}"
                     evidence += Evidence(
-                        id = "wayback:${sha256("$originalUrl|${capture.timestamp}|${capture.digest}").take(32)}",
+                        id = snapshotEvidenceId,
                         kind = EvidenceKind.PublicSearchEvidence,
                         value = snapshotUrl,
                         sourceUrl = snapshotUrl,
@@ -98,7 +99,8 @@ class WaybackHistoryPlugin(
                         fromValue = originalUrl,
                         toValue = snapshotUrl,
                         relation = "ARCHIVED_AS",
-                        evidence = "Wayback capture ${ArchivePageResolver.displayTimestamp(capture.timestamp)}"
+                        evidence = "Wayback capture ${ArchivePageResolver.displayTimestamp(capture.timestamp)}",
+                        evidenceIds = listOf(snapshotEvidenceId)
                     )
 
                     if (fetched != null) {
