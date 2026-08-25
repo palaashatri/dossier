@@ -56,8 +56,10 @@ import io.dossier.app.domain.case.EffectiveCaseProjection
 import io.dossier.app.domain.case.UserCorrection
 import io.dossier.app.domain.case.UserCorrectionDecision
 import io.dossier.app.domain.evidence.AttackPathFinder
+import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.ExposureEngine
+import io.dossier.app.domain.evidence.persistedEvidenceId
 import io.dossier.app.domain.evidence.toEvidence
 import io.dossier.app.domain.discovery.ScanHistoryRuntime
 import io.dossier.app.domain.model.BreachDigest
@@ -312,16 +314,20 @@ fun ReportScreen(
                 ReportView.Evidence -> EvidenceReport(
                     modifier = Modifier.weight(1f),
                     findings = findings,
-                    profileResults = reportProfileResults,
+                    // Keep the raw profile observations in the correction view so a
+                    // rejected/ignored card remains available for an explicit review
+                    // decision. Overview/scoring still use the effective projection.
+                    profileResults = profileResults,
+                    evidenceRecords = evidenceCollection.evidence,
                     faceMatches = faceMatches,
                     breachDigests = breachDigests,
                     onNavigateToBrowser = onNavigateToBrowser,
                     draftCorrections = draftCorrectionByEvidence,
                     draftCorrectionMessage = draftCorrectionMessage,
-                    onDraftCorrection = { finding, decision ->
+                    onDraftCorrection = { evidenceId, decision ->
                         val accepted = ScanSession.recordDraftCorrection(
                             UserCorrection(
-                                evidenceId = finding.toEvidence().id,
+                                evidenceId = evidenceId,
                                 decision = decision,
                                 createdAtUtc = Instant.now().toString()
                             )
@@ -530,12 +536,13 @@ private fun EvidenceReport(
     modifier: Modifier,
     findings: List<Finding>,
     profileResults: List<ProfileScanResult>,
+    evidenceRecords: List<Evidence>,
     faceMatches: List<FaceConsistencyMatch>,
     breachDigests: List<BreachDigest>,
     onNavigateToBrowser: (String) -> Unit,
     draftCorrections: Map<String, UserCorrection>,
     draftCorrectionMessage: String?,
-    onDraftCorrection: (Finding, UserCorrectionDecision) -> Unit
+    onDraftCorrection: (String, UserCorrectionDecision) -> Unit
 ) {
     LazyColumn(
         modifier = modifier.fillMaxWidth(),
@@ -566,7 +573,9 @@ private fun EvidenceReport(
                     finding = finding,
                     onNavigateToBrowser = onNavigateToBrowser,
                     currentCorrection = draftCorrections[finding.toEvidence().id]?.decision,
-                    onDraftCorrection = { decision -> onDraftCorrection(finding, decision) }
+                    onDraftCorrection = { decision ->
+                        onDraftCorrection(finding.toEvidence().id, decision)
+                    }
                 )
             }
         }
@@ -576,7 +585,16 @@ private fun EvidenceReport(
             item { NoticeCard("No profile checks were recorded.", NeuralTheme.TextSecondary) }
         } else {
             items(profileResults, key = { it.candidate.url }) { result ->
-                ProfileEvidenceCard(result, onNavigateToBrowser)
+                val evidenceId = result.persistedEvidenceId(evidenceRecords)
+                ProfileEvidenceCard(
+                    result = result,
+                    onNavigateToBrowser = onNavigateToBrowser,
+                    evidenceId = evidenceId,
+                    currentCorrection = evidenceId?.let(draftCorrections::get)?.decision,
+                    onDraftCorrection = evidenceId?.let { id ->
+                        { decision -> onDraftCorrection(id, decision) }
+                    }
+                )
             }
         }
 
@@ -872,7 +890,8 @@ private fun FindingCard(
             }
             DraftCorrectionRow(
                 current = currentCorrection,
-                onDecision = onDraftCorrection
+                onDecision = onDraftCorrection,
+                targetLabel = "evidence"
             )
         }
     }
@@ -881,7 +900,8 @@ private fun FindingCard(
 @Composable
 private fun DraftCorrectionRow(
     current: UserCorrectionDecision?,
-    onDecision: (UserCorrectionDecision) -> Unit
+    onDecision: (UserCorrectionDecision) -> Unit,
+    targetLabel: String
 ) {
     Column(
         modifier = Modifier
@@ -890,7 +910,7 @@ private fun DraftCorrectionRow(
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Text(
-            "Draft evidence decision · not saved",
+            "Draft $targetLabel decision · not saved",
             color = NeuralTheme.TextSecondary,
             fontSize = 10.5.sp,
             fontWeight = FontWeight.SemiBold
@@ -904,6 +924,7 @@ private fun DraftCorrectionRow(
                 decision = UserCorrectionDecision.ThisIsMe,
                 selected = current == UserCorrectionDecision.ThisIsMe,
                 modifier = Modifier.weight(1f),
+                targetLabel = targetLabel,
                 onClick = onDecision
             )
             DraftCorrectionButton(
@@ -911,6 +932,7 @@ private fun DraftCorrectionRow(
                 decision = UserCorrectionDecision.ThisIsNotMe,
                 selected = current == UserCorrectionDecision.ThisIsNotMe,
                 modifier = Modifier.weight(1f),
+                targetLabel = targetLabel,
                 onClick = onDecision
             )
         }
@@ -923,6 +945,7 @@ private fun DraftCorrectionRow(
                 decision = UserCorrectionDecision.Unsure,
                 selected = current == UserCorrectionDecision.Unsure,
                 modifier = Modifier.weight(1f),
+                targetLabel = targetLabel,
                 onClick = onDecision
             )
             DraftCorrectionButton(
@@ -930,6 +953,7 @@ private fun DraftCorrectionRow(
                 decision = UserCorrectionDecision.IgnoreEvidence,
                 selected = current == UserCorrectionDecision.IgnoreEvidence,
                 modifier = Modifier.weight(1f),
+                targetLabel = targetLabel,
                 onClick = onDecision
             )
         }
@@ -942,6 +966,7 @@ private fun DraftCorrectionButton(
     decision: UserCorrectionDecision,
     selected: Boolean,
     modifier: Modifier,
+    targetLabel: String,
     onClick: (UserCorrectionDecision) -> Unit
 ) {
     OutlinedButton(
@@ -949,7 +974,7 @@ private fun DraftCorrectionButton(
         modifier = modifier
             .heightIn(min = 48.dp)
             .semantics {
-                contentDescription = "$label evidence correction"
+                contentDescription = "$label $targetLabel correction"
                 stateDescription = if (selected) "Selected" else "Not selected"
             },
         colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cobalt)
@@ -966,7 +991,13 @@ private fun UserCorrectionDecision.draftLabel(): String = when (this) {
 }
 
 @Composable
-private fun ProfileEvidenceCard(result: ProfileScanResult, onNavigateToBrowser: (String) -> Unit) {
+private fun ProfileEvidenceCard(
+    result: ProfileScanResult,
+    onNavigateToBrowser: (String) -> Unit,
+    evidenceId: String?,
+    currentCorrection: UserCorrectionDecision?,
+    onDraftCorrection: ((UserCorrectionDecision) -> Unit)?
+) {
     val statusColor = when {
         result.exists && result.verified -> NeuralTheme.Emerald
         result.exists -> NeuralTheme.Amber
@@ -1003,6 +1034,30 @@ private fun ProfileEvidenceCard(result: ProfileScanResult, onNavigateToBrowser: 
         }
         result.provenance?.let {
             Text("Provenance: $it", color = NeuralTheme.TextSecondary, fontSize = 10.5.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+        if (onDraftCorrection != null) {
+            currentCorrection?.let { decision ->
+                Text(
+                    "Draft decision: ${decision.draftLabel()}. Raw profile evidence remains retained until encrypted case save.",
+                    color = NeuralTheme.Amber,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+            DraftCorrectionRow(
+                current = currentCorrection,
+                onDecision = onDraftCorrection,
+                targetLabel = "profile"
+            )
+        } else if (evidenceId == null) {
+            Text(
+                "Correction unavailable: no unique persisted profile evidence record was found.",
+                color = NeuralTheme.TextMuted,
+                fontSize = 10.5.sp,
+                lineHeight = 14.sp,
+                modifier = Modifier.padding(top = 8.dp)
+            )
         }
     }
 }
