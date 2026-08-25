@@ -5,6 +5,8 @@ import io.dossier.app.domain.model.ProfileScanResult
 import java.security.MessageDigest
 import kotlinx.serialization.Serializable
 
+private val SHA256_PATTERN = Regex("[a-fA-F0-9]{64}")
+
 /**
  * The label attached to a benchmark case.  UNVERIFIABLE cases are kept out of
  * the labelled-positive/labelled-negative error rates, but their unsafe
@@ -37,7 +39,16 @@ data class EntityResolutionBenchmarkCorpus(
     val kind: EntityResolutionCorpusKind,
     val generatorVersion: String,
     val deterministicSeed: Long,
-    val cases: List<EntityResolutionBenchmarkCase>
+    val cases: List<EntityResolutionBenchmarkCase>,
+    /**
+     * Regression fixtures are never eligible to change production policy.
+     * Only an explicitly declared held-out evaluation can be considered for
+     * calibration, and its provenance is still an attestation rather than
+     * independent proof of consent or identity-disjoint sampling.
+     */
+    val evaluationSplit: EntityResolutionEvaluationSplit = EntityResolutionEvaluationSplit.REGRESSION,
+    val trainingCorpusDigest: String? = null,
+    val authorizationRecordDigest: String? = null
 ) {
     init {
         require(corpusId.isNotBlank()) { "Benchmark corpusId is required." }
@@ -46,6 +57,41 @@ data class EntityResolutionBenchmarkCorpus(
         require(cases.isNotEmpty()) { "Benchmark corpus must contain at least one case." }
         require(cases.map { it.id }.distinct().size == cases.size) {
             "Benchmark case IDs must be unique."
+        }
+        require(trainingCorpusDigest == null || trainingCorpusDigest.matches(SHA256_PATTERN)) {
+            "Benchmark trainingCorpusDigest must be SHA-256 when supplied."
+        }
+        require(authorizationRecordDigest == null || authorizationRecordDigest.matches(SHA256_PATTERN)) {
+            "Benchmark authorizationRecordDigest must be SHA-256 when supplied."
+        }
+        when (kind) {
+            EntityResolutionCorpusKind.SYNTHETIC -> {
+                require(evaluationSplit == EntityResolutionEvaluationSplit.REGRESSION) {
+                    "Synthetic corpora cannot be declared as held-out calibration data."
+                }
+                require(authorizationRecordDigest == null) {
+                    "Synthetic corpora must not carry consent authorization metadata."
+                }
+            }
+
+            EntityResolutionCorpusKind.CONSENTED -> require(authorizationRecordDigest != null) {
+                "Consented corpora require an authorization-record digest."
+            }
+        }
+        if (evaluationSplit == EntityResolutionEvaluationSplit.HELD_OUT) {
+            require(kind == EntityResolutionCorpusKind.CONSENTED) {
+                "Held-out calibration data must be consented or legally distributable."
+            }
+            require(trainingCorpusDigest != null) {
+                "Held-out calibration data must identify the training corpus digest."
+            }
+            require(!trainingCorpusDigest.equals(digest, ignoreCase = true)) {
+                "Held-out calibration data must not reuse its own corpus digest as training data."
+            }
+        } else {
+            require(trainingCorpusDigest == null) {
+                "Regression corpora must not declare a training corpus digest."
+            }
         }
     }
 
@@ -60,6 +106,15 @@ enum class EntityResolutionCorpusKind {
 
     /** Consented/appropriately licensed fixtures may be eligible after minimum-size checks. */
     CONSENTED
+}
+
+@Serializable
+enum class EntityResolutionEvaluationSplit {
+    /** Regression-only metrics; never eligible to change production policy. */
+    REGRESSION,
+
+    /** Declared held-out evaluation data for a separately fitted policy. */
+    HELD_OUT
 }
 
 @Serializable
@@ -192,6 +247,9 @@ object EntityResolutionBenchmark {
             appendField(corpus.kind.name)
             appendField(corpus.generatorVersion)
             appendField(corpus.deterministicSeed)
+            appendField(corpus.evaluationSplit.name)
+            appendField(corpus.trainingCorpusDigest)
+            appendField(corpus.authorizationRecordDigest)
             append('\n')
             corpus.cases.sortedBy { it.id }.forEach { testCase ->
                 appendField(testCase.id)

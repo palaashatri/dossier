@@ -7,6 +7,7 @@ import io.dossier.app.domain.identity.EntityResolutionCalibrationArtifact
 import io.dossier.app.domain.identity.EntityResolutionCalibrationLoadResult
 import io.dossier.app.domain.identity.EntityResolutionCalibrationLoader
 import io.dossier.app.domain.identity.EntityResolutionCorpusKind
+import io.dossier.app.domain.identity.EntityResolutionEvaluationSplit
 import io.dossier.app.domain.identity.EntityResolutionPolicy
 import io.dossier.app.domain.identity.EntityResolverV2
 import io.dossier.app.domain.identity.ResolutionBand
@@ -17,11 +18,15 @@ import io.dossier.app.domain.model.UsernameCandidate
 import io.dossier.app.domain.model.UsernameMatchType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class EntityResolutionBenchmarkTest {
+    private val trainingDigest = "f".repeat(64)
+    private val authorizationDigest = "e".repeat(64)
+
     @Test
     fun syntheticCorpusIsDeterministicAndReportsIndependentErrorRates() {
         val corpus = EntityResolutionBenchmarkFixtures.syntheticCorpus()
@@ -63,6 +68,22 @@ class EntityResolutionBenchmarkTest {
         assertTrue(evaluation.metrics.unverifiableAccuracy in 0.0..1.0)
         // Synthetic fixture results are regression evidence, not a scientific estimate.
         assertEquals(EntityResolutionCorpusKind.SYNTHETIC, corpus.kind)
+    }
+
+    @Test
+    fun corpusDigestBindsHeldOutAndAuthorizationMetadata() {
+        val regression = EntityResolutionBenchmarkFixtures.syntheticCorpus()
+        val heldOut = regression.copy(
+            kind = EntityResolutionCorpusKind.CONSENTED,
+            evaluationSplit = EntityResolutionEvaluationSplit.HELD_OUT,
+            trainingCorpusDigest = trainingDigest,
+            authorizationRecordDigest = authorizationDigest
+        )
+
+        assertNotEquals(regression.digest, heldOut.digest)
+        assertEquals(EntityResolutionEvaluationSplit.HELD_OUT, heldOut.evaluationSplit)
+        assertEquals(trainingDigest, heldOut.trainingCorpusDigest)
+        assertEquals(authorizationDigest, heldOut.authorizationRecordDigest)
     }
 
     @Test
@@ -134,11 +155,25 @@ class EntityResolutionBenchmarkTest {
                 mediumScore = 0.95,
                 highScore = 0.95
             ),
-            source = "consented-holdout-fixture"
+            source = "consented-holdout-fixture",
+            evaluationSplit = EntityResolutionEvaluationSplit.HELD_OUT,
+            trainingCorpusDigest = trainingDigest,
+            authorizationRecordDigest = authorizationDigest
         )
-        val loaded = EntityResolutionCalibrationLoader.loadOrNull(artifact.toJson(), artifact.corpusDigest)
+        val loaded = EntityResolutionCalibrationLoader.loadOrNull(
+            artifact.toJson(),
+            artifact.corpusDigest,
+            trainingDigest,
+            authorizationDigest
+        )
         assertNotNull(loaded)
-        assertNotNull(loaded!!.productionPolicyOrNull(artifact.corpusDigest))
+        assertNotNull(
+            loaded!!.productionPolicyOrNull(
+                artifact.corpusDigest,
+                trainingDigest,
+                authorizationDigest
+            )
+        )
 
         val input = IdentityInput(
             fullName = "Jane Example",
@@ -161,9 +196,85 @@ class EntityResolutionBenchmarkTest {
                 input,
                 profile,
                 loaded,
-                expectedCorpusDigest = artifact.corpusDigest
+                expectedCorpusDigest = artifact.corpusDigest,
+                expectedTrainingCorpusDigest = trainingDigest,
+                expectedAuthorizationRecordDigest = authorizationDigest
             ).band
         )
+    }
+
+    @Test
+    fun consentedRegressionArtifactCannotActivateProductionPolicy() {
+        val artifact = EntityResolutionCalibrationArtifact(
+            schemaVersion = EntityResolutionCalibrationArtifact.SCHEMA_VERSION,
+            resolverVersion = EntityResolverV2.RESOLVER_VERSION,
+            benchmarkVersion = EntityResolutionBenchmark.BENCHMARK_VERSION,
+            corpusId = "consented-regression-fixture",
+            corpusVersion = "2026-08-24",
+            corpusKind = EntityResolutionCorpusKind.CONSENTED,
+            corpusDigest = "a".repeat(64),
+            deterministicSeed = 8L,
+            sampleCount = 200,
+            positiveCaseCount = 100,
+            negativeCaseCount = 100,
+            unverifiableCaseCount = 0,
+            metrics = EntityResolutionBenchmarkMetrics(100, 0, 0, 100, 0, 0, 200),
+            policy = EntityResolutionPolicy.DEFAULT,
+            source = "consented-regression-fixture",
+            authorizationRecordDigest = authorizationDigest
+        )
+
+        assertNull(
+            artifact.productionPolicyOrNull(
+                expectedCorpusDigest = artifact.corpusDigest,
+                expectedAuthorizationRecordDigest = authorizationDigest
+            )
+        )
+    }
+
+    @Test
+    fun calibrationLoaderBindsHeldOutProvenanceDigests() {
+        val artifact = EntityResolutionCalibrationArtifact(
+            schemaVersion = EntityResolutionCalibrationArtifact.SCHEMA_VERSION,
+            resolverVersion = EntityResolverV2.RESOLVER_VERSION,
+            benchmarkVersion = EntityResolutionBenchmark.BENCHMARK_VERSION,
+            corpusId = "consented-fixture",
+            corpusVersion = "2026-08-24",
+            corpusKind = EntityResolutionCorpusKind.CONSENTED,
+            corpusDigest = "a".repeat(64),
+            deterministicSeed = 9L,
+            sampleCount = 200,
+            positiveCaseCount = 100,
+            negativeCaseCount = 100,
+            unverifiableCaseCount = 0,
+            metrics = EntityResolutionBenchmarkMetrics(100, 0, 0, 100, 0, 0, 200),
+            policy = EntityResolutionPolicy.DEFAULT,
+            source = "consented-holdout-fixture",
+            evaluationSplit = EntityResolutionEvaluationSplit.HELD_OUT,
+            trainingCorpusDigest = trainingDigest,
+            authorizationRecordDigest = authorizationDigest
+        )
+
+        val wrongTraining = EntityResolutionCalibrationLoader.load(
+            artifact.toJson(),
+            expectedCorpusDigest = artifact.corpusDigest,
+            expectedTrainingCorpusDigest = "d".repeat(64),
+            expectedAuthorizationRecordDigest = authorizationDigest
+        )
+        val wrongAuthorization = EntityResolutionCalibrationLoader.load(
+            artifact.toJson(),
+            expectedCorpusDigest = artifact.corpusDigest,
+            expectedTrainingCorpusDigest = trainingDigest,
+            expectedAuthorizationRecordDigest = "c".repeat(64)
+        )
+        val missingProvenance = EntityResolutionCalibrationLoader.load(
+            artifact.toJson(),
+            expectedCorpusDigest = artifact.corpusDigest
+        )
+
+        assertTrue(wrongTraining is EntityResolutionCalibrationLoadResult.Rejected)
+        assertTrue(wrongAuthorization is EntityResolutionCalibrationLoadResult.Rejected)
+        assertTrue(missingProvenance is EntityResolutionCalibrationLoadResult.Rejected)
     }
 
     @Test
@@ -183,12 +294,17 @@ class EntityResolutionBenchmarkTest {
             unverifiableCaseCount = 0,
             metrics = EntityResolutionBenchmarkMetrics(100, 0, 0, 100, 0, 0, 200),
             policy = EntityResolutionPolicy.DEFAULT,
-            source = "consented-fixture"
+            source = "consented-fixture",
+            evaluationSplit = EntityResolutionEvaluationSplit.HELD_OUT,
+            trainingCorpusDigest = trainingDigest,
+            authorizationRecordDigest = authorizationDigest
         )
 
         val wrongDigest = EntityResolutionCalibrationLoader.load(
             artifact.toJson(),
-            expectedCorpusDigest = "c".repeat(64)
+            expectedCorpusDigest = "c".repeat(64),
+            expectedTrainingCorpusDigest = trainingDigest,
+            expectedAuthorizationRecordDigest = authorizationDigest
         )
         assertTrue(wrongDigest is EntityResolutionCalibrationLoadResult.Rejected)
 
@@ -198,6 +314,13 @@ class EntityResolutionBenchmarkTest {
         )
         val wrongVersion = EntityResolutionCalibrationLoader.load(wrongVersionJson)
         assertTrue(wrongVersion is EntityResolutionCalibrationLoadResult.Rejected)
+
+        val legacySchemaJson = artifact.toJson().replace(
+            "\"schemaVersion\":${EntityResolutionCalibrationArtifact.SCHEMA_VERSION}",
+            "\"schemaVersion\":1"
+        )
+        val legacySchema = EntityResolutionCalibrationLoader.load(legacySchemaJson)
+        assertTrue(legacySchema is EntityResolutionCalibrationLoadResult.Rejected)
     }
 
     private fun profile(

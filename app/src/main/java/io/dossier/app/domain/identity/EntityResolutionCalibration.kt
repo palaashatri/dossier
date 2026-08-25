@@ -73,7 +73,12 @@ data class EntityResolutionCalibrationArtifact(
     val unverifiableCaseCount: Int,
     val metrics: EntityResolutionBenchmarkMetrics,
     val policy: EntityResolutionPolicy,
-    val source: String
+    val source: String,
+    /** Metadata required to prove that production metrics were evaluated on held-out data. */
+    val evaluationSplit: EntityResolutionEvaluationSplit = EntityResolutionEvaluationSplit.REGRESSION,
+    val trainingCorpusDigest: String? = null,
+    /** Digest of the external consent/legal-distribution record, not the record itself. */
+    val authorizationRecordDigest: String? = null
 ) {
     init {
         require(schemaVersion == SCHEMA_VERSION) { "Unsupported resolver calibration schema." }
@@ -101,18 +106,64 @@ data class EntityResolutionCalibrationArtifact(
             "Calibration unverifiable metrics do not match unverifiableCaseCount."
         }
         require(source.isNotBlank()) { "Calibration source is required." }
+        require(trainingCorpusDigest == null || trainingCorpusDigest.matches(SHA256_PATTERN)) {
+            "Calibration trainingCorpusDigest must be SHA-256 when supplied."
+        }
+        require(authorizationRecordDigest == null || authorizationRecordDigest.matches(SHA256_PATTERN)) {
+            "Calibration authorizationRecordDigest must be SHA-256 when supplied."
+        }
+        when (corpusKind) {
+            EntityResolutionCorpusKind.SYNTHETIC -> {
+                require(evaluationSplit == EntityResolutionEvaluationSplit.REGRESSION) {
+                    "Synthetic calibration artifacts cannot be declared held-out."
+                }
+                require(trainingCorpusDigest == null && authorizationRecordDigest == null) {
+                    "Synthetic calibration artifacts must not carry consent provenance."
+                }
+            }
+
+            EntityResolutionCorpusKind.CONSENTED -> require(authorizationRecordDigest != null) {
+                "Consented calibration artifacts require an authorization-record digest."
+            }
+        }
+        if (evaluationSplit == EntityResolutionEvaluationSplit.HELD_OUT) {
+            require(corpusKind == EntityResolutionCorpusKind.CONSENTED) {
+                "Held-out calibration artifacts must be consented or legally distributable."
+            }
+            require(trainingCorpusDigest != null) {
+                "Held-out calibration artifacts must identify the training corpus digest."
+            }
+            require(!trainingCorpusDigest.equals(corpusDigest, ignoreCase = true)) {
+                "Held-out calibration data must not reuse its own corpus digest as training data."
+            }
+        } else {
+            require(trainingCorpusDigest == null) {
+                "Regression calibration artifacts must not declare a training corpus digest."
+            }
+        }
     }
 
     /**
      * Synthetic data is accepted for regression reporting, but only a sizeable
      * consented corpus may alter production thresholds.
      */
-    fun productionPolicyOrNull(expectedCorpusDigest: String? = null): EntityResolutionPolicy? {
+    fun productionPolicyOrNull(
+        expectedCorpusDigest: String? = null,
+        expectedTrainingCorpusDigest: String? = null,
+        expectedAuthorizationRecordDigest: String? = null
+    ): EntityResolutionPolicy? {
         if (corpusKind != EntityResolutionCorpusKind.CONSENTED) return null
+        if (evaluationSplit != EntityResolutionEvaluationSplit.HELD_OUT) return null
         if (positiveCaseCount < MIN_CONSENTED_POSITIVE_CASES) return null
         if (negativeCaseCount < MIN_CONSENTED_NEGATIVE_CASES) return null
         if (expectedCorpusDigest == null ||
             !corpusDigest.equals(expectedCorpusDigest, ignoreCase = true)
+        ) return null
+        if (trainingCorpusDigest == null || expectedTrainingCorpusDigest == null ||
+            !trainingCorpusDigest.equals(expectedTrainingCorpusDigest, ignoreCase = true)
+        ) return null
+        if (authorizationRecordDigest == null || expectedAuthorizationRecordDigest == null ||
+            !authorizationRecordDigest.equals(expectedAuthorizationRecordDigest, ignoreCase = true)
         ) return null
         if (metrics.truePositives + metrics.falseNegatives != positiveCaseCount) return null
         if (metrics.trueNegatives + metrics.falsePositives != negativeCaseCount) return null
@@ -123,7 +174,7 @@ data class EntityResolutionCalibrationArtifact(
     fun toJson(): String = CALIBRATION_JSON.encodeToString(this)
 
     companion object {
-        const val SCHEMA_VERSION = 1
+        const val SCHEMA_VERSION = 2
         const val MIN_CONSENTED_POSITIVE_CASES = 100
         const val MIN_CONSENTED_NEGATIVE_CASES = 100
         private val SHA256_PATTERN = Regex("[a-fA-F0-9]{64}")
@@ -152,7 +203,10 @@ data class EntityResolutionCalibrationArtifact(
                 unverifiableCaseCount = unverifiable,
                 metrics = metrics,
                 policy = policy,
-                source = source
+                source = source,
+                evaluationSplit = evaluation.corpus.evaluationSplit,
+                trainingCorpusDigest = evaluation.corpus.trainingCorpusDigest,
+                authorizationRecordDigest = evaluation.corpus.authorizationRecordDigest
             )
         }
     }
@@ -169,18 +223,54 @@ object EntityResolutionCalibrationLoader {
 
     fun load(
         serialized: String,
-        expectedCorpusDigest: String? = null
+        expectedCorpusDigest: String? = null,
+        expectedTrainingCorpusDigest: String? = null,
+        expectedAuthorizationRecordDigest: String? = null
     ): EntityResolutionCalibrationLoadResult {
         val artifact = runCatching { json.decodeFromString<EntityResolutionCalibrationArtifact>(serialized) }
             .getOrElse { return EntityResolutionCalibrationLoadResult.Rejected("Malformed calibration: ${it.message}") }
         if (expectedCorpusDigest != null && !artifact.corpusDigest.equals(expectedCorpusDigest, ignoreCase = true)) {
             return EntityResolutionCalibrationLoadResult.Rejected("Calibration corpus digest does not match the evaluated corpus.")
         }
+        if (artifact.corpusKind == EntityResolutionCorpusKind.CONSENTED &&
+            expectedAuthorizationRecordDigest == null
+        ) {
+            return EntityResolutionCalibrationLoadResult.Rejected(
+                "Consented calibration requires an expected authorization-record digest."
+            )
+        }
+        if (artifact.evaluationSplit == EntityResolutionEvaluationSplit.HELD_OUT &&
+            expectedTrainingCorpusDigest == null
+        ) {
+            return EntityResolutionCalibrationLoadResult.Rejected(
+                "Held-out calibration requires an expected training-corpus digest."
+            )
+        }
+        if (expectedTrainingCorpusDigest != null &&
+            !artifact.trainingCorpusDigest.equals(expectedTrainingCorpusDigest, ignoreCase = true)
+        ) {
+            return EntityResolutionCalibrationLoadResult.Rejected("Calibration training corpus digest does not match the evaluated corpus provenance.")
+        }
+        if (expectedAuthorizationRecordDigest != null &&
+            !artifact.authorizationRecordDigest.equals(expectedAuthorizationRecordDigest, ignoreCase = true)
+        ) {
+            return EntityResolutionCalibrationLoadResult.Rejected("Calibration authorization digest does not match the supplied provenance.")
+        }
         return EntityResolutionCalibrationLoadResult.Accepted(artifact)
     }
 
-    fun loadOrNull(serialized: String, expectedCorpusDigest: String? = null): EntityResolutionCalibrationArtifact? =
-        (load(serialized, expectedCorpusDigest) as? EntityResolutionCalibrationLoadResult.Accepted)?.artifact
+    fun loadOrNull(
+        serialized: String,
+        expectedCorpusDigest: String? = null,
+        expectedTrainingCorpusDigest: String? = null,
+        expectedAuthorizationRecordDigest: String? = null
+    ): EntityResolutionCalibrationArtifact? =
+        (load(
+            serialized,
+            expectedCorpusDigest,
+            expectedTrainingCorpusDigest,
+            expectedAuthorizationRecordDigest
+        ) as? EntityResolutionCalibrationLoadResult.Accepted)?.artifact
 }
 
 private val CALIBRATION_JSON = Json {

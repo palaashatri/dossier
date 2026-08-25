@@ -81,9 +81,15 @@ object EntityResolverV2 {
         input: IdentityInput,
         result: ProfileScanResult,
         calibration: EntityResolutionCalibrationArtifact? = null,
-        expectedCorpusDigest: String? = null
+        expectedCorpusDigest: String? = null,
+        expectedTrainingCorpusDigest: String? = null,
+        expectedAuthorizationRecordDigest: String? = null
     ): EntityResolutionResult {
-        val policy = calibration?.productionPolicyOrNull(expectedCorpusDigest)
+        val policy = calibration?.productionPolicyOrNull(
+            expectedCorpusDigest = expectedCorpusDigest,
+            expectedTrainingCorpusDigest = expectedTrainingCorpusDigest,
+            expectedAuthorizationRecordDigest = expectedAuthorizationRecordDigest
+        )
             ?: EntityResolutionPolicy.DEFAULT
         if (!result.exists) {
             return EntityResolutionResult(
