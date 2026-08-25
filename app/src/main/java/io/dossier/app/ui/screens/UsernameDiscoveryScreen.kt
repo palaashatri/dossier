@@ -22,6 +22,7 @@ import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
 import io.dossier.app.domain.discovery.ProviderHealthAssessment
 import io.dossier.app.domain.discovery.ProviderHealthReport
+import io.dossier.app.domain.discovery.ProviderHealthSample
 import io.dossier.app.domain.discovery.ProviderHealthStatus
 import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.discovery.WhatsMyNameCatalog
@@ -66,6 +67,7 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
         mutableStateOf(initialWmnState is WhatsMyNameCatalogState.Ready)
     }
     var providerHealthReport by remember { mutableStateOf<ProviderHealthReport?>(null) }
+    var wmnHealthReport by remember { mutableStateOf<ProviderHealthReport?>(null) }
 
     // Migrate the pre-v2 Deep Research choice into the new authoritative scan
     // depth without silently losing the user's earlier intent.
@@ -83,6 +85,15 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
             ProviderDiagnosticsRuntime.install(context.applicationContext)
             ProviderDiagnosticsRuntime.report(
                 knownProviderIds = ProviderCatalogV2.definitions.map { it.id },
+                now = Instant.now()
+            )
+        }
+        wmnHealthReport = withContext(Dispatchers.IO) {
+            val samples = ProviderDiagnosticsRuntime.snapshot()
+                .map { it.toHealthSample() }
+            whatsMyNameHealthReport(
+                state = installedState,
+                samples = samples,
                 now = Instant.now()
             )
         }
@@ -347,6 +358,15 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
                     Spacer(modifier = Modifier.height(18.dp))
                     ProviderHealthDiagnosticsPanel(report)
                 }
+                wmnHealthReport?.let { report ->
+                    Spacer(modifier = Modifier.height(18.dp))
+                    ProviderHealthDiagnosticsPanel(
+                        report = report,
+                        title = "WhatsMyName username-rule health",
+                        knownProviderLabel = "pinned executable username rule(s)",
+                        caveat = "Health is persisted aggregate diagnostics for the pinned WhatsMyName source only; catalog membership, an HTTP 200, or a username hit is not live validation or identity evidence."
+                    )
+                }
             }
 
             Row(
@@ -414,6 +434,17 @@ fun UsernameDiscoveryScreen(onNext: () -> Unit, onBack: () -> Unit) {
     }
 }
 
+/**
+ * Builds diagnostics for the pinned WhatsMyName source without merging its
+ * source records into the authored ProviderCatalogV2 report.
+ */
+internal fun whatsMyNameHealthReport(
+    state: WhatsMyNameCatalogState,
+    samples: Collection<ProviderHealthSample>,
+    now: Instant = Instant.now()
+): ProviderHealthReport? = (state as? WhatsMyNameCatalogState.Ready)
+    ?.healthReport(samples = samples, now = now)
+
 internal fun providerHealthSummary(report: ProviderHealthReport): String = listOf(
     "Healthy ${report.healthyCount}",
     "Degraded ${report.degradedCount}",
@@ -431,7 +462,12 @@ private fun providerHealthStatusLabel(status: ProviderHealthStatus): String = wh
 }
 
 @Composable
-internal fun ProviderHealthDiagnosticsPanel(report: ProviderHealthReport) {
+internal fun ProviderHealthDiagnosticsPanel(
+    report: ProviderHealthReport,
+    title: String = "Provider catalog health",
+    knownProviderLabel: String = "catalog definition(s)",
+    caveat: String = "Health is persisted aggregate provider diagnostics only; catalog membership, an HTTP 200, or a search hit is not live validation or identity evidence."
+) {
     val notable = remember(report) {
         report.assessments
             .filter { it.status != ProviderHealthStatus.Healthy }
@@ -448,13 +484,13 @@ internal fun ProviderHealthDiagnosticsPanel(report: ProviderHealthReport) {
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Text(
-                text = "Provider catalog health",
+                text = title,
                 color = NeuralTheme.TextPrimary,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "${report.knownProviderCount} catalog definition(s) · ${report.observedProviderCount} with recorded validation (${(report.coverageRate * 100).toInt()}% coverage)",
+                text = "${report.knownProviderCount} $knownProviderLabel · ${report.observedProviderCount} with recorded validation (${(report.coverageRate * 100).toInt()}% coverage)",
                 color = NeuralTheme.TextSecondary,
                 fontSize = 11.sp,
                 lineHeight = 15.sp,
@@ -468,7 +504,7 @@ internal fun ProviderHealthDiagnosticsPanel(report: ProviderHealthReport) {
                 modifier = Modifier.padding(top = 5.dp)
             )
             Text(
-                text = "Health is persisted aggregate provider diagnostics only; catalog membership, an HTTP 200, or a search hit is not live validation or identity evidence.",
+                text = caveat,
                 color = NeuralTheme.TextMuted,
                 fontSize = 10.5.sp,
                 lineHeight = 15.sp,

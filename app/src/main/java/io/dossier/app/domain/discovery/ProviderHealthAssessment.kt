@@ -90,11 +90,16 @@ object ProviderHealthAssessmentRules {
     fun assess(
         sample: ProviderHealthSample?,
         now: Instant = Instant.now(),
-        staleAfter: Duration = DEFAULT_STALE_AFTER
+        staleAfter: Duration = DEFAULT_STALE_AFTER,
+        knownProviderId: String? = null
     ): ProviderHealthAssessment {
         require(!staleAfter.isNegative) { "staleAfter must not be negative" }
 
-        val providerId = sample?.providerId?.trim()?.lowercase(Locale.ROOT).orEmpty().ifBlank { "unknown" }
+        val providerId = (sample?.providerId ?: knownProviderId)
+            ?.trim()
+            ?.lowercase(Locale.ROOT)
+            .orEmpty()
+            .ifBlank { "unknown" }
         val rawAttempts = sample?.attempts ?: 0L
         val attempts = rawAttempts.coerceAtLeast(0L)
         val successes = sample?.successes?.coerceAtLeast(0L) ?: 0L
@@ -201,7 +206,14 @@ object ProviderHealthAssessmentRules {
             .sorted()
         val byId = samples
             .associateBy { it.providerId.trim().lowercase(Locale.ROOT) }
-        val assessments = known.map { id -> assess(byId[id], now, staleAfter) }
+        val assessments = known.map { id ->
+            assess(
+                sample = byId[id],
+                now = now,
+                staleAfter = staleAfter,
+                knownProviderId = id
+            )
+        }
         return ProviderHealthReport(
             knownProviderCount = assessments.size,
             observedProviderCount = assessments.count {

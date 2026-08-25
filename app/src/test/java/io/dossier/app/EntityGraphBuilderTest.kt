@@ -16,6 +16,7 @@ import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.Platform
 import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.model.RelationshipType
 import io.dossier.app.domain.model.UsernameCandidate
 import io.dossier.app.domain.model.UsernameMatchType
 import org.junit.Assert.assertEquals
@@ -251,6 +252,35 @@ class EntityGraphBuilderTest {
 
         // Scanner-asserted relationship seeds a direct edge.
         assertTrue(graph.edges.any { it.relation == "username_on_profile" })
+    }
+
+    @Test
+    fun duplicateRelationshipKeysIgnoreRelationCaseAndWhitespace() {
+        val graph = EntityGraphBuilder.build(
+            input = IdentityInput(fullName = "Jane Doe"),
+            relationships = listOf(
+                EvidenceRelationship(
+                    fromValue = "alice",
+                    toValue = "profile",
+                    relation = "HAS_EMAIL",
+                    evidence = "first",
+                    evidenceIds = listOf("ev2:first")
+                ),
+                EvidenceRelationship(
+                    fromValue = "alice",
+                    toValue = "profile",
+                    relation = " has_email ",
+                    evidence = "second",
+                    evidenceIds = listOf("ev2:second")
+                )
+            )
+        )
+
+        val edge = graph.edges.single { it.fromId == "value:alice" }
+        assertEquals("HAS_EMAIL", edge.relation)
+        assertEquals(RelationshipType.HAS_EMAIL, edge.relationType)
+        assertEquals(listOf("ev2:first", "ev2:second"), edge.evidenceIds)
+        assertEquals("first", edge.evidence)
     }
 
     @Test

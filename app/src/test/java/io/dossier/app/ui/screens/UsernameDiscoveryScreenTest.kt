@@ -3,10 +3,15 @@ package io.dossier.app.ui.screens
 import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.discovery.ProviderHealthAssessment
 import io.dossier.app.domain.discovery.ProviderHealthReport
+import io.dossier.app.domain.discovery.ProviderHealthSample
 import io.dossier.app.domain.discovery.ProviderHealthStatus
+import io.dossier.app.domain.discovery.ProviderCategory
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import java.time.Instant
+import io.dossier.app.domain.discovery.WhatsMyNameCatalogState
+import io.dossier.app.domain.discovery.WhatsMyNameSite
 
 class UsernameDiscoveryScreenTest {
     @Test
@@ -61,4 +66,73 @@ class UsernameDiscoveryScreenTest {
             providerHealthSummary(report)
         )
     }
+
+    @Test
+    fun whatsMyNameHealthReportKeepsPinnedRulesSeparateFromAuthoredSamples() {
+        val now = Instant.parse("2026-08-25T12:00:00Z")
+        val state = WhatsMyNameCatalogState.Ready(
+            sites = listOf(
+                testSite("wmn-one"),
+                testSite("wmn-two")
+            ),
+            excluded = emptyList(),
+            license = emptyList(),
+            authors = emptyList(),
+            categories = emptyList(),
+            totalCount = 2,
+            executableCount = 2,
+            excludedCount = 0
+        )
+        val report = whatsMyNameHealthReport(
+            state = state,
+            samples = listOf(
+                ProviderHealthSample(
+                    providerId = "wmn-one",
+                    attempts = 3,
+                    successes = 3,
+                    lastValidatedAt = now
+                ),
+                ProviderHealthSample(
+                    providerId = "authored-github",
+                    attempts = 3,
+                    successes = 3,
+                    lastValidatedAt = now
+                )
+            ),
+            now = now
+        )
+
+        assertEquals(2, report?.knownProviderCount)
+        assertEquals(1, report?.observedProviderCount)
+        assertEquals(
+            setOf("wmn-one", "wmn-two"),
+            report?.assessments?.map { it.providerId }?.toSet()
+        )
+        assertEquals(ProviderHealthStatus.Healthy, report?.assessments?.first()?.status)
+        assertEquals(ProviderHealthStatus.Unvalidated, report?.assessments?.last()?.status)
+    }
+
+    @Test
+    fun whatsMyNameHealthReportIsAbsentWhenCatalogUnavailable() {
+        assertNull(
+            whatsMyNameHealthReport(
+                state = WhatsMyNameCatalogState.Unavailable("integrity mismatch"),
+                samples = emptyList(),
+                now = Instant.parse("2026-08-25T12:00:00Z")
+            )
+        )
+    }
+
+    private fun testSite(id: String) = WhatsMyNameSite(
+        id = id,
+        name = id,
+        category = ProviderCategory.Social,
+        uriPretty = "https://$id.example/{account}",
+        uriCheck = "https://$id.example/{account}",
+        eCode = 200,
+        eString = "found",
+        mCode = 404,
+        mString = "missing",
+        stripBadChar = ""
+    )
 }

@@ -33,6 +33,12 @@ private fun mergeEvidenceIds(existing: List<String>, incoming: List<String>): Li
         .distinct()
         .take(MAX_EDGE_EVIDENCE_IDS)
 
+/**
+ * Relation names are a persisted compatibility surface, so retain the first
+ * spelling on an edge while using a stable key for duplicate detection.
+ */
+private fun canonicalRelationKey(value: String): String = value.trim().lowercase(Locale.ROOT)
+
 /** Fuses identity input, verified observations, evidence, images and breach summaries into one graph. */
 object EntityGraphBuilder {
 
@@ -81,8 +87,11 @@ object EntityGraphBuilder {
             contradictingEvidenceIds: List<String> = emptyList()
         ) {
             if (fromId == toId) return
+            val relationKey = canonicalRelationKey(relation)
             val duplicateIndex = edges.indexOfFirst {
-                it.fromId == fromId && it.toId == toId && it.relation == relation
+                it.fromId == fromId &&
+                    it.toId == toId &&
+                    canonicalRelationKey(it.relation) == relationKey
             }
             if (duplicateIndex >= 0) {
                 val existing = edges[duplicateIndex]
