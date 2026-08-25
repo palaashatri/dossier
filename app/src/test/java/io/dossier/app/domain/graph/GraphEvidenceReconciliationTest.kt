@@ -157,6 +157,46 @@ class GraphEvidenceReconciliationTest {
 
         assertFalse(report.isConsistent)
         assertTrue(report.truncatedGraphEntityEvidenceIds > 0)
+        val diagnostic = report.diagnostics.single()
+        assertEquals(GraphEvidenceReconciliationKind.TruncatedEvidenceReference, diagnostic.kind)
+        assertEquals(listOf("profile:oversized"), diagnostic.graphEntityReferences)
+        assertEquals(
+            GraphEvidenceReconciliation.MAX_EVIDENCE_IDS_PER_DIAGNOSTIC,
+            diagnostic.graphEvidenceIds.size
+        )
+        assertEquals(1, diagnostic.truncatedGraphEntityEvidenceIds)
+        assertTrue(diagnostic.reason.contains("bounded comparison limit"))
+    }
+
+    @Test
+    fun graphEntityTruncationDiagnosticsAreDeterministicAndBounded() {
+        val graph = EntityGraph(
+            entities = (0 until GraphEvidenceReconciliation.MAX_DIAGNOSTICS + 8).map { index ->
+                DossierEntity(
+                    id = "profile:truncated-${index.toString().padStart(4, '0')}",
+                    type = EntityType.Profile,
+                    label = "Profile $index",
+                    evidenceIds = List(GraphEvidenceReconciliation.MAX_EVIDENCE_IDS_PER_DIAGNOSTIC + 1) {
+                        "ev2:entity-$index-$it"
+                    }
+                )
+            }
+        )
+
+        val first = GraphEvidenceReconciliation.validate(emptyList(), graph)
+        val second = GraphEvidenceReconciliation.validate(emptyList(), graph)
+
+        assertEquals(GraphEvidenceReconciliation.MAX_DIAGNOSTICS, first.diagnostics.size)
+        assertEquals(first.diagnostics, second.diagnostics)
+        assertEquals(
+            GraphEvidenceReconciliation.MAX_DIAGNOSTICS + 8,
+            first.truncatedGraphEntityEvidenceIds
+        )
+        assertEquals("profile:truncated-0000", first.diagnostics.first().toValue)
+        assertEquals(
+            "profile:truncated-${(GraphEvidenceReconciliation.MAX_DIAGNOSTICS - 1).toString().padStart(4, '0')}",
+            first.diagnostics.last().toValue
+        )
     }
 
     @Test

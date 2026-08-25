@@ -56,7 +56,9 @@ enum class GraphEvidenceReconciliationKind {
     ConflictingEvidence,
     Ambiguous,
     /** A provenance ID is present but absent from the case evidence ledger. */
-    DanglingEvidenceReference
+    DanglingEvidenceReference,
+    /** A bounded provenance projection omitted one or more IDs. */
+    TruncatedEvidenceReference
 }
 
 data class GraphEvidenceReconciliationDiagnostic(
@@ -283,6 +285,25 @@ object GraphEvidenceReconciliation {
                         graphEdgeReferences = listOf(edge.reference),
                         truncatedGraphEvidenceIds = edge.truncatedEvidenceIds,
                         reason = "graph edge endpoint entity is missing; exact endpoint comparison is unavailable"
+                    )
+                )
+            }
+
+        graphEntityProjections
+            .asSequence()
+            .filter { it.truncatedEvidenceIds > 0 }
+            .sortedBy(GraphEntityProjection::reference)
+            .forEach { entity ->
+                addDiagnostic(
+                    GraphEvidenceReconciliationDiagnostic(
+                        kind = GraphEvidenceReconciliationKind.TruncatedEvidenceReference,
+                        fromValue = "[graph entity projection]",
+                        toValue = entity.reference,
+                        relation = "EVIDENCE_REFERENCE",
+                        graphEvidenceIds = entity.normalizedEvidenceIds,
+                        graphEntityReferences = listOf(entity.reference),
+                        truncatedGraphEntityEvidenceIds = entity.truncatedEvidenceIds,
+                        reason = "graph entity evidence IDs exceed the bounded comparison limit"
                     )
                 )
             }
