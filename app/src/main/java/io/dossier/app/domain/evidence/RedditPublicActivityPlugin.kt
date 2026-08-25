@@ -93,7 +93,8 @@ class RedditPublicActivityPlugin(
                         fromValue = handle,
                         toValue = activity.url,
                         relation = "PUBLISHED_PUBLIC_ACTIVITY",
-                        evidence = "Exact Reddit author search for @$handle (${activity.kind.name.lowercase()})"
+                        evidence = "Exact Reddit author search for @$handle (${activity.kind.name.lowercase()})",
+                        evidenceIds = listOf(evidenceId)
                     )
                 }
             } catch (cancelled: CancellationException) {

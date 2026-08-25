@@ -1,10 +1,16 @@
 package io.dossier.app.domain.evidence
 
 import io.dossier.app.domain.model.IdentityInput
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Test
 
 class RedditPublicActivityPluginTest {
@@ -95,5 +101,47 @@ class RedditPublicActivityPluginTest {
             "https://www.reddit.com/r/privacy/comments/abc123/post_title/c0ffee.json?raw_json=1",
             RedditPublicActivityPlugin.commentJsonUrl(permalink)
         )
+    }
+
+    @Test
+    fun publishedActivityRelationshipCitesTheEmittedEvidenceRecord() = runBlocking {
+        val postPayload = """
+            {
+              "data": {
+                "after": null,
+                "children": [
+                  {"kind":"t3","data":{"author":"example_user","permalink":"/r/privacy/comments/abc123/post_title/","title":"Public post","selftext":"body","subreddit":"privacy","created_utc":1700000000}}
+                ]
+              }
+            }
+        """.trimIndent()
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val body = if (request.url.host == "api.reddit.com") {
+                    postPayload
+                } else {
+                    "<html><body></body></html>"
+                }
+                Response.Builder()
+                    .request(request)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val result = RedditPublicActivityPlugin(client).scan(
+            IdentityInput(fullName = "Authorized subject", primaryUsername = "example_user")
+        )
+
+        assertEquals(1, result.evidence.size)
+        assertEquals(1, result.relationships.size)
+        val evidence = result.evidence.single()
+        val relationship = result.relationships.single()
+        assertEquals("PUBLISHED_PUBLIC_ACTIVITY", relationship.relation)
+        assertEquals(listOf(evidence.id), relationship.evidenceIds)
     }
 }
