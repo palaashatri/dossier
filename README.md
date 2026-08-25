@@ -11,10 +11,10 @@ The current implementation branch is **83/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-674fe2b
+1764233
 ```
 
-`674fe2b` is the evidence-keyed media correction tranche; the validated tree also includes the exact-owner Pausing recovery fix (`0bd65dd`), canonical graph-assertion export separation, exact profile-evidence correction controls, bounded encrypted case persistence, held-out calibration provenance propagation, exact published-result owner recovery, pinned source-catalog maintenance diagnostics, bounded live evidence corrections, source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, report-evidence accessibility semantics, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
+`1764233` is the request-plan binding follow-up for bounded breach-stage resume; the validated tree also includes encrypted breach summaries (`9bc1cd3`), focused accessibility/reduced-motion hardening (`a810d0c`), exact relationship provenance migration (`4ee7e14`), the evidence-keyed media correction tranche (`674fe2b`), the exact-owner Pausing recovery fix (`0bd65dd`), canonical graph-assertion export separation, exact profile-evidence correction controls, bounded encrypted case persistence, held-out calibration provenance propagation, exact published-result owner recovery, pinned source-catalog maintenance diagnostics, bounded live evidence corrections, source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
 
@@ -23,21 +23,21 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 7 tests / no-network schema + pinned source-catalog fixtures
-Debug JVM unit tests                PASS — 744 tests / 122 result XML files / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 744 tests / 122 result XML files / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 753 tests / 123 result XML files / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 753 tests / 123 result XML files / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 115,532,264 bytes
-Debug APK SHA-256                   A07A81622ED4B85B64058A639939D32A719C359C6E49A89788ECE3C571961308
-uiTest APK assembly                 PASS — 243,046,841 bytes
-uiTest APK SHA-256                  7154C5132CF764CA09E1FF1D01E30ACAB8508781B07A4E9988DF3D5C9B5945CD
-Android-test APK                    PASS — 1,025,992 bytes
-Android-test APK SHA-256             DE4D6ABD0AFB39DA98F629444219F544E0B02DA7CD0020C6E1857A623C1BA135
+Debug APK assembly                  PASS — 115,565,032 bytes
+Debug APK SHA-256                   F0DA3663D56F70CD64DBD0339394FBF2370F01DEB51F20C5E26BB9D7F7A6E8D9
+uiTest APK assembly                 PASS — 243,063,225 bytes
+uiTest APK SHA-256                  C7A64FA8A8E189E9B37649142955BBF078A47A2BAB0B58DD15993A71C6D73204
+Android-test APK                    PASS — 1,027,576 bytes
+Android-test APK SHA-256             9A76115D8EF7D9406B54DFE9F4399876A514CC362FEE3E8EC6D5676D9E37368D
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
-Connected uiTest suite              PASS — 52 tests / 0 failures on API 36 `medium_phone` emulator
+Connected uiTest suite              PASS — 53 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, exact evidence-key fail-closed behavior, report-evidence button semantics, bounded CaseStore save behavior, async saved-case persistence, graph/export redaction semantics, HUD status semantics and reverse-video picker semantics. A fresh ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified the encrypted result remained visible after an external `am force-stop`/relaunch and after an emulator reboot. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
+The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, exact evidence-key fail-closed behavior, focused breach/report/reverse-media accessibility semantics, bounded CaseStore save behavior, async saved-case persistence, graph/export redaction semantics, HUD status semantics and reverse-video picker semantics. A fresh ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified the encrypted result remained visible after an external `am force-stop`/relaunch and after an emulator reboot, with the production `MainActivity` resumed after both launches. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
