@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+import tempfile
 import unittest
 
 
@@ -11,7 +12,12 @@ TOOLS = pathlib.Path(__file__).resolve().parent
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
-from provider_registry_audit import Entry, audit, parse_catalog  # noqa: E402
+from provider_registry_audit import (  # noqa: E402
+    Entry,
+    audit,
+    audit_whats_my_name_catalog,
+    parse_catalog,
+)
 
 
 class ProviderRegistryAuditTest(unittest.TestCase):
@@ -90,6 +96,40 @@ class ProviderRegistryAuditTest(unittest.TestCase):
 
         self.assertEqual([], errors)
         self.assertEqual(1, stats["providerCount"])
+
+    def test_pinned_whatsmyname_catalog_is_audited_as_source_rules(self) -> None:
+        errors, stats = audit_whats_my_name_catalog()
+
+        self.assertEqual([], errors)
+        self.assertEqual(716, stats["sourceRecordCount"])
+        self.assertEqual(644, stats["executableRuleCount"])
+        self.assertEqual(72, stats["excludedRecordCount"])
+        self.assertEqual(644, stats["generatedRuleIdCount"])
+        self.assertEqual(37, stats["exclusionReasons"]["CategoryNSFW"])
+        self.assertEqual(23, stats["exclusionReasons"]["ContainsPostBody"])
+        self.assertEqual(7, stats["exclusionReasons"]["NotHttps"])
+        self.assertEqual(4, stats["exclusionReasons"]["ProtectionEnabled"])
+        self.assertEqual(1, stats["exclusionReasons"]["NotValid"])
+
+    def test_source_catalog_drift_fails_closed_without_changing_provider_count(self) -> None:
+        source = b'{"license":["fixture"],"authors":["fixture"],"categories":["social"],"sites":[{"name":"fixture"}]}'
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            data_path = root / "wmn-data.json"
+            license_path = root / "LICENSE.md"
+            data_path.write_bytes(source)
+            license_path.write_bytes(b"fixture license")
+
+            errors, stats = audit_whats_my_name_catalog(data_path, license_path)
+
+        joined = "\n".join(errors)
+        self.assertIn("data asset size changed", joined)
+        self.assertIn("data asset SHA-256", joined)
+        self.assertIn("executable rule count changed", joined)
+        self.assertIn("source record count changed", joined)
+        self.assertEqual(1, stats["sourceRecordCount"])
+        self.assertEqual(0, stats["executableRuleCount"])
+        self.assertEqual(1, stats["excludedRecordCount"])
 
 
 if __name__ == "__main__":
