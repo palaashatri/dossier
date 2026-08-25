@@ -743,7 +743,8 @@ internal class ScanResumeStore internal constructor(
                 !isValidRelationshipConfidenceCheckpoint(
                     relationshipConfidenceCheckpoint,
                     recordForPoint(available.point),
-                    ownerId
+                    ownerId,
+                    requireCompletedStage = false
                 ))
         ) {
             return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
@@ -1460,8 +1461,14 @@ internal class ScanResumeStore internal constructor(
     private fun isValidRelationshipConfidenceCheckpoint(
         checkpoint: RelationshipConfidenceStageCheckpoint,
         record: ResumeRecord,
-        expectedOwnerId: String?
+        expectedOwnerId: String?,
+        requireCompletedStage: Boolean = true
     ): Boolean {
+        if (requireCompletedStage &&
+            ScanCheckpointStage.ScoringRelationshipConfidence.wireName !in record.completedCheckpointStages
+        ) {
+            return false
+        }
         if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
         if (record.planFingerprint.isNullOrBlank() ||
             checkpoint.planFingerprint != record.planFingerprint ||

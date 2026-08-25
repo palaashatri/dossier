@@ -19,6 +19,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.util.Base64
 
 class ConfidenceCheckpointCodecTest {
 
@@ -257,6 +258,59 @@ class ScanResumeStoreConfidenceCheckpointTest {
         )
     }
 
+    @Test
+    fun authenticatedPayloadWithoutCompletedStageMarkerIsNotReusable() {
+        val fixture = fixture()
+        val crypto = ConfidenceCheckpointTestCrypto()
+        val store = store(fixture, crypto = crypto)
+        val saved = store.saveRequestDetailed(input(), false, false) as ResumeWriteState.Saved
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.ScoringRelationshipConfidence,
+                completed = true,
+                relationshipConfidenceCheckpoint = checkpoint(saved.point, OWNER_ONE)
+            ) is ResumeCheckpointWriteState.Saved
+        )
+
+        val record = fixture.records.listFiles().orEmpty()
+            .single { it.name.endsWith(ScanResumeStore.RECORD_EXTENSION) }
+        val envelope = record.readText()
+        val ivMarker = "\"ivBase64\":\""
+        val ciphertextMarker = "\"ciphertextBase64\":\""
+        val ivStart = envelope.indexOf(ivMarker) + ivMarker.length
+        val ciphertextStart = envelope.indexOf(ciphertextMarker) + ciphertextMarker.length
+        check(ivStart >= ivMarker.length && ciphertextStart >= ciphertextMarker.length)
+        val ivEnd = envelope.indexOf('"', ivStart)
+        val ciphertextEnd = envelope.indexOf('"', ciphertextStart)
+        val iv = Base64.getDecoder().decode(envelope.substring(ivStart, ivEnd))
+        val ciphertext = Base64.getDecoder().decode(envelope.substring(ciphertextStart, ciphertextEnd))
+        val plaintext = crypto.open(
+            SealedResumePayload(iv = iv, ciphertext = ciphertext),
+            "${ScanResumeStore.FORMAT_VERSION}:${saved.point.requestId}"
+                .toByteArray(Charsets.UTF_8)
+        ).toString(Charsets.UTF_8)
+        val marker = "\"completedCheckpointStages\":[\"SCORING_RELATIONSHIP_CONFIDENCE\"]"
+        check(plaintext.contains(marker))
+        val withoutStage = plaintext.replace(marker, "\"completedCheckpointStages\":[]")
+        val resealed = crypto.seal(
+            withoutStage.toByteArray(Charsets.UTF_8),
+            "${ScanResumeStore.FORMAT_VERSION}:${saved.point.requestId}"
+                .toByteArray(Charsets.UTF_8),
+            allowKeyCreation = false
+        )
+        record.writeText(
+            "{\"formatVersion\":${ScanResumeStore.FORMAT_VERSION}," +
+                "\"ivBase64\":\"${Base64.getEncoder().encodeToString(resealed.iv)}\"," +
+                "\"ciphertextBase64\":\"${Base64.getEncoder().encodeToString(resealed.ciphertext)}\"}"
+        )
+
+        val loaded = store.loadRequestDetailed(saved.point.requestId) as ResumeReadState.Available
+        assertNull(loaded.point.relationshipConfidenceCheckpoint)
+    }
+
     private fun checkpoint(point: ResumePoint, ownerId: String) = RelationshipConfidenceStageCheckpoint(
         requestId = point.requestId,
         planFingerprint = point.planFingerprint!!,
@@ -277,11 +331,15 @@ class ScanResumeStoreConfidenceCheckpointTest {
         return Fixture(File(root, "records"), File(root, "legacy"))
     }
 
-    private fun store(fixture: Fixture, nowMillis: () -> Long = { 1_000L }): ScanResumeStore =
+    private fun store(
+        fixture: Fixture,
+        nowMillis: () -> Long = { 1_000L },
+        crypto: ConfidenceCheckpointTestCrypto = ConfidenceCheckpointTestCrypto()
+    ): ScanResumeStore =
         ScanResumeStore(
             recordsDir = fixture.records,
             legacyDir = fixture.legacy,
-            crypto = ConfidenceCheckpointTestCrypto(),
+            crypto = crypto,
             nowMillis = nowMillis,
             idFactory = { ID_ONE }
         )
