@@ -22,7 +22,9 @@ data class GraphEvidenceReconciliationReport(
     val ambiguousRelationships: Int,
     val diagnostics: List<GraphEvidenceReconciliationDiagnostic>,
     val truncatedCanonicalRelationships: Int = 0,
-    val truncatedGraphEdges: Int = 0
+    val truncatedGraphEdges: Int = 0,
+    val truncatedCanonicalEvidenceIds: Int = 0,
+    val truncatedGraphEvidenceIds: Int = 0
 ) {
     val isConsistent: Boolean
         get() = missingGraphEdges == 0 &&
@@ -30,7 +32,9 @@ data class GraphEvidenceReconciliationReport(
             conflictingEvidence == 0 &&
             ambiguousRelationships == 0 &&
             truncatedCanonicalRelationships == 0 &&
-            truncatedGraphEdges == 0
+            truncatedGraphEdges == 0 &&
+            truncatedCanonicalEvidenceIds == 0 &&
+            truncatedGraphEvidenceIds == 0
 }
 
 enum class GraphEvidenceReconciliationKind {
@@ -48,6 +52,8 @@ data class GraphEvidenceReconciliationDiagnostic(
     val canonicalEvidenceIds: List<String> = emptyList(),
     val graphEvidenceIds: List<String> = emptyList(),
     val graphEdgeReferences: List<String> = emptyList(),
+    val truncatedCanonicalEvidenceIds: Int = 0,
+    val truncatedGraphEvidenceIds: Int = 0,
     val reason: String
 )
 
@@ -60,6 +66,7 @@ object GraphEvidenceReconciliation {
     const val MAX_RELATIONSHIPS = 10_000
     const val MAX_DIAGNOSTICS = 512
     const val MAX_EDGE_REFERENCES_PER_DIAGNOSTIC = 16
+    const val MAX_EVIDENCE_IDS_PER_DIAGNOSTIC = 256
 
     fun validate(
         canonicalRelationships: List<EvidenceRelationship>,
@@ -91,6 +98,12 @@ object GraphEvidenceReconciliation {
         var conflicting = 0
         var ambiguous = 0
 
+        val truncatedCanonicalEvidenceIds = boundedCanonical.sumOf {
+            it.normalizedEvidenceIds().truncated
+        }
+        val allGraphProjections = graphByKey.values.asSequence().flatten() + unresolvedEdges.asSequence()
+        val truncatedGraphEvidenceIds = allGraphProjections.sumOf { it.truncatedEvidenceIds }
+
         fun addDiagnostic(diagnostic: GraphEvidenceReconciliationDiagnostic) {
             if (diagnostics.size < MAX_DIAGNOSTICS) diagnostics += diagnostic
         }
@@ -101,21 +114,21 @@ object GraphEvidenceReconciliation {
             val graphEdges = graphByKey[key].orEmpty()
             when {
                 canonical.size > 1 || graphEdges.size > 1 -> {
+                    val canonicalEvidence = canonicalEvidenceIds(canonical)
+                    val graphEvidence = graphEvidenceIds(graphEdges)
                     ambiguous++
                     addDiagnostic(
                         diagnostic(
                             kind = GraphEvidenceReconciliationKind.Ambiguous,
                             key = key,
-                            canonicalEvidenceIds = canonical.flatMap { it.normalizedEvidenceIds() }
-                                .distinct()
-                                .sorted(),
-                            graphEvidenceIds = graphEdges.flatMap { it.normalizedEvidenceIds }
-                                .distinct()
-                                .sorted(),
+                            canonicalEvidenceIds = canonicalEvidence.ids,
+                            graphEvidenceIds = graphEvidence.ids,
                             graphEdgeReferences = graphEdges.map { it.reference }
                                 .distinct()
                                 .sorted()
                                 .take(MAX_EDGE_REFERENCES_PER_DIAGNOSTIC),
+                            truncatedCanonicalEvidenceIds = canonicalEvidence.truncated,
+                            truncatedGraphEvidenceIds = graphEvidence.truncated,
                             reason = when {
                                 canonical.size > 1 && graphEdges.size > 1 ->
                                     "multiple canonical assertions and graph edges share the same exact key"
@@ -137,6 +150,7 @@ object GraphEvidenceReconciliation {
                                 kind = GraphEvidenceReconciliationKind.Ambiguous,
                                 key = key,
                                 graphEdgeReferences = listOf(graphEdge.reference),
+                                truncatedGraphEvidenceIds = graphEdge.truncatedEvidenceIds,
                                 reason = "graph edge has no canonical assertion or evidence IDs"
                             )
                         )
@@ -148,6 +162,7 @@ object GraphEvidenceReconciliation {
                                 key = key,
                                 graphEvidenceIds = graphEdge.normalizedEvidenceIds,
                                 graphEdgeReferences = listOf(graphEdge.reference),
+                                truncatedGraphEvidenceIds = graphEdge.truncatedEvidenceIds,
                                 reason = "graph edge has no canonical evidence relationship assertion; it may be derived graph material"
                             )
                         )
@@ -157,11 +172,13 @@ object GraphEvidenceReconciliation {
                 graphEdges.isEmpty() -> {
                     missing++
                     val relationship = canonical.single()
+                    val canonicalEvidence = relationship.normalizedEvidenceIds()
                     addDiagnostic(
                         diagnostic(
                             kind = GraphEvidenceReconciliationKind.MissingGraphEdge,
                             key = key,
-                            canonicalEvidenceIds = relationship.normalizedEvidenceIds(),
+                            canonicalEvidenceIds = canonicalEvidence.ids,
+                            truncatedCanonicalEvidenceIds = canonicalEvidence.truncated,
                             reason = "canonical evidence relationship has no exact graph edge"
                         )
                     )
@@ -170,8 +187,26 @@ object GraphEvidenceReconciliation {
                 else -> {
                     val relationship = canonical.single()
                     val graphEdge = graphEdges.single()
-                    val canonicalIds = relationship.normalizedEvidenceIds()
-                    if (canonicalIds.isEmpty() && graphEdge.normalizedEvidenceIds.isEmpty()) {
+                    val canonicalEvidence = relationship.normalizedEvidenceIds()
+                    val graphEvidence = BoundedEvidenceIds(
+                        graphEdge.normalizedEvidenceIds,
+                        graphEdge.truncatedEvidenceIds
+                    )
+                    if (canonicalEvidence.truncated > 0 || graphEvidence.truncated > 0) {
+                        ambiguous++
+                        addDiagnostic(
+                            diagnostic(
+                                kind = GraphEvidenceReconciliationKind.Ambiguous,
+                                key = key,
+                                canonicalEvidenceIds = canonicalEvidence.ids,
+                                graphEvidenceIds = graphEvidence.ids,
+                                graphEdgeReferences = listOf(graphEdge.reference),
+                                truncatedCanonicalEvidenceIds = canonicalEvidence.truncated,
+                                truncatedGraphEvidenceIds = graphEvidence.truncated,
+                                reason = "exact endpoint/relation match exceeds the bounded evidence-ID comparison limit"
+                            )
+                        )
+                    } else if (canonicalEvidence.ids.isEmpty() && graphEvidence.ids.isEmpty()) {
                         ambiguous++
                         addDiagnostic(
                             diagnostic(
@@ -180,7 +215,7 @@ object GraphEvidenceReconciliation {
                                 reason = "exact endpoint/relation match has no evidence IDs on either side"
                             )
                         )
-                    } else if (canonicalIds == graphEdge.normalizedEvidenceIds) {
+                    } else if (canonicalEvidence.ids == graphEvidence.ids) {
                         matched++
                     } else {
                         conflicting++
@@ -188,8 +223,8 @@ object GraphEvidenceReconciliation {
                             diagnostic(
                                 kind = GraphEvidenceReconciliationKind.ConflictingEvidence,
                                 key = key,
-                                canonicalEvidenceIds = canonicalIds,
-                                graphEvidenceIds = graphEdge.normalizedEvidenceIds,
+                                canonicalEvidenceIds = canonicalEvidence.ids,
+                                graphEvidenceIds = graphEvidence.ids,
                                 graphEdgeReferences = listOf(graphEdge.reference),
                                 reason = "exact endpoint/relation match has different evidence ID sets"
                             )
@@ -211,6 +246,7 @@ object GraphEvidenceReconciliation {
                         relation = edge.normalizedRelation,
                         graphEvidenceIds = edge.normalizedEvidenceIds,
                         graphEdgeReferences = listOf(edge.reference),
+                        truncatedGraphEvidenceIds = edge.truncatedEvidenceIds,
                         reason = "graph edge endpoint entity is missing; exact endpoint comparison is unavailable"
                     )
                 )
@@ -224,7 +260,9 @@ object GraphEvidenceReconciliation {
             ambiguousRelationships = ambiguous,
             diagnostics = diagnostics,
             truncatedCanonicalRelationships = (canonicalRelationships.size - boundedCanonical.size).coerceAtLeast(0),
-            truncatedGraphEdges = (graph.edges.size - boundedEdges.size).coerceAtLeast(0)
+            truncatedGraphEdges = (graph.edges.size - boundedEdges.size).coerceAtLeast(0),
+            truncatedCanonicalEvidenceIds = truncatedCanonicalEvidenceIds,
+            truncatedGraphEvidenceIds = truncatedGraphEvidenceIds
         )
     }
 
@@ -237,6 +275,8 @@ object GraphEvidenceReconciliation {
         canonicalEvidenceIds: List<String> = emptyList(),
         graphEvidenceIds: List<String> = emptyList(),
         graphEdgeReferences: List<String> = emptyList(),
+        truncatedCanonicalEvidenceIds: Int = 0,
+        truncatedGraphEvidenceIds: Int = 0,
         reason: String
     ): GraphEvidenceReconciliationDiagnostic = GraphEvidenceReconciliationDiagnostic(
         kind = kind,
@@ -246,6 +286,8 @@ object GraphEvidenceReconciliation {
         canonicalEvidenceIds = canonicalEvidenceIds,
         graphEvidenceIds = graphEvidenceIds,
         graphEdgeReferences = graphEdgeReferences,
+        truncatedCanonicalEvidenceIds = truncatedCanonicalEvidenceIds,
+        truncatedGraphEvidenceIds = truncatedGraphEvidenceIds,
         reason = reason
     )
 
@@ -269,9 +311,15 @@ object GraphEvidenceReconciliation {
         val toDisplay: String,
         val normalizedRelation: String,
         val normalizedEvidenceIds: List<String>,
+        val truncatedEvidenceIds: Int,
         val reference: String
     ) {
     }
+
+    private data class BoundedEvidenceIds(
+        val ids: List<String>,
+        val truncated: Int
+    )
 
     private fun project(edge: DossierEdge, graph: EntityGraph): GraphEdgeProjection {
         val from = graph.entity(edge.fromId)
@@ -288,14 +336,17 @@ object GraphEvidenceReconciliation {
                 relation = normalizedRelation
             )
         }
+        val evidenceIds = normalizeEvidenceIds(
+            sequenceOf(edge.evidenceIds.asSequence(), edge.contradictingEvidenceIds.asSequence())
+                .flatten()
+        )
         return GraphEdgeProjection(
             key = key,
             fromDisplay = fromDisplay,
             toDisplay = toDisplay,
             normalizedRelation = normalizedRelation,
-            normalizedEvidenceIds = normalizeEvidenceIds(
-                edge.evidenceIds + edge.contradictingEvidenceIds
-            ),
+            normalizedEvidenceIds = evidenceIds.ids,
+            truncatedEvidenceIds = evidenceIds.truncated,
             reference = listOf(edge.fromId, edge.toId, normalizedRelation)
                 .joinToString("|")
         )
@@ -307,17 +358,58 @@ object GraphEvidenceReconciliation {
         relation = relation.trim().uppercase(Locale.ROOT)
     )
 
-    private fun EvidenceRelationship.normalizedEvidenceIds(): List<String> =
-        normalizeEvidenceIds(evidenceIds)
+    private fun EvidenceRelationship.normalizedEvidenceIds(): BoundedEvidenceIds =
+        normalizeEvidenceIds(evidenceIds.asSequence())
 
     private fun normalizeEndpoint(value: String): String = value.trim().lowercase(Locale.ROOT)
 
-    private fun normalizeEvidenceIds(ids: List<String>): List<String> = ids
-        .map(String::trim)
-        .filter(String::isNotBlank)
-        .map(EvidenceIdPolicy::migrate)
-        .distinct()
-        .sorted()
+    private fun normalizeEvidenceIds(ids: Sequence<String>): BoundedEvidenceIds {
+        val normalized = LinkedHashSet<String>(MAX_EVIDENCE_IDS_PER_DIAGNOSTIC)
+        var truncated = 0
+        ids.forEach { raw ->
+            val id = EvidenceIdPolicy.migrate(raw.trim())
+            if (id.isBlank()) return@forEach
+            if (normalized.size < MAX_EVIDENCE_IDS_PER_DIAGNOSTIC) {
+                normalized += id
+            } else {
+                // Do not retain unbounded IDs merely to count/deduplicate them. Any
+                // entry beyond the diagnostic bound makes exact reconciliation
+                // unavailable, so the caller fails closed and reports truncation.
+                truncated++
+            }
+        }
+        return BoundedEvidenceIds(normalized.toList().sorted(), truncated)
+    }
+
+    private fun combineEvidenceIds(parts: Sequence<BoundedEvidenceIds>): BoundedEvidenceIds {
+        val normalized = LinkedHashSet<String>(MAX_EVIDENCE_IDS_PER_DIAGNOSTIC)
+        var truncated = 0
+        parts.forEach { part ->
+            truncated += part.truncated
+            part.ids.forEach { id ->
+                if (normalized.size < MAX_EVIDENCE_IDS_PER_DIAGNOSTIC) {
+                    normalized += id
+                } else {
+                    truncated++
+                }
+            }
+        }
+        return BoundedEvidenceIds(normalized.toList().sorted(), truncated)
+    }
+
+    private fun canonicalEvidenceIds(
+        relationships: List<EvidenceRelationship>
+    ): BoundedEvidenceIds = combineEvidenceIds(
+        relationships.asSequence().map { relationship -> relationship.normalizedEvidenceIds() }
+    )
+
+    private fun graphEvidenceIds(
+        edges: List<GraphEdgeProjection>
+    ): BoundedEvidenceIds = combineEvidenceIds(
+        edges.asSequence().map { edge ->
+            BoundedEvidenceIds(edge.normalizedEvidenceIds, edge.truncatedEvidenceIds)
+        }
+    )
 }
 
 /** Read-only case diagnostic entry point used by callers that have a case snapshot. */

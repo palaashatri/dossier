@@ -204,6 +204,45 @@ class GraphEvidenceReconciliationTest {
         assertEquals(0, first.truncatedCanonicalRelationships)
     }
 
+    @Test
+    fun oversizedEvidenceIdSetsAreBoundedAndFailClosed() {
+        val evidenceIds = List(GraphEvidenceReconciliation.MAX_EVIDENCE_IDS_PER_DIAGNOSTIC + 1) { index ->
+            "ev2:oversized-$index"
+        }
+        val canonical = EvidenceRelationship(
+            fromValue = "Alice",
+            toValue = "Profile",
+            relation = "MENTIONS",
+            evidenceIds = evidenceIds
+        )
+        val graph = graph(
+            edge = DossierEdge(
+                fromId = "person:alice",
+                toId = "profile:alice",
+                relation = "MENTIONS",
+                evidenceIds = evidenceIds
+            ),
+            entities = listOf(
+                DossierEntity("person:alice", EntityType.Person, "Alice"),
+                DossierEntity("profile:alice", EntityType.Profile, "Profile")
+            )
+        )
+
+        val report = GraphEvidenceReconciliation.validate(listOf(canonical), graph)
+
+        assertFalse(report.isConsistent)
+        assertEquals(0, report.matchedRelationships)
+        assertEquals(1, report.ambiguousRelationships)
+        assertTrue(report.truncatedCanonicalEvidenceIds > 0)
+        assertTrue(report.truncatedGraphEvidenceIds > 0)
+        val diagnostic = report.diagnostics.single()
+        assertEquals(GraphEvidenceReconciliationKind.Ambiguous, diagnostic.kind)
+        assertEquals(GraphEvidenceReconciliation.MAX_EVIDENCE_IDS_PER_DIAGNOSTIC, diagnostic.canonicalEvidenceIds.size)
+        assertEquals(GraphEvidenceReconciliation.MAX_EVIDENCE_IDS_PER_DIAGNOSTIC, diagnostic.graphEvidenceIds.size)
+        assertTrue(diagnostic.truncatedCanonicalEvidenceIds > 0)
+        assertTrue(diagnostic.truncatedGraphEvidenceIds > 0)
+    }
+
     private fun graph(edge: DossierEdge, entities: List<DossierEntity>): EntityGraph =
         EntityGraph(entities = entities, edges = listOf(edge))
 }
