@@ -11,10 +11,10 @@ The current implementation branch is **83/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-1764233
+0cbc2ca
 ```
 
-`1764233` is the request-plan binding follow-up for bounded breach-stage resume; the validated tree also includes encrypted breach summaries (`9bc1cd3`), focused accessibility/reduced-motion hardening (`a810d0c`), exact relationship provenance migration (`4ee7e14`), the evidence-keyed media correction tranche (`674fe2b`), the exact-owner Pausing recovery fix (`0bd65dd`), canonical graph-assertion export separation, exact profile-evidence correction controls, bounded encrypted case persistence, held-out calibration provenance propagation, exact published-result owner recovery, pinned source-catalog maintenance diagnostics, bounded live evidence corrections, source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
+`c404592` adds bounded encrypted post-processing checkpoint reuse bound to the exact request/plan/owner and a digest of the deterministic post-processing inputs; `acc325a` also retires unsafe legacy WorkManager status payloads from the UI projection without claiming forensic database erasure; `0cbc2ca` adds an authenticated-tamper regression test. The validated tree also includes the request-plan binding follow-up (`1764233`), encrypted breach summaries (`9bc1cd3`), focused accessibility/reduced-motion hardening (`a810d0c`), exact relationship provenance migration (`4ee7e14`), the evidence-keyed media correction tranche (`674fe2b`), the exact-owner Pausing recovery fix (`0bd65dd`), canonical graph-assertion export separation, exact profile-evidence correction controls, bounded encrypted case persistence, held-out calibration provenance propagation, exact published-result owner recovery, pinned source-catalog maintenance diagnostics, bounded live evidence corrections, source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
 
@@ -23,13 +23,13 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 7 tests / no-network schema + pinned source-catalog fixtures
-Debug JVM unit tests                PASS — 753 tests / 123 result XML files / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 753 tests / 123 result XML files / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 762 tests / 125 result XML files / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 762 tests / 125 result XML files / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 115,565,032 bytes
-Debug APK SHA-256                   F0DA3663D56F70CD64DBD0339394FBF2370F01DEB51F20C5E26BB9D7F7A6E8D9
-uiTest APK assembly                 PASS — 243,063,225 bytes
-uiTest APK SHA-256                  C7A64FA8A8E189E9B37649142955BBF078A47A2BAB0B58DD15993A71C6D73204
+Debug APK assembly                  PASS — 115,581,416 bytes
+Debug APK SHA-256                   6264727DC25759F7374BA4EE0D78F41A052498FAE765AE7F9A3154C283FB0A6C
+uiTest APK assembly                 PASS — 243,079,609 bytes
+uiTest APK SHA-256                  3B95288B26D28E5F30FF32452253CB4D5C9B0001D984BD83F4C9C770AFEA5563
 Android-test APK                    PASS — 1,027,576 bytes
 Android-test APK SHA-256             9A76115D8EF7D9406B54DFE9F4399876A514CC362FEE3E8EC6D5676D9E37368D
 Debug lint                          PASS — 0 errors / 69 warnings
@@ -37,7 +37,7 @@ uiTest lint                         PASS — 0 errors / 72 warnings
 Connected uiTest suite              PASS — 53 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, exact evidence-key fail-closed behavior, focused breach/report/reverse-media accessibility semantics, bounded CaseStore save behavior, async saved-case persistence, graph/export redaction semantics, HUD status semantics and reverse-video picker semantics. A fresh ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified the encrypted result remained visible after an external `am force-stop`/relaunch and after an emulator reboot, with the production `MainActivity` resumed after both launches. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
+The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, exact evidence-key fail-closed behavior, focused breach/report/reverse-media accessibility semantics, bounded CaseStore save behavior, async saved-case persistence, graph/export redaction semantics, HUD status semantics and reverse-video picker semantics. A fresh ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified the encrypted result remained visible after an external `am force-stop`/relaunch and after an emulator reboot, with the production `MainActivity` resumed after both launches. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated. Post-processing checkpoint reuse is code-tested for exact binding/digest/shape/TTL behavior but was not independently process-kill validated on the emulator.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
@@ -107,6 +107,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - Background WorkManager scans now expose exact-owner `Pausing`/`Paused` lifecycle states, retain encrypted checkpoints through terminal cancellation, resume with a fresh work UUID bound to the same request/generation, and surface pause/resume controls in Background analysis.
 - The exact owner also writes an encrypted, allow-listed semantic stage ledger (profile discovery, face, breach, graph, scoring, exposure, AI, post-processing and completion) plus bounded item/verified/omitted counts for completed major stages; sanitized checkpoint events update the coordinator snapshot without persisting URLs, identifiers or response text.
 - Background WorkManager progress and failures are reduced to fixed stage/error codes rather than persisting arbitrary exception or identity text.
+- Legacy WorkManager progress/output rows with unexpected keys or value types are fail-closed and logically retired from the UI projection; this does not claim forensic SQLite/WAL erasure.
 - Background enqueue now publishes a generation-bound lifecycle before replacing the old exact WorkManager UUID, promotes only that prepared encrypted request, and reenqueues the same UUID after an authoritative missing-row crash boundary.
 - The worker claims the exact owner/request/generation, publishes the encrypted result before durable success, and treats an exact matching result as idempotent success if WorkManager retries after the success-commit boundary.
 - If a retry observes the exact owner with the result already durably published, lifecycle reconciliation promotes that request to success before rerunning stages; owner and result identity must match and paused/mismatched records remain fail-closed.
