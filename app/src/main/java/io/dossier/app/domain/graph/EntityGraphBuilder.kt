@@ -288,7 +288,14 @@ object EntityGraphBuilder {
         }
 
         evidence.forEach { ev ->
-            attachEvidence(ev, subjectId, ::putEntity, ::link)
+            attachEvidence(
+                ev,
+                subjectId,
+                ::putEntity,
+                { fromId, toId, relation, evidenceText, evidenceIds ->
+                    linkWithEvidence(fromId, toId, relation, evidenceText, evidenceIds)
+                }
+            )
         }
 
         val resolvedRelationships = EvidenceCollection(
@@ -430,7 +437,7 @@ object EntityGraphBuilder {
         ev: Evidence,
         subjectId: String,
         putEntity: (DossierEntity) -> Unit,
-        link: (String, String, String, String?) -> Unit
+        link: (String, String, String, String?, List<String>) -> Unit
     ) {
         val value = ev.value.trim()
         if (value.isBlank()) return
@@ -469,7 +476,13 @@ object EntityGraphBuilder {
             ev.attributeKind == HistoricalAttributeKind.Bio
         ) {
             sourceId?.let { archiveId ->
-                link(subjectId, archiveId, if (historicalArchive) "archived_as" else "mentions", ev.snippet)
+                link(
+                    subjectId,
+                    archiveId,
+                    if (historicalArchive) "archived_as" else "mentions",
+                    ev.snippet,
+                    listOf(ev.id)
+                )
             }
             return
         }
@@ -508,18 +521,18 @@ object EntityGraphBuilder {
                 HistoricalAttributeKind.Location -> "mentions"
                 else -> "mentions"
             }
-            link(sourceId, id, relation, ev.snippet)
+            link(sourceId, id, relation, ev.snippet, listOf(ev.id))
         } else {
             val subjectRelation = if (historicalArchive && ev.attributeKind == null) {
                 "archived_as"
             } else {
                 relationFor(type)
             }
-            link(subjectId, id, subjectRelation, ev.snippet)
+            link(subjectId, id, subjectRelation, ev.snippet, listOf(ev.id))
             if (!historicalArchive) {
                 ev.sourceUrl?.let { sourceUrl ->
                     val profileId = entityId(EntityType.Profile, sourceUrl)
-                    link(profileId, id, "mentions", ev.snippet)
+                    link(profileId, id, "mentions", ev.snippet, listOf(ev.id))
                 }
             }
         }
@@ -529,22 +542,40 @@ object EntityGraphBuilder {
         if (graph.edges.isEmpty()) return graph
         val byId = graph.entities.associateBy(DossierEntity::id)
         val evidenceById = evidence.associateBy { EvidenceIdPolicy.migrate(it.id) }
-        val evidenceByValue = evidence.groupBy { it.value.trim().lowercase(Locale.US) }
-        val evidenceBySource = evidence
-            .filter { !it.sourceUrl.isNullOrBlank() }
-            .groupBy { it.sourceUrl!!.trim().lowercase(Locale.US) }
+
+        fun uniqueExactEvidence(raw: String): Evidence? {
+            val key = raw.trim().lowercase(Locale.US)
+            if (key.isBlank()) return null
+            val matches = evidence.asSequence()
+                .filter { record ->
+                    record.value.trim().lowercase(Locale.US) == key ||
+                        record.sourceUrl?.trim()?.lowercase(Locale.US) == key
+                }
+                .distinctBy { EvidenceIdPolicy.migrate(it.id) }
+                .toList()
+            return matches.singleOrNull()
+        }
 
         val enrichedEdges = graph.edges.map { edge ->
             val from = byId[edge.fromId]
             val to = byId[edge.toId]
             val relevant = buildList {
                 addAll(edge.evidenceIds.mapNotNull { evidenceById[EvidenceIdPolicy.migrate(it)] })
-                if (to != null) addAll(evidenceByValue[to.label.trim().lowercase(Locale.US)].orEmpty())
-                to?.sourceUrls.orEmpty().forEach { url ->
-                    addAll(evidenceBySource[url.trim().lowercase(Locale.US)].orEmpty())
-                }
-                if (from != null && from.type != EntityType.Person) {
-                    addAll(evidenceByValue[from.label.trim().lowercase(Locale.US)].orEmpty())
+                /*
+                 * Explicit producer evidence IDs are authoritative. Only legacy
+                 * id-less edges receive a conservative exact lookup, and each
+                 * endpoint/source key must resolve to one evidence record. This
+                 * prevents duplicate records sharing a URL from becoming broad
+                 * provenance for an unrelated graph edge.
+                 */
+                if (edge.evidenceIds.isEmpty() && edge.contradictingEvidenceIds.isEmpty()) {
+                    to?.let { entity ->
+                        uniqueExactEvidence(entity.label)?.let(::add)
+                        entity.sourceUrls.forEach { url -> uniqueExactEvidence(url)?.let(::add) }
+                    }
+                    if (from != null && from.type != EntityType.Person) {
+                        uniqueExactEvidence(from.label)?.let(::add)
+                    }
                 }
             }.distinctBy(Evidence::id)
             val contradictions = relevant.filter { it.state == EvidenceState.Conflicting }

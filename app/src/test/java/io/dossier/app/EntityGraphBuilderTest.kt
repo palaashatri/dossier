@@ -254,6 +254,44 @@ class EntityGraphBuilderTest {
     }
 
     @Test
+    fun ambiguousLegacyEndpointProvenanceRemainsIdless() {
+        val sharedSource = "https://example.test/activity/1"
+        val evidence = listOf(
+            Evidence(
+                id = "activity-1",
+                kind = EvidenceKind.PublicSearchEvidence,
+                value = sharedSource,
+                sourceUrl = sharedSource
+            ),
+            Evidence(
+                id = "activity-2",
+                kind = EvidenceKind.Profile,
+                value = "Archived profile attribute",
+                sourceUrl = sharedSource
+            )
+        )
+
+        val graph = EntityGraphBuilder.build(
+            input = IdentityInput(fullName = "Authorized subject"),
+            evidence = evidence,
+            relationships = listOf(
+                EvidenceRelationship(
+                    fromValue = "alice",
+                    toValue = sharedSource,
+                    relation = "MENTIONS",
+                    evidence = "legacy assertion without a persisted ID"
+                )
+            )
+        )
+
+        val edge = graph.edges.single {
+            it.fromId == "value:alice" && it.relation == "MENTIONS"
+        }
+        assertTrue(edge.evidenceIds.isEmpty())
+        assertTrue(edge.contradictingEvidenceIds.isEmpty())
+    }
+
+    @Test
     fun legacyRelationshipReceivesOnlyExactExistingEvidenceProvenance() {
         val evidence = Evidence(
             id = "activity-1",
@@ -387,7 +425,7 @@ class EntityGraphBuilderTest {
             graph.edges.any {
                 it.relation == "claims_identity" &&
                     it.historical &&
-                    it.evidenceIds.contains("archive-username")
+                    "archive-username" in it.evidenceIds
             }
         )
         val subjectId = graph.entities.first { it.type == EntityType.Person }.id
