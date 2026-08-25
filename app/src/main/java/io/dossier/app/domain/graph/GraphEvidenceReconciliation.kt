@@ -267,7 +267,7 @@ object GraphEvidenceReconciliation {
     }
 
     fun validate(case: DossierCase): GraphEvidenceReconciliationReport =
-        validate(case.evidenceRelationships, case.entityGraph)
+        validate(case.canonicalEvidenceRelationships(), case.entityGraph)
 
     private fun diagnostic(
         kind: GraphEvidenceReconciliationKind,

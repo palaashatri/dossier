@@ -129,6 +129,18 @@ data class DossierCase(
     fun findingKey(finding: Finding): String =
         "${finding.type.name}|${finding.value}|${finding.sourceUrl.orEmpty()}"
 
+    /**
+     * Returns the persisted scanner/plugin relationship assertions used as the
+     * canonical read source for graph diagnostics.
+     *
+     * This is intentionally a read-only view: it does not fall back to graph
+     * edges, normalize or merge assertions, or mutate the case. Persistence and
+     * runtime producers apply the relationship policy before saving/building a
+     * case, while consumers enforce their own diagnostic bounds. Legacy cases
+     * with no persisted assertions therefore remain empty and unresolved.
+     */
+    fun canonicalEvidenceRelationships(): List<EvidenceRelationship> = evidenceRelationships
+
     companion object {
         /** v8 persists canonical evidence relationships alongside evidence records. */
         const val CURRENT_SCHEMA_VERSION = 8

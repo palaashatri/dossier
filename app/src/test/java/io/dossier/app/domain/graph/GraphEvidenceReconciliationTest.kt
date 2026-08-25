@@ -77,6 +77,36 @@ class GraphEvidenceReconciliationTest {
         assertEquals(1, report.extraGraphEdges)
         assertEquals(GraphEvidenceReconciliationKind.ExtraGraphEdge, report.diagnostics.single().kind)
         assertTrue(case.evidenceRelationships.isEmpty())
+        assertTrue(case.canonicalEvidenceRelationships().isEmpty())
+    }
+
+    @Test
+    fun canonicalCaseReadUsesPersistedAssertionsWithoutRewritingOrGraphFallback() {
+        val first = EvidenceRelationship(
+            fromValue = "Alice",
+            toValue = "Profile",
+            relation = "MENTIONS",
+            evidence = "first assertion",
+            evidenceIds = listOf("ev2:first")
+        )
+        val duplicate = first.copy(
+            evidence = "second assertion",
+            evidenceIds = listOf("ev2:second")
+        )
+        val case = DossierCase(
+            createdAt = "2026-08-25T00:00:00Z",
+            subjectName = "Alice",
+            input = IdentityInput(fullName = "Alice"),
+            evidenceRelationships = listOf(first, duplicate)
+        )
+
+        assertEquals(listOf(first, duplicate), case.canonicalEvidenceRelationships())
+        val report = case.graphEvidenceReconciliation()
+
+        assertFalse(report.isConsistent)
+        assertEquals(1, report.ambiguousRelationships)
+        assertEquals(GraphEvidenceReconciliationKind.Ambiguous, report.diagnostics.single().kind)
+        assertEquals(listOf(first, duplicate), case.evidenceRelationships)
     }
 
     @Test
