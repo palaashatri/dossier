@@ -205,6 +205,7 @@ class CaseStore(private val context: Context) {
     }.getOrDefault(false)
 
     fun load(caseId: String): DossierCase? = synchronized(CASE_MUTATION_LOCK) {
+        if (!CaseStoreStoragePolicy.isSafeCaseId(caseId)) return@synchronized null
         loadUnlocked(caseId)
     }
 
@@ -214,6 +215,7 @@ class CaseStore(private val context: Context) {
      */
     fun graphEvidenceDiagnostics(caseId: String): GraphEvidenceReconciliationReport? =
         synchronized(CASE_MUTATION_LOCK) {
+            if (!CaseStoreStoragePolicy.isSafeCaseId(caseId)) return@synchronized null
             loadUnlocked(caseId)?.graphEvidenceReconciliation()
         }
 
@@ -226,6 +228,7 @@ class CaseStore(private val context: Context) {
     }
 
     private fun loadUnlocked(caseId: String): DossierCase? {
+        if (!CaseStoreStoragePolicy.isSafeCaseId(caseId)) return null
         val encrypted = encryptedFile(caseId)
         if (encrypted.exists()) {
             readEncryptedCase(encrypted)?.let { return it }
@@ -339,11 +342,22 @@ class CaseStore(private val context: Context) {
     }
 
     fun delete(caseId: String): Boolean = synchronized(CASE_MUTATION_LOCK) {
+        if (!CaseStoreStoragePolicy.isSafeCaseId(caseId)) return@synchronized false
         runCatching {
-            val encryptedDeleted = !encryptedFile(caseId).exists() || encryptedFile(caseId).delete()
-            val backupDeleted = !backupFile(caseId).exists() || backupFile(caseId).delete()
-            val legacyDeleted = !legacyFile(caseId).exists() || legacyFile(caseId).delete()
-            encryptedDeleted && backupDeleted && legacyDeleted
+            val plan = CaseStoreStoragePolicy.scopedFiles(
+                root = dir,
+                caseId = caseId,
+                encryptedExtension = ENCRYPTED_EXTENSION,
+                legacyExtension = LEGACY_EXTENSION,
+                backupExtension = BACKUP_EXTENSION,
+                tempExtension = TEMP_EXTENSION
+            ) ?: return@runCatching false
+            val deleted = CaseStoreStoragePolicy.deleteAll(
+                files = plan.files,
+                deleteFile = { file -> file.delete() },
+                syncDirectory = { syncDirectory(dir) }
+            )
+            deleted && plan.unsafeFileCount == 0
         }.getOrDefault(false)
     }
 
@@ -357,18 +371,21 @@ class CaseStore(private val context: Context) {
 
     fun clear(): Boolean = synchronized(CASE_MUTATION_LOCK) {
         runCatching {
-            dir.listFiles().orEmpty().forEach { file ->
-                if (file.extension in setOf(
-                        ENCRYPTED_EXTENSION,
-                        LEGACY_EXTENSION,
-                        TEMP_EXTENSION,
-                        BACKUP_EXTENSION
-                    )
-                ) {
-                    file.delete()
-                }
-            }
-            true
+            val plan = CaseStoreStoragePolicy.clearPlan(
+                root = dir,
+                extensions = setOf(
+                    ENCRYPTED_EXTENSION,
+                    LEGACY_EXTENSION,
+                    TEMP_EXTENSION,
+                    BACKUP_EXTENSION
+                )
+            ) ?: return@runCatching false
+            val deleted = CaseStoreStoragePolicy.deleteAll(
+                files = plan.files,
+                deleteFile = { file -> file.delete() },
+                syncDirectory = { syncDirectory(dir) }
+            )
+            deleted && plan.unsafeFileCount == 0
         }.getOrDefault(false)
     }
 
@@ -555,23 +572,44 @@ class CaseStore(private val context: Context) {
         return sha256(json.encodeToString(analysisSnapshot).toByteArray(Charsets.UTF_8))
     }
 
-    private fun syncDirectory(directory: File?) {
-        if (directory == null) return
-        runCatching {
-            FileOutputStream(directory).use { output -> output.fd.sync() }
-        }
+    private fun syncDirectory(directory: File?): Boolean {
+        if (directory == null) return true
+        return runCatching {
+            val fd = android.system.Os.open(
+                directory.absolutePath,
+                android.system.OsConstants.O_RDONLY,
+                0
+            )
+            try {
+                android.system.Os.fsync(fd)
+            } finally {
+                android.system.Os.close(fd)
+            }
+            true
+        }.getOrDefault(false)
     }
 
-    private fun encryptedFile(caseId: String) = File(dir, "$caseId.$ENCRYPTED_EXTENSION")
-    private fun legacyFile(caseId: String) = File(dir, "$caseId.$LEGACY_EXTENSION")
-    private fun backupFile(caseId: String) = File(dir, "$caseId.$ENCRYPTED_EXTENSION.$BACKUP_EXTENSION")
+    private fun encryptedFile(caseId: String) = requireNotNull(
+        CaseStoreStoragePolicy.confinedPath(dir, caseId, ENCRYPTED_EXTENSION)
+    )
+    private fun legacyFile(caseId: String) = requireNotNull(
+        CaseStoreStoragePolicy.confinedPath(dir, caseId, LEGACY_EXTENSION)
+    )
+
+    private fun backupFile(caseId: String) = requireNotNull(
+        CaseStoreStoragePolicy.confinedPath(
+            dir,
+            caseId,
+            "$ENCRYPTED_EXTENSION.$BACKUP_EXTENSION"
+        )
+    )
 
     private fun caseIdFromStorageFile(file: File): String? = when (file.extension) {
         ENCRYPTED_EXTENSION,
         LEGACY_EXTENSION -> file.name.removeSuffix(".${file.extension}")
         BACKUP_EXTENSION -> file.name.removeSuffix(".$ENCRYPTED_EXTENSION.$BACKUP_EXTENSION")
         else -> null
-    }
+    }?.takeIf(CaseStoreStoragePolicy::isSafeCaseId)
 
     @Serializable
     private data class EncryptedCaseEnvelope(
@@ -608,6 +646,125 @@ class CaseStore(private val context: Context) {
         fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
             .digest(bytes)
             .joinToString("") { byte -> "%02x".format(byte) }
+    }
+}
+
+/**
+ * File-scope and deletion policy for encrypted case storage.
+ *
+ * Case identifiers are normally generated UUIDs, but persisted/legacy data is
+ * still an input boundary. Keep every path confined to the canonical case
+ * directory and reject malformed identifiers before constructing a File.
+ */
+internal object CaseStoreStoragePolicy {
+    const val MAX_CASE_ID_LENGTH = 128
+
+    data class ClearPlan(
+        val files: List<File>,
+        val unsafeFileCount: Int
+    )
+
+    data class ScopedFilePlan(
+        val files: List<File>,
+        val unsafeFileCount: Int
+    )
+
+    fun isSafeCaseId(value: String): Boolean {
+        if (value.length !in 1..MAX_CASE_ID_LENGTH) return false
+        if (value == "." || value == "..") return false
+        return value.all { character ->
+            character in 'a'..'z' ||
+                character in 'A'..'Z' ||
+                character in '0'..'9' ||
+                character == '.' ||
+                character == '_' ||
+                character == '-'
+        }
+    }
+
+    fun confinedPath(root: File, caseId: String, suffix: String): File? {
+        if (!isSafeCaseId(caseId) || suffix.isBlank() || suffix.contains('/') || suffix.contains('\\')) {
+            return null
+        }
+        val canonicalRoot = runCatching { root.canonicalFile }.getOrNull() ?: return null
+        val target = runCatching {
+            File(canonicalRoot, "$caseId.$suffix").canonicalFile
+        }.getOrNull() ?: return null
+        return target.takeIf { it.parentFile == canonicalRoot }
+    }
+
+    fun scopedFiles(
+        root: File,
+        caseId: String,
+        encryptedExtension: String,
+        legacyExtension: String,
+        backupExtension: String,
+        tempExtension: String
+    ): ScopedFilePlan? {
+        val encrypted = confinedPath(root, caseId, encryptedExtension) ?: return null
+        val legacy = confinedPath(root, caseId, legacyExtension) ?: return null
+        val backup = confinedPath(
+            root,
+            caseId,
+            "$encryptedExtension.$backupExtension"
+        ) ?: return null
+        val canonicalRoot = runCatching { root.canonicalFile }.getOrNull() ?: return null
+        val entries = runCatching { canonicalRoot.listFiles() }.getOrNull()
+            ?: return if (!canonicalRoot.exists()) {
+                ScopedFilePlan(listOf(encrypted, backup, legacy), unsafeFileCount = 0)
+            } else {
+                null
+            }
+        val tempPrefix = "${encrypted.name}."
+        val matchingTemporary = entries.filter { entry ->
+            entry.name.startsWith(tempPrefix) && entry.name.endsWith(".$tempExtension")
+        }
+        val temporary = matchingTemporary.filter { entry ->
+            runCatching { entry.canonicalFile.parentFile == canonicalRoot }
+                .getOrDefault(false)
+        }
+        return ScopedFilePlan(
+            files = listOf(encrypted, backup, legacy) + temporary,
+            unsafeFileCount = matchingTemporary.size - temporary.size
+        )
+    }
+
+    fun clearPlan(root: File, extensions: Set<String>): ClearPlan? {
+        val canonicalRoot = runCatching { root.canonicalFile }.getOrNull() ?: return null
+        val entries = runCatching { canonicalRoot.listFiles() }.getOrNull()
+            ?: return if (!canonicalRoot.exists()) ClearPlan(emptyList(), 0) else null
+        val matching = entries.filter { it.extension in extensions }
+        val safe = matching.filter { entry ->
+            runCatching { entry.canonicalFile.parentFile == canonicalRoot }
+                .getOrDefault(false)
+        }
+        return ClearPlan(
+            files = safe,
+            unsafeFileCount = matching.size - safe.size
+        )
+    }
+
+    /** Attempts every file and reports any failed deletion or directory sync. */
+    fun deleteAll(
+        files: Collection<File>,
+        deleteFile: (File) -> Boolean,
+        syncDirectory: () -> Boolean
+    ): Boolean {
+        var success = true
+        var changed = false
+        files.distinctBy { file ->
+            runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
+        }.forEach { file ->
+            if (!file.exists()) return@forEach
+            changed = true
+            if (!runCatching { deleteFile(file) }.getOrDefault(false)) {
+                success = false
+            }
+        }
+        if (changed && !runCatching { syncDirectory() }.getOrDefault(false)) {
+            success = false
+        }
+        return success
     }
 }
 

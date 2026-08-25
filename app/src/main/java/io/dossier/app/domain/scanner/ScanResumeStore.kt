@@ -633,6 +633,9 @@ internal class ScanResumeStore internal constructor(
             breachCheckpoint = record.breachCheckpoint
                 ?.takeIf { isValidBreachCheckpoint(it, record, record.checkpointOwnerId) }
                 ?.copy(ownerId = ownerId),
+            faceCheckpoint = record.faceCheckpoint
+                ?.takeIf { isValidFaceCheckpoint(it, record, record.checkpointOwnerId) }
+                ?.copy(ownerId = ownerId),
             postProcessingCheckpoint = record.postProcessingCheckpoint
                 ?.takeIf { isValidPostProcessingCheckpoint(it, record, record.checkpointOwnerId) }
                 ?.copy(ownerId = ownerId),
@@ -666,6 +669,7 @@ internal class ScanResumeStore internal constructor(
         output: ScanStageOutput? = null,
         payloads: List<ScanPayloadSummary> = emptyList(),
         breachCheckpoint: BreachStageCheckpoint? = null,
+        faceCheckpoint: FaceConsistencyStageCheckpoint? = null,
         postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
         entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
         relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
@@ -719,6 +723,18 @@ internal class ScanResumeStore internal constructor(
                     breachCheckpoint,
                     recordForPoint(available.point),
                     ownerId
+                ))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+        if (faceCheckpoint != null &&
+            (!completed ||
+                stage != ScanCheckpointStage.ComparingFaceConsistency ||
+                !isValidFaceCheckpoint(
+                    faceCheckpoint,
+                    recordForPoint(available.point),
+                    ownerId,
+                    requireCompletedStage = false
                 ))
         ) {
             return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
@@ -793,6 +809,10 @@ internal class ScanResumeStore internal constructor(
             .toMutableMap()
         if (completed) payloads.forEach { payloadSummaries[it.stage] = it }
         val retainedBreachCheckpoint = breachCheckpoint ?: available.point.breachCheckpoint
+        val retainedFaceCheckpoint = when {
+            stage == ScanCheckpointStage.ComparingFaceConsistency && completed -> faceCheckpoint
+            else -> available.point.faceCheckpoint
+        }
         val retainedPostProcessingCheckpoint = when {
             stage == ScanCheckpointStage.PostProcessing && completed -> postProcessingCheckpoint
             else -> available.point.postProcessingCheckpoint
@@ -843,6 +863,7 @@ internal class ScanResumeStore internal constructor(
                 .take(MAX_PAYLOAD_SUMMARIES)
                 .map { it.second },
             breachCheckpoint = retainedBreachCheckpoint,
+            faceCheckpoint = retainedFaceCheckpoint,
             postProcessingCheckpoint = retainedPostProcessingCheckpoint,
             entityGraphCheckpoint = retainedEntityGraphCheckpoint,
             relationshipConfidenceCheckpoint = retainedRelationshipConfidenceCheckpoint,
@@ -1341,6 +1362,8 @@ internal class ScanResumeStore internal constructor(
                 // breach stage; never expose or reuse an invalid value.
                 breachCheckpoint = record.breachCheckpoint
                     ?.takeIf { isValidBreachCheckpoint(it, record, record.checkpointOwnerId) },
+                faceCheckpoint = record.faceCheckpoint
+                    ?.takeIf { isValidFaceCheckpoint(it, record, record.checkpointOwnerId) },
                 postProcessingCheckpoint = record.postProcessingCheckpoint
                     ?.takeIf { isValidPostProcessingCheckpoint(it, record, record.checkpointOwnerId) },
                 entityGraphCheckpoint = record.entityGraphCheckpoint
@@ -1458,6 +1481,34 @@ internal class ScanResumeStore internal constructor(
                 result.publicEvidenceUrls.all(::isSafePublicUrl) &&
                 (result.note == null || isSafeCheckpointNote(result.note))
         }
+    }
+
+    private fun isValidFaceCheckpoint(
+        checkpoint: FaceConsistencyStageCheckpoint,
+        record: ResumeRecord,
+        expectedOwnerId: String?,
+        requireCompletedStage: Boolean = true
+    ): Boolean {
+        if (requireCompletedStage &&
+            ScanCheckpointStage.ComparingFaceConsistency.wireName !in record.completedCheckpointStages
+        ) {
+            return false
+        }
+        if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
+        if (record.planFingerprint.isNullOrBlank() ||
+            checkpoint.planFingerprint != record.planFingerprint ||
+            !ProviderPlanFingerprint.isValid(checkpoint.planFingerprint)
+        ) return false
+        if (!isValidRequestId(checkpoint.ownerId) ||
+            expectedOwnerId == null ||
+            checkpoint.ownerId != expectedOwnerId ||
+            record.checkpointOwnerId != expectedOwnerId
+        ) return false
+        if (checkpoint.capturedAtEpochMillis !in record.createdAtEpochMillis..record.expiresAtEpochMillis) {
+            return false
+        }
+        if (!FaceCheckpointCodec.isValidDigest(checkpoint.inputDigest)) return false
+        return FaceCheckpointCodec.decode(checkpoint.matchesJson) != null
     }
 
     private fun isValidPostProcessingCheckpoint(
@@ -1636,6 +1687,7 @@ internal class ScanResumeStore internal constructor(
             .sortedBy(ScanPayloadSummary::stage)
             .take(MAX_PAYLOAD_SUMMARIES),
         breachCheckpoint = point.breachCheckpoint,
+        faceCheckpoint = point.faceCheckpoint,
         postProcessingCheckpoint = point.postProcessingCheckpoint,
         entityGraphCheckpoint = point.entityGraphCheckpoint,
         relationshipConfidenceCheckpoint = point.relationshipConfidenceCheckpoint,
@@ -1714,6 +1766,7 @@ internal class ScanResumeStore internal constructor(
             .take(MAX_PAYLOAD_SUMMARIES)
             .filter(ScanPayloadSummary::isWellFormed),
         breachCheckpoint = breachCheckpoint,
+        faceCheckpoint = faceCheckpoint,
         postProcessingCheckpoint = postProcessingCheckpoint,
         entityGraphCheckpoint = entityGraphCheckpoint,
         relationshipConfidenceCheckpoint = relationshipConfidenceCheckpoint,
@@ -2579,6 +2632,8 @@ internal class ScanResumeStore internal constructor(
         val payloadSummaries: List<ScanPayloadSummary> = emptyList(),
         /** Exact safe output of the completed breach stage, when available. */
         val breachCheckpoint: BreachStageCheckpoint? = null,
+        /** Exact bounded output of the completed face-consistency stage, when available. */
+        val faceCheckpoint: FaceConsistencyStageCheckpoint? = null,
         /** Exact bounded output of deterministic post-processing, when available. */
         val postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
         /** Exact bounded output of deterministic graph construction, when available. */
@@ -2718,6 +2773,7 @@ internal data class ResumePoint(
     val stageOutputs: Map<ScanCheckpointStage, ScanStageOutput> = emptyMap(),
     val payloadSummaries: List<ScanPayloadSummary> = emptyList(),
     val breachCheckpoint: BreachStageCheckpoint? = null,
+    val faceCheckpoint: FaceConsistencyStageCheckpoint? = null,
     val postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
     val entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
     val relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,

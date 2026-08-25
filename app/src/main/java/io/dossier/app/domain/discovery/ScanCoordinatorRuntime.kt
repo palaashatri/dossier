@@ -14,6 +14,7 @@ import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.domain.scanner.ScanPayloadSummary
 import io.dossier.app.domain.scanner.ScanStageOutput
 import io.dossier.app.domain.scanner.BreachStageCheckpoint
+import io.dossier.app.domain.scanner.FaceConsistencyStageCheckpoint
 import io.dossier.app.domain.scanner.PostProcessingStageCheckpoint
 import io.dossier.app.domain.scanner.EntityGraphStageCheckpoint
 import io.dossier.app.domain.scanner.RelationshipConfidenceStageCheckpoint
@@ -380,6 +381,7 @@ object ScanCoordinatorRuntime {
         output: ScanStageOutput? = null,
         payloads: List<ScanPayloadSummary> = emptyList(),
         breachCheckpoint: BreachStageCheckpoint? = null,
+        faceCheckpoint: FaceConsistencyStageCheckpoint? = null,
         postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
         entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
         relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
@@ -396,6 +398,7 @@ object ScanCoordinatorRuntime {
             output = output,
             payloads = payloads,
             breachCheckpoint = breachCheckpoint,
+            faceCheckpoint = faceCheckpoint,
             postProcessingCheckpoint = postProcessingCheckpoint,
             entityGraphCheckpoint = entityGraphCheckpoint,
             relationshipConfidenceCheckpoint = relationshipConfidenceCheckpoint,

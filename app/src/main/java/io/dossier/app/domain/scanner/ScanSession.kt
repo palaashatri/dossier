@@ -494,10 +494,49 @@ object ScanSession {
                 completed = false
             )
             _progressText.value = "COMPARING_FACE_CONSISTENCY..."
-            val faceMatches = runFaceConsistency(context, inputToUse, scanResults)
+            val facePlanFingerprint = requestId?.let { durableRequestId ->
+                (runCatching {
+                    ScanResumeStore(context).loadRequestDetailed(durableRequestId)
+                }.getOrNull() as? ResumeReadState.Available)?.point?.planFingerprint
+            }
+            val faceModelCommitmentBefore = faceModelCommitment(context)
+            val faceInputDigestBefore = FaceCheckpointCodec.inputDigest(
+                input = inputToUse,
+                profileResults = scanResults,
+                modelCommitment = faceModelCommitmentBefore
+            )
+            var reusableFaceMatches = loadReusableFaceCheckpoint(
+                context = context,
+                requestId = requestId,
+                ownerId = checkpointOwnerId,
+                planFingerprint = facePlanFingerprint,
+                inputDigest = faceInputDigestBefore
+            )
+            // A model import/repair may race a recreated worker. Never reuse a
+            // score captured under a different local backend commitment.
+            if (reusableFaceMatches != null && faceModelCommitment(context) != faceModelCommitmentBefore) {
+                reusableFaceMatches = null
+            }
+            val faceMatches = reusableFaceMatches
+                ?: runFaceConsistency(context, inputToUse, scanResults)
             currentCoroutineContext().ensureActive()
             _faceConsistencyMatches.value = faceMatches
             allFindings.addAll(faceFindingsFromMatches(faceMatches))
+            // A model import/repair can complete while the comparison is in
+            // flight.  Scores produced under the old commitment must never be
+            // persisted under the new one; an incomplete checkpoint simply
+            // causes the next worker attempt to rerun this bounded stage.
+            val faceModelCommitmentAfter = faceModelCommitment(context)
+            val faceCheckpoint = buildFaceCheckpointIfModelStable(
+                requestId = requestId,
+                ownerId = checkpointOwnerId,
+                planFingerprint = facePlanFingerprint,
+                modelCommitmentBefore = faceModelCommitmentBefore,
+                modelCommitmentAfter = faceModelCommitmentAfter,
+                input = inputToUse,
+                profileResults = scanResults,
+                matches = faceMatches
+            )
             checkpointStage(
                 context,
                 requestId,
@@ -505,7 +544,8 @@ object ScanSession {
                 checkpointGeneration,
                 ScanCheckpointStage.ComparingFaceConsistency,
                 completed = true,
-                output = ScanStageOutput(itemCount = faceMatches.size)
+                output = ScanStageOutput(itemCount = faceMatches.size),
+                faceCheckpoint = faceCheckpoint
             )
 
             checkpointStage(
@@ -871,6 +911,7 @@ object ScanSession {
         output: ScanStageOutput? = null,
         payloads: List<ScanPayloadSummary> = emptyList(),
         breachCheckpoint: BreachStageCheckpoint? = null,
+        faceCheckpoint: FaceConsistencyStageCheckpoint? = null,
         entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
         relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
         attackPathsCheckpoint: AttackPathsStageCheckpoint? = null,
@@ -878,6 +919,7 @@ object ScanSession {
     ) {
         if (requestId == null || ownerId == null || generation == null) return
         fun writeCheckpoint(
+            faceStageCheckpoint: FaceConsistencyStageCheckpoint?,
             graphCheckpoint: EntityGraphStageCheckpoint?,
             confidenceCheckpoint: RelationshipConfidenceStageCheckpoint?,
             attackPathsCheckpoint: AttackPathsStageCheckpoint?,
@@ -893,12 +935,14 @@ object ScanSession {
                 output = output,
                 payloads = payloads,
                 breachCheckpoint = breachCheckpoint,
+                faceCheckpoint = faceStageCheckpoint,
                 entityGraphCheckpoint = graphCheckpoint,
                 relationshipConfidenceCheckpoint = confidenceCheckpoint,
                 attackPathsCheckpoint = attackPathsCheckpoint,
                 exposureCheckpoint = exposureCheckpoint
             )
         val first = writeCheckpoint(
+            faceCheckpoint,
             entityGraphCheckpoint,
             relationshipConfidenceCheckpoint,
             attackPathsCheckpoint,
@@ -911,11 +955,12 @@ object ScanSession {
             first is ResumeCheckpointWriteState.Invalid &&
             first.reason == ResumeInvalidReason.RecordTooLarge &&
             (entityGraphCheckpoint != null ||
+                faceCheckpoint != null ||
                 relationshipConfidenceCheckpoint != null ||
                 attackPathsCheckpoint != null ||
                 exposureCheckpoint != null)
         ) {
-            writeCheckpoint(null, null, null, null)
+            writeCheckpoint(null, null, null, null, null)
         } else {
             first
         }
@@ -1079,6 +1124,98 @@ object ScanSession {
                     } &&
                     result.note?.length?.let { it <= ScanResumeStore.MAX_BREACH_NOTE_CHARS } != false
             }
+
+    /**
+     * The face stage can use either the conservative appearance descriptor or
+     * an imported/strong local model.  Commit both the selected policy and the
+     * active imported model hash so a retry never reuses a score across a
+     * backend change.
+     */
+    private fun faceModelCommitment(context: Context): String =
+        FaceCheckpointCodec.modelCommitment(
+            strongCorrelationEnabled = FaceCorrelationSessionPolicy.isStrongCorrelationEnabled(),
+            importedModelSha256 = runCatching {
+                FaceEmbeddingModelStore(context.applicationContext).importedModelSha256()
+            }.getOrNull()
+        )
+
+    private fun loadReusableFaceCheckpoint(
+        context: Context,
+        requestId: String?,
+        ownerId: String?,
+        planFingerprint: String?,
+        inputDigest: String
+    ): List<FaceConsistencyMatch>? {
+        if (requestId == null || ownerId == null || !ProviderPlanFingerprint.isValid(planFingerprint)) {
+            return null
+        }
+        if (!FaceCheckpointCodec.isValidDigest(inputDigest)) return null
+        val point = (runCatching {
+            ScanResumeStore(context).loadRequestDetailed(requestId)
+        }.getOrNull() as? ResumeReadState.Available)?.point ?: return null
+        if (point.checkpointOwnerId != ownerId ||
+            point.planFingerprint != planFingerprint ||
+            ScanCheckpointStage.ComparingFaceConsistency !in point.completedCheckpointStages
+        ) return null
+        val checkpoint = point.faceCheckpoint ?: return null
+        if (checkpoint.requestId != requestId ||
+            checkpoint.ownerId != ownerId ||
+            checkpoint.planFingerprint != planFingerprint ||
+            checkpoint.inputDigest != inputDigest
+        ) return null
+        return FaceCheckpointCodec.decode(checkpoint.matchesJson)
+    }
+
+    /**
+     * Builds a durable face result only when the backend/model commitment is
+     * unchanged for the entire stage.  The comparison output itself may still
+     * be shown for this attempt, but stale output is never checkpointed.
+     */
+    internal fun buildFaceCheckpointIfModelStable(
+        requestId: String?,
+        ownerId: String?,
+        planFingerprint: String?,
+        modelCommitmentBefore: String,
+        modelCommitmentAfter: String,
+        input: IdentityInput,
+        profileResults: List<ProfileScanResult>,
+        matches: List<FaceConsistencyMatch>
+    ): FaceConsistencyStageCheckpoint? {
+        if (modelCommitmentBefore != modelCommitmentAfter) return null
+        val inputDigest = FaceCheckpointCodec.inputDigest(
+            input = input,
+            profileResults = profileResults,
+            modelCommitment = modelCommitmentBefore
+        )
+        return buildFaceCheckpoint(
+            requestId = requestId,
+            ownerId = ownerId,
+            planFingerprint = planFingerprint,
+            inputDigest = inputDigest,
+            matches = matches
+        )
+    }
+
+    private fun buildFaceCheckpoint(
+        requestId: String?,
+        ownerId: String?,
+        planFingerprint: String?,
+        inputDigest: String,
+        matches: List<FaceConsistencyMatch>
+    ): FaceConsistencyStageCheckpoint? {
+        if (requestId == null || ownerId == null) return null
+        val plan = planFingerprint?.takeIf(ProviderPlanFingerprint::isValid) ?: return null
+        if (!FaceCheckpointCodec.isValidDigest(inputDigest)) return null
+        val matchesJson = FaceCheckpointCodec.encode(matches) ?: return null
+        return FaceConsistencyStageCheckpoint(
+            requestId = requestId,
+            planFingerprint = plan,
+            ownerId = ownerId,
+            capturedAtEpochMillis = System.currentTimeMillis(),
+            inputDigest = inputDigest,
+            matchesJson = matchesJson
+        )
+    }
 
     private fun loadReusableBreachCheckpoint(
         context: Context,
