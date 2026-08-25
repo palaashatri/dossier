@@ -11,10 +11,10 @@ The current implementation branch is **83/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-665e69d
+deda54d
 ```
 
-`665e69d` is the held-out calibration provenance propagation tranche; the validated tree also includes exact published-result owner recovery, pinned source-catalog maintenance diagnostics, bounded live evidence corrections, source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, report-evidence accessibility semantics, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
+`deda54d` is the canonical graph-assertion export separation tranche; the validated tree also includes exact profile-evidence correction controls, bounded encrypted case persistence, held-out calibration provenance propagation, exact published-result owner recovery, pinned source-catalog maintenance diagnostics, bounded live evidence corrections, source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, report-evidence accessibility semantics, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
 
@@ -23,21 +23,21 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 7 tests / no-network schema + pinned source-catalog fixtures
-Debug JVM unit tests                PASS — 734 tests / 120 result XML files / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 734 tests / 120 result XML files / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 740 tests / 121 result XML files / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 740 tests / 121 result XML files / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 115,515,880 bytes
-Debug APK SHA-256                   1F90FB4A6EA1E06FD10E0B1718B988E8B238218B82E506D85AF1B55D30326B47
-uiTest APK assembly                 PASS — 243,014,073 bytes
-uiTest APK SHA-256                  EBE8D67B2A88AC087EAE719478FD508AB0856931D838B56F1CFC1599884F917E
-Android-test APK                    PASS — 1,021,836 bytes
-Android-test APK SHA-256             27985DAD3304662CB69B2021606144E9CD83C1C9A0811AECAEECE374E5E01B42
+Debug APK assembly                  PASS — 115,532,264 bytes
+Debug APK SHA-256                   9C3E0670C9E1F7EDEBA17A1BE9F47A633D1AE73CA5EA9A460D1F5A02B0514ED9
+uiTest APK assembly                 PASS — 243,030,457 bytes
+uiTest APK SHA-256                  C378621F5B3E6E81B6534980ABE6CBF4B10C71AA05BC2C078DFDD00EE82ED862
+Android-test APK                    PASS — 1,023,944 bytes
+Android-test APK SHA-256             B27ADC0EA80ADA4D575437E7C95438D581EF01DFC7F1B97615108AD9CCB7FB4F
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
-Connected uiTest suite              PASS — 48 tests / 0 failures on API 36 `medium_phone` emulator
+Connected uiTest suite              PASS — 51 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, live draft evidence-correction semantics, report-evidence button semantics, async saved-case persistence, HUD status semantics and reverse-video picker semantics. A fresh ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified restoration after an external `am force-stop`/relaunch and after an emulator reboot. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
+The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, live draft evidence-correction semantics, exact profile-card correction controls, report-evidence button semantics, bounded CaseStore save behavior, async saved-case persistence, graph/export redaction semantics, HUD status semantics and reverse-video picker semantics. A fresh ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified the encrypted result remained visible after an external `am force-stop`/relaunch and after an emulator reboot. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
@@ -94,6 +94,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - Scanner/plugin relationship assertions with the same normalized endpoints and relation are merged deterministically while unioning their evidence IDs and retaining a nonblank description, so one producer cannot erase another producer's provenance.
 - Canonical relationship assertions are now stored in versioned encrypted cases alongside evidence records, restored into the runtime cache, migrated from legacy evidence IDs, and bounded to 10,000 relationships with at most 256 evidence IDs per relationship.
 - Scanner-produced profile and finding relationships now carry the exact stable `Evidence.id` values created for those observations; relationship provenance is not reconstructed from endpoint text.
+- Graph exports keep the `EntityGraph` projection separate from the read-only canonical scanner/plugin assertion ledger; case exports include a distinct `*.canonical-assertions.csv` sidecar, and ShareSafe redaction removes assertion endpoints, evidence text and identifiers before files are written.
 - Reddit public-activity and WhatsMyName username-surface relationships also carry the exact stable IDs of the emitted evidence records.
 - Scan HUD status pills expose positive, warning, critical and informational state through Compose `stateDescription` semantics, while color remains supplemental.
 - Structured scan IDs, requests, run states and events.
@@ -213,6 +214,8 @@ A production-sized/adversarial AI evaluation corpus remains incomplete; correcte
 - Evidence decisions: **Mine / Not mine / Unsure / Ignore**.
 - Account decisions: **This is me / Not me / Unsure**.
 - Corrections affect effective analysis/graph membership without deleting raw encrypted evidence.
+- Live report profile cards expose the same bounded Confirm / Reject / Unsure / Ignore correction decisions when exactly one persisted profile evidence record can be resolved; ambiguous or missing IDs fail closed, and media/provider corrections remain unavailable until they have a durable evidence key.
+- Encrypted CaseStore writes reject plaintext payloads above 8 MiB or envelopes above 12 MiB, bound legacy/encrypted reads, and preserve the last-good case when a save is rejected before atomic replacement.
 - Remediation states: Not started, In progress, Submitted, Awaiting response, Completed, Rejected and Needs manual action.
 - Reviewed provider-settings resources are catalog-validated (HTTPS, provider ownership, no userinfo/query/fragment) with manual-action or unavailable fallback when no reviewed resource exists; the catalog currently covers eight providers and is not deletion proof.
 - Differential comparison classifies added, removed, changed and unchanged findings; saved-case media review also reports bounded source-page/image-URL keyed added, changed, unchanged, not-observed and unavailable observations without using visual identity or candidate IDs as keys.
@@ -224,6 +227,7 @@ A production-sized/adversarial AI evaluation corpus remains incomplete; correcte
 ## Reports and share-safe export
 
 - Paginated PDF plus machine-readable JSON evidence package.
+- Graph exports include GraphML, node/edge CSV and JSON projection files plus a separate canonical scanner/plugin assertion CSV sidecar when a saved case contains the assertion ledger; the projection is not treated as the assertion source of truth.
 - Per-section SHA-256 hashes and canonical manifest hash.
 - Explicit `ShareSafe` mode from saved Cases.
 - Redaction happens **before export files are written**.
