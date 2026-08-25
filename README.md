@@ -11,10 +11,10 @@ The current implementation branch is **83/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-deda54d
+674fe2b
 ```
 
-`deda54d` is the canonical graph-assertion export separation tranche; the validated tree also includes exact profile-evidence correction controls, bounded encrypted case persistence, held-out calibration provenance propagation, exact published-result owner recovery, pinned source-catalog maintenance diagnostics, bounded live evidence corrections, source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, report-evidence accessibility semantics, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
+`674fe2b` is the evidence-keyed media correction tranche; the validated tree also includes the exact-owner Pausing recovery fix (`0bd65dd`), canonical graph-assertion export separation, exact profile-evidence correction controls, bounded encrypted case persistence, held-out calibration provenance propagation, exact published-result owner recovery, pinned source-catalog maintenance diagnostics, bounded live evidence corrections, source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, report-evidence accessibility semantics, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
 
@@ -23,21 +23,21 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 7 tests / no-network schema + pinned source-catalog fixtures
-Debug JVM unit tests                PASS — 740 tests / 121 result XML files / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 740 tests / 121 result XML files / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 744 tests / 122 result XML files / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 744 tests / 122 result XML files / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
 Debug APK assembly                  PASS — 115,532,264 bytes
-Debug APK SHA-256                   9C3E0670C9E1F7EDEBA17A1BE9F47A633D1AE73CA5EA9A460D1F5A02B0514ED9
-uiTest APK assembly                 PASS — 243,030,457 bytes
-uiTest APK SHA-256                  C378621F5B3E6E81B6534980ABE6CBF4B10C71AA05BC2C078DFDD00EE82ED862
-Android-test APK                    PASS — 1,023,944 bytes
-Android-test APK SHA-256             B27ADC0EA80ADA4D575437E7C95438D581EF01DFC7F1B97615108AD9CCB7FB4F
+Debug APK SHA-256                   A07A81622ED4B85B64058A639939D32A719C359C6E49A89788ECE3C571961308
+uiTest APK assembly                 PASS — 243,046,841 bytes
+uiTest APK SHA-256                  7154C5132CF764CA09E1FF1D01E30ACAB8508781B07A4E9988DF3D5C9B5945CD
+Android-test APK                    PASS — 1,025,992 bytes
+Android-test APK SHA-256             DE4D6ABD0AFB39DA98F629444219F544E0B02DA7CD0020C6E1857A623C1BA135
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
-Connected uiTest suite              PASS — 51 tests / 0 failures on API 36 `medium_phone` emulator
+Connected uiTest suite              PASS — 52 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, live draft evidence-correction semantics, exact profile-card correction controls, report-evidence button semantics, bounded CaseStore save behavior, async saved-case persistence, graph/export redaction semantics, HUD status semantics and reverse-video picker semantics. A fresh ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified the encrypted result remained visible after an external `am force-stop`/relaunch and after an emulator reboot. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
+The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, exact evidence-key fail-closed behavior, report-evidence button semantics, bounded CaseStore save behavior, async saved-case persistence, graph/export redaction semantics, HUD status semantics and reverse-video picker semantics. A fresh ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified the encrypted result remained visible after an external `am force-stop`/relaunch and after an emulator reboot. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
@@ -214,7 +214,8 @@ A production-sized/adversarial AI evaluation corpus remains incomplete; correcte
 - Evidence decisions: **Mine / Not mine / Unsure / Ignore**.
 - Account decisions: **This is me / Not me / Unsure**.
 - Corrections affect effective analysis/graph membership without deleting raw encrypted evidence.
-- Live report profile cards expose the same bounded Confirm / Reject / Unsure / Ignore correction decisions when exactly one persisted profile evidence record can be resolved; ambiguous or missing IDs fail closed, and media/provider corrections remain unavailable until they have a durable evidence key.
+- Live report profile cards expose the same bounded Confirm / Reject / Unsure / Ignore correction decisions when exactly one persisted profile evidence record can be resolved; ambiguous or missing IDs fail closed.
+- Reverse-image visual provenance cards now expose the same draft decisions for exactly one directly verified-profile linkage whose source page and persisted Profile evidence ID match; generic candidates, user-reviewed linkages without a unique persisted record, and ambiguous evidence remain explicitly unavailable.
 - Encrypted CaseStore writes reject plaintext payloads above 8 MiB or envelopes above 12 MiB, bound legacy/encrypted reads, and preserve the last-good case when a save is rejected before atomic replacement.
 - Remediation states: Not started, In progress, Submitted, Awaiting response, Completed, Rejected and Needs manual action.
 - Reviewed provider-settings resources are catalog-validated (HTTPS, provider ownership, no userinfo/query/fragment) with manual-action or unavailable fallback when no reviewed resource exists; the catalog currently covers eight providers and is not deletion proof.
