@@ -11,8 +11,10 @@ The current implementation branch is **80/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-efb6c90
+366c280
 ```
+
+`366c280` is the test-only accessibility follow-up on the media/provenance implementation in `4bb7a0e`; the validation below covers the resulting tree.
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
 
@@ -21,23 +23,23 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 5 tests / no-network schema fixtures
-Debug JVM unit tests                PASS — 683 tests / 112 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 683 tests / 112 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 690 tests / 114 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 690 tests / 114 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 115,466,728 bytes
-Debug APK SHA-256                   E702E1EE6F51D5EBAB063F7CAF93F391AAD7E2771EFD11741284592A336137BA
-uiTest APK assembly                 PASS — 242,932,153 bytes
-uiTest APK SHA-256                  270F6A80D971CD376D0153B1C3B63D2452CA12A859A6DEAFDD6C597B413D11E9
-Android-test APK                    PASS — 1,008,344 bytes
-Android-test APK SHA-256             F8A668686B8997082BF1748103C504372988628CBE14F6DDB20782D2786B7EE5
+Debug APK assembly                  PASS — 115,483,112 bytes
+Debug APK SHA-256                   5C23FC27BC2D5154DD53C8C988A42108D49C9C130F4C72EB3077AB8508B09B2F
+uiTest APK assembly                 PASS — 242,964,921 bytes
+uiTest APK SHA-256                  B88E9ADD122039F18A1A48147B34AD674E4B92229CC15C971C3B5EDB54A635EC
+Android-test APK                    PASS — 1,046,696 bytes
+Android-test APK SHA-256             C2150971D2830DF4D90F498C46F17B2C09906FAD70AF221B2F8EAC93C074A1F7
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
-Connected uiTest suite              PASS — 42 tests / 0 failures on API 36 `medium_phone` emulator
+Connected uiTest suite              PASS — 43 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, and the async saved-case persistence coverage. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Physical devices, process-death/reboot, accessibility, and battery/thermal behavior remain unvalidated.
+The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, async saved-case persistence coverage, and the HUD status semantics test. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commit; its hash is therefore a current-worktree artifact. Physical devices, process-death/reboot, TalkBack, and battery/thermal behavior remain unvalidated.
 
-This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, verified-account image correlation, and representative physical-device/accessibility/performance validation remain release gates.
+This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, automatic verified-account image acquisition, and representative physical-device/accessibility/performance validation remain release gates.
 
 See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the target product contract.
 
@@ -89,6 +91,8 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - Remediation cards expose reviewed provider-specific resources, manual-action fallback or explicit unavailable state; opening a settings page never asserts deletion and later scans remain required.
 - Saved-case comparison exposes source-scoped historical/provider changes and remediation rechecks with exact evidence IDs and only newer successful scan IDs; missing or unavailable observations are not reported as deletion.
 - Scanner/plugin relationship assertions with the same normalized endpoints and relation are merged deterministically while unioning their evidence IDs and retaining a nonblank description, so one producer cannot erase another producer's provenance.
+- Scanner-produced profile and finding relationships now carry the exact stable `Evidence.id` values created for those observations; relationship provenance is not reconstructed from endpoint text.
+- Scan HUD status pills expose positive, warning, critical and informational state through Compose `stateDescription` semantics, while color remains supplemental.
 - Structured scan IDs, requests, run states and events.
 - Live UI state derives from real scan-stage/profile/face/breach/graph/analysis observations.
 - Direct-profile execution emits provider queued/started/completed/unavailable events with one stable scan ID; retries do not inflate unique started counts and stale callbacks are ignored.
@@ -118,6 +122,7 @@ Recovery now covers stable initial direct-profile outcomes, the configured-depth
 - Numeric confidence is separate from verification state.
 - Graph v2 provides semantic node kinds, typed relationships, evidence IDs, contradiction IDs, history fields and verification/conflict state while retaining saved-case compatibility.
 - Legacy relationship provenance is migrated only through exact existing endpoint/source evidence matches; graph queries expose both positive and contradicting evidence links.
+- Scanner relationship edges preserve the exact profile/finding evidence IDs that produced them, so graph drill-down can inspect the originating observation without guessing from a URL or endpoint label.
 - Multi-signal account resolution is integrated into the production graph.
 - A deterministic benchmark harness reports confusion-matrix counts, precision, recall, F1, false-positive rate, false-negative rate and unverifiable-case accuracy over digest-bound corpora.
 - Calibration artifacts are schema/version/digest/policy checked; synthetic fixtures cannot activate production policy, and consented artifacts must meet minimum positive/negative sample counts before exact-corpus activation.
@@ -146,13 +151,14 @@ Implemented whole-image duplicate/repost analysis:
 - deterministic exact-content and perceptual-near-duplicate clusters with stable IDs;
 - Reverse Media UI for candidate-state totals, cluster summaries, hash/dimension details and source drill-down.
 - bounded saved-case whole-image cluster history groups repeated fingerprints across saved cases while retaining case/cluster/source/retrieval provenance;
+- explicit `ImageAccountLinkage` records can link a candidate to an exact account page only from a verified-profile association or a user review, with bounded evidence IDs and timestamps; visual scores and clusters never create this identity edge;
 - accessible review wording explicitly states that repeated whole-image content does not establish shared account or person identity.
 
 Whole-image clusters mean **duplicate/reposted image content**. They do not mean two different photos depict the same person.
 
 Optional local cross-photo face support uses pinned YuNet/SFace models with exact size/SHA-256 verification, deterministic preprocessing, five-landmark alignment, ambiguity/quality rejection and cosine scoring. Face similarity remains supporting evidence; release thresholds are not advertised as measured identity probabilities until a representative benchmark exists.
 
-Verified-account correlation and independent visual acceptance remain incomplete. Whole-image similarity and face similarity are supporting evidence, not identity proof.
+Automatic verified-account acquisition/correlation and independent visual acceptance remain incomplete. Explicit verified-profile and user-reviewed linkages are bounded, evidence-carrying associations rather than automatic identity conclusions. Whole-image similarity and face similarity are supporting evidence, not identity proof.
 
 ## Historical evidence
 
@@ -268,13 +274,13 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - Replacement-generation cleanup is best effort after WorkManager enqueue acknowledgement. A crash or cleanup failure in that narrow hand-off can retain an encrypted prior-request profile scope until explicit purge or later maintenance; a durable retirement ledger remains open.
 - UI latest-result reads, purge, saved-case listing/deletion, case analysis, corrections, remediation updates and case-save actions now use IO-dispatched seams; lower-level synchronous helpers remain for controlled lifecycle paths. Background result envelopes enforce bounded file, metadata, IV, ciphertext and plaintext sizes before allocation/decryption and reject oversized nested case/graph/media/analysis collection shapes before save or after authenticated load. Large-case ANR/storage-corruption testing remains open.
 - Entity resolution has deterministic metrics and a fail-closed calibration-artifact path, but still needs a consented representative corpus and published measured calibration before weights can be treated as empirically fitted.
-- Verified-account correlation and richer cross-scan image change workflows remain open; bounded candidate/cluster provenance persistence and saved-case fingerprint history review are implemented.
+- Automatic verified-account acquisition/correlation and richer cross-scan image change workflows remain open; explicit verified-profile/user-reviewed account linkages, bounded candidate/cluster provenance persistence and saved-case fingerprint history review are implemented.
 - Provider-specific remediation resources currently use a small reviewed allowlist and truthful manual/unavailable fallback states; opening a provider settings page is not deletion proof and broader reviewed coverage remains open.
 - Cross-photo face correlation still requires measured ROC/FAR/FRR and representative physical-device validation.
 - Historical extraction is currently strongest for directly re-fetched Wayback HTML; archive/provider-wide structured extraction and universal timestamp propagation remain incomplete even though bounded source-scoped change diffing is available.
 - HIBP email coverage depends on user-supplied supported access and provider availability.
 - Share-safe redaction reduces disclosure but cannot guarantee anonymity.
-- Visual QA currently covers one API 36 emulator viewport with synthetic data. The changed scan-budget and bottom-navigation states were checked at 1.0x, 1.3x, 1.5x and 2.0x font scale, but this does not establish whole-product accessibility, landscape/tablet or physical-device acceptance.
+- Visual QA currently covers one API 36 emulator viewport with synthetic data. HUD status severity semantics have a connected instrumentation assertion, and the changed scan-budget and bottom-navigation states were checked at 1.0x, 1.3x, 1.5x and 2.0x font scale, but this does not establish whole-product TalkBack/accessibility, landscape/tablet or physical-device acceptance.
 - Emulator CI cannot replace Samsung/Pixel/lower-memory, accessibility, font-scale, process-death, thermal, battery and large-case validation.
 
 ## Documentation policy
