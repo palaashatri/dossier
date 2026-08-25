@@ -136,6 +136,36 @@ internal data class PivotFrontierState(
     val diagnostics: List<PivotDecisionDiagnostic>
 )
 
+/**
+ * Result of loading a request-scoped frontier.  A missing file is expected on
+ * the first pass and permits creating a fresh frontier.  A request-scoped
+ * file that exists but cannot be authenticated, decoded, or safely read is a
+ * different state: silently replacing it would forget admitted/pending work
+ * after process death and could re-admit pivots that were already visited.
+ */
+internal sealed interface PivotFrontierLoadResult {
+    data class Available(val frontier: BoundedPivotFrontier) : PivotFrontierLoadResult
+    data object Missing : PivotFrontierLoadResult
+    data object Unavailable : PivotFrontierLoadResult
+}
+
+/**
+ * Restores a durable frontier or fails closed when a persisted request state
+ * exists but cannot be trusted.  The null/Missing branch is the only path
+ * that creates a fresh frontier, preserving normal first-run behavior.
+ */
+internal fun restorePivotFrontierOrFail(
+    requestId: String,
+    config: PivotFrontierConfig,
+    persisted: PivotFrontierLoadResult?
+): BoundedPivotFrontier = when (persisted) {
+    is PivotFrontierLoadResult.Available -> persisted.frontier
+    null,
+    PivotFrontierLoadResult.Missing -> BoundedPivotFrontier(requestId, config)
+    PivotFrontierLoadResult.Unavailable ->
+        throw ScanExecutionException(ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE)
+}
+
 internal sealed interface PivotOffer {
     data class Admitted(val entry: PivotFrontierEntry) : PivotOffer
     data class Rejected(val diagnostic: PivotDecisionDiagnostic) : PivotOffer
@@ -509,33 +539,65 @@ internal class PivotFrontierStore internal constructor(
         coerceInputValues = false
     }
 
-    fun load(config: PivotFrontierConfig): BoundedPivotFrontier? = synchronized(STORE_LOCK) {
+    /**
+     * Nullable compatibility facade.  New recovery callers should use
+     * [loadDetailed] so an invalid persisted file is not confused with a
+     * first-run request that has no frontier yet.
+     */
+    fun load(config: PivotFrontierConfig): BoundedPivotFrontier? =
+        (loadDetailed(config) as? PivotFrontierLoadResult.Available)?.frontier
+
+    fun loadDetailed(config: PivotFrontierConfig): PivotFrontierLoadResult = synchronized(STORE_LOCK) {
         runCatching {
             val target = frontierFile()
-            val parent = target.parentFile ?: return@runCatching null
-            if (!isSafeDirectoryChain(rootDir, parent) || isTombstoned()) return@runCatching null
-            if (!isContained(target) || !isSafeRegularFile(target) || target.length() > MAX_ENVELOPE_BYTES) {
-                return@runCatching null
+            val parent = target.parentFile ?: return@runCatching PivotFrontierLoadResult.Unavailable
+            // Validate the optional path chain even when the request file is
+            // absent.  A regular-file or symlinked parent must not be treated
+            // as a fresh scan, otherwise later save failures would silently
+            // drop the frontier after process death.
+            if (!isSafeDirectoryChain(rootDir, parent) || !isContained(target)) {
+                return@runCatching PivotFrontierLoadResult.Unavailable
+            }
+            // No request-scoped file is the normal first-run state.  This is
+            // safe only after the path chain above has been authenticated.
+            if (!Files.exists(target.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+                return@runCatching if (isTombstoned()) {
+                    PivotFrontierLoadResult.Unavailable
+                } else {
+                    PivotFrontierLoadResult.Missing
+                }
+            }
+            if (isTombstoned() ||
+                !isSafeRegularFile(target) ||
+                target.length() > MAX_ENVELOPE_BYTES
+            ) {
+                return@runCatching PivotFrontierLoadResult.Unavailable
             }
             val envelope = json.decodeFromString<PivotFrontierEnvelope>(target.readBounded())
-            if (envelope.version != FORMAT_VERSION || envelope.requestId != requestId) return@runCatching null
+            if (envelope.version != FORMAT_VERSION || envelope.requestId != requestId) {
+                return@runCatching PivotFrontierLoadResult.Unavailable
+            }
             val now = nowMillis()
             if (now < 0L || envelope.savedAtEpochMillis < 0L || envelope.savedAtEpochMillis > now) {
-                return@runCatching null
+                return@runCatching PivotFrontierLoadResult.Unavailable
             }
-            if (now - envelope.savedAtEpochMillis > MAX_AGE_MILLIS) return@runCatching null
+            if (now - envelope.savedAtEpochMillis > MAX_AGE_MILLIS) {
+                return@runCatching PivotFrontierLoadResult.Unavailable
+            }
             val plaintext = crypto.decrypt(
                 envelope.ivBase64,
                 envelope.ciphertextBase64,
                 aad()
-            ) ?: return@runCatching null
-            if (plaintext.size > MAX_PAYLOAD_BYTES) return@runCatching null
+            ) ?: return@runCatching PivotFrontierLoadResult.Unavailable
+            if (plaintext.size > MAX_PAYLOAD_BYTES) {
+                return@runCatching PivotFrontierLoadResult.Unavailable
+            }
             val state = json.decodeFromString<PivotFrontierState>(String(plaintext, Charsets.UTF_8))
             if (state.requestId != requestId || state.version != BoundedPivotFrontier.FORMAT_VERSION) {
-                return@runCatching null
+                return@runCatching PivotFrontierLoadResult.Unavailable
             }
-            BoundedPivotFrontier(requestId, config, nowMillis, state)
-        }.getOrNull()
+            PivotFrontierLoadResult.Available(BoundedPivotFrontier(requestId, config, nowMillis, state))
+        }.getOrElse { PivotFrontierLoadResult.Unavailable }
     }
 
     fun save(frontier: BoundedPivotFrontier): Boolean = synchronized(STORE_LOCK) {

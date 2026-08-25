@@ -221,11 +221,19 @@ class ProfileScanner(
         val frontierRequestId = requestId
             ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
             ?: EPHEMERAL_FRONTIER_REQUEST_ID
-        val frontierStore = requestId
+        val frontierStoreAttempt = requestId
             ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
-            ?.let { runCatching { PivotFrontierStore(context, it) }.getOrNull() }
-        val pivotFrontier = frontierStore?.load(frontierConfig)
-            ?: BoundedPivotFrontier(frontierRequestId, frontierConfig)
+            ?.let { runCatching { PivotFrontierStore(context, it) } }
+        val frontierStore = frontierStoreAttempt?.getOrNull()
+        val pivotFrontier = restorePivotFrontierOrFail(
+            requestId = frontierRequestId,
+            config = frontierConfig,
+            persisted = when {
+                frontierStoreAttempt == null -> null
+                frontierStoreAttempt.isFailure -> PivotFrontierLoadResult.Unavailable
+                else -> frontierStore!!.loadDetailed(frontierConfig)
+            }
+        )
         pivotFrontier.markVisited(uniqueCandidates.map { it.url })
         publishPivotDiagnostics(scanId, pivotFrontier)
 
@@ -414,7 +422,7 @@ class ProfileScanner(
 
                 personalSites.forEach { siteUrl ->
                     try {
-                        val followed = websiteFollower.follow(siteUrl)
+                        val followed = websiteFollower.follow(siteUrl, scanId)
                         if (followed.text.isBlank() && followed.links.isEmpty()) return@forEach
                         val sitePivots = HandleExtractor.extract(
                             profileText = followed.text,

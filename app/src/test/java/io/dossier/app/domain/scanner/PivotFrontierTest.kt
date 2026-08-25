@@ -155,6 +155,62 @@ class PivotFrontierTest {
     }
 
     @Test
+    fun `detailed load distinguishes first run from unavailable persisted state`() {
+        val store = PivotFrontierStore(root, REQUEST_ID, crypto, nowMillis = { now })
+        assertTrue(store.loadDetailed(PivotFrontierConfig()) is PivotFrontierLoadResult.Missing)
+
+        val frontier = BoundedPivotFrontier(REQUEST_ID, PivotFrontierConfig(), nowMillis = { now })
+        frontier.offer(candidate("tampered-detailed"), 1, PivotSignalType.ExplicitProfileLink)
+        assertTrue(store.save(frontier))
+        val file = store.frontierFileForTesting()
+        file.writeText(file.readText().replaceFirst("A", "B"))
+
+        assertTrue(store.loadDetailed(PivotFrontierConfig()) is PivotFrontierLoadResult.Unavailable)
+    }
+
+    @Test
+    fun `invalid persisted frontier fails closed instead of creating a fresh queue`() {
+        val config = PivotFrontierConfig()
+        val store = PivotFrontierStore(root, REQUEST_ID, crypto, nowMillis = { now })
+        val frontier = BoundedPivotFrontier(REQUEST_ID, config, nowMillis = { now })
+        frontier.offer(candidate("invalid-recovery"), 1, PivotSignalType.ExplicitProfileLink)
+        assertTrue(store.save(frontier))
+        store.frontierFileForTesting().writeText("not-a-frontier-envelope")
+
+        val persisted = store.loadDetailed(config)
+        assertTrue(persisted is PivotFrontierLoadResult.Unavailable)
+        val failure = runCatching {
+            restorePivotFrontierOrFail(REQUEST_ID, config, persisted)
+        }.exceptionOrNull()
+        assertTrue(failure is ScanExecutionException)
+        assertEquals(
+            ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE,
+            (failure as ScanExecutionException).failureCode
+        )
+    }
+
+    @Test
+    fun `missing persisted frontier permits a bounded fresh queue`() {
+        val config = PivotFrontierConfig()
+        val fresh = restorePivotFrontierOrFail(
+            requestId = REQUEST_ID,
+            config = config,
+            persisted = PivotFrontierLoadResult.Missing
+        )
+        assertEquals(0, fresh.pendingCount)
+        assertEquals(0, fresh.visitedCount)
+    }
+
+    @Test
+    fun `unsafe optional frontier parent is unavailable instead of missing`() {
+        val frontierRoot = File(root, "dossier_frontier")
+        frontierRoot.writeText("not-a-directory")
+        val store = PivotFrontierStore(root, REQUEST_ID, crypto, nowMillis = { now })
+
+        assertTrue(store.loadDetailed(PivotFrontierConfig()) is PivotFrontierLoadResult.Unavailable)
+    }
+
+    @Test
     fun `pending entries survive encrypted store round trip until acknowledged`() {
         val store = PivotFrontierStore(root, REQUEST_ID, crypto, nowMillis = { now })
         val config = PivotFrontierConfig()
