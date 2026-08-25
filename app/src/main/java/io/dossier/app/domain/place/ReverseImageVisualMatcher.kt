@@ -7,6 +7,7 @@ import io.dossier.app.data.web.DiscoveryHttpPolicy
 import io.dossier.app.data.web.ReverseImageCandidateSearchService
 import io.dossier.app.domain.image.ImageDuplicateClusterer
 import io.dossier.app.domain.model.ReverseImageLookupResult
+import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.scanner.ScanSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -84,11 +85,11 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
             deepResearch = deepResearch
         )
 
-        val profileCandidates = ScanSession.profileScanResults.value
+        val profileCandidatesWithLinkage = ScanSession.profileScanResults.value
             .asSequence()
             .filter { it.exists && it.profileImageUrl?.startsWith("http", true) == true }
             .map { result ->
-                ReverseImageCandidateSearchService.Candidate(
+                val candidate = ReverseImageCandidateSearchService.Candidate(
                     title = result.displayName ?: result.candidate.username,
                     imageUrl = result.profileImageUrl!!,
                     thumbnailUrl = result.profileImageUrl,
@@ -96,8 +97,15 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
                     query = "Previously discovered profile avatar",
                     source = "Dossier profile discovery"
                 )
+                candidate to verifiedProfileMediaLinkage(result)
             }
             .toList()
+        val profileCandidates = profileCandidatesWithLinkage.map { it.first }
+        val verifiedProfileLinkagesBySourcePage = profileCandidatesWithLinkage
+            .mapNotNull { (candidate, linkage) ->
+                linkage?.let { canonical(candidate.sourcePageUrl) to it }
+            }
+            .toMap()
 
         val candidates = (profileCandidates + indexedCandidates)
             .distinctBy { canonical(it.imageUrl) }
@@ -116,7 +124,11 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
             candidates.map { candidate ->
                 async(Dispatchers.IO) {
                     semaphore.withPermit {
-                        compareCandidate(queryFingerprint, candidate)
+                        compareCandidate(
+                            query = queryFingerprint,
+                            candidate = candidate,
+                            accountLinkage = verifiedProfileLinkagesBySourcePage[canonical(candidate.sourcePageUrl)]
+                        )
                     }
                 }
             }.awaitAll()
@@ -182,7 +194,8 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
 
     private suspend fun compareCandidate(
         query: VisualFingerprint.FingerprintSet,
-        candidate: ReverseImageCandidateSearchService.Candidate
+        candidate: ReverseImageCandidateSearchService.Candidate,
+        accountLinkage: ReverseImageLookupResult.ImageAccountLinkage? = null
     ): CandidateAnalysis {
         val candidateId = stableCandidateId(candidate)
         val base = ReverseImageLookupResult.ImageCandidateProvenance(
@@ -192,6 +205,7 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
             sourcePageUrl = candidate.sourcePageUrl,
             source = candidate.source,
             acquisitionQuery = candidate.query,
+            accountLinkages = listOfNotNull(accountLinkage),
             state = ReverseImageLookupResult.ImageCandidateState.Indexed
         )
 
@@ -376,4 +390,25 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
         const val FULL_IMAGE_RETRY_FLOOR = 0.70f
         const val USER_AGENT = "Dossier/0.1 authorized-public-image-audit"
     }
+}
+
+/**
+ * Converts only a directly verified public profile into explicit media linkage
+ * provenance. Candidate image similarity, clusters, usernames, and guessed URLs
+ * are intentionally not accepted as account-linkage evidence.
+ */
+internal fun verifiedProfileMediaLinkage(
+    result: ProfileScanResult
+): ReverseImageLookupResult.ImageAccountLinkage? {
+    if (!result.exists || !result.verified) return null
+    val accountUrl = result.candidate.url.trim()
+    val uri = runCatching { URI(accountUrl) }.getOrNull() ?: return null
+    val scheme = uri.scheme?.lowercase() ?: return null
+    if (scheme != "http" && scheme != "https") return null
+    if (uri.host.isNullOrBlank()) return null
+    return ReverseImageLookupResult.ImageAccountLinkage(
+        accountUrl = accountUrl,
+        basis = ReverseImageLookupResult.ImageAccountLinkageBasis.VerifiedProfile,
+        evidenceIds = listOf("profile:$accountUrl")
+    )
 }
