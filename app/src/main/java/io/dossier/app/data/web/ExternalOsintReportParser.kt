@@ -5,7 +5,9 @@ import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationship
+import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.ImportEvidenceIdPolicy
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
 import kotlinx.serialization.json.Json
@@ -227,7 +229,8 @@ object ExternalOsintReportParser {
     fun parse(
         source: Source,
         raw: String,
-        input: IdentityInput
+        input: IdentityInput,
+        importDigest: String? = null
     ): ParseResult {
         if (raw.isBlank()) {
             return ParseResult(source, EvidenceCollection(), 0, 0, listOf("The selected report is empty"))
@@ -272,7 +275,13 @@ object ExternalOsintReportParser {
             var emitted = false
             urls.forEach { url ->
                 if (!urlAllowedByScope(url, scope, matches, source.allowedSignals)) return@forEach
-                val id = "external-osint:${source.providerId}:${sha256("$url|${matches.joinToString()}").take(32)}"
+                val id = ImportEvidenceIdPolicy.stableId(
+                    prefix = "external-osint:${source.providerId}",
+                    providerId = source.providerId,
+                    importDigest = importDigest,
+                    rowMaterial = sanitized,
+                    discriminator = "$url|${matches.joinToString()}"
+                )
                 evidence += Evidence(
                     id = id,
                     kind = if (looksLikeProfileUrl(url, scope.handles)) EvidenceKind.Profile else EvidenceKind.PublicSearchEvidence,
@@ -298,7 +307,8 @@ object ExternalOsintReportParser {
                     fromValue = matches.first(),
                     toValue = url,
                     relation = "IMPORTED_PUBLIC_EVIDENCE",
-                    evidence = "User-supplied ${source.displayName} report; independent verification required"
+                    evidence = "User-supplied ${source.displayName} report; independent verification required",
+                    evidenceIds = listOf(id)
                 )
                 emitted = true
             }
@@ -306,7 +316,13 @@ object ExternalOsintReportParser {
             if (!emitted && source.allowSummaryWithoutUrl) {
                 val summary = sanitized.take(MAX_SUMMARY_CHARS).trim()
                 if (summary.isNotBlank() && !containsCredentialMaterial(summary)) {
-                    val id = "external-osint:${source.providerId}:summary:${sha256("$summary|${matches.joinToString()}").take(32)}"
+                    val id = ImportEvidenceIdPolicy.stableId(
+                        prefix = "external-osint:${source.providerId}:summary",
+                        providerId = source.providerId,
+                        importDigest = importDigest,
+                        rowMaterial = summary,
+                        discriminator = matches.joinToString()
+                    )
                     evidence += Evidence(
                         id = id,
                         kind = summaryKind(source),
@@ -344,7 +360,7 @@ object ExternalOsintReportParser {
             source = source,
             collection = EvidenceCollection(
                 evidence = dedupedEvidence,
-                relationships = relationships.distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}" }
+                relationships = EvidenceRelationshipPolicy.normalize(relationships)
             ),
             acceptedRecords = dedupedEvidence.size,
             rejectedRecords = rejected,

@@ -28,6 +28,44 @@ Reddit,https://www.reddit.com/user/janedoe,found
         assertTrue(result.collection.evidence.all { it.state == EvidenceState.Candidate })
         assertTrue(result.collection.evidence.all { it.reliability == EvidenceReliability.ThirdPartyAggregation })
         assertTrue(result.collection.evidence.all { it.kind == EvidenceKind.Profile })
+        assertEquals(2, result.collection.relationships.size)
+        assertEquals(
+            result.collection.evidence.mapTo(mutableSetOf(), io.dossier.app.domain.evidence.Evidence::id),
+            result.collection.relationships.flatMap { it.evidenceIds }.toSet()
+        )
+    }
+
+    @Test
+    fun duplicatePublicRowsKeepStableEvidenceIdsAndMergeRelationshipIds() {
+        val input = IdentityInput(fullName = "Jane Doe", primaryUsername = "janedoe")
+        val report = """site,url,status
+            GitHub,https://github.com/janedoe,found
+            Mirror,https://github.com/janedoe,found
+        """.trimIndent()
+
+        val first = ExternalOsintReportParser.parse(
+            ExternalOsintReportParser.Source.Sherlock,
+            report,
+            input,
+            importDigest = "c".repeat(64)
+        )
+        val second = ExternalOsintReportParser.parse(
+            ExternalOsintReportParser.Source.Sherlock,
+            report,
+            input,
+            importDigest = "c".repeat(64)
+        )
+
+        assertEquals(first.collection.evidence.map { it.id }, second.collection.evidence.map { it.id })
+        assertEquals(2, first.collection.evidence.size)
+        assertEquals(1, first.collection.relationships.size)
+        assertEquals(
+            first.collection.evidence.mapTo(mutableSetOf(), io.dossier.app.domain.evidence.Evidence::id),
+            first.collection.relationships.single().evidenceIds.toSet()
+        )
+        assertTrue(first.collection.evidence.none { record ->
+            record.id.contains("janedoe", ignoreCase = true) || record.id.contains("github.com", ignoreCase = true)
+        })
     }
 
     @Test
@@ -64,6 +102,7 @@ Reddit,https://www.reddit.com/user/janedoe,found
         )
 
         assertTrue(result.collection.evidence.isEmpty())
+        assertTrue(result.collection.relationships.isEmpty())
         assertTrue(result.warnings.any { it.contains("credential/secret", ignoreCase = true) })
     }
 

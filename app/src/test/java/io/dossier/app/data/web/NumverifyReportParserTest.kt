@@ -31,6 +31,7 @@ class NumverifyReportParserTest {
         assertEquals("••••3210", evidence.value)
         assertTrue(evidence.snippet.orEmpty().contains("carrier=Example Carrier"))
         assertFalse(evidence.signals.any { it.contains("subscriber identity is verified", true) })
+        assertEquals(listOf(evidence.id), result.relationships.single().evidenceIds)
     }
 
     @Test

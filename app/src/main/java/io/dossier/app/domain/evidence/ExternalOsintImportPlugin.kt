@@ -21,7 +21,11 @@ class ExternalOsintImportPlugin : ScannerPlugin {
 
         ExternalOsintImportSession.snapshot().forEach { pending ->
             if (NumverifyReportParser.looksLikeNumverify(pending.displayName, pending.rawText)) {
-                val numverify = NumverifyReportParser.parse(pending.rawText, input)
+                val numverify = NumverifyReportParser.parse(
+                    raw = pending.rawText,
+                    input = input,
+                    importDigest = pending.sha256
+                )
                 evidence += numverify.evidence.map { record ->
                     record.copy(
                         signals = record.signals + listOf(
@@ -38,7 +42,8 @@ class ExternalOsintImportPlugin : ScannerPlugin {
             val parsed = ExternalOsintReportParser.parse(
                 source = pending.source,
                 raw = pending.rawText,
-                input = input
+                input = input,
+                importDigest = pending.sha256
             )
             evidence += parsed.collection.evidence.map { record ->
                 record.copy(
@@ -54,7 +59,7 @@ class ExternalOsintImportPlugin : ScannerPlugin {
 
         return EvidenceCollection(
             evidence = evidence.distinctBy(Evidence::id),
-            relationships = relationships.distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}" }
+            relationships = EvidenceRelationshipPolicy.normalize(relationships)
         )
     }
 }

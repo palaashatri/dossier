@@ -2,6 +2,7 @@ package io.dossier.app.domain.evidence
 
 import io.dossier.app.data.web.ExternalOsintImportSession
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.RiskLevel
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -31,49 +32,123 @@ class ExternalInteractionImportPlugin : ScannerPlugin {
             .toSet()
         if (authorized.isEmpty()) return EvidenceCollection()
 
+        val evidence = mutableListOf<Evidence>()
         val relationships = mutableListOf<EvidenceRelationship>()
         ExternalOsintImportSession.snapshot().forEach { pending ->
-            parseRecords(pending.rawText)
-                .take(MAX_RECORDS_PER_IMPORT)
-                .forEach { row ->
-                    val source = firstHandle(row, SOURCE_KEYS)
-                    val explicitTarget = firstHandle(row, TARGET_KEYS)
-                    val relation = normalizeRelation(firstText(row, RELATION_KEYS))
-                    val rowText = firstText(row, TEXT_KEYS).orEmpty()
-                    val textTargets = if (source != null) handlesFromText(rowText) else emptyList()
-                    val targets = buildList {
-                        explicitTarget?.let(::add)
-                        addAll(textTargets)
-                    }.distinct().take(MAX_TARGETS_PER_ROW)
-
-                    if (source == null || targets.isEmpty()) return@forEach
-                    targets.forEach { target ->
-                        if (source == target) return@forEach
-                        if (source !in authorized && target !in authorized) return@forEach
-                        val inferredRelation = when {
-                            explicitTarget != null -> relation
-                            else -> "MENTIONS"
-                        }
-                        val repetitions = boundedWeight(firstText(row, WEIGHT_KEYS))
-                        repeat(repetitions) { occurrence ->
-                            relationships += EvidenceRelationship(
-                                fromValue = source,
-                                toValue = target,
-                                relation = inferredRelation,
-                                evidence = buildString {
-                                    append("User-selected public interaction report: ${pending.displayName}")
-                                    if (repetitions > 1) append("; bounded-weight-instance=${occurrence + 1}/$repetitions")
-                                }
-                            )
-                        }
-                    }
-                }
+            val imported = parseImport(
+                rawText = pending.rawText,
+                importDigest = pending.sha256,
+                displayName = pending.displayName,
+                authorizedHandles = authorized
+            )
+            evidence += imported.evidence
+            relationships += imported.relationships
         }
 
+        val dedupedEvidence = evidence.distinctBy(Evidence::id).take(MAX_EVIDENCE)
+        val evidenceIds = dedupedEvidence.mapTo(HashSet(), Evidence::id)
         return EvidenceCollection(
-            relationships = relationships
-                .distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}|${it.evidence.orEmpty()}" }
+            evidence = dedupedEvidence,
+            relationships = EvidenceRelationshipPolicy.normalize(relationships)
+                .map { relationship ->
+                    relationship.copy(evidenceIds = relationship.evidenceIds.filter(evidenceIds::contains))
+                }
                 .take(MAX_RELATIONSHIPS)
+        )
+    }
+
+    /**
+     * Parses one bounded report without touching Android session state. Tests and
+     * import diagnostics use this path so every emitted relationship can point
+     * to the candidate Evidence record created from the same accepted row.
+     */
+    internal fun parseImport(
+        rawText: String,
+        importDigest: String,
+        displayName: String,
+        authorizedHandles: Set<String>
+    ): EvidenceCollection {
+        val authorized = authorizedHandles
+            .map(::normalizeHandle)
+            .filter(String::isNotBlank)
+            .toSet()
+        if (authorized.isEmpty() || rawText.isBlank()) return EvidenceCollection()
+
+        val evidence = mutableListOf<Evidence>()
+        val relationships = mutableListOf<EvidenceRelationship>()
+        parseRecords(rawText)
+            .take(MAX_RECORDS_PER_IMPORT)
+            .forEach { row ->
+                if (containsSensitiveMaterial(row)) return@forEach
+
+                val source = firstHandle(row, SOURCE_KEYS)
+                val explicitTarget = firstHandle(row, TARGET_KEYS)
+                val relation = normalizeRelation(firstText(row, RELATION_KEYS))
+                val rowText = firstText(row, TEXT_KEYS).orEmpty()
+                val textTargets = if (source != null) handlesFromText(rowText) else emptyList()
+                val targets = buildList {
+                    explicitTarget?.let(::add)
+                    addAll(textTargets)
+                }.distinct().take(MAX_TARGETS_PER_ROW)
+
+                if (source == null || targets.isEmpty()) return@forEach
+                val acceptedTargets = targets.filter { target ->
+                    target != source && (source in authorized || target in authorized)
+                }
+                if (acceptedTargets.isEmpty()) return@forEach
+
+                val inferredRelation = if (explicitTarget != null) relation else "MENTIONS"
+                val rowDigest = ImportEvidenceIdPolicy.digestFields(row)
+                val evidenceId = ImportEvidenceIdPolicy.stableId(
+                    prefix = "external-interaction",
+                    providerId = id,
+                    importDigest = importDigest,
+                    rowMaterial = rowDigest,
+                    discriminator = "$inferredRelation|${acceptedTargets.joinToString(",")}"
+                )
+                val safeSnippet = rowText.take(MAX_SNIPPET_CHARS).ifBlank {
+                    "Public interaction row imported from a user-selected report"
+                }
+                evidence += Evidence(
+                    id = evidenceId,
+                    kind = EvidenceKind.PublicSearchEvidence,
+                    value = "public-interaction-report",
+                    snippet = safeSnippet,
+                    confidence = IMPORT_CONFIDENCE,
+                    risk = RiskLevel.Low,
+                    signals = listOf(
+                        "Imported from a user-selected public interaction report: ${displayName.take(MAX_DISPLAY_NAME_CHARS)}",
+                        "At least one endpoint exactly matched an explicitly authorized audit handle",
+                        "Interaction metadata is a Candidate lead; no account ownership is asserted"
+                    ),
+                    providerId = id,
+                    retrievedAtEpochMillis = System.currentTimeMillis(),
+                    state = EvidenceState.Candidate,
+                    reliability = EvidenceReliability.ThirdPartyAggregation,
+                    contentHashSha256 = ImportEvidenceIdPolicy.digest(safeSnippet),
+                    parserVersion = PARSER_VERSION
+                )
+
+                acceptedTargets.forEach { target ->
+                    val repetitions = boundedWeight(firstText(row, WEIGHT_KEYS))
+                    repeat(repetitions) { occurrence ->
+                        relationships += EvidenceRelationship(
+                            fromValue = source,
+                            toValue = target,
+                            relation = inferredRelation,
+                            evidence = buildString {
+                                append("User-selected public interaction report: ${displayName.take(MAX_DISPLAY_NAME_CHARS)}")
+                                if (repetitions > 1) append("; bounded-weight-instance=${occurrence + 1}/$repetitions")
+                            },
+                            evidenceIds = listOf(evidenceId)
+                        )
+                    }
+                }
+            }
+
+        return EvidenceCollection(
+            evidence = evidence.distinctBy(Evidence::id).take(MAX_EVIDENCE),
+            relationships = EvidenceRelationshipPolicy.normalize(relationships).take(MAX_RELATIONSHIPS)
         )
     }
 
@@ -201,6 +276,15 @@ class ExternalInteractionImportPlugin : ScannerPlugin {
         .replace(Regex("[^a-z0-9.]+"), "_")
         .trim('_')
 
+    private fun containsSensitiveMaterial(row: Map<String, String>): Boolean {
+        return row.entries.any { (rawKey, rawValue) ->
+            val key = normalizeKey(rawKey)
+            val keyParts = key.split('.', '_').filter(String::isNotBlank)
+            val value = rawValue.lowercase(Locale.ROOT)
+            keyParts.any { it in SENSITIVE_KEYS } || SENSITIVE_VALUE_MARKERS.any { marker -> value.contains(marker) }
+        }
+    }
+
     private fun splitDelimited(line: String, delimiter: Char): List<String> {
         val values = mutableListOf<String>()
         val current = StringBuilder()
@@ -239,5 +323,38 @@ class ExternalInteractionImportPlugin : ScannerPlugin {
         const val MAX_WEIGHT_EXPANSION = 10
         const val MAX_JSON_DEPTH = 4
         const val MAX_FIELD_CHARS = 2_000
+        const val MAX_EVIDENCE = 10_000
+        const val MAX_SNIPPET_CHARS = 900
+        const val MAX_DISPLAY_NAME_CHARS = 100
+        const val IMPORT_CONFIDENCE = 0.42f
+        const val PARSER_VERSION = "external-interaction-import-v1"
+        val SENSITIVE_KEYS = setOf(
+            "password",
+            "passwd",
+            "pwd",
+            "hash",
+            "cookie",
+            "session",
+            "token",
+            "secret",
+            "credential",
+            "private",
+            "apikey",
+            "authorization"
+        )
+        val SENSITIVE_VALUE_MARKERS = listOf(
+            "password=",
+            "passwd=",
+            "pwd=",
+            "cookie=",
+            "session=",
+            "token=",
+            "secret=",
+            "api_key=",
+            "apikey=",
+            "authorization: bearer",
+            "private key",
+            "stealer log"
+        )
     }
 }

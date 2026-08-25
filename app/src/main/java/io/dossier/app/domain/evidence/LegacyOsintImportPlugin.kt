@@ -27,7 +27,8 @@ class LegacyOsintImportPlugin : ScannerPlugin {
             val parsed = LegacyOsintExportParser.parse(
                 source = pending.source,
                 raw = pending.rawText,
-                authorizedHandles = authorizedHandles
+                authorizedHandles = authorizedHandles,
+                importDigest = pending.sha256
             )
             evidence += parsed.collection.evidence.map { record ->
                 record.copy(
@@ -43,7 +44,7 @@ class LegacyOsintImportPlugin : ScannerPlugin {
 
         return EvidenceCollection(
             evidence = evidence.distinctBy(Evidence::id),
-            relationships = relationships.distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}" }
+            relationships = EvidenceRelationshipPolicy.normalize(relationships)
         )
     }
 }

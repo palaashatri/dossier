@@ -5,6 +5,7 @@ import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationship
+import io.dossier.app.domain.evidence.ImportEvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
@@ -29,7 +30,7 @@ object NumverifyReportParser {
         return markers.count(sample::contains) >= 3 && ("valid" in sample || "number" in sample)
     }
 
-    fun parse(raw: String, input: IdentityInput): EvidenceCollection {
+    fun parse(raw: String, input: IdentityInput, importDigest: String? = null): EvidenceCollection {
         val authorized = input.phones
             .map { it.filter(Char::isDigit) }
             .filter { it.length >= 8 }
@@ -52,7 +53,13 @@ object NumverifyReportParser {
         }.joinToString(" | ").ifBlank { "Numverify phone metadata response" }.take(600)
 
         val masked = "••••${matched.takeLast(4)}"
-        val id = "numverify-import:${sha256("$matched|$safeSummary").take(32)}"
+        val id = ImportEvidenceIdPolicy.stableId(
+            prefix = "numverify-import",
+            providerId = "numverify-import",
+            importDigest = importDigest,
+            rowMaterial = safeSummary,
+            discriminator = matched
+        )
         val evidence = Evidence(
             id = id,
             kind = EvidenceKind.Phone,
@@ -79,7 +86,8 @@ object NumverifyReportParser {
                     fromValue = masked,
                     toValue = id,
                     relation = "HAS_PUBLIC_PHONE_METADATA",
-                    evidence = "Imported Numverify metadata; subscriber identity not asserted"
+                    evidence = "Imported Numverify metadata; subscriber identity not asserted",
+                    evidenceIds = listOf(id)
                 )
             )
         )

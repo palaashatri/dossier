@@ -5,7 +5,9 @@ import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationship
+import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.ImportEvidenceIdPolicy
 import io.dossier.app.domain.model.RiskLevel
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -18,6 +20,7 @@ import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /**
  * Local-only compatibility parser for historical Twint and snscrape exports.
@@ -37,7 +40,12 @@ object LegacyOsintExportParser {
         val warnings: List<String>
     )
 
-    fun parse(source: Source, raw: String, authorizedHandles: Collection<String>): ParseResult {
+    fun parse(
+        source: Source,
+        raw: String,
+        authorizedHandles: Collection<String>,
+        importDigest: String? = null
+    ): ParseResult {
         val handles = authorizedHandles
             .map(::normalizeHandle)
             .filter { it.length >= 2 }
@@ -56,13 +64,31 @@ object LegacyOsintExportParser {
                 Source.TwintJson -> parseTwint(record)
                 Source.SnscrapeJsonl -> parseSnscrape(record)
             }
-            if (parsed == null || normalizeHandle(parsed.username) !in handles || parsed.url.isBlank()) {
+            if (
+                parsed == null ||
+                normalizeHandle(parsed.username) !in handles ||
+                parsed.url.isBlank() ||
+                containsCredentialMaterial(parsed)
+            ) {
                 rejected++
                 return@forEach
             }
 
             val handle = normalizeHandle(parsed.username)
-            val id = "legacy-osint:${source.name.lowercase()}:${sha256("$handle|${parsed.url}").take(32)}"
+            val id = ImportEvidenceIdPolicy.stableId(
+                prefix = "legacy-osint:${source.name.lowercase()}",
+                providerId = providerId(source),
+                importDigest = importDigest,
+                rowMaterial = listOf(
+                    handle,
+                    parsed.url,
+                    parsed.text,
+                    parsed.observedAtEpochMillis?.toString().orEmpty(),
+                    parsed.replyTo.orEmpty(),
+                    parsed.mentions.joinToString(",")
+                ).joinToString("\u001f"),
+                discriminator = source.name
+            )
             evidence += Evidence(
                 id = id,
                 kind = EvidenceKind.PublicSearchEvidence,
@@ -89,7 +115,8 @@ object LegacyOsintExportParser {
                 fromValue = handle,
                 toValue = parsed.url,
                 relation = "IMPORTED_PUBLIC_ACTIVITY",
-                evidence = "User-supplied ${sourceLabel(source)} export; independent verification required"
+                evidence = "User-supplied ${sourceLabel(source)} export; independent verification required",
+                evidenceIds = listOf(id)
             )
 
             parsed.replyTo?.let { target ->
@@ -98,7 +125,8 @@ object LegacyOsintExportParser {
                         fromValue = handle,
                         toValue = target,
                         relation = "REPLIES_TO",
-                        evidence = parsed.url
+                        evidence = parsed.url,
+                        evidenceIds = listOf(id)
                     )
                 }
             }
@@ -111,15 +139,14 @@ object LegacyOsintExportParser {
                         fromValue = handle,
                         toValue = target,
                         relation = "MENTIONS",
-                        evidence = parsed.url
+                        evidence = parsed.url,
+                        evidenceIds = listOf(id)
                     )
                 }
         }
 
         val dedupedEvidence = evidence.distinctBy(Evidence::id)
-        val dedupedRelationships = relationships.distinctBy {
-            "${it.fromValue}|${it.toValue}|${it.relation}|${it.evidence.orEmpty()}"
-        }
+        val dedupedRelationships = EvidenceRelationshipPolicy.normalize(relationships)
         val warnings = buildList {
             if (records.size > MAX_RECORDS) add("Export truncated to $MAX_RECORDS records")
             if (rejected > 0) add("$rejected record(s) rejected because the handle/URL did not match the authorized import contract")
@@ -279,6 +306,14 @@ object LegacyOsintExportParser {
         .takeIf { it.matches(HANDLE_VALUE) }
         .orEmpty()
 
+    private fun containsCredentialMaterial(record: ImportedRecord): Boolean {
+        val fields = listOf(record.username, record.url, record.text)
+        return fields.any { value ->
+            val lower = value.lowercase(Locale.ROOT)
+            CREDENTIAL_MARKERS.any(lower::contains)
+        }
+    }
+
     private fun sourceLabel(source: Source): String = when (source) {
         Source.TwintJson -> "Twint JSON"
         Source.SnscrapeJsonl -> "snscrape JSONL"
@@ -302,6 +337,20 @@ object LegacyOsintExportParser {
     private const val MAX_INTERACTIONS_PER_RECORD = 24
     private const val IMPORT_CONFIDENCE = 0.52f
     private const val PARSER_VERSION = "legacy-osint-import-v2"
+    private val CREDENTIAL_MARKERS = listOf(
+        "password=",
+        "passwd=",
+        "pwd=",
+        "cookie=",
+        "session=",
+        "token=",
+        "secret=",
+        "api_key=",
+        "apikey=",
+        "authorization: bearer",
+        "private key",
+        "stealer log"
+    )
     private val HANDLE_MENTION = Regex("(?<![A-Za-z0-9_])@([A-Za-z0-9_][A-Za-z0-9_.-]{1,63})")
     private val HANDLE_VALUE = Regex("[a-z0-9_][a-z0-9_.-]{1,63}")
     private val JSON = Json { ignoreUnknownKeys = true }

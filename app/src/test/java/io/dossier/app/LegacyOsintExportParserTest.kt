@@ -32,6 +32,56 @@ class LegacyOsintExportParserTest {
         assertEquals("twint-import", evidence.providerId)
         assertTrue(evidence.historical)
         assertTrue(evidence.snippet!!.contains("authorized public post"))
+        assertEquals(listOf(evidence.id), result.collection.relationships.single().evidenceIds)
+    }
+
+    @Test
+    fun duplicateRowsKeepStableEvidenceIdsAndMergeRelationshipProvenance() {
+        val raw = """
+            [
+              {"username":"alice","tweet":"first public post","link":"https://x.com/alice/status/1"},
+              {"username":"alice","tweet":"second public post","link":"https://x.com/alice/status/1"}
+            ]
+        """.trimIndent()
+
+        val first = LegacyOsintExportParser.parse(
+            LegacyOsintExportParser.Source.TwintJson,
+            raw,
+            listOf("alice"),
+            importDigest = "d".repeat(64)
+        )
+        val second = LegacyOsintExportParser.parse(
+            LegacyOsintExportParser.Source.TwintJson,
+            raw,
+            listOf("alice"),
+            importDigest = "d".repeat(64)
+        )
+
+        assertEquals(first.collection.evidence.map { it.id }, second.collection.evidence.map { it.id })
+        assertEquals(2, first.collection.evidence.size)
+        assertEquals(1, first.collection.relationships.size)
+        assertEquals(
+            first.collection.evidence.mapTo(mutableSetOf()) { it.id },
+            first.collection.relationships.single().evidenceIds.toSet()
+        )
+        assertTrue(first.collection.evidence.none { it.id.contains("alice", ignoreCase = true) })
+    }
+
+    @Test
+    fun credentialMaterialInLegacyRowIsRejected() {
+        val raw = """
+            [{"username":"alice","tweet":"public post password=do-not-import","link":"https://x.com/alice/status/1"}]
+        """.trimIndent()
+
+        val result = LegacyOsintExportParser.parse(
+            LegacyOsintExportParser.Source.TwintJson,
+            raw,
+            listOf("alice")
+        )
+
+        assertEquals(0, result.collection.evidence.size)
+        assertTrue(result.collection.relationships.isEmpty())
+        assertEquals(1, result.rejectedRecords)
     }
 
     @Test
