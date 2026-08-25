@@ -50,6 +50,19 @@ class ScanCoordinatorRuntimeTest {
                 )
             )
         )
+        assertFalse(
+            acceptsCoordinatorProjectionEvent(
+                terminal,
+                ScanEvent.RecoveryDiagnosticsUpdated(
+                    scanId = scanId,
+                    occurredAt = now,
+                    stage = "DISCOVERING_USERNAMES",
+                    checkpointAvailable = true,
+                    reusedCount = 1,
+                    rerunCount = 0
+                )
+            )
+        )
         assertTrue(
             acceptsCoordinatorProjectionEvent(
                 terminal,
@@ -220,6 +233,58 @@ class ScanCoordinatorRuntimeTest {
         assertEquals(4_096, event.visitedCount)
         assertEquals(4, event.maxDepth)
         assertEquals(200, event.maxTotalPivots)
+    }
+
+    @Test
+    fun `recovery diagnostics project exact direct-profile counts`() = runBlocking {
+        val scanId = ScanId("recovery-diagnostics")
+        ScanCoordinatorRuntime.resetCounts(scanId)
+        val nextEvent = async(start = CoroutineStart.UNDISPATCHED) {
+            ScanCoordinatorRuntime.events.first { it is ScanEvent.RecoveryDiagnosticsUpdated }
+        }
+
+        ScanCoordinatorRuntime.onRecoveryDiagnostics(
+            scanId = scanId,
+            stage = io.dossier.app.domain.scanner.ScanCheckpointStage.DiscoveringUsernames,
+            checkpointAvailable = true,
+            reusedCount = 2,
+            rerunCount = 3
+        )
+
+        val event = nextEvent.await() as ScanEvent.RecoveryDiagnosticsUpdated
+        assertEquals("DISCOVERING_USERNAMES", event.stage)
+        assertTrue(event.checkpointAvailable)
+        assertEquals(2, event.reusedCount)
+        assertEquals(3, event.rerunCount)
+        assertEquals(event.stage, ScanCoordinatorRuntime.snapshot.value.recoveryStage)
+        assertEquals(2, ScanCoordinatorRuntime.snapshot.value.recoveryReusedCount)
+        assertEquals(3, ScanCoordinatorRuntime.snapshot.value.recoveryRerunCount)
+    }
+
+    @Test
+    fun `recovery diagnostics are allowlisted and count bounded`() = runBlocking {
+        val scanId = ScanId("sanitized-recovery-diagnostics")
+        ScanCoordinatorRuntime.resetCounts(scanId)
+        val nextEvent = async(start = CoroutineStart.UNDISPATCHED) {
+            ScanCoordinatorRuntime.events.first { it is ScanEvent.RecoveryDiagnosticsUpdated }
+        }
+
+        ScanCoordinatorRuntime.dispatch(
+            ScanEvent.RecoveryDiagnosticsUpdated(
+                scanId = scanId,
+                occurredAt = java.time.Instant.now(),
+                stage = "private-token=do-not-emit",
+                checkpointAvailable = true,
+                reusedCount = -1,
+                rerunCount = 99_999
+            )
+        )
+
+        val event = nextEvent.await() as ScanEvent.RecoveryDiagnosticsUpdated
+        assertEquals("QUEUED_BACKGROUND_SCAN", event.stage)
+        assertEquals(0, event.reusedCount)
+        assertEquals(4_096, event.rerunCount)
+        assertEquals("QUEUED_BACKGROUND_SCAN", ScanCoordinatorRuntime.snapshot.value.recoveryStage)
     }
 
     @Test

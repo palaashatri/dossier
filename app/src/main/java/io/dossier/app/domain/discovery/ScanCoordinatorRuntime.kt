@@ -166,6 +166,21 @@ sealed interface ScanEvent {
         val maxTotalPivots: Int
     ) : ScanEvent
 
+    /**
+     * Truthful, evidence-free accounting for a request-scoped direct-profile
+     * recovery boundary. Counts describe exact checkpoint reuse versus work
+     * fetched in the completed pass; no usernames, URLs, or provider payloads
+     * cross the coordinator boundary.
+     */
+    data class RecoveryDiagnosticsUpdated(
+        override val scanId: ScanId,
+        override val occurredAt: Instant,
+        val stage: String,
+        val checkpointAvailable: Boolean,
+        val reusedCount: Int,
+        val rerunCount: Int
+    ) : ScanEvent
+
     data class ScanCompleted(
         override val scanId: ScanId,
         override val occurredAt: Instant,
@@ -218,6 +233,7 @@ private const val MAX_SAFE_PIVOT_DECISIONS = 4_096
 private const val MAX_SAFE_PIVOT_VISITED = 4_096
 private const val MAX_SAFE_PIVOT_SIGNAL_LENGTH = 64
 private const val MAX_SAFE_PIVOT_REASON_LENGTH = 256
+private const val MAX_SAFE_RECOVERY_COUNT = 4_096
 private val SAFE_PIVOT_SIGNAL_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]{0,63}$")
 private val SAFE_TERMINAL_FAILURE_CODES =
     BackgroundScanWorker.SAFE_ERROR_CODES +
@@ -285,6 +301,10 @@ data class LiveScanSnapshot(
     val pivotMaxDepth: Int = 0,
     val pivotMaxTotalPivots: Int = 0,
     val pivotLastDecision: PivotDecisionSummary? = null,
+    val recoveryStage: String = "",
+    val recoveryCheckpointAvailable: Boolean = false,
+    val recoveryReusedCount: Int = 0,
+    val recoveryRerunCount: Int = 0,
     val checkpointStage: String = ScanCheckpointStage.Queued.wireName,
     val completedCheckpointStages: List<String> = emptyList(),
     val plan: ScanPlanSummary? = null,
@@ -329,7 +349,11 @@ object ScanCoordinatorRuntime {
                     pivotVisitedCount = 0,
                     pivotMaxDepth = 0,
                     pivotMaxTotalPivots = 0,
-                    pivotLastDecision = null
+                    pivotLastDecision = null,
+                    recoveryStage = "",
+                    recoveryCheckpointAvailable = false,
+                    recoveryReusedCount = 0,
+                    recoveryRerunCount = 0
                 )
             }
             id
@@ -520,6 +544,31 @@ object ScanCoordinatorRuntime {
         emit(safeEvent)
     }
 
+    /**
+     * Publishes direct-profile checkpoint reuse/rerun accounting. The caller
+     * supplies only the semantic stage and bounded counts; sanitization keeps
+     * this boundary free of identity values and provider payloads.
+     */
+    internal fun onRecoveryDiagnostics(
+        scanId: ScanId,
+        stage: ScanCheckpointStage,
+        checkpointAvailable: Boolean,
+        reusedCount: Int,
+        rerunCount: Int
+    ) {
+        val event = ScanEvent.RecoveryDiagnosticsUpdated(
+            scanId = scanId,
+            occurredAt = Instant.now(),
+            stage = stage.wireName,
+            checkpointAvailable = checkpointAvailable,
+            reusedCount = reusedCount,
+            rerunCount = rerunCount
+        )
+        val safeEvent = sanitizeEvent(event)
+        reduceProviderEvent(safeEvent)
+        emit(safeEvent)
+    }
+
     fun dispatch(event: ScanEvent) {
         val safeEvent = sanitizeEvent(event)
         reduceProviderEvent(safeEvent)
@@ -569,6 +618,12 @@ object ScanCoordinatorRuntime {
                     pivotMaxTotalPivots = event.maxTotalPivots,
                     pivotLastDecision = event.decision ?: current.pivotLastDecision
                 )
+                is ScanEvent.RecoveryDiagnosticsUpdated -> current.copy(
+                    recoveryStage = event.stage,
+                    recoveryCheckpointAvailable = event.checkpointAvailable,
+                    recoveryReusedCount = event.reusedCount,
+                    recoveryRerunCount = event.rerunCount
+                )
                 is ScanEvent.CheckpointUpdated -> current.copy(
                     checkpointStage = event.stage,
                     completedCheckpointStages = event.completedStages,
@@ -611,6 +666,16 @@ object ScanCoordinatorRuntime {
             maxDepth = event.maxDepth.coerceIn(0, PivotAdmissionPolicy.MAX_ALLOWED_DEPTH),
             maxTotalPivots = event.maxTotalPivots.coerceIn(0, PivotFrontierConfig.MAX_ALLOWED_TOTAL_PIVOTS)
         )
+        is ScanEvent.RecoveryDiagnosticsUpdated -> {
+            val safeStage = ScanCheckpointStage.fromWire(event.stage)
+                ?.takeIf { it == ScanCheckpointStage.DiscoveringUsernames }
+                ?: ScanCheckpointStage.Queued
+            event.copy(
+                stage = safeStage.wireName,
+                reusedCount = event.reusedCount.coerceIn(0, MAX_SAFE_RECOVERY_COUNT),
+                rerunCount = event.rerunCount.coerceIn(0, MAX_SAFE_RECOVERY_COUNT)
+            )
+        }
         is ScanEvent.CheckpointUpdated -> {
             val safeStage = ScanCheckpointStage.fromWire(event.stage)
             event.copy(
@@ -950,7 +1015,11 @@ object ScanCoordinatorRuntime {
                 scanId = id,
                 mode = request.mode,
                 plan = ScanPlanSummary.from(ProviderCatalogV2.plan(request.mode)),
-                payloadSummaries = emptyList()
+                payloadSummaries = emptyList(),
+                recoveryStage = "",
+                recoveryCheckpointAvailable = false,
+                recoveryReusedCount = 0,
+                recoveryRerunCount = 0
             )
         }
         DiscoveryScanPreferences.setMode(request.mode)

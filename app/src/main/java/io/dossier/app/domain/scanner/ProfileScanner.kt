@@ -202,7 +202,16 @@ class ProfileScanner(
             input = input,
             scanId = scanId,
             requestId = requestId,
-            deepResearch = deepResearch
+            deepResearch = deepResearch,
+            onRecovery = { summary ->
+                ScanCoordinatorRuntime.onRecoveryDiagnostics(
+                    scanId = scanId,
+                    stage = ScanCheckpointStage.DiscoveringUsernames,
+                    checkpointAvailable = summary.checkpointAvailable,
+                    reusedCount = summary.reusedCount,
+                    rerunCount = summary.rerunCount
+                )
+            }
         )
 
         // The recursive pass is backed by a request-scoped encrypted frontier
@@ -295,7 +304,8 @@ class ProfileScanner(
         input: IdentityInput,
         scanId: ScanId,
         requestId: String?,
-        deepResearch: Boolean
+        deepResearch: Boolean,
+        onRecovery: (ProfileInitialPassExecutor.RecoverySummary) -> Unit = {}
     ): List<ProfileScanResult> {
         val planFingerprint = if (requestId != null && BackgroundScanWorker.isCanonicalUuid(requestId)) {
             ProfileScanCheckpointStore.planFingerprint(input, deepResearch, uniqueCandidates)
@@ -313,7 +323,8 @@ class ProfileScanner(
             queueMiss = { candidate -> queueProviderCandidate(candidate, scanId) },
             fetchMiss = { candidate ->
                 fetchAndParse(candidate, input, provenance = null, scanId = scanId)
-            }
+            },
+            onRecovery = onRecovery
         )
     }
 

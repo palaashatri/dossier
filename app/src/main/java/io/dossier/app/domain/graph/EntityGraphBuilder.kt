@@ -28,8 +28,9 @@ private const val MAX_EDGE_EVIDENCE_IDS = 256
 
 private fun mergeEvidenceIds(existing: List<String>, incoming: List<String>): List<String> =
     (existing + incoming)
-        .map(EvidenceIdPolicy::migrate)
+        .map(String::trim)
         .filter(String::isNotBlank)
+        .map(EvidenceIdPolicy::migrate)
         .distinct()
         .take(MAX_EDGE_EVIDENCE_IDS)
 
@@ -57,13 +58,15 @@ object EntityGraphBuilder {
         fun putEntity(entity: DossierEntity) {
             val existing = entities[entity.id]
             if (existing == null) {
-                entities[entity.id] = entity
+                entities[entity.id] = entity.copy(
+                    evidenceIds = mergeEvidenceIds(emptyList(), entity.evidenceIds)
+                )
             } else {
                 entities[entity.id] = existing.copy(
                     confidence = maxOf(existing.confidence, entity.confidence),
                     sourceUrls = (existing.sourceUrls + entity.sourceUrls).distinct(),
                     label = if (entity.label.length > existing.label.length) entity.label else existing.label,
-                    evidenceIds = (existing.evidenceIds + entity.evidenceIds).distinct(),
+                    evidenceIds = mergeEvidenceIds(existing.evidenceIds, entity.evidenceIds),
                     historical = existing.historical || entity.historical,
                     firstObservedAtEpochMillis = minNullable(
                         existing.firstObservedAtEpochMillis,

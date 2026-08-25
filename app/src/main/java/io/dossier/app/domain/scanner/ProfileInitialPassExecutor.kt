@@ -13,11 +13,24 @@ import kotlinx.coroutines.coroutineScope
  * completion events and progress remains tied to actual scheduled operations.
  */
 internal object ProfileInitialPassExecutor {
+    /**
+     * Evidence-free accounting for the direct-profile boundary.  A reused
+     * result was loaded from the request/plan-bound checkpoint; a rerun result
+     * was fetched during this pass.  The summary contains no candidate values
+     * or provider payloads and is emitted only after the pass has completed.
+     */
+    data class RecoverySummary(
+        val reusedCount: Int,
+        val rerunCount: Int,
+        val checkpointAvailable: Boolean
+    )
+
     suspend fun execute(
         candidates: List<UsernameCandidate>,
         checkpoint: ProfileCheckpointAccess?,
         queueMiss: (UsernameCandidate) -> Unit,
-        fetchMiss: suspend (UsernameCandidate) -> ProfileScanResult
+        fetchMiss: suspend (UsernameCandidate) -> ProfileScanResult,
+        onRecovery: (RecoverySummary) -> Unit = {}
     ): List<ProfileScanResult> = coroutineScope {
         val orderedResults = arrayOfNulls<ProfileScanResult>(candidates.size)
         val misses = mutableListOf<IndexedValue<UsernameCandidate>>()
@@ -44,8 +57,21 @@ internal object ProfileInitialPassExecutor {
             orderedResults[index] = result
         }
 
-        orderedResults.mapIndexed { index, result ->
+        val completeResults = orderedResults.mapIndexed { index, result ->
             requireNotNull(result) { "Missing direct-profile result at index $index" }
         }
+        // Diagnostics are deliberately best-effort and happen after all
+        // direct-profile work succeeded. A reporting callback must never turn
+        // an otherwise valid scan into a failure.
+        runCatching {
+            onRecovery(
+                RecoverySummary(
+                    reusedCount = candidates.size - misses.size,
+                    rerunCount = misses.size,
+                    checkpointAvailable = checkpoint != null
+                )
+            )
+        }
+        completeResults
     }
 }

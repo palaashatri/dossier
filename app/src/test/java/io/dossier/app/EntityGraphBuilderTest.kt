@@ -5,6 +5,7 @@ import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.HistoricalAttributeKind
 import io.dossier.app.domain.graph.EntityGraphBuilder
 import io.dossier.app.domain.model.BreachDigest
@@ -24,6 +25,63 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class EntityGraphBuilderTest {
+
+    @Test
+    fun entityEvidenceIdsMigrateTrimAndDeduplicateWithoutFoldingOpaqueCase() {
+        val email = "alice@example.test"
+        val legacyId = "ev:Email:$email:https://example.test/contact"
+        val graph = EntityGraphBuilder.build(
+            input = IdentityInput(fullName = "Authorized subject"),
+            evidence = listOf(
+                Evidence(
+                    id = legacyId,
+                    kind = EvidenceKind.Email,
+                    value = email
+                ),
+                Evidence(
+                    id = "  opaque-id  ",
+                    kind = EvidenceKind.Email,
+                    value = email
+                ),
+                Evidence(
+                    id = "opaque-id",
+                    kind = EvidenceKind.Email,
+                    value = email
+                ),
+                Evidence(
+                    id = "Opaque-Id",
+                    kind = EvidenceKind.Email,
+                    value = email
+                )
+            )
+        )
+
+        val entity = graph.entities.single { it.type == EntityType.Email && it.label == email }
+        assertEquals(
+            listOf(EvidenceIdPolicy.migrate(legacyId), "opaque-id", "Opaque-Id"),
+            entity.evidenceIds
+        )
+    }
+
+    @Test
+    fun entityEvidenceIdsAreBoundedToGraphEvidenceLimit() {
+        val email = "bounded@example.test"
+        val graph = EntityGraphBuilder.build(
+            input = IdentityInput(fullName = "Authorized subject"),
+            evidence = (0 until 260).map { index ->
+                Evidence(
+                    id = "evidence-$index",
+                    kind = EvidenceKind.Email,
+                    value = email
+                )
+            }
+        )
+
+        val entity = graph.entities.single { it.type == EntityType.Email && it.label == email }
+        assertEquals(256, entity.evidenceIds.size)
+        assertEquals("evidence-0", entity.evidenceIds.first())
+        assertEquals("evidence-255", entity.evidenceIds.last())
+    }
 
     @Test
     fun buildsSubjectAndSeedEntities() {

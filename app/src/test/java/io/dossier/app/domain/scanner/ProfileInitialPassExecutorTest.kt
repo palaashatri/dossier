@@ -10,6 +10,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -60,6 +61,39 @@ class ProfileInitialPassExecutorTest {
         assertEquals(candidates, results.map { it.candidate })
         assertEquals("cached", results[1].extractedText)
         assertEquals(setOf(key(candidates[0]), key(candidates[2])), access.savedKeys.toSet())
+    }
+
+    @Test
+    fun `reports exact checkpoint reuse and rerun counts after a completed pass`() = runBlocking {
+        val candidates = candidates()
+        val access = MapCheckpointAccess().apply {
+            values[key(candidates[1])] = result(
+                candidates[1],
+                ProviderVerificationState.NotFound,
+                "cached"
+            )
+        }
+        var summary: ProfileInitialPassExecutor.RecoverySummary? = null
+
+        ProfileInitialPassExecutor.execute(
+            candidates = candidates,
+            checkpoint = access,
+            queueMiss = {},
+            fetchMiss = { candidate ->
+                result(candidate, ProviderVerificationState.Present, "fresh")
+            },
+            onRecovery = { summary = it }
+        )
+
+        assertNotNull(summary)
+        assertEquals(
+            ProfileInitialPassExecutor.RecoverySummary(
+                reusedCount = 1,
+                rerunCount = 2,
+                checkpointAvailable = true
+            ),
+            summary
+        )
     }
 
     @Test
