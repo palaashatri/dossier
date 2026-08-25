@@ -209,13 +209,17 @@ object EntityResolutionBenchmark {
         var correctlyUnverifiable = 0
         var unsafeUnverifiable = 0
         val expectedCorpusDigest = calibration?.let { corpus.digest }
+        val expectedTrainingCorpusDigest = calibration?.let { corpus.trainingCorpusDigest }
+        val expectedAuthorizationRecordDigest = calibration?.let { corpus.authorizationRecordDigest }
 
         corpus.cases.forEach { testCase ->
             val result = EntityResolverV2.resolve(
                 testCase.input,
                 testCase.profile,
                 calibration,
-                expectedCorpusDigest
+                expectedCorpusDigest = expectedCorpusDigest,
+                expectedTrainingCorpusDigest = expectedTrainingCorpusDigest,
+                expectedAuthorizationRecordDigest = expectedAuthorizationRecordDigest
             )
             val positive = result.band.isAtLeastMedium()
             when (testCase.expected) {
