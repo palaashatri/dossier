@@ -203,6 +203,39 @@ class ScanResumeStorePostProcessingCheckpointTest {
         assertEquals(ResumeReadState.Expired, store.loadRequestDetailed(saved.point.requestId))
     }
 
+    @Test
+    fun tamperedEncryptedCheckpointFailsAuthentication() {
+        val fixture = fixture()
+        val store = store(fixture)
+        val saved = store.saveRequestDetailed(input(), false, false) as ResumeWriteState.Saved
+        store.bindCheckpointOwner(saved.point.requestId, OWNER_ONE)
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.PostProcessing,
+                completed = true,
+                postProcessingCheckpoint = checkpoint(saved.point, OWNER_ONE)
+            ) is ResumeCheckpointWriteState.Saved
+        )
+
+        val record = fixture.records.listFiles().orEmpty()
+            .single { it.name.endsWith(ScanResumeStore.RECORD_EXTENSION) }
+        val encoded = record.readText()
+        val marker = "\"ciphertextBase64\":\""
+        val start = encoded.indexOf(marker) + marker.length
+        check(start >= marker.length)
+        val tampered = encoded.toCharArray().also { chars ->
+            chars[start] = if (chars[start] == 'A') 'B' else 'A'
+        }.concatToString()
+        record.writeText(tampered)
+
+        assertEquals(
+            ResumeReadState.Invalid(ResumeInvalidReason.AuthenticationFailed),
+            store.loadRequestDetailed(saved.point.requestId)
+        )
+    }
+
     private fun checkpoint(point: ResumePoint, ownerId: String): PostProcessingStageCheckpoint {
         val analysis = PostProcessingCheckpointCodec.encode(
             OsintAnalysisBundle(
