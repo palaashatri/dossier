@@ -107,8 +107,7 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
             }
             .toMap()
 
-        val candidates = (profileCandidates + indexedCandidates)
-            .distinctBy { canonical(it.imageUrl) }
+        val candidates = deduplicateReverseImageCandidates(profileCandidates + indexedCandidates)
             .take(if (deepResearch) MAX_DEEP_CANDIDATES else MAX_DEFAULT_CANDIDATES)
 
         if (candidates.isEmpty()) {
@@ -370,11 +369,7 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
     private fun Long.unsignedHex(): String =
         java.lang.Long.toUnsignedString(this, 16).padStart(16, '0')
 
-    private fun canonical(url: String): String = runCatching {
-        val uri = URI(url)
-        URI(uri.scheme?.lowercase(), uri.userInfo, uri.host?.lowercase(), uri.port, uri.path, uri.query, null)
-            .toString().removeSuffix("/")
-    }.getOrDefault(url.trim().substringBefore('#').removeSuffix("/").lowercase())
+    private fun canonical(url: String): String = canonicalMediaUrl(url)
 
     private fun percent(value: Float): String = "${(value * 100).toInt()}%"
 
@@ -391,6 +386,35 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
         const val USER_AGENT = "Dossier/0.1 authorized-public-image-audit"
     }
 }
+
+/**
+ * Deduplicates candidate images across profile and indexed sources by canonical
+ * image URL and canonical source page URL, preserving first-seen candidate order.
+ * Reused public avatars from distinct source pages remain separate candidates,
+ * while duplicate image+source pairs coalesce.
+ */
+internal fun deduplicateReverseImageCandidates(
+    candidates: List<ReverseImageCandidateSearchService.Candidate>
+): List<ReverseImageCandidateSearchService.Candidate> = candidates
+    .distinctBy { candidate ->
+        "${canonicalMediaUrl(candidate.imageUrl)}|${canonicalMediaUrl(candidate.sourcePageUrl)}"
+    }
+
+internal fun canonicalMediaUrl(url: String): String = runCatching {
+    val trimmed = url.trim()
+    val uri = URI(trimmed)
+    val path = uri.path?.removeSuffix("/")?.ifBlank { null }
+    URI(
+        uri.scheme?.lowercase(),
+        uri.userInfo,
+        uri.host?.lowercase(),
+        uri.port,
+        path,
+        uri.query,
+        null
+    ).toString().removeSuffix("/")
+}.getOrDefault(url.trim().substringBefore('#').removeSuffix("/").lowercase())
+
 
 /**
  * Converts only a directly verified public profile into explicit media linkage
