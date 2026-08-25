@@ -22,6 +22,7 @@ import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ScanHistoryRuntime
 import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
+import io.dossier.app.domain.discovery.ProviderPlanFingerprint
 import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
@@ -45,6 +46,51 @@ import java.util.UUID
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+
+private fun buildPostProcessingCheckpoint(
+    requestId: String,
+    ownerId: String,
+    planFingerprint: String?,
+    inputDigest: String,
+    analysis: OsintAnalysisBundle
+): PostProcessingStageCheckpoint? {
+    val plan = planFingerprint?.takeIf { ProviderPlanFingerprint.isValid(it) } ?: return null
+    val serialized = PostProcessingCheckpointCodec.encode(analysis) ?: return null
+    if (!PostProcessingCheckpointCodec.isValidDigest(inputDigest)) return null
+    return PostProcessingStageCheckpoint(
+        requestId = requestId,
+        planFingerprint = plan,
+        ownerId = ownerId,
+        capturedAtEpochMillis = System.currentTimeMillis(),
+        inputDigest = inputDigest,
+        analysisJson = serialized
+    )
+}
+
+private fun loadReusablePostProcessingCheckpoint(
+    context: Context,
+    requestId: String,
+    ownerId: String,
+    planFingerprint: String?,
+    inputDigest: String
+): OsintAnalysisBundle? {
+    val plan = planFingerprint?.takeIf { ProviderPlanFingerprint.isValid(it) } ?: return null
+    if (!PostProcessingCheckpointCodec.isValidDigest(inputDigest)) return null
+    val point = (runCatching {
+        ScanResumeStore(context).loadRequestDetailed(requestId)
+    }.getOrNull() as? ResumeReadState.Available)?.point ?: return null
+    if (point.checkpointOwnerId != ownerId ||
+        point.planFingerprint != plan ||
+        ScanCheckpointStage.PostProcessing !in point.completedCheckpointStages
+    ) return null
+    val checkpoint = point.postProcessingCheckpoint ?: return null
+    if (checkpoint.requestId != requestId ||
+        checkpoint.ownerId != ownerId ||
+        checkpoint.planFingerprint != plan ||
+        checkpoint.inputDigest != inputDigest
+    ) return null
+    return PostProcessingCheckpointCodec.decode(checkpoint.analysisJson)
+}
 
 /** Durable WorkManager-owned assessment execution. */
 class BackgroundScanWorker(
@@ -135,7 +181,8 @@ class BackgroundScanWorker(
             fun checkpointFailure(
                 stage: ScanCheckpointStage,
                 completed: Boolean,
-                output: ScanStageOutput? = null
+                output: ScanStageOutput? = null,
+                postProcessingCheckpoint: PostProcessingStageCheckpoint? = null
             ): String? {
                 val generationRef = generation ?: return null
                 return when (
@@ -146,7 +193,8 @@ class BackgroundScanWorker(
                         generation = generationRef,
                         stage = stage,
                         completed = completed,
-                        output = output
+                        output = output,
+                        postProcessingCheckpoint = postProcessingCheckpoint
                     )
                 ) {
                     is ResumeCheckpointWriteState.Saved -> null
@@ -241,16 +289,38 @@ class BackgroundScanWorker(
             checkpointFailure(ScanCheckpointStage.PostProcessing, completed = false)
                 ?.let { return@coroutineScope terminalFailure(it) }
             val evidenceCollection = EvidenceRuntimeCache.collection.value
-            val baseAnalysis = OsintPostProcessor.analyze(
+            val postProcessingInputDigest = PostProcessingCheckpointCodec.inputDigest(
                 input = input,
                 profiles = ScanSession.profileScanResults.value,
-                evidence = evidenceCollection
+                evidence = evidenceCollection,
+                usernameObservations = UsernameSurfaceRuntimeCache.observations.value
             )
-            val analysis = baseAnalysis.copy(
-                identitySurface = UsernameSurfaceAnalysis.merge(
-                    base = baseAnalysis.identitySurface,
-                    observations = UsernameSurfaceRuntimeCache.observations.value
+            val reusableAnalysis = loadReusablePostProcessingCheckpoint(
+                context = applicationContext,
+                requestId = requestId,
+                ownerId = workerId,
+                planFingerprint = requestPoint.planFingerprint,
+                inputDigest = postProcessingInputDigest
+            )
+            val analysis = reusableAnalysis ?: run {
+                val baseAnalysis = OsintPostProcessor.analyze(
+                    input = input,
+                    profiles = ScanSession.profileScanResults.value,
+                    evidence = evidenceCollection
                 )
+                baseAnalysis.copy(
+                    identitySurface = UsernameSurfaceAnalysis.merge(
+                        base = baseAnalysis.identitySurface,
+                        observations = UsernameSurfaceRuntimeCache.observations.value
+                    )
+                )
+            }
+            val postProcessingCheckpoint = buildPostProcessingCheckpoint(
+                requestId = requestId,
+                ownerId = workerId,
+                planFingerprint = requestPoint.planFingerprint,
+                inputDigest = postProcessingInputDigest,
+                analysis = analysis
             )
             checkpointFailure(
                 ScanCheckpointStage.PostProcessing,
@@ -258,7 +328,8 @@ class BackgroundScanWorker(
                 output = ScanStageOutput(
                     itemCount = evidenceCollection.evidence.size,
                     verifiedCount = evidenceCollection.evidence.count { it.state == io.dossier.app.domain.evidence.EvidenceState.Verified }
-                )
+                ),
+                postProcessingCheckpoint = postProcessingCheckpoint
             )
                 ?.let { return@coroutineScope terminalFailure(it) }
 
@@ -1323,7 +1394,8 @@ object BackgroundScanManager {
         completed: Boolean,
         output: ScanStageOutput? = null,
         payloads: List<ScanPayloadSummary> = emptyList(),
-        breachCheckpoint: BreachStageCheckpoint? = null
+        breachCheckpoint: BreachStageCheckpoint? = null,
+        postProcessingCheckpoint: PostProcessingStageCheckpoint? = null
     ): ResumeCheckpointWriteState = synchronized(LIFECYCLE_LOCK) {
         val appContext = context.applicationContext
         val lifecycle = (lifecycleStoreProvider(appContext).read()
@@ -1343,7 +1415,8 @@ object BackgroundScanManager {
             completed = completed,
             output = output,
             payloads = payloads,
-            breachCheckpoint = breachCheckpoint
+            breachCheckpoint = breachCheckpoint,
+            postProcessingCheckpoint = postProcessingCheckpoint
         )
     }
 

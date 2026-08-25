@@ -14,6 +14,7 @@ import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.domain.scanner.ScanPayloadSummary
 import io.dossier.app.domain.scanner.ScanStageOutput
 import io.dossier.app.domain.scanner.BreachStageCheckpoint
+import io.dossier.app.domain.scanner.PostProcessingStageCheckpoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -374,7 +375,8 @@ object ScanCoordinatorRuntime {
         completed: Boolean,
         output: ScanStageOutput? = null,
         payloads: List<ScanPayloadSummary> = emptyList(),
-        breachCheckpoint: BreachStageCheckpoint? = null
+        breachCheckpoint: BreachStageCheckpoint? = null,
+        postProcessingCheckpoint: PostProcessingStageCheckpoint? = null
     ): ResumeCheckpointWriteState =
         BackgroundScanManager.advanceCheckpointIfOwner(
             context = context,
@@ -385,7 +387,8 @@ object ScanCoordinatorRuntime {
             completed = completed,
             output = output,
             payloads = payloads,
-            breachCheckpoint = breachCheckpoint
+            breachCheckpoint = breachCheckpoint,
+            postProcessingCheckpoint = postProcessingCheckpoint
         ).also(::publishCheckpointState)
 
     private fun publishCheckpointState(state: ResumeCheckpointWriteState) {
