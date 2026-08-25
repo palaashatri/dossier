@@ -44,6 +44,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
@@ -270,7 +272,8 @@ fun ReportScreen(
                     text = "Privacy audit report",
                     color = NeuralTheme.TextPrimary,
                     fontSize = 27.sp,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.semantics { heading() }
                 )
                 Text(
                     text = subject,
@@ -626,7 +629,13 @@ private fun EvidenceReport(
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.SemiBold,
                         textDecoration = TextDecoration.Underline,
-                        modifier = Modifier.clickable { onNavigateToBrowser(match.profileUrl) }
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .clickable(role = Role.Button) { onNavigateToBrowser(match.profileUrl) }
+                            .semantics {
+                                contentDescription = "Open visual match profile ${match.profileUrl}"
+                            }
                     )
                     Text(
                         "Similarity score ${"%.3f".format(match.similarityScore)}",
@@ -875,6 +884,7 @@ private fun FindingCard(
                 textDecoration = TextDecoration.Underline,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(min = 48.dp)
                     .clickable(
                         enabled = onNavigateToBrowser != null,
                         role = Role.Button
@@ -990,6 +1000,7 @@ private fun DraftCorrectionButton(
         modifier = modifier
             .heightIn(min = 48.dp)
             .semantics {
+                this.selected = selected
                 contentDescription = "$label $targetLabel correction"
                 stateDescription = if (selected) "Selected" else "Not selected"
             },
@@ -1042,7 +1053,11 @@ private fun ProfileEvidenceCard(
             textDecoration = TextDecoration.Underline,
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onNavigateToBrowser(result.candidate.url) }
+                .heightIn(min = 48.dp)
+                .clickable(role = Role.Button) { onNavigateToBrowser(result.candidate.url) }
+                .semantics {
+                    contentDescription = "Open profile ${result.candidate.url}"
+                }
                 .padding(vertical = 8.dp)
         )
         result.verificationStatus?.let {
@@ -1218,7 +1233,13 @@ private fun RiskBadge(risk: RiskLevel) {
 @Composable
 private fun SectionHeading(title: String, subtitle: String) {
     Column(modifier = Modifier.fillMaxWidth()) {
-        Text(title, color = NeuralTheme.TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            title,
+            color = NeuralTheme.TextPrimary,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.semantics { heading() }
+        )
         Text(subtitle, color = NeuralTheme.TextSecondary, fontSize = 11.5.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 2.dp))
     }
 }

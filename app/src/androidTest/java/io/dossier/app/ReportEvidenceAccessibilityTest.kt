@@ -207,6 +207,11 @@ class ReportEvidenceAccessibilityTest {
         }
         composeRule.onNodeWithText("Evidence").performClick()
 
+        val profileSource = composeRule
+            .onNodeWithContentDescription("Open profile $source")
+            .fetchSemanticsNode()
+        assertEquals(Role.Button, profileSource.config[SemanticsProperties.Role])
+
         val reject = composeRule.onNodeWithContentDescription("Reject profile correction")
         assertEquals(
             "Not selected",

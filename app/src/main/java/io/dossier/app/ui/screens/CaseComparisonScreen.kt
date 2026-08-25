@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -35,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -149,7 +151,8 @@ fun CaseComparisonScreen(onNavigateToBrowser: (String) -> Unit = {}) {
             text = "Saved cases",
             color = NeuralTheme.TextPrimary,
             fontSize = 25.sp,
-            fontWeight = FontWeight.SemiBold
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.semantics { heading() }
         )
         Text(
             text = "Encrypted on this device. Compare scans, correlate reused media, correct attribution, and track cleanup work without altering raw evidence.",
@@ -421,7 +424,14 @@ private fun CaseSelectionCard(
         ) {
             OutlinedButton(
                 onClick = onSelectBefore,
-                modifier = Modifier.weight(1f).height(48.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .semantics {
+                        this.selected = isBefore
+                        stateDescription = if (isBefore) "Selected as older comparison point" else "Not selected as older comparison point"
+                        contentDescription = "${if (isBefore) "Remove" else "Set"} ${case.label} as older comparison point"
+                    },
                 colors = ButtonDefaults.outlinedButtonColors(
                     contentColor = if (isBefore) NeuralTheme.Amber else NeuralTheme.TextSecondary
                 )
@@ -430,7 +440,14 @@ private fun CaseSelectionCard(
             }
             OutlinedButton(
                 onClick = onSelectAfter,
-                modifier = Modifier.weight(1f).height(48.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .semantics {
+                        this.selected = isAfter
+                        stateDescription = if (isAfter) "Selected as newer comparison point" else "Not selected as newer comparison point"
+                        contentDescription = "${if (isAfter) "Remove" else "Set"} ${case.label} as newer comparison point"
+                    },
                 colors = ButtonDefaults.outlinedButtonColors(
                     contentColor = if (isAfter) NeuralTheme.Cobalt else NeuralTheme.TextSecondary
                 )
@@ -1241,7 +1258,12 @@ private fun CaseReviewPanel(
                 )
             }
             if (distinctFindings.size > REVIEW_PREVIEW_LIMIT) {
-                TextButton(onClick = { showAllEvidence = !showAllEvidence }) {
+                TextButton(
+                    onClick = { showAllEvidence = !showAllEvidence },
+                    modifier = Modifier.semantics {
+                        stateDescription = if (showAllEvidence) "Expanded" else "Collapsed"
+                    }
+                ) {
                     Text(if (showAllEvidence) "Show fewer evidence items" else "Show all ${distinctFindings.size} evidence items")
                 }
             }
@@ -1299,7 +1321,12 @@ private fun CaseReviewPanel(
                 }
             }
             if (accounts.size > REVIEW_PREVIEW_LIMIT) {
-                TextButton(onClick = { showAllAccounts = !showAllAccounts }) {
+                TextButton(
+                    onClick = { showAllAccounts = !showAllAccounts },
+                    modifier = Modifier.semantics {
+                        stateDescription = if (showAllAccounts) "Expanded" else "Collapsed"
+                    }
+                ) {
                     Text(if (showAllAccounts) "Show fewer accounts" else "Show all ${accounts.size} accounts")
                 }
             }
@@ -1345,7 +1372,12 @@ private fun CaseReviewPanel(
                 )
             }
             if (actionableFindings.size > REVIEW_PREVIEW_LIMIT) {
-                TextButton(onClick = { showAllActions = !showAllActions }) {
+                TextButton(
+                    onClick = { showAllActions = !showAllActions },
+                    modifier = Modifier.semantics {
+                        stateDescription = if (showAllActions) "Expanded" else "Collapsed"
+                    }
+                ) {
                     Text(if (showAllActions) "Show fewer actions" else "Show all ${actionableFindings.size} actions")
                 }
             }
@@ -1534,7 +1566,13 @@ private fun StatusButton(
 
 @Composable
 private fun ReviewSectionTitle(title: String, subtitle: String) {
-    Text(title, color = NeuralTheme.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    Text(
+        title,
+        color = NeuralTheme.TextPrimary,
+        fontSize = 14.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.semantics { heading() }
+    )
     Text(
         subtitle,
         color = NeuralTheme.TextSecondary,

@@ -96,6 +96,10 @@ class ReverseImageLookupAccessibilityTest {
             .assertIsDisplayed()
             .performClick()
         assertEquals(UserCorrectionDecision.ThisIsNotMe, decision)
+        val sourceNode = composeRule
+            .onNodeWithContentDescription("Open public candidate source Verified avatar")
+            .fetchSemanticsNode()
+        assertEquals(Role.Button, sourceNode.config[SemanticsProperties.Role])
         composeRule.onNodeWithText("This control applies only to the exact linked profile observation; it does not establish image ownership. Raw media and profile evidence remain retained until encrypted case save.").assertIsDisplayed()
     }
 

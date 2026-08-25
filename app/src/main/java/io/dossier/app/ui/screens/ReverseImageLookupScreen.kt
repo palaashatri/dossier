@@ -43,6 +43,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
@@ -210,7 +212,9 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
                 fontSize = 24.sp,
                 lineHeight = 30.sp,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)
+                modifier = Modifier
+                    .padding(top = 6.dp, bottom = 6.dp)
+                    .semantics { heading() }
             )
             Text(
                 "Extract EXIF, OCR, and scene clues; search several public image indexes; then compare downloaded candidates locally for exact copies, resizes, recompressions, screenshots, and modest crops.",
@@ -413,7 +417,11 @@ private fun RenderLookupResult(
                         fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
                         textDecoration = TextDecoration.Underline,
-                        modifier = Modifier.padding(top = 7.dp).clickable { onNavigateToBrowser(target) }
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .padding(top = 7.dp)
+                            .clickable(role = Role.Button) { onNavigateToBrowser(target) }
+                            .semantics { contentDescription = "Open image match source $target" }
                     )
                 }
             }
@@ -454,7 +462,11 @@ private fun RenderLookupResult(
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     textDecoration = TextDecoration.Underline,
-                    modifier = Modifier.padding(top = 8.dp).clickable { onNavigateToBrowser(url) }
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .padding(top = 8.dp)
+                        .clickable(role = Role.Button) { onNavigateToBrowser(url) }
+                        .semantics { contentDescription = "Open resolved location in Maps $url" }
                 )
             }
         }
@@ -513,7 +525,11 @@ private fun RenderLookupResult(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 9.5.sp,
                             textDecoration = TextDecoration.Underline,
-                            modifier = Modifier.padding(top = 5.dp).clickable { onNavigateToBrowser(evidence.url) }
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .padding(top = 5.dp)
+                                .clickable(role = Role.Button) { onNavigateToBrowser(evidence.url) }
+                                .semantics { contentDescription = "Open public location evidence ${evidence.title}" }
                         )
                     }
                 }
@@ -541,7 +557,11 @@ private fun RenderLookupResult(
             fontSize = 11.5.sp,
             fontWeight = FontWeight.Bold,
             textDecoration = TextDecoration.Underline,
-            modifier = Modifier.padding(vertical = 4.dp).clickable { onNavigateToBrowser(url) }
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .padding(vertical = 4.dp)
+                .clickable(role = Role.Button) { onNavigateToBrowser(url) }
+                .semantics { contentDescription = "Open external visual index $name" }
         )
     }
 }
@@ -668,9 +688,15 @@ internal fun RenderVisualProvenance(
                         color = NeuralTheme.Cyan,
                         fontSize = 10.5.sp,
                         textDecoration = TextDecoration.Underline,
-                        modifier = Modifier.padding(top = 5.dp).clickable {
-                            onNavigateToBrowser(candidate.sourcePageUrl)
-                        }
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .padding(top = 5.dp)
+                            .clickable(role = Role.Button) {
+                                onNavigateToBrowser(candidate.sourcePageUrl)
+                            }
+                            .semantics {
+                                contentDescription = "Open public candidate source ${candidate.title}"
+                            }
                     )
                 }
                 if (onDraftCorrection != null) {
@@ -703,7 +729,12 @@ internal fun RenderVisualProvenance(
     }
 
     if (candidates.size > PROVENANCE_PREVIEW_COUNT) {
-        TextButton(onClick = { expanded = !expanded }) {
+        TextButton(
+            onClick = { expanded = !expanded },
+            modifier = Modifier.semantics {
+                stateDescription = if (expanded) "Expanded" else "Collapsed"
+            }
+        ) {
             Text(
                 if (expanded) "Show fewer candidates" else "Inspect all ${candidates.size} candidates",
                 color = NeuralTheme.Cyan
@@ -781,8 +812,9 @@ private fun MediaDraftCorrectionButton(
     OutlinedButton(
         onClick = { onClick(decision) },
         modifier = modifier
-            .heightIn(min = 44.dp)
+            .heightIn(min = 48.dp)
             .semantics {
+                this.selected = selected
                 contentDescription = "$label linked profile evidence correction"
                 stateDescription = if (selected) "Selected" else "Not selected"
             }
@@ -902,7 +934,8 @@ private fun SectionHeader(text: String) {
         text = text.uppercase(),
         marker = "»",
         blinkDot = true,
-        dotLevel = io.dossier.app.ui.components.HudLevel.INFO
+        dotLevel = io.dossier.app.ui.components.HudLevel.INFO,
+        modifier = Modifier.semantics { heading() }
     )
 }
 

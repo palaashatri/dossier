@@ -28,6 +28,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -140,7 +144,8 @@ fun AnalysisScreen(
             text = "Background analysis",
             color = NeuralTheme.TextPrimary,
             fontSize = 27.sp,
-            fontWeight = FontWeight.SemiBold
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.semantics { heading() }
         )
         Text(
             text = when {
@@ -159,7 +164,11 @@ fun AnalysisScreen(
         )
 
         if (running || pausing) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics { contentDescription = "Background scan in progress" }
+            )
             AnalysisCard("Current stage") {
                 MonoText(if (pausing) "PAUSE_REQUESTED" else status?.stage ?: "BACKGROUND_SCAN_RUNNING")
                 Spacer(Modifier.height(8.dp))
@@ -434,11 +443,19 @@ private fun TimelineSection(case: DossierCase) {
                     .atZone(ZoneId.systemDefault())
                     .format(TIMELINE_FORMAT)
                 Text(
-                    text = "$timestamp · ${event.title}",
+                    text = "${if (event.historical) "HISTORICAL · " else ""}$timestamp · ${event.title}",
                     color = if (event.historical) NeuralTheme.Amber else NeuralTheme.TextPrimary,
                     fontSize = 11.5.sp,
                     fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(top = 4.dp)
+                    modifier = Modifier
+                        .padding(top = 4.dp)
+                        .semantics {
+                            stateDescription = if (event.historical) {
+                                "Historical observation"
+                            } else {
+                                "Current observation"
+                            }
+                        }
                 )
                 Text(
                     text = event.detail,
@@ -469,14 +486,24 @@ private fun AnalysisCard(title: String, content: @Composable () -> Unit) {
             .padding(15.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Text(title, color = NeuralTheme.Cobalt, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Text(
+            title,
+            color = NeuralTheme.Cobalt,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.semantics { heading() }
+        )
         content()
     }
 }
 
 @Composable
 private fun Metric(label: String, value: Int) {
-    Column {
+    Column(
+        modifier = Modifier.semantics(mergeDescendants = true) {
+            contentDescription = "$value $label"
+        }
+    ) {
         Text(value.toString(), color = NeuralTheme.TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
         Text(label, color = NeuralTheme.TextSecondary, fontSize = 9.5.sp)
     }
