@@ -211,6 +211,15 @@ class BackgroundScanWorkerTest {
     }
 
     @Test
+    fun legacyWorkDataWithUnexpectedValueTypeStillFailsClosed() {
+        val legacy = Data.Builder()
+            .putByteArray("identity_json", "plaintext-seed".toByteArray())
+            .build()
+
+        assertTrue(BackgroundScanWorker.hasLegacyWorkData(legacy))
+    }
+
+    @Test
     fun arbitraryErrorTextCannotEnterWorkManagerData() {
         val secret = "java.io.IOException: token=do-not-persist"
 
@@ -264,6 +273,30 @@ class BackgroundScanWorkerTest {
             BackgroundScanWorker.STAGE_CANCELLED,
             BackgroundScanManager.safeStatusStage(null, null, WorkInfo.State.CANCELLED)
         )
+    }
+
+    @Test
+    fun historicalUnsafeWorkInfoPayloadIsLogicallyRetiredWithoutEchoingIt() {
+        val secret = "DISCOVERING identity=authorized@example.test"
+        val info = WorkInfo(
+            UUID.randomUUID(),
+            WorkInfo.State.SUCCEEDED,
+            emptySet(),
+            Data.Builder().putString(BackgroundScanWorker.KEY_STAGE, secret).build(),
+            Data.EMPTY
+        )
+
+        val status = BackgroundScanManager.toStatus(info)
+
+        assertTrue(status.legacyDataRetired)
+        assertFalse(status.running)
+        assertFalse(status.complete)
+        assertEquals(BackgroundScanWorker.STAGE_FAILED, status.stage)
+        assertEquals(
+            BackgroundScanWorker.ERROR_LEGACY_WORK_DATA_UNSUPPORTED,
+            status.error
+        )
+        assertFalse(status.error.orEmpty().contains(secret))
     }
 
     @Test

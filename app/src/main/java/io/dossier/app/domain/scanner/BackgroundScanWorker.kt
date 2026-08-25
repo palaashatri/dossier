@@ -376,11 +376,14 @@ class BackgroundScanWorker(
 
         internal const val KEY_REQUEST_ID = "request_id"
         internal const val KEY_GENERATION = "generation"
-        private const val LEGACY_KEY_IDENTITY_JSON = "identity_json"
-        private const val LEGACY_KEY_DEEP_RESEARCH = "deep_research"
-        private const val LEGACY_KEY_STRONG_FACE_CORRELATION = "strong_face_correlation"
-        private const val LEGACY_KEY_SCAN_MODE = "scan_mode"
-        private const val LEGACY_KEY_MODE = "mode"
+        private val LEGACY_WORK_DATA_KEYS = setOf(
+            "identity_json",
+            "deep_research",
+            "strong_face_correlation",
+            "scan_mode",
+            "mode"
+        )
+        private val ALLOWLISTED_STATUS_KEYS = setOf(KEY_STAGE, KEY_ERROR)
         private const val MAX_ERROR_CHARS = 120
         private const val MAX_SNAPSHOT_EVIDENCE = 10_000
         private val SCAN_EXECUTION_MUTEX = Mutex()
@@ -437,15 +440,27 @@ class BackgroundScanWorker(
             return builder.build()
         }
 
-        internal fun hasLegacyWorkData(data: Data): Boolean = listOf(
-            LEGACY_KEY_IDENTITY_JSON,
-            LEGACY_KEY_DEEP_RESEARCH,
-            LEGACY_KEY_STRONG_FACE_CORRELATION,
-            LEGACY_KEY_SCAN_MODE,
-            LEGACY_KEY_MODE
-        ).any { key ->
-            data.hasKeyWithValueOfType(key, String::class.java) ||
-                data.hasKeyWithValueOfType(key, Boolean::class.javaObjectType)
+        /**
+         * Detect legacy request keys by name, regardless of their serialized
+         * value type. A malformed typed value must fail closed too; checking
+         * only String/Boolean values would let an old plaintext row through.
+         */
+        internal fun hasLegacyWorkData(data: Data): Boolean =
+            data.keyValueMap.keys.any(LEGACY_WORK_DATA_KEYS::contains)
+
+        /**
+         * WorkInfo intentionally does not expose inputData. We can still
+         * retire any historical payload that is observable through its
+         * progress/output columns before it reaches UI code. Current rows
+         * contain only the two allow-listed keys and exact enum/error values.
+         */
+        internal fun hasUntrustedStatusData(data: Data): Boolean {
+            if (data.keyValueMap.keys.any { it !in ALLOWLISTED_STATUS_KEYS }) return true
+            val stage = data.keyValueMap[KEY_STAGE]
+            if (stage != null && (stage !is String || stage !in SAFE_PROGRESS_STAGES)) return true
+            val error = data.keyValueMap[KEY_ERROR]
+            if (error != null && (error !is String || error !in SAFE_ERROR_CODES)) return true
+            return false
         }
 
         internal fun failureData(code: String): Data {
@@ -495,11 +510,22 @@ object BackgroundScanManager {
         val id: UUID,
         val state: WorkInfo.State,
         val stage: String,
-        val error: String?
+        val error: String?,
+        /**
+         * True when the WorkManager row exposes a payload outside the
+         * current allow-list. Such a row may contain data written by an
+         * older worker; it is logically retired from the UI projection.
+         * This does not claim that WorkManager's historical database bytes
+         * were physically erased.
+         */
+        val legacyDataRetired: Boolean = false
     ) {
         val running: Boolean
-            get() = state == WorkInfo.State.ENQUEUED || state == WorkInfo.State.RUNNING || state == WorkInfo.State.BLOCKED
-        val complete: Boolean get() = state == WorkInfo.State.SUCCEEDED
+            get() = !legacyDataRetired &&
+                (state == WorkInfo.State.ENQUEUED ||
+                    state == WorkInfo.State.RUNNING ||
+                    state == WorkInfo.State.BLOCKED)
+        val complete: Boolean get() = !legacyDataRetired && state == WorkInfo.State.SUCCEEDED
     }
 
     internal var nowEpochMillis: () -> Long = { System.currentTimeMillis() }
@@ -898,17 +924,31 @@ object BackgroundScanManager {
         return if (terminal && sanitized == BackgroundScanWorker.STAGE_RUNNING) stateStage else sanitized
     }
 
-    fun toStatus(info: WorkInfo): Status = Status(
-        id = info.id,
-        state = info.state,
-        stage = safeStatusStage(
-            progressStage = info.progress.getString(BackgroundScanWorker.KEY_STAGE),
-            outputStage = info.outputData.getString(BackgroundScanWorker.KEY_STAGE),
-            state = info.state
-        ),
-        error = info.outputData.getString(BackgroundScanWorker.KEY_ERROR)
-            ?.takeIf { it in BackgroundScanWorker.SAFE_ERROR_CODES }
-    )
+    fun toStatus(info: WorkInfo): Status {
+        val legacyDataRetired =
+            BackgroundScanWorker.hasUntrustedStatusData(info.progress) ||
+                BackgroundScanWorker.hasUntrustedStatusData(info.outputData)
+        return Status(
+            id = info.id,
+            state = info.state,
+            stage = if (legacyDataRetired) {
+                BackgroundScanWorker.STAGE_FAILED
+            } else {
+                safeStatusStage(
+                    progressStage = info.progress.getString(BackgroundScanWorker.KEY_STAGE),
+                    outputStage = info.outputData.getString(BackgroundScanWorker.KEY_STAGE),
+                    state = info.state
+                )
+            },
+            error = if (legacyDataRetired) {
+                BackgroundScanWorker.ERROR_LEGACY_WORK_DATA_UNSUPPORTED
+            } else {
+                info.outputData.getString(BackgroundScanWorker.KEY_ERROR)
+                    ?.takeIf { it in BackgroundScanWorker.SAFE_ERROR_CODES }
+            },
+            legacyDataRetired = legacyDataRetired
+        )
+    }
 
     fun latestResult(context: Context): BackgroundScanResultStore.Snapshot? = synchronized(LIFECYCLE_LOCK) {
         val appContext = context.applicationContext
