@@ -80,7 +80,10 @@ fun AnalysisScreen(
     val status = latestInfo?.let(BackgroundScanManager::toStatus)
 
     LaunchedEffect(Unit) {
-        snapshot = BackgroundScanManager.latestResultAsync(context)
+        BackgroundScanManager.latestResultAsync(context)?.let { restored ->
+            snapshot = restored
+            restored.dossierCase.let(ScanSession::restoreFromCase)
+        }
     }
 
     // A paused request has a cancelled WorkManager row by design. Keep the

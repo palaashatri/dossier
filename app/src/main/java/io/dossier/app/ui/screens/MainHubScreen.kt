@@ -178,10 +178,33 @@ private fun DossierNavGraph(
 ) {
     val context = LocalContext.current
     var initialRoute by remember(context) { mutableStateOf<String?>(null) }
+    val restoredRoute = navController
+        .currentBackStackEntryAsState()
+        .value
+        ?.destination
+        ?.route
+    var restoredAnalysisRedirected by remember { mutableStateOf(false) }
     LaunchedEffect(context) {
         val hasActiveMarker = BackgroundScanManager.hasActiveMarkerAsync(context)
         val hasLatestResult = BackgroundScanManager.latestResultAsync(context) != null
         initialRoute = if (hasActiveMarker || hasLatestResult) "analysis" else "identity"
+    }
+    LaunchedEffect(initialRoute, restoredRoute) {
+        // Activity recreation can restore an older identity destination even
+        // when durable scan state now points to Analysis. Redirect once for
+        // that restoration seam, then let an explicit user return to setup
+        // remain authoritative.
+        if (!restoredAnalysisRedirected &&
+            initialRoute == "analysis" &&
+            restoredRoute != null &&
+            restoredRoute !in setOf("analysis", "report")
+        ) {
+            restoredAnalysisRedirected = true
+            navController.navigate("analysis") {
+                popUpTo(restoredRoute) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
     }
     if (initialRoute == null) {
         Box(modifier = Modifier.fillMaxSize()) {
