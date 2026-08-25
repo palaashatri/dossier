@@ -11,10 +11,10 @@ The current implementation branch is **82/100 under the strict production rubric
 Validated implementation commit:
 
 ```text
-61ece02
+c4a8a00
 ```
 
-`61ece02` is the report-evidence accessibility tranche; the validated tree also includes bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
+`c4a8a00` is the structured face-comparison provenance tranche; the validated tree also includes report-evidence accessibility semantics, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
 
@@ -23,13 +23,13 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 5 tests / no-network schema fixtures
-Debug JVM unit tests                PASS — 719 tests / 115 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 719 tests / 115 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 723 tests / 115 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 723 tests / 115 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
 Debug APK assembly                  PASS — 115,499,496 bytes
-Debug APK SHA-256                   70050737459590336F9C355F34C67B1CC2EF39697B6DBB21D718B6DDAD444536
-uiTest APK assembly                 PASS — 242,981,305 bytes
-uiTest APK SHA-256                  447CC96A921BFB8C63840668860FC13460CB2D162F37C49FFAFAD80E97A48F9B
+Debug APK SHA-256                   1FB19FD21C7CED17E7DD148162F5BC7547FD7DD17C76237C39580341DF44F531
+uiTest APK assembly                 PASS — 242,997,689 bytes
+uiTest APK SHA-256                  FEFCF23DB994511A43A784527054BBD7FAE201A8B6840A376BFE677271E3168F
 Android-test APK                    PASS — 1,020,008 bytes
 Android-test APK SHA-256             F49197FFFB67E5E7AF6338010EC82876C3D9D6ECB8B7C4572C32E9E4079B2E31
 Debug lint                          PASS — 0 errors / 69 warnings
@@ -158,7 +158,7 @@ Implemented whole-image duplicate/repost analysis:
 
 Whole-image clusters mean **duplicate/reposted image content**. They do not mean two different photos depict the same person.
 
-Optional local cross-photo face support uses pinned YuNet/SFace models with exact size/SHA-256 verification, deterministic preprocessing, five-landmark alignment, ambiguity/quality rejection and cosine scoring. Face similarity remains supporting evidence; release thresholds are not advertised as measured identity probabilities until a representative benchmark exists.
+Optional local cross-photo face support uses pinned YuNet/SFace models with exact size/SHA-256 verification, deterministic preprocessing, five-landmark alignment, ambiguity/quality rejection and cosine scoring. Each comparison now retains bounded structured backend/model-hash/pipeline, calibration-state and selfie/profile-quality provenance, including explicit reference-policy, measured, imported, fallback and not-run states. Face similarity remains supporting evidence; release thresholds are not advertised as measured identity probabilities until a representative benchmark exists.
 
 Directly scanned, verified profile avatars now produce bounded `VerifiedProfile` linkages with `profile:<url>` evidence; broader verified-account acquisition/correlation and independent visual acceptance remain incomplete. Explicit verified-profile and user-reviewed linkages are evidence-carrying associations rather than automatic identity conclusions. Whole-image similarity and face similarity are supporting evidence, not identity proof.
 
