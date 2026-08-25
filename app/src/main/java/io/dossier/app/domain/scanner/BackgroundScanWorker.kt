@@ -995,8 +995,9 @@ object BackgroundScanManager {
                     (generation == null || record.generation == generation) &&
                     record.phase in setOf(
                         ScanLifecyclePhase.Running,
-                        ScanLifecyclePhase.Succeeded,
-                        ScanLifecyclePhase.Paused
+                        ScanLifecyclePhase.Pausing,
+                        ScanLifecyclePhase.Paused,
+                        ScanLifecyclePhase.Succeeded
                     ) &&
                     record.resultReady
             }
