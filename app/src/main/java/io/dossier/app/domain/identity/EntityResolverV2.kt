@@ -1,5 +1,8 @@
 package io.dossier.app.domain.identity
 
+import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.evidence.toEvidence
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ProfileScanResult
 import kotlinx.serialization.Serializable
@@ -83,7 +86,14 @@ object EntityResolverV2 {
         calibration: EntityResolutionCalibrationArtifact? = null,
         expectedCorpusDigest: String? = null,
         expectedTrainingCorpusDigest: String? = null,
-        expectedAuthorizationRecordDigest: String? = null
+        expectedAuthorizationRecordDigest: String? = null,
+        /**
+         * The persisted evidence ledger for this profile, when available.
+         * Provenance is fail-closed: only IDs that occur exactly once in this
+         * ledger are attached to contributions. The resolver never creates an
+         * evidence record from a URL, value, or explanation.
+         */
+        evidence: List<Evidence> = emptyList()
     ): EntityResolutionResult {
         val policy = calibration?.productionPolicyOrNull(
             expectedCorpusDigest = expectedCorpusDigest,
@@ -102,6 +112,8 @@ object EntityResolverV2 {
 
         val supporting = mutableListOf<CorrelationContribution>()
         val contradicting = mutableListOf<CorrelationContribution>()
+        val evidenceLedger = EvidenceLedger(evidence)
+        val profileEvidenceId = evidenceLedger.profileId(result)
         val candidateUrl = normalizeUrl(result.candidate.url)
         val suppliedUrls = input.profileUrls.mapNotNull(::normalizeUrl).toSet()
         val suppliedUsernames = buildSet {
@@ -113,6 +125,7 @@ object EntityResolverV2 {
             supporting += CorrelationContribution(
                 feature = CorrelationFeature.DirectVerification,
                 weight = policy.weight(CorrelationFeature.DirectVerification, 0.45),
+                evidenceIds = listOfNotNull(profileEvidenceId),
                 explanation = "The public profile passed Dossier's direct verification and attribution checks"
             )
         }
@@ -120,6 +133,7 @@ object EntityResolverV2 {
             supporting += CorrelationContribution(
                 feature = CorrelationFeature.UserSuppliedProfile,
                 weight = 0.80,
+                evidenceIds = listOfNotNull(profileEvidenceId),
                 explanation = "The exact profile URL was supplied by the authorized user"
             )
         }
@@ -130,6 +144,7 @@ object EntityResolverV2 {
             supporting += CorrelationContribution(
                 feature = CorrelationFeature.ExactSuppliedUsername,
                 weight = policy.weight(CorrelationFeature.ExactSuppliedUsername, 0.24),
+                evidenceIds = listOfNotNull(profileEvidenceId),
                 explanation = "The public account uses an exact supplied username"
             )
         }
@@ -141,6 +156,7 @@ object EntityResolverV2 {
             supporting += CorrelationContribution(
                 feature = CorrelationFeature.ExplicitCrossLink,
                 weight = policy.weight(CorrelationFeature.ExplicitCrossLink, 0.42),
+                evidenceIds = listOfNotNull(profileEvidenceId),
                 explanation = "The public account cross-links a supplied public site (${sharedHosts.first()})"
             )
         }
@@ -154,6 +170,15 @@ object EntityResolverV2 {
             supporting += CorrelationContribution(
                 feature = CorrelationFeature.ExactPublicEmail,
                 weight = policy.weight(CorrelationFeature.ExactPublicEmail, 0.70),
+                evidenceIds = result.findings
+                    .asSequence()
+                    .filter { finding ->
+                        finding.type == io.dossier.app.domain.model.FindingType.Email &&
+                            finding.value.trim().lowercase(Locale.ROOT) in suppliedEmails
+                    }
+                    .mapNotNull(evidenceLedger::findingId)
+                    .distinct()
+                    .toList(),
                 explanation = "The public profile exposes an exact supplied email address"
             )
         }
@@ -166,11 +191,13 @@ object EntityResolverV2 {
                 overlap >= 0.8 -> supporting += CorrelationContribution(
                     CorrelationFeature.DisplayNameAgreement,
                     policy.weight(CorrelationFeature.DisplayNameAgreement, 0.18),
+                    evidenceIds = listOfNotNull(profileEvidenceId),
                     explanation = "Public display name strongly agrees with the supplied name"
                 )
                 overlap == 0.0 && displayName.size >= 2 && suppliedName.size >= 2 -> contradicting += CorrelationContribution(
                     CorrelationFeature.ConflictingDisplayName,
                     policy.weight(CorrelationFeature.ConflictingDisplayName, -0.45),
+                    evidenceIds = listOfNotNull(profileEvidenceId),
                     explanation = "Public display name has no token overlap with the supplied full name"
                 )
             }
@@ -187,6 +214,7 @@ object EntityResolverV2 {
             supporting += CorrelationContribution(
                 CorrelationFeature.OrganizationAgreement,
                 policy.weight(CorrelationFeature.OrganizationAgreement, 0.12),
+                evidenceIds = listOfNotNull(profileEvidenceId),
                 explanation = "Public profile text mentions supplied organization '$matchingOrg'"
             )
         }
@@ -198,6 +226,7 @@ object EntityResolverV2 {
             supporting += CorrelationContribution(
                 CorrelationFeature.LocationAgreement,
                 policy.weight(CorrelationFeature.LocationAgreement, 0.08),
+                evidenceIds = listOfNotNull(profileEvidenceId),
                 explanation = "Public profile text mentions supplied location '$matchingLocation'"
             )
         }
@@ -229,6 +258,33 @@ object EntityResolverV2 {
     }
 
     private fun normalizeHandle(value: String): String = value.trim().removePrefix("@").lowercase(Locale.ROOT)
+
+    /**
+     * Exact-ID evidence lookup used by resolver contributions. Duplicate
+     * canonical IDs are treated as ambiguous and omitted rather than choosing
+     * one record or falling back to URL/value matching.
+     */
+    private class EvidenceLedger(evidence: List<Evidence>) {
+        private val uniqueIds: Set<String> = evidence
+            .asSequence()
+            .map { EvidenceIdPolicy.migrate(it.id) }
+            .filter(String::isNotBlank)
+            .groupingBy { it }
+            .eachCount()
+            .filterValues { it == 1 }
+            .keys
+
+        fun profileId(result: ProfileScanResult): String? =
+            exact("profile:${result.candidate.url}")
+
+        fun findingId(finding: io.dossier.app.domain.model.Finding): String? =
+            exact(finding.toEvidence().id)
+
+        private fun exact(rawId: String): String? {
+            val canonical = EvidenceIdPolicy.migrate(rawId.trim())
+            return canonical.takeIf { it.isNotBlank() && it in uniqueIds }
+        }
+    }
 
     private fun normalizeUrl(value: String): String? = runCatching {
         val input = value.trim().trimEnd('/')

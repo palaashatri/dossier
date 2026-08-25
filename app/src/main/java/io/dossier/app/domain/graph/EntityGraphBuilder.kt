@@ -24,6 +24,15 @@ import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ProfileScanResult
 import java.util.Locale
 
+private const val MAX_EDGE_EVIDENCE_IDS = 256
+
+private fun mergeEvidenceIds(existing: List<String>, incoming: List<String>): List<String> =
+    (existing + incoming)
+        .map(EvidenceIdPolicy::migrate)
+        .filter(String::isNotBlank)
+        .distinct()
+        .take(MAX_EDGE_EVIDENCE_IDS)
+
 /** Fuses identity input, verified observations, evidence, images and breach summaries into one graph. */
 object EntityGraphBuilder {
 
@@ -68,7 +77,8 @@ object EntityGraphBuilder {
             toId: String,
             relation: String,
             evidenceText: String? = null,
-            evidenceIds: List<String> = emptyList()
+            evidenceIds: List<String> = emptyList(),
+            contradictingEvidenceIds: List<String> = emptyList()
         ) {
             if (fromId == toId) return
             val duplicateIndex = edges.indexOfFirst {
@@ -78,9 +88,11 @@ object EntityGraphBuilder {
                 val existing = edges[duplicateIndex]
                 edges[duplicateIndex] = existing.copy(
                     evidence = existing.evidence ?: evidenceText,
-                    evidenceIds = (existing.evidenceIds + evidenceIds)
-                        .map(EvidenceIdPolicy::migrate)
-                        .distinct()
+                    evidenceIds = mergeEvidenceIds(existing.evidenceIds, evidenceIds),
+                    contradictingEvidenceIds = mergeEvidenceIds(
+                        existing.contradictingEvidenceIds,
+                        contradictingEvidenceIds
+                    )
                 )
                 return
             }
@@ -90,7 +102,8 @@ object EntityGraphBuilder {
                     toId = toId,
                     relation = relation,
                     evidence = evidenceText,
-                    evidenceIds = evidenceIds.map(EvidenceIdPolicy::migrate).distinct()
+                    evidenceIds = mergeEvidenceIds(emptyList(), evidenceIds),
+                    contradictingEvidenceIds = mergeEvidenceIds(emptyList(), contradictingEvidenceIds)
                 )
             )
         }
@@ -104,9 +117,10 @@ object EntityGraphBuilder {
             toId: String,
             relation: String,
             evidenceText: String? = null,
-            evidenceIds: List<String> = emptyList()
+            evidenceIds: List<String> = emptyList(),
+            contradictingEvidenceIds: List<String> = emptyList()
         ) {
-            addLink(fromId, toId, relation, evidenceText, evidenceIds)
+            addLink(fromId, toId, relation, evidenceText, evidenceIds, contradictingEvidenceIds)
         }
 
         val subjectLabel = input.fullName.trim().ifBlank {
@@ -197,7 +211,7 @@ object EntityGraphBuilder {
         profileResults.forEach { result ->
             val url = result.candidate.url
             val profileId = entityId(EntityType.Profile, url)
-            val resolution = EntityResolverV2.resolve(input, result)
+            val resolution = EntityResolverV2.resolve(input, result, evidence = evidence)
             val resolverConfidence = resolution.score.toFloat().coerceIn(0f, 1f)
             val conf = maxOf(result.candidate.confidence.coerceIn(0f, 1f), resolverConfidence)
             putEntity(
@@ -219,13 +233,19 @@ object EntityGraphBuilder {
                 ResolutionBand.Conflicting -> "candidate_profile"
                 ResolutionBand.Unresolved -> if (result.exists) "possible_profile" else "candidate_profile"
             }
-            link(
+            linkWithEvidence(
                 subjectId,
                 profileId,
                 relation,
                 resolution.explanation.takeIf { it.isNotBlank() }
                     ?: result.verificationStatus
-                    ?: result.provenance
+                    ?: result.provenance,
+                evidenceIds = resolution.supporting
+                    .flatMap { it.evidenceIds }
+                    .distinct(),
+                contradictingEvidenceIds = resolution.contradicting
+                    .flatMap { it.evidenceIds }
+                    .distinct()
             )
 
             val username = result.candidate.username

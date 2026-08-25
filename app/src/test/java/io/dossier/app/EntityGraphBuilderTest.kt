@@ -131,6 +131,55 @@ class EntityGraphBuilderTest {
     }
 
     @Test
+    fun resolverProvenancePersistsSupportAndContradictionIdsOnProfileEdge() {
+        val url = "https://github.com/shared_handle"
+        val input = IdentityInput(
+            fullName = "Alice Example",
+            primaryUsername = "shared_handle"
+        )
+        val profile = ProfileScanResult(
+            candidate = UsernameCandidate(
+                username = "shared_handle",
+                platform = Platform.GitHub,
+                url = url,
+                matchType = UsernameMatchType.Exact,
+                confidence = 0.4f
+            ),
+            exists = true,
+            httpStatus = 200,
+            displayName = "Robert Different",
+            bio = null,
+            links = emptyList(),
+            extractedText = "Robert Different",
+            findings = emptyList(),
+            confidenceSignals = emptyList(),
+            verified = false,
+            verificationStatus = "review"
+        )
+        val profileEvidence = Evidence(
+            id = "profile:$url",
+            kind = EvidenceKind.Profile,
+            value = url,
+            sourceUrl = url,
+            state = EvidenceState.Observed
+        )
+
+        val graph = EntityGraphBuilder.build(
+            input = input,
+            profileResults = listOf(profile),
+            evidence = listOf(profileEvidence)
+        )
+        val subjectId = graph.entities.single { it.type == EntityType.Person }.id
+        val profileId = graph.entities.single { it.type == EntityType.Profile && it.sourceUrls.contains(url) }.id
+        val edge = graph.edges.single {
+            it.fromId == subjectId && it.toId == profileId && it.relation == "candidate_profile"
+        }
+
+        assertEquals(listOf(profileEvidence.id), edge.evidenceIds)
+        assertEquals(listOf(profileEvidence.id), edge.contradictingEvidenceIds)
+    }
+
+    @Test
     fun softProfileUsesPossibleRelation() {
         val input = IdentityInput(fullName = "Jane Doe", usernames = listOf("janedoe"))
         val soft = ProfileScanResult(
