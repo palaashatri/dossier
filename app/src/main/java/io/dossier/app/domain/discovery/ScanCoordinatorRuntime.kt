@@ -17,6 +17,7 @@ import io.dossier.app.domain.scanner.BreachStageCheckpoint
 import io.dossier.app.domain.scanner.PostProcessingStageCheckpoint
 import io.dossier.app.domain.scanner.EntityGraphStageCheckpoint
 import io.dossier.app.domain.scanner.RelationshipConfidenceStageCheckpoint
+import io.dossier.app.domain.scanner.ExposureStageCheckpoint
 import io.dossier.app.domain.scanner.AttackPathsStageCheckpoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -382,7 +383,8 @@ object ScanCoordinatorRuntime {
         postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
         entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
         relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
-        attackPathsCheckpoint: AttackPathsStageCheckpoint? = null
+        attackPathsCheckpoint: AttackPathsStageCheckpoint? = null,
+        exposureCheckpoint: ExposureStageCheckpoint? = null
     ): ResumeCheckpointWriteState =
         BackgroundScanManager.advanceCheckpointIfOwner(
             context = context,
@@ -397,7 +399,8 @@ object ScanCoordinatorRuntime {
             postProcessingCheckpoint = postProcessingCheckpoint,
             entityGraphCheckpoint = entityGraphCheckpoint,
             relationshipConfidenceCheckpoint = relationshipConfidenceCheckpoint,
-            attackPathsCheckpoint = attackPathsCheckpoint
+            attackPathsCheckpoint = attackPathsCheckpoint,
+            exposureCheckpoint = exposureCheckpoint
         ).also(::publishCheckpointState)
 
     private fun publishCheckpointState(state: ResumeCheckpointWriteState) {
@@ -523,7 +526,9 @@ object ScanCoordinatorRuntime {
     private fun reduceProviderEvent(event: ScanEvent) {
         synchronized(lock) {
             val current = _snapshot.value
-            if (activeScanId != event.scanId || current.scanId != event.scanId) return
+            if (activeScanId != event.scanId || !acceptsCoordinatorProjectionEvent(current, event)) {
+                return
+            }
             _snapshot.value = when (event) {
                 is ScanEvent.ProviderQueued -> current.copy(
                     scheduledProviderCount = current.scheduledProviderCount + 1

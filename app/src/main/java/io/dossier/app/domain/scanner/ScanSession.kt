@@ -756,7 +756,22 @@ object ScanSession {
                 completed = false
             )
             _progressText.value = "COMPILING_EXPOSURE_SCORES..."
-            _exposure.value = ExposureEngine().score(allFindings, digests)
+            val exposureInputDigest = ExposureCheckpointCodec.inputDigest(allFindings, digests)
+            _exposure.value = loadReusableExposureCheckpoint(
+                context = context,
+                requestId = requestId,
+                ownerId = checkpointOwnerId,
+                planFingerprint = graphPlanFingerprint,
+                inputDigest = exposureInputDigest,
+                findings = allFindings
+            ) ?: ExposureEngine().score(allFindings, digests)
+            val exposureCheckpoint = buildExposureCheckpoint(
+                requestId = requestId,
+                ownerId = checkpointOwnerId,
+                planFingerprint = graphPlanFingerprint,
+                inputDigest = exposureInputDigest,
+                exposure = _exposure.value
+            )
 
             val distinctFindings = allFindings.distinctBy { it.type.name + it.value + it.sourceUrl }
             val capped = MemoryGuard.cap(distinctFindings)
@@ -775,7 +790,8 @@ object ScanSession {
                 output = ScanStageOutput(
                     itemCount = _findings.value.size,
                     omittedCount = _memoryDropped.value
-                )
+                ),
+                exposureCheckpoint = exposureCheckpoint
             )
 
             checkpointStage(
@@ -857,13 +873,15 @@ object ScanSession {
         breachCheckpoint: BreachStageCheckpoint? = null,
         entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
         relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
-        attackPathsCheckpoint: AttackPathsStageCheckpoint? = null
+        attackPathsCheckpoint: AttackPathsStageCheckpoint? = null,
+        exposureCheckpoint: ExposureStageCheckpoint? = null
     ) {
         if (requestId == null || ownerId == null || generation == null) return
         fun writeCheckpoint(
             graphCheckpoint: EntityGraphStageCheckpoint?,
             confidenceCheckpoint: RelationshipConfidenceStageCheckpoint?,
-            attackPathsCheckpoint: AttackPathsStageCheckpoint?
+            attackPathsCheckpoint: AttackPathsStageCheckpoint?,
+            exposureCheckpoint: ExposureStageCheckpoint?
         ): ResumeCheckpointWriteState =
             ScanCoordinatorRuntime.recordCheckpoint(
                 context = context,
@@ -877,12 +895,14 @@ object ScanSession {
                 breachCheckpoint = breachCheckpoint,
                 entityGraphCheckpoint = graphCheckpoint,
                 relationshipConfidenceCheckpoint = confidenceCheckpoint,
-                attackPathsCheckpoint = attackPathsCheckpoint
+                attackPathsCheckpoint = attackPathsCheckpoint,
+                exposureCheckpoint = exposureCheckpoint
             )
         val first = writeCheckpoint(
             entityGraphCheckpoint,
             relationshipConfidenceCheckpoint,
-            attackPathsCheckpoint
+            attackPathsCheckpoint,
+            exposureCheckpoint
         )
         // Deterministic outputs are optional accelerators. If the encrypted
         // request record cannot fit the new payload, retain the semantic stage
@@ -892,9 +912,10 @@ object ScanSession {
             first.reason == ResumeInvalidReason.RecordTooLarge &&
             (entityGraphCheckpoint != null ||
                 relationshipConfidenceCheckpoint != null ||
-                attackPathsCheckpoint != null)
+                attackPathsCheckpoint != null ||
+                exposureCheckpoint != null)
         ) {
-            writeCheckpoint(null, null, null)
+            writeCheckpoint(null, null, null, null)
         } else {
             first
         }
@@ -1222,6 +1243,56 @@ object ScanSession {
             capturedAtEpochMillis = System.currentTimeMillis(),
             inputDigest = inputDigest,
             attackPathsJson = attackPathsJson
+        )
+    }
+
+    private fun loadReusableExposureCheckpoint(
+        context: Context,
+        requestId: String?,
+        ownerId: String?,
+        planFingerprint: String?,
+        inputDigest: String,
+        findings: List<Finding>
+    ): ExposureEngine.ExposureResult? {
+        if (requestId == null || ownerId == null || !ProviderPlanFingerprint.isValid(planFingerprint)) {
+            return null
+        }
+        if (!ExposureCheckpointCodec.isValidDigest(inputDigest)) return null
+        val point = (runCatching {
+            ScanResumeStore(context).loadRequestDetailed(requestId)
+        }.getOrNull() as? ResumeReadState.Available)?.point ?: return null
+        if (point.checkpointOwnerId != ownerId ||
+            point.planFingerprint != planFingerprint ||
+            ScanCheckpointStage.CompilingExposureScores !in point.completedCheckpointStages
+        ) return null
+        val checkpoint = point.exposureCheckpoint ?: return null
+        if (checkpoint.requestId != requestId ||
+            checkpoint.ownerId != ownerId ||
+            checkpoint.planFingerprint != planFingerprint ||
+            checkpoint.inputDigest != inputDigest
+        ) return null
+        val decoded = ExposureCheckpointCodec.decode(checkpoint.exposureJson) ?: return null
+        return ExposureCheckpointCodec.rebuild(decoded, findings)
+    }
+
+    private fun buildExposureCheckpoint(
+        requestId: String?,
+        ownerId: String?,
+        planFingerprint: String?,
+        inputDigest: String,
+        exposure: ExposureEngine.ExposureResult?
+    ): ExposureStageCheckpoint? {
+        if (requestId == null || ownerId == null || exposure == null) return null
+        val plan = planFingerprint?.takeIf(ProviderPlanFingerprint::isValid) ?: return null
+        if (!ExposureCheckpointCodec.isValidDigest(inputDigest)) return null
+        val exposureJson = ExposureCheckpointCodec.encode(exposure) ?: return null
+        return ExposureStageCheckpoint(
+            requestId = requestId,
+            planFingerprint = plan,
+            ownerId = ownerId,
+            capturedAtEpochMillis = System.currentTimeMillis(),
+            inputDigest = inputDigest,
+            exposureJson = exposureJson
         )
     }
 

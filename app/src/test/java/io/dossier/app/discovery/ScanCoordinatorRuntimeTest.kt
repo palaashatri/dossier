@@ -19,6 +19,66 @@ import org.junit.Test
 
 class ScanCoordinatorRuntimeTest {
     @Test
+    fun terminalSnapshotRejectsLateProviderAndPivotProjectionButAllowsCheckpoint() {
+        val scanId = ScanId("terminal-projection")
+        val terminal = LiveScanSnapshot(
+            scanId = scanId,
+            state = ScanRunState.Completed
+        )
+        val now = java.time.Instant.now()
+
+        assertFalse(
+            acceptsCoordinatorProjectionEvent(
+                terminal,
+                ScanEvent.ProviderQueued(scanId, now, "provider")
+            )
+        )
+        assertFalse(
+            acceptsCoordinatorProjectionEvent(
+                terminal,
+                ScanEvent.PivotDiagnosticsUpdated(
+                    scanId = scanId,
+                    occurredAt = now,
+                    decision = null,
+                    pendingCount = 0,
+                    pendingByDepth = emptyList(),
+                    admittedCount = 0,
+                    rejectedCount = 0,
+                    visitedCount = 0,
+                    maxDepth = 2,
+                    maxTotalPivots = 15
+                )
+            )
+        )
+        assertTrue(
+            acceptsCoordinatorProjectionEvent(
+                terminal,
+                ScanEvent.CheckpointUpdated(
+                    scanId = scanId,
+                    occurredAt = now,
+                    stage = "QUEUED_BACKGROUND_SCAN",
+                    completedStages = emptyList()
+                )
+            )
+        )
+    }
+
+    @Test
+    fun projectionAcceptanceRequiresOwnedScanIdAndAllowsNonTerminalEvents() {
+        val active = ScanId("active-projection")
+        val running = LiveScanSnapshot(scanId = active, state = ScanRunState.Running)
+        val event = ScanEvent.ProviderQueued(active, java.time.Instant.now(), "provider")
+
+        assertTrue(acceptsCoordinatorProjectionEvent(running, event))
+        assertFalse(
+            acceptsCoordinatorProjectionEvent(
+                running,
+                event.copy(scanId = ScanId("stale-projection"))
+            )
+        )
+    }
+
+    @Test
     fun startDelegatesOnlyThroughCoordinatorAndBindsRequestedPlan() = runBlocking {
         val request = ScanRequest(
             input = IdentityInput(fullName = "Coordinator Subject", primaryUsername = "coordinator"),
