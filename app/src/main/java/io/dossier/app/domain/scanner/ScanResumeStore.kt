@@ -635,6 +635,9 @@ internal class ScanResumeStore internal constructor(
                 ?.copy(ownerId = ownerId),
             postProcessingCheckpoint = record.postProcessingCheckpoint
                 ?.takeIf { isValidPostProcessingCheckpoint(it, record, record.checkpointOwnerId) }
+                ?.copy(ownerId = ownerId),
+            entityGraphCheckpoint = record.entityGraphCheckpoint
+                ?.takeIf { isValidEntityGraphCheckpoint(it, record, record.checkpointOwnerId) }
                 ?.copy(ownerId = ownerId)
         )
         persistUpdatedRecord(rebound)
@@ -654,7 +657,8 @@ internal class ScanResumeStore internal constructor(
         output: ScanStageOutput? = null,
         payloads: List<ScanPayloadSummary> = emptyList(),
         breachCheckpoint: BreachStageCheckpoint? = null,
-        postProcessingCheckpoint: PostProcessingStageCheckpoint? = null
+        postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
+        entityGraphCheckpoint: EntityGraphStageCheckpoint? = null
     ): ResumeCheckpointWriteState = synchronized(STORE_LOCK) {
         if (!isValidRequestId(requestId) || !isValidRequestId(ownerId)) {
             return@synchronized ResumeCheckpointWriteState.Invalid(
@@ -718,6 +722,17 @@ internal class ScanResumeStore internal constructor(
         ) {
             return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
         }
+        if (entityGraphCheckpoint != null &&
+            (!completed ||
+                stage != ScanCheckpointStage.BuildingEntityGraph ||
+                !isValidEntityGraphCheckpoint(
+                    entityGraphCheckpoint,
+                    recordForPoint(available.point),
+                    ownerId
+                ))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
 
         val current = available.point.checkpointStage
         val completedStages = available.point.completedCheckpointStages
@@ -733,6 +748,10 @@ internal class ScanResumeStore internal constructor(
         val retainedPostProcessingCheckpoint = when {
             stage == ScanCheckpointStage.PostProcessing && completed -> postProcessingCheckpoint
             else -> available.point.postProcessingCheckpoint
+        }
+        val retainedEntityGraphCheckpoint = when {
+            stage == ScanCheckpointStage.BuildingEntityGraph && completed -> entityGraphCheckpoint
+            else -> available.point.entityGraphCheckpoint
         }
         val nextCurrent = if (stage.order >= current.order) stage else current
         val now = runCatching { nowMillis() }.getOrElse {
@@ -765,6 +784,7 @@ internal class ScanResumeStore internal constructor(
                 .map { it.second },
             breachCheckpoint = retainedBreachCheckpoint,
             postProcessingCheckpoint = retainedPostProcessingCheckpoint,
+            entityGraphCheckpoint = retainedEntityGraphCheckpoint,
             checkpointOwnerId = ownerId
         )
         persistUpdatedRecord(updated)
@@ -1260,6 +1280,8 @@ internal class ScanResumeStore internal constructor(
                     ?.takeIf { isValidBreachCheckpoint(it, record, record.checkpointOwnerId) },
                 postProcessingCheckpoint = record.postProcessingCheckpoint
                     ?.takeIf { isValidPostProcessingCheckpoint(it, record, record.checkpointOwnerId) },
+                entityGraphCheckpoint = record.entityGraphCheckpoint
+                    ?.takeIf { isValidEntityGraphCheckpoint(it, record, record.checkpointOwnerId) },
                 checkpointOwnerId = record.checkpointOwnerId
             )
         )
@@ -1391,6 +1413,28 @@ internal class ScanResumeStore internal constructor(
         return PostProcessingCheckpointCodec.decode(checkpoint.analysisJson) != null
     }
 
+    private fun isValidEntityGraphCheckpoint(
+        checkpoint: EntityGraphStageCheckpoint,
+        record: ResumeRecord,
+        expectedOwnerId: String?
+    ): Boolean {
+        if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
+        if (record.planFingerprint.isNullOrBlank() ||
+            checkpoint.planFingerprint != record.planFingerprint ||
+            !ProviderPlanFingerprint.isValid(checkpoint.planFingerprint)
+        ) return false
+        if (!isValidRequestId(checkpoint.ownerId) ||
+            expectedOwnerId == null ||
+            checkpoint.ownerId != expectedOwnerId ||
+            record.checkpointOwnerId != expectedOwnerId
+        ) return false
+        if (checkpoint.capturedAtEpochMillis !in record.createdAtEpochMillis..record.expiresAtEpochMillis) {
+            return false
+        }
+        if (!GraphCheckpointCodec.isValidDigest(checkpoint.inputDigest)) return false
+        return GraphCheckpointCodec.decode(checkpoint.graphJson) != null
+    }
+
     private fun isSafeCheckpointText(value: String, maxChars: Int): Boolean =
         value.length in 1..maxChars && value.none { it.code < 0x20 || it.code == 0x7f }
 
@@ -1440,6 +1484,7 @@ internal class ScanResumeStore internal constructor(
             .take(MAX_PAYLOAD_SUMMARIES),
         breachCheckpoint = point.breachCheckpoint,
         postProcessingCheckpoint = point.postProcessingCheckpoint,
+        entityGraphCheckpoint = point.entityGraphCheckpoint,
         checkpointOwnerId = point.checkpointOwnerId
     )
 
@@ -1514,6 +1559,7 @@ internal class ScanResumeStore internal constructor(
             .filter(ScanPayloadSummary::isWellFormed),
         breachCheckpoint = breachCheckpoint,
         postProcessingCheckpoint = postProcessingCheckpoint,
+        entityGraphCheckpoint = entityGraphCheckpoint,
         checkpointOwnerId = checkpointOwnerId
     )
 
@@ -2376,6 +2422,8 @@ internal class ScanResumeStore internal constructor(
         val breachCheckpoint: BreachStageCheckpoint? = null,
         /** Exact bounded output of deterministic post-processing, when available. */
         val postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
+        /** Exact bounded output of deterministic graph construction, when available. */
+        val entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
         /** Exact WorkManager owner bound after lifecycle CAS succeeds. */
         val checkpointOwnerId: String? = null
     )
@@ -2506,6 +2554,7 @@ internal data class ResumePoint(
     val payloadSummaries: List<ScanPayloadSummary> = emptyList(),
     val breachCheckpoint: BreachStageCheckpoint? = null,
     val postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
+    val entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
     val checkpointOwnerId: String? = null
 )
 

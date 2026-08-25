@@ -580,7 +580,27 @@ object ScanSession {
             val evidence = evidenceSnapshot.evidence
             val relationships = evidenceSnapshot.relationships
             EvidenceRuntimeCache.replace(evidenceSnapshot)
-            val graph = EntityGraphBuilder.build(
+            val graphInputDigest = GraphCheckpointCodec.inputDigest(
+                input = inputToUse,
+                profileResults = scanResults,
+                findings = allFindings,
+                faceMatches = faceMatches,
+                breachDigests = digests,
+                evidence = evidence,
+                relationships = relationships
+            )
+            val graphPlanFingerprint = requestId?.let { durableRequestId ->
+                (runCatching {
+                    ScanResumeStore(context).loadRequestDetailed(durableRequestId)
+                }.getOrNull() as? ResumeReadState.Available)?.point?.planFingerprint
+            }
+            val graph = loadReusableEntityGraphCheckpoint(
+                context = context,
+                requestId = requestId,
+                ownerId = checkpointOwnerId,
+                planFingerprint = graphPlanFingerprint,
+                inputDigest = graphInputDigest
+            ) ?: EntityGraphBuilder.build(
                 input = inputToUse,
                 profileResults = scanResults,
                 findings = allFindings,
@@ -590,6 +610,13 @@ object ScanSession {
                 relationships = relationships
             )
             _entityGraph.value = graph
+            val graphCheckpoint = buildEntityGraphCheckpoint(
+                requestId = requestId,
+                ownerId = checkpointOwnerId,
+                planFingerprint = graphPlanFingerprint,
+                inputDigest = graphInputDigest,
+                graph = graph
+            )
             checkpointStage(
                 context,
                 requestId,
@@ -600,7 +627,8 @@ object ScanSession {
                 output = ScanStageOutput(
                     itemCount = graph.entities.size,
                     verifiedCount = graph.entities.count { it.state == io.dossier.app.domain.model.GraphNodeState.Confirmed }
-                )
+                ),
+                entityGraphCheckpoint = graphCheckpoint
             )
 
             checkpointStage(
@@ -787,11 +815,12 @@ object ScanSession {
         completed: Boolean,
         output: ScanStageOutput? = null,
         payloads: List<ScanPayloadSummary> = emptyList(),
-        breachCheckpoint: BreachStageCheckpoint? = null
+        breachCheckpoint: BreachStageCheckpoint? = null,
+        entityGraphCheckpoint: EntityGraphStageCheckpoint? = null
     ) {
         if (requestId == null || ownerId == null || generation == null) return
-        when (
-            val result = ScanCoordinatorRuntime.recordCheckpoint(
+        fun writeCheckpoint(graphCheckpoint: EntityGraphStageCheckpoint?): ResumeCheckpointWriteState =
+            ScanCoordinatorRuntime.recordCheckpoint(
                 context = context,
                 requestId = requestId,
                 ownerId = ownerId,
@@ -800,9 +829,23 @@ object ScanSession {
                 completed = completed,
                 output = output,
                 payloads = payloads,
-                breachCheckpoint = breachCheckpoint
+                breachCheckpoint = breachCheckpoint,
+                entityGraphCheckpoint = graphCheckpoint
             )
+        val first = writeCheckpoint(entityGraphCheckpoint)
+        // Graph output is an optional acceleration. If the encrypted request
+        // record cannot fit both deterministic outputs, retain the semantic
+        // stage boundary without the graph payload and let a retry rebuild it.
+        val result = if (
+            first is ResumeCheckpointWriteState.Invalid &&
+            first.reason == ResumeInvalidReason.RecordTooLarge &&
+            entityGraphCheckpoint != null
         ) {
+            writeCheckpoint(null)
+        } else {
+            first
+        }
+        when (result) {
             is ResumeCheckpointWriteState.Saved -> Unit
             ResumeCheckpointWriteState.StaleOwner,
             ResumeCheckpointWriteState.Missing -> throw CancellationException()
@@ -981,6 +1024,56 @@ object ScanSession {
                 checkpoint.ownerId == ownerId &&
                 checkpoint.planFingerprint == point.planFingerprint
         }
+    }
+
+    private fun loadReusableEntityGraphCheckpoint(
+        context: Context,
+        requestId: String?,
+        ownerId: String?,
+        planFingerprint: String?,
+        inputDigest: String
+    ): EntityGraph? {
+        if (requestId == null || ownerId == null || !ProviderPlanFingerprint.isValid(planFingerprint)) {
+            return null
+        }
+        if (!GraphCheckpointCodec.isValidDigest(inputDigest)) return null
+        val point = (runCatching {
+            ScanResumeStore(context).loadRequestDetailed(requestId)
+        }.getOrNull() as? ResumeReadState.Available)?.point ?: return null
+        if (point.checkpointOwnerId != ownerId ||
+            point.planFingerprint != planFingerprint ||
+            ScanCheckpointStage.BuildingEntityGraph !in point.completedCheckpointStages
+        ) return null
+        val checkpoint = point.entityGraphCheckpoint ?: return null
+        if (checkpoint.requestId != requestId ||
+            checkpoint.ownerId != ownerId ||
+            checkpoint.planFingerprint != planFingerprint ||
+            checkpoint.inputDigest != inputDigest
+        ) return null
+        return GraphCheckpointCodec.decode(checkpoint.graphJson)
+    }
+
+    private fun buildEntityGraphCheckpoint(
+        requestId: String?,
+        ownerId: String?,
+        planFingerprint: String?,
+        inputDigest: String,
+        graph: EntityGraph
+    ): EntityGraphStageCheckpoint? {
+        if (requestId == null || ownerId == null) {
+            return null
+        }
+        val plan = planFingerprint?.takeIf(ProviderPlanFingerprint::isValid) ?: return null
+        if (!GraphCheckpointCodec.isValidDigest(inputDigest)) return null
+        val graphJson = GraphCheckpointCodec.encode(graph) ?: return null
+        return EntityGraphStageCheckpoint(
+            requestId = requestId,
+            planFingerprint = plan,
+            ownerId = ownerId,
+            capturedAtEpochMillis = System.currentTimeMillis(),
+            inputDigest = inputDigest,
+            graphJson = graphJson
+        )
     }
 
     internal fun findingsFromBreachCheckpoint(

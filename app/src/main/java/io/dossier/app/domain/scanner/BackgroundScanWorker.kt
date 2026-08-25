@@ -1395,7 +1395,8 @@ object BackgroundScanManager {
         output: ScanStageOutput? = null,
         payloads: List<ScanPayloadSummary> = emptyList(),
         breachCheckpoint: BreachStageCheckpoint? = null,
-        postProcessingCheckpoint: PostProcessingStageCheckpoint? = null
+        postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
+        entityGraphCheckpoint: EntityGraphStageCheckpoint? = null
     ): ResumeCheckpointWriteState = synchronized(LIFECYCLE_LOCK) {
         val appContext = context.applicationContext
         val lifecycle = (lifecycleStoreProvider(appContext).read()
@@ -1416,7 +1417,8 @@ object BackgroundScanManager {
             output = output,
             payloads = payloads,
             breachCheckpoint = breachCheckpoint,
-            postProcessingCheckpoint = postProcessingCheckpoint
+            postProcessingCheckpoint = postProcessingCheckpoint,
+            entityGraphCheckpoint = entityGraphCheckpoint
         )
     }
 
