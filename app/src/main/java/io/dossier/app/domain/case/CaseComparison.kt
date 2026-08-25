@@ -92,6 +92,55 @@ class CaseComparison {
             get() = observations.map(MediaAccountLinkageObservation::caseId).distinct().size
     }
 
+    /**
+     * One source-scoped image observation from a saved case. The key used for
+     * comparison is the canonical source-page plus image URL; no candidate ID,
+     * username, or visual score is used as an identity key.
+     */
+    data class MediaObservation(
+        val candidateId: String,
+        val title: String,
+        val imageUrl: String,
+        val sourcePageUrl: String,
+        val source: String,
+        val retrievedAtEpochMillis: Long?,
+        val contentSha256: String?,
+        val averageHashHex: String?,
+        val differenceHashHex: String?,
+        val perceptualHashHex: String?,
+        val width: Int?,
+        val height: Int?,
+        val exactBytes: Boolean,
+        val state: ReverseImageLookupResult.ImageCandidateState
+    )
+
+    enum class MediaObservationChangeKind {
+        ADDED,
+        NOT_OBSERVED_IN_LATEST_CASE,
+        CHANGED,
+        UNCHANGED,
+        UNAVAILABLE
+    }
+
+    /**
+     * A bounded before/after media observation comparison. This describes
+     * public-image retrieval state and content provenance only; it never asserts
+     * that an image depicts the same person or belongs to the same account.
+     */
+    data class MediaObservationChange(
+        val key: String,
+        val change: MediaObservationChangeKind,
+        val before: MediaObservation? = null,
+        val after: MediaObservation? = null,
+        val explanation: String
+    ) {
+        val sourcePageUrl: String?
+            get() = after?.sourcePageUrl ?: before?.sourcePageUrl
+
+        val imageUrl: String?
+            get() = after?.imageUrl ?: before?.imageUrl
+    }
+
     data class FindingChange(
         val finding: Finding,
         val change: ChangeKind,
@@ -161,7 +210,9 @@ class CaseComparison {
         val clustersAdded: Int = 0,
         val clustersRemoved: Int = 0,
         val sourcePagesAdded: Int = 0,
-        val sourcePagesRemoved: Int = 0
+        val sourcePagesRemoved: Int = 0,
+        /** Source-scoped image changes retained for detailed saved-case review. */
+        val observationChanges: List<MediaObservationChange> = emptyList()
     )
 
     data class CaseDiff(
@@ -600,7 +651,8 @@ class CaseComparison {
         val contentHashes: Set<String>,
         val perceptualHashes: Set<String>,
         val clusterSignatures: Set<String>,
-        val sourcePages: Set<String>
+        val sourcePages: Set<String>,
+        val observations: Map<String, MediaObservation>
     )
 
     private fun compareMedia(before: DossierCase, after: DossierCase): MediaDiff {
@@ -612,15 +664,91 @@ class CaseComparison {
             clustersAdded = (right.clusterSignatures - left.clusterSignatures).size,
             clustersRemoved = (left.clusterSignatures - right.clusterSignatures).size,
             sourcePagesAdded = (right.sourcePages - left.sourcePages).size,
-            sourcePagesRemoved = (left.sourcePages - right.sourcePages).size
+            sourcePagesRemoved = (left.sourcePages - right.sourcePages).size,
+            observationChanges = compareMediaObservations(left.observations, right.observations)
         )
     }
+
+    private fun compareMediaObservations(
+        before: Map<String, MediaObservation>,
+        after: Map<String, MediaObservation>
+    ): List<MediaObservationChange> {
+        val keys = (before.keys + after.keys)
+            .distinct()
+            .sorted()
+            .take(MAX_MEDIA_OBSERVATION_KEYS)
+        return keys.mapNotNull { key ->
+            val previous = before[key]
+            val current = after[key]
+            when {
+                current == null -> MediaObservationChange(
+                    key = key,
+                    change = MediaObservationChangeKind.NOT_OBSERVED_IN_LATEST_CASE,
+                    before = previous,
+                    explanation = "The latest case did not observe this source-scoped image; this is not proof that the source or image was removed."
+                )
+
+                isMediaUnavailable(current) -> MediaObservationChange(
+                    key = key,
+                    change = MediaObservationChangeKind.UNAVAILABLE,
+                    before = previous,
+                    after = current,
+                    explanation = "The latest case recorded this source-scoped image as unavailable; no current image observation is asserted."
+                )
+
+                previous == null -> MediaObservationChange(
+                    key = key,
+                    change = MediaObservationChangeKind.ADDED,
+                    after = current,
+                    explanation = "This source-scoped image observation was recorded in the latest case."
+                )
+
+                mediaObservationValue(previous) != mediaObservationValue(current) -> MediaObservationChange(
+                    key = key,
+                    change = MediaObservationChangeKind.CHANGED,
+                    before = previous,
+                    after = current,
+                    explanation = "The source-scoped image provenance or retrieval state changed between saved cases; review both observations and their timestamps."
+                )
+
+                else -> MediaObservationChange(
+                    key = key,
+                    change = MediaObservationChangeKind.UNCHANGED,
+                    before = previous,
+                    after = current,
+                    explanation = "The source-scoped image provenance and retrieval state are unchanged between saved cases."
+                )
+            }
+        }.sortedWith(
+            compareBy<MediaObservationChange> { it.change == MediaObservationChangeKind.UNCHANGED }
+                .thenBy { it.change.name }
+                .thenBy { it.key }
+        )
+    }
+
+    private fun mediaObservationValue(observation: MediaObservation): List<Any?> = listOf(
+        observation.title.trim(),
+        observation.source.trim(),
+        observation.contentSha256?.trim()?.lowercase(Locale.ROOT),
+        observation.averageHashHex?.trim()?.lowercase(Locale.ROOT),
+        observation.differenceHashHex?.trim()?.lowercase(Locale.ROOT),
+        observation.perceptualHashHex?.trim()?.lowercase(Locale.ROOT),
+        observation.width,
+        observation.height,
+        observation.exactBytes,
+        observation.state
+    )
+
+    private fun isMediaUnavailable(observation: MediaObservation): Boolean =
+        observation.state == ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable ||
+            observation.state == ReverseImageLookupResult.ImageCandidateState.DecodeFailed
 
     private fun mediaState(case: DossierCase): MediaState {
         val contentHashes = linkedSetOf<String>()
         val perceptualHashes = linkedSetOf<String>()
         val clusterSignatures = linkedSetOf<String>()
         val sourcePages = linkedSetOf<String>()
+        val observations = linkedMapOf<String, MediaObservation>()
 
         case.mediaIntelligence.imageResults.forEach { result ->
             val byId = result.visualCandidates.associateBy { it.id }
@@ -628,6 +756,31 @@ class CaseComparison {
                 candidate.contentSha256?.lowercase()?.takeIf(String::isNotBlank)?.let(contentHashes::add)
                 candidate.perceptualHashHex?.lowercase()?.takeIf(String::isNotBlank)?.let(perceptualHashes::add)
                 candidate.sourcePageUrl.trim().lowercase().takeIf(String::isNotBlank)?.let(sourcePages::add)
+                mediaObservationKey(candidate)?.let { key ->
+                    val observation = MediaObservation(
+                        candidateId = candidate.id,
+                        title = candidate.title,
+                        imageUrl = candidate.imageUrl,
+                        sourcePageUrl = candidate.sourcePageUrl,
+                        source = candidate.source,
+                        retrievedAtEpochMillis = candidate.retrievedAtEpochMillis,
+                        contentSha256 = candidate.contentSha256,
+                        averageHashHex = candidate.averageHashHex,
+                        differenceHashHex = candidate.differenceHashHex,
+                        perceptualHashHex = candidate.perceptualHashHex,
+                        width = candidate.width,
+                        height = candidate.height,
+                        exactBytes = candidate.exactBytes,
+                        state = candidate.state
+                    )
+                    val existing = observations[key]
+                    if (
+                        (existing != null && newerMediaObservation(observation, existing)) ||
+                        (existing == null && observations.size < MAX_MEDIA_OBSERVATION_KEYS)
+                    ) {
+                        observations[key] = observation
+                    }
+                }
             }
             result.visualClusters.forEach { cluster ->
                 val signatures = cluster.memberCandidateIds.mapNotNull(byId::get)
@@ -646,7 +799,38 @@ class CaseComparison {
                 }
             }
         }
-        return MediaState(contentHashes, perceptualHashes, clusterSignatures, sourcePages)
+        return MediaState(contentHashes, perceptualHashes, clusterSignatures, sourcePages, observations)
+    }
+
+    private fun mediaObservationKey(
+        candidate: ReverseImageLookupResult.ImageCandidateProvenance
+    ): String? {
+        val sourcePage = canonicalMediaObservationUrl(candidate.sourcePageUrl) ?: return null
+        val image = canonicalMediaObservationUrl(candidate.imageUrl) ?: return null
+        return "$sourcePage|$image"
+    }
+
+    private fun canonicalMediaObservationUrl(raw: String): String? = runCatching {
+        val uri = URI(raw.trim())
+        val scheme = uri.scheme?.lowercase(Locale.ROOT)
+            ?.takeIf { it == "http" || it == "https" }
+            ?: return null
+        val host = uri.host?.lowercase(Locale.ROOT)?.removePrefix("www.")
+            ?.takeIf(String::isNotBlank)
+            ?: return null
+        val path = uri.path.orEmpty().ifBlank { "/" }.trimEnd('/').ifBlank { "/" }
+        val query = uri.rawQuery?.let { "?$it" }.orEmpty()
+        "$scheme://$host$path$query"
+    }.getOrNull()
+
+    private fun newerMediaObservation(
+        candidate: MediaObservation,
+        existing: MediaObservation
+    ): Boolean {
+        val candidateTime = candidate.retrievedAtEpochMillis ?: Long.MIN_VALUE
+        val existingTime = existing.retrievedAtEpochMillis ?: Long.MIN_VALUE
+        return candidateTime > existingTime ||
+            (candidateTime == existingTime && candidate.candidateId > existing.candidateId)
     }
 
     private fun verifyRemediation(
@@ -817,6 +1001,7 @@ class CaseComparison {
         const val MAX_FINGERPRINT_LENGTH = 256
         const val MAX_ACCOUNT_LINKAGES_PER_CANDIDATE = 4
         const val MAX_EVIDENCE_IDS_PER_LINKAGE = 8
+        const val MAX_MEDIA_OBSERVATION_KEYS = 256
         const val MAX_REMEDIATION_EVIDENCE_RECORDS = 256
     }
 }

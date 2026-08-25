@@ -467,10 +467,14 @@ private fun RenderDiff(
         DeltaRow("Known breaches", diff.breachesAdded - diff.breachesRemoved, positiveIsGood = false)
 
         val media = diff.media
+        val actionableMediaChanges = media.observationChanges.filter {
+            it.change != CaseComparison.MediaObservationChangeKind.UNCHANGED
+        }
         if (
             media.exactContentReused > 0 || media.perceptualFingerprintsReused > 0 ||
             media.clustersAdded != 0 || media.clustersRemoved != 0 ||
-            media.sourcePagesAdded != 0 || media.sourcePagesRemoved != 0
+            media.sourcePagesAdded != 0 || media.sourcePagesRemoved != 0 ||
+            actionableMediaChanges.isNotEmpty()
         ) {
             Spacer(modifier = Modifier.height(10.dp))
             HorizontalDivider(color = NeuralTheme.BorderColor, thickness = 0.7.dp)
@@ -492,6 +496,42 @@ private fun RenderDiff(
             MediaMetricRow("Perceptual hashes reused", media.perceptualFingerprintsReused)
             DeltaRow("Image clusters", media.clustersAdded - media.clustersRemoved, positiveIsGood = null)
             DeltaRow("Image source pages", media.sourcePagesAdded - media.sourcePagesRemoved, positiveIsGood = null)
+            if (actionableMediaChanges.isNotEmpty()) {
+                MediaMetricRow("Source-scoped image changes", actionableMediaChanges.size)
+                Text(
+                    text = "Changes are keyed only by canonical source-page and image URLs plus recorded content/provenance state; they do not establish account or person identity.",
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 10.5.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 3.dp)
+                )
+                actionableMediaChanges.take(MAX_VISIBLE_MEDIA_CHANGES).forEach { change ->
+                    Text(
+                        text = "${change.change.displayLabel()} · ${change.sourcePageUrl ?: "source unavailable"}",
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 10.5.sp,
+                        lineHeight = 15.sp,
+                        modifier = Modifier.padding(top = 3.dp)
+                    )
+                    change.imageUrl?.let { imageUrl ->
+                        Text(
+                            text = imageUrl,
+                            color = NeuralTheme.TextMuted,
+                            fontSize = 9.5.sp,
+                            lineHeight = 14.sp,
+                            modifier = Modifier.padding(start = 4.dp)
+                        )
+                    }
+                }
+                if (actionableMediaChanges.size > MAX_VISIBLE_MEDIA_CHANGES) {
+                    Text(
+                        text = "… ${actionableMediaChanges.size - MAX_VISIBLE_MEDIA_CHANGES} more source-scoped change(s) retained in the encrypted case",
+                        color = NeuralTheme.TextMuted,
+                        fontSize = 9.5.sp,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(10.dp))
@@ -809,6 +849,14 @@ private fun RenderMediaClusterHistory(
 private fun ReverseImageLookupResult.ImageClusterType.displayLabel(): String = when (this) {
     ReverseImageLookupResult.ImageClusterType.ExactContent -> "Exact-content image cluster"
     ReverseImageLookupResult.ImageClusterType.PerceptualNearDuplicate -> "Perceptual near-duplicate cluster"
+}
+
+private fun CaseComparison.MediaObservationChangeKind.displayLabel(): String = when (this) {
+    CaseComparison.MediaObservationChangeKind.ADDED -> "Added image observation"
+    CaseComparison.MediaObservationChangeKind.NOT_OBSERVED_IN_LATEST_CASE -> "Not observed in latest case"
+    CaseComparison.MediaObservationChangeKind.CHANGED -> "Changed image provenance"
+    CaseComparison.MediaObservationChangeKind.UNCHANGED -> "Unchanged image observation"
+    CaseComparison.MediaObservationChangeKind.UNAVAILABLE -> "Image unavailable"
 }
 
 @Composable
@@ -1648,4 +1696,5 @@ private const val MAX_VISIBLE_MEDIA_HISTORY = 8
 private const val MAX_VISIBLE_MEDIA_OBSERVATIONS = 4
 private const val MAX_VISIBLE_MEDIA_MEMBERS = 4
 private const val MAX_VISIBLE_FINGERPRINT_CHARS = 36
+private const val MAX_VISIBLE_MEDIA_CHANGES = 8
 private const val MAX_EVIDENCE_CHANGE_ROWS = 40

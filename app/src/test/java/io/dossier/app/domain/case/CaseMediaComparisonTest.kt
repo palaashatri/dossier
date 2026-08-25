@@ -111,30 +111,161 @@ class CaseMediaComparisonTest {
         assertNull(history.first().fingerprint)
     }
 
-    private fun dossierCase(id: String, media: ReverseImageLookupResult) = DossierCase(
+    @Test
+    fun sourceScopedHistoryReportsContentChangeWithoutUsingCandidateIdOrScore() {
+        val before = dossierCase(
+            "before",
+            imageResult(
+                candidateId = "candidate-before",
+                contentHash = "old-content",
+                perceptualHash = "same-phash",
+                sourcePage = "https://example.test/profile",
+                comparisonScore = 0.41f
+            )
+        )
+        val after = dossierCase(
+            "after",
+            imageResult(
+                candidateId = "candidate-after",
+                contentHash = "new-content",
+                perceptualHash = "same-phash",
+                sourcePage = "https://example.test/profile",
+                comparisonScore = 0.92f
+            )
+        )
+
+        val change = CaseComparison().compare(before, after).media.observationChanges.single()
+
+        assertEquals(
+            CaseComparison.MediaObservationChangeKind.CHANGED,
+            change.change
+        )
+        assertEquals("old-content", change.before?.contentSha256)
+        assertEquals("new-content", change.after?.contentSha256)
+        assertEquals("https://example.test/profile", change.sourcePageUrl)
+        assertTrue(change.explanation.contains("source-scoped"))
+
+        val scoreOnly = CaseComparison().compare(
+            before,
+            after.copy(
+                mediaIntelligence = after.mediaIntelligence.copy(
+                    imageResults = listOf(
+                        imageResult(
+                            candidateId = "candidate-score-only",
+                            contentHash = "old-content",
+                            perceptualHash = "same-phash",
+                            sourcePage = "https://example.test/profile",
+                            comparisonScore = 0.99f
+                        )
+                    )
+                )
+            )
+        ).media.observationChanges.single()
+        assertEquals(
+            CaseComparison.MediaObservationChangeKind.UNCHANGED,
+            scoreOnly.change
+        )
+    }
+
+    @Test
+    fun sourceScopedHistoryDistinguishesAddedMissingAndUnavailable() {
+        val observed = imageResult(
+            candidateId = "candidate",
+            contentHash = "content",
+            perceptualHash = "phash",
+            sourcePage = "https://example.test/profile"
+        )
+        val before = dossierCase("before", observed)
+
+        val added = CaseComparison().compare(
+            dossierCase("empty-before"),
+            dossierCase("added-after", observed)
+        ).media.observationChanges.single()
+        assertEquals(CaseComparison.MediaObservationChangeKind.ADDED, added.change)
+
+        val missing = CaseComparison().compare(
+            before,
+            dossierCase("missing-after")
+        ).media.observationChanges.single()
+        assertEquals(
+            CaseComparison.MediaObservationChangeKind.NOT_OBSERVED_IN_LATEST_CASE,
+            missing.change
+        )
+
+        val unavailable = CaseComparison().compare(
+            before,
+            dossierCase(
+                "unavailable-after",
+                observed.copy(
+                    visualCandidates = observed.visualCandidates.map { candidate ->
+                        candidate.copy(
+                            state = ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable
+                        )
+                    }
+                )
+            )
+        ).media.observationChanges.single()
+        assertEquals(
+            CaseComparison.MediaObservationChangeKind.UNAVAILABLE,
+            unavailable.change
+        )
+        assertTrue(unavailable.after?.state == ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable)
+    }
+
+    @Test
+    fun sourceScopedHistorySkipsCandidatesWithoutBothHttpUrls() {
+        val before = dossierCase(
+            "before",
+            imageResult(
+                candidateId = "candidate-before",
+                contentHash = "content",
+                perceptualHash = "phash",
+                sourcePage = "https://example.test/profile",
+                imageUrl = ""
+            )
+        )
+        val after = dossierCase(
+            "after",
+            imageResult(
+                candidateId = "candidate-after",
+                contentHash = "content",
+                perceptualHash = "phash",
+                sourcePage = "https://example.test/profile",
+                imageUrl = ""
+            )
+        )
+
+        assertTrue(CaseComparison().compare(before, after).media.observationChanges.isEmpty())
+    }
+
+    private fun dossierCase(id: String, vararg media: ReverseImageLookupResult) = DossierCase(
         caseId = id,
         createdAt = "2026-08-21 01:00",
         subjectName = "X",
         input = IdentityInput(fullName = "", primaryUsername = "x"),
-        mediaIntelligence = MediaIntelligenceSnapshot(imageResults = listOf(media))
+        mediaIntelligence = MediaIntelligenceSnapshot(imageResults = media.toList())
     )
 
     private fun imageResult(
         candidateId: String,
         contentHash: String,
         perceptualHash: String,
-        sourcePage: String
+        sourcePage: String,
+        state: ReverseImageLookupResult.ImageCandidateState = ReverseImageLookupResult.ImageCandidateState.Matched,
+        imageUrl: String? = null,
+        comparisonScore: Float? = null
     ): ReverseImageLookupResult {
         val candidate = ReverseImageLookupResult.ImageCandidateProvenance(
             id = candidateId,
             title = "candidate",
-            imageUrl = "$sourcePage/image.jpg",
+            imageUrl = imageUrl ?: "$sourcePage/image.jpg",
             sourcePageUrl = sourcePage,
             source = "test",
             acquisitionQuery = "x",
             contentSha256 = contentHash,
             perceptualHashHex = perceptualHash,
-            state = ReverseImageLookupResult.ImageCandidateState.Matched,
+            comparisonScore = comparisonScore,
+            state = state,
             clusterId = "cluster"
         )
         return ReverseImageLookupResult(
