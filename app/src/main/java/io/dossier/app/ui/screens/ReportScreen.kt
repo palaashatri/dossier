@@ -64,6 +64,8 @@ import io.dossier.app.domain.evidence.ExposureEngine
 import io.dossier.app.domain.evidence.persistedEvidenceId
 import io.dossier.app.domain.evidence.toEvidence
 import io.dossier.app.domain.discovery.ScanHistoryRuntime
+import io.dossier.app.domain.graph.GraphEvidenceReconciliationReport
+import io.dossier.app.domain.graph.graphEvidenceReconciliation
 import io.dossier.app.domain.model.BreachDigest
 import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.FaceConsistencyMatch
@@ -168,6 +170,17 @@ fun ReportScreen(
     // it never reconstructs assertions from graph edges.
     val reportCanonicalRelationships = effectiveCase?.canonicalEvidenceRelationships()
         ?: ScanSession.buildCase()?.canonicalEvidenceRelationships().orEmpty()
+    // Keep this diagnostic tied to the exact read-only report snapshot. It
+    // compares persisted canonical assertions with graph material, but never
+    // rewrites either collection or treats extra derived edges as corruption.
+    val reportGraphReconciliation = remember(
+        effectiveCase,
+        reportEntityGraph,
+        reportCanonicalRelationships,
+        evidenceCollection.evidence
+    ) {
+        (effectiveCase ?: ScanSession.buildCase())?.graphEvidenceReconciliation()
+    }
     val onShareSafeGraphExport: (() -> Unit)? = if (reportEntityGraph.entities.isNotEmpty()) {
         {
             val exportCase = (effectiveCase ?: ScanSession.buildCase())
@@ -371,6 +384,7 @@ fun ReportScreen(
                     entityGraph = reportEntityGraph,
                     relationshipConfidence = relationshipConfidence,
                     attackPaths = attackPaths,
+                    graphReconciliation = reportGraphReconciliation,
                     onShareSafeGraphExport = onShareSafeGraphExport
                 )
                 ReportView.Actions -> ActionsReport(
@@ -698,6 +712,7 @@ private fun ConnectionsReport(
     entityGraph: EntityGraph,
     relationshipConfidence: Map<String, io.dossier.app.domain.evidence.RelationshipConfidence>,
     attackPaths: List<AttackPathFinder.AttackPath>,
+    graphReconciliation: GraphEvidenceReconciliationReport?,
     onShareSafeGraphExport: (() -> Unit)? = null
 ) {
     LazyColumn(
@@ -710,6 +725,13 @@ private fun ConnectionsReport(
             ReportCard {
                 EntityGraphView(graph = entityGraph, confidenceByEdge = relationshipConfidence)
             }
+        }
+        item {
+            SectionHeading(
+                "Graph/evidence consistency",
+                "Read-only diagnostics compare canonical evidence relationships with persisted graph edges."
+            )
+            GraphReconciliationCard(graphReconciliation)
         }
         if (entityGraph.entities.isNotEmpty() && onShareSafeGraphExport != null) {
             item {
@@ -754,6 +776,37 @@ private fun ConnectionsReport(
             items(attackPaths, key = { it.endpointLabel }) { path -> ExposurePathCard(path) }
         }
         item { Spacer(modifier = Modifier.height(20.dp)) }
+    }
+}
+
+@Composable
+private fun GraphReconciliationCard(report: GraphEvidenceReconciliationReport?) {
+    val summary = graphReconciliationUiSummary(report)
+    ReportCard(borderColor = if (summary.hasDiagnosticIssues) NeuralTheme.Amber else NeuralTheme.BorderColor) {
+        Text(
+            summary.statusLabel,
+            color = NeuralTheme.TextPrimary,
+            fontSize = 13.5.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.semantics {
+                stateDescription = summary.statusLabel
+                contentDescription = "Graph/evidence reconciliation: ${summary.statusLabel}. ${summary.detail}"
+            }
+        )
+        Text(
+            summary.detail,
+            color = NeuralTheme.TextSecondary,
+            fontSize = 11.5.sp,
+            lineHeight = 16.sp,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        Text(
+            "No graph or evidence records were changed by this diagnostic.",
+            color = NeuralTheme.TextSecondary,
+            fontSize = 11.5.sp,
+            lineHeight = 16.sp,
+            modifier = Modifier.padding(top = 8.dp)
+        )
     }
 }
 
@@ -1320,6 +1373,45 @@ internal fun faceConsistencySummary(
     faceMatchCount == 0 -> "A reference photo was supplied, but no profile image produced a usable local comparison."
     calibratedMatchCount == 0 -> "$faceMatchCount local visual score(s) were produced, but they are not treated as identity evidence without a matching measured calibration."
     else -> "$calibratedMatchCount calibrated visual match(es) were recorded from $faceMatchCount comparison(s). They remain supporting evidence, not ownership proof."
+}
+
+internal data class GraphReconciliationUiSummary(
+    val statusLabel: String,
+    val detail: String,
+    val hasDiagnosticIssues: Boolean
+)
+
+internal fun graphReconciliationUiSummary(
+    report: GraphEvidenceReconciliationReport?
+): GraphReconciliationUiSummary {
+    if (report == null) {
+        return GraphReconciliationUiSummary(
+            statusLabel = "Unavailable",
+            detail = "No active case snapshot is available; no consistency claim is made.",
+            hasDiagnosticIssues = false
+        )
+    }
+
+    val detail = listOf(
+        "Matched canonical relationships: ${report.matchedRelationships}",
+        "Missing graph edges: ${report.missingGraphEdges}",
+        "Extra graph edges: ${report.extraGraphEdges}",
+        "Conflicting evidence: ${report.conflictingEvidence}",
+        "Ambiguous relationships: ${report.ambiguousRelationships}",
+        "Dangling canonical evidence references: ${report.danglingCanonicalEvidenceIds}",
+        "Dangling graph-edge evidence references: ${report.danglingGraphEvidenceIds}",
+        "Dangling graph-entity evidence references: ${report.danglingGraphEntityEvidenceIds}",
+        "Truncated canonical relationships: ${report.truncatedCanonicalRelationships}",
+        "Truncated graph edges: ${report.truncatedGraphEdges}",
+        "Truncated canonical evidence references: ${report.truncatedCanonicalEvidenceIds}",
+        "Truncated graph-edge evidence references: ${report.truncatedGraphEvidenceIds}",
+        "Truncated graph-entity evidence references: ${report.truncatedGraphEntityEvidenceIds}"
+    ).joinToString("; ")
+    return GraphReconciliationUiSummary(
+        statusLabel = if (report.isConsistent) "Consistent" else "Review needed",
+        detail = detail,
+        hasDiagnosticIssues = !report.isConsistent
+    )
 }
 
 internal fun formatEntityGraphFromSession(graph: EntityGraph): List<String> {
