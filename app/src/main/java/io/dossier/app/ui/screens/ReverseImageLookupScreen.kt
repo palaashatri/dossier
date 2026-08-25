@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -26,9 +27,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,12 +44,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.dossier.app.domain.case.UserCorrection
+import io.dossier.app.domain.case.UserCorrectionDecision
+import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceRuntimeCache
+import io.dossier.app.domain.evidence.persistedLinkedProfileEvidenceId
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.ReverseVideoLookupResult
 import io.dossier.app.domain.place.ReverseImageLookupService
@@ -57,6 +66,7 @@ import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.CircularWavyProgressIndicator
 import io.dossier.app.ui.components.GeminiSpark
 import io.dossier.app.ui.theme.NeuralTheme
+import java.time.Instant
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
 
@@ -84,6 +94,13 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val cardShape = io.dossier.app.ui.theme.DossierCardShape
+    val evidenceCollection by EvidenceRuntimeCache.collection.collectAsState()
+    val draftCorrections by ScanSession.userCorrections.collectAsState()
+    val draftCorrectionsByEvidence = remember(draftCorrections) {
+        draftCorrections
+            .filter { it.evidenceId != null }
+            .associateBy { it.evidenceId!! }
+    }
 
     var selectedImage by remember { mutableStateOf<Uri?>(null) }
     var selectedVideo by remember { mutableStateOf<Uri?>(null) }
@@ -91,6 +108,7 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
     var videoResult by remember { mutableStateOf<ReverseVideoLookupResult?>(null) }
     var analyzing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var correctionMessage by remember { mutableStateOf<String?>(null) }
     val requestGate = remember { ReverseMediaLookupRequestGate() }
 
     fun analyzeImage(uri: Uri) {
@@ -100,6 +118,7 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
         imageResult = null
         videoResult = null
         error = null
+        correctionMessage = null
         analyzing = true
         val bindingToken = ScanSession.currentInput.value?.let(MediaIntelligenceSession::bindTo)
         if (bindingToken == null) {
@@ -133,6 +152,7 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
         imageResult = null
         videoResult = null
         error = null
+        correctionMessage = null
         analyzing = true
         val bindingToken = ScanSession.currentInput.value?.let(MediaIntelligenceSession::bindTo)
         if (bindingToken == null) {
@@ -247,7 +267,28 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
 
             imageResult?.let {
                 Spacer(Modifier.height(20.dp))
-                RenderLookupResult(it, cardShape, onNavigateToBrowser)
+                RenderLookupResult(
+                    result = it,
+                    cardShape = cardShape,
+                    onNavigateToBrowser = onNavigateToBrowser,
+                    evidenceRecords = evidenceCollection.evidence,
+                    draftCorrections = draftCorrectionsByEvidence,
+                    draftCorrectionMessage = correctionMessage,
+                    onDraftCorrection = { evidenceId, decision ->
+                        val accepted = ScanSession.recordDraftCorrection(
+                            UserCorrection(
+                                evidenceId = evidenceId,
+                                decision = decision,
+                                createdAtUtc = Instant.now().toString()
+                            )
+                        )
+                        correctionMessage = if (accepted) {
+                            "Draft linked-profile decision applied locally. Use Actions → Save encrypted case to persist it."
+                        } else {
+                            "Draft correction limit reached; no change was applied."
+                        }
+                    }
+                )
             }
             videoResult?.let {
                 Spacer(Modifier.height(20.dp))
@@ -280,7 +321,11 @@ private fun RenderLookupResult(
     result: ReverseImageLookupResult,
     cardShape: RoundedCornerShape,
     onNavigateToBrowser: (String) -> Unit,
-    showGps: Boolean = true
+    showGps: Boolean = true,
+    evidenceRecords: List<Evidence> = emptyList(),
+    draftCorrections: Map<String, UserCorrection> = emptyMap(),
+    draftCorrectionMessage: String? = null,
+    onDraftCorrection: ((String, UserCorrectionDecision) -> Unit)? = null
 ) {
     if (result.faceDetected) {
         InfoCard(
@@ -377,7 +422,15 @@ private fun RenderLookupResult(
 
     if (result.visualCandidates.isNotEmpty()) {
         Spacer(Modifier.height(20.dp))
-        RenderVisualProvenance(result, cardShape, onNavigateToBrowser)
+        RenderVisualProvenance(
+            result = result,
+            cardShape = cardShape,
+            onNavigateToBrowser = onNavigateToBrowser,
+            evidenceRecords = evidenceRecords,
+            draftCorrections = draftCorrections,
+            draftCorrectionMessage = draftCorrectionMessage,
+            onDraftCorrection = onDraftCorrection
+        )
     }
 
     Spacer(Modifier.height(20.dp))
@@ -494,10 +547,14 @@ private fun RenderLookupResult(
 }
 
 @Composable
-private fun RenderVisualProvenance(
+internal fun RenderVisualProvenance(
     result: ReverseImageLookupResult,
     cardShape: RoundedCornerShape,
-    onNavigateToBrowser: (String) -> Unit
+    onNavigateToBrowser: (String) -> Unit,
+    evidenceRecords: List<Evidence> = emptyList(),
+    draftCorrections: Map<String, UserCorrection> = emptyMap(),
+    draftCorrectionMessage: String? = null,
+    onDraftCorrection: ((String, UserCorrectionDecision) -> Unit)? = null
 ) {
     var expanded by remember(result.visualCandidates) { mutableStateOf(false) }
     val candidates = result.visualCandidates
@@ -526,6 +583,10 @@ private fun RenderVisualProvenance(
         lineHeight = 15.sp,
         modifier = Modifier.padding(bottom = 9.dp)
     )
+    draftCorrectionMessage?.let { message ->
+        InfoCard(message, NeuralTheme.Cobalt, cardShape)
+        Spacer(Modifier.height(8.dp))
+    }
 
     if (result.visualClusters.isNotEmpty()) {
         Text(
@@ -612,6 +673,31 @@ private fun RenderVisualProvenance(
                         }
                     )
                 }
+                if (onDraftCorrection != null) {
+                    val evidenceId = candidate.persistedLinkedProfileEvidenceId(evidenceRecords)
+                    val currentCorrection = evidenceId?.let(draftCorrections::get)?.decision
+                    if (evidenceId != null) {
+                        Text(
+                            "This control applies only to the exact linked profile observation; it does not establish image ownership. Raw media and profile evidence remain retained until encrypted case save.",
+                            color = NeuralTheme.TextMuted,
+                            fontSize = 9.5.sp,
+                            lineHeight = 13.sp,
+                            modifier = Modifier.padding(top = 7.dp)
+                        )
+                        MediaDraftCorrectionRow(
+                            current = currentCorrection,
+                            onDecision = { decision -> onDraftCorrection(evidenceId, decision) }
+                        )
+                    } else {
+                        Text(
+                            "Correction unavailable: no unique persisted profile evidence record backs this account linkage.",
+                            color = NeuralTheme.TextMuted,
+                            fontSize = 9.5.sp,
+                            lineHeight = 13.sp,
+                            modifier = Modifier.padding(top = 7.dp)
+                        )
+                    }
+                }
             }
         }
     }
@@ -623,6 +709,85 @@ private fun RenderVisualProvenance(
                 color = NeuralTheme.Cyan
             )
         }
+    }
+}
+
+@Composable
+private fun MediaDraftCorrectionRow(
+    current: UserCorrectionDecision?,
+    onDecision: (UserCorrectionDecision) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Text(
+            "Draft linked-profile decision · not saved",
+            color = NeuralTheme.TextSecondary,
+            fontSize = 9.5.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            MediaDraftCorrectionButton(
+                label = "Confirm",
+                decision = UserCorrectionDecision.ThisIsMe,
+                selected = current == UserCorrectionDecision.ThisIsMe,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+            MediaDraftCorrectionButton(
+                label = "Reject",
+                decision = UserCorrectionDecision.ThisIsNotMe,
+                selected = current == UserCorrectionDecision.ThisIsNotMe,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            MediaDraftCorrectionButton(
+                label = "Unsure",
+                decision = UserCorrectionDecision.Unsure,
+                selected = current == UserCorrectionDecision.Unsure,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+            MediaDraftCorrectionButton(
+                label = "Ignore",
+                decision = UserCorrectionDecision.IgnoreEvidence,
+                selected = current == UserCorrectionDecision.IgnoreEvidence,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+        }
+    }
+}
+
+@Composable
+private fun MediaDraftCorrectionButton(
+    label: String,
+    decision: UserCorrectionDecision,
+    selected: Boolean,
+    modifier: Modifier,
+    onClick: (UserCorrectionDecision) -> Unit
+) {
+    OutlinedButton(
+        onClick = { onClick(decision) },
+        modifier = modifier
+            .heightIn(min = 44.dp)
+            .semantics {
+                contentDescription = "$label linked profile evidence correction"
+                stateDescription = if (selected) "Selected" else "Not selected"
+            }
+    ) {
+        Text(label, fontSize = 10.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
     }
 }
 
