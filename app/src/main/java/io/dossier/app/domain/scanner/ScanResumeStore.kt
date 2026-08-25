@@ -1218,7 +1218,11 @@ internal class ScanResumeStore internal constructor(
                 payloadSummaries = record.payloadSummaries
                     .take(MAX_PAYLOAD_SUMMARIES)
                     .filter(ScanPayloadSummary::isWellFormed),
-                breachCheckpoint = record.breachCheckpoint,
+                // A malformed authenticated stage payload is not allowed to
+                // poison the whole request. Omit it so the worker reruns the
+                // breach stage; never expose or reuse an invalid value.
+                breachCheckpoint = record.breachCheckpoint
+                    ?.takeIf { isValidBreachCheckpoint(it, record, record.checkpointOwnerId) },
                 checkpointOwnerId = record.checkpointOwnerId
             )
         )
@@ -1269,10 +1273,9 @@ internal class ScanResumeStore internal constructor(
         if (record.payloadSummaries.isNotEmpty() &&
             ScanCheckpointStage.DiscoveringUsernames.wireName !in completed
         ) return false
-        if (record.breachCheckpoint != null &&
-            (ScanCheckpointStage.CheckingBreachExposure.wireName !in completed ||
-                !isValidBreachCheckpoint(record.breachCheckpoint, record, record.checkpointOwnerId))
-        ) return false
+        // Invalid breach output is intentionally treated as absent. The
+        // request, plan and owner remain resumable, but ScanSession must rerun
+        // that stage rather than using stale or malformed metadata.
         return record.checkpointOwnerId == null || isValidRequestId(record.checkpointOwnerId)
     }
 

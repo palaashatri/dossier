@@ -540,6 +540,7 @@ object ScanSession {
             allFindings.addAll(breachRun.findings)
             _breachDigests.value = digests
             val breachCheckpoint = persistedBreach ?: buildBreachCheckpoint(
+                context = context,
                 requestId = requestId,
                 ownerId = checkpointOwnerId,
                 results = breachRun.checkpointResults
@@ -910,6 +911,7 @@ object ScanSession {
     }
 
     private fun buildBreachCheckpoint(
+        context: Context,
         requestId: String?,
         ownerId: String?,
         results: List<BreachStageCheckpointResult>
@@ -917,11 +919,16 @@ object ScanSession {
         if (requestId == null || ownerId == null || results.size > ScanResumeStore.MAX_BREACH_RESULTS) {
             return null
         }
-        val fingerprint = runCatching {
-            ProviderPlanFingerprint.forPlan(
-                ProviderCatalogV2.plan(DiscoveryScanPreferences.selectedMode.value)
-            )
-        }.getOrNull() ?: return null
+        // Read the immutable plan commitment from the exact encrypted request
+        // rather than the mutable process preference. A preference change or
+        // a recreated worker must never attach output to another plan.
+        val fingerprint = (runCatching {
+            ScanResumeStore(context).loadRequestDetailed(requestId)
+        }.getOrNull() as? ResumeReadState.Available)
+            ?.point
+            ?.planFingerprint
+            ?.takeIf { ProviderPlanFingerprint.isValid(it) }
+            ?: return null
         val candidate = BreachStageCheckpoint(
             requestId = requestId,
             planFingerprint = fingerprint,
@@ -934,6 +941,7 @@ object ScanSession {
 
     private fun isLocallyBoundedBreachCheckpoint(checkpoint: BreachStageCheckpoint): Boolean =
         checkpoint.results.size <= ScanResumeStore.MAX_BREACH_RESULTS &&
+            checkpoint.results.map { it.email.trim().lowercase() }.distinct().size == checkpoint.results.size &&
             checkpoint.results.all { result ->
                 result.email.length in 1..ScanResumeStore.MAX_BREACH_EMAIL_CHARS &&
                     result.email.none { it.code < 0x20 || it.code == 0x7f } &&

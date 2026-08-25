@@ -276,6 +276,15 @@ class ScanResumeStoreTest {
                 ownerId = OWNER_ONE,
                 stage = ScanCheckpointStage.CheckingBreachExposure,
                 completed = true,
+                breachCheckpoint = checkpoint.copy(planFingerprint = "b".repeat(64))
+            ) is ResumeCheckpointWriteState.Invalid
+        )
+        assertTrue(
+            store.advanceCheckpoint(
+                requestId = saved.point.requestId,
+                ownerId = OWNER_ONE,
+                stage = ScanCheckpointStage.CheckingBreachExposure,
+                completed = true,
                 breachCheckpoint = checkpoint.copy(
                     results = listOf(
                         checkpoint.results.single().copy(note = "api-key=secret")
