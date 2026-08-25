@@ -85,10 +85,100 @@ data class ProfileScanResult(
 )
 
 @Serializable
+enum class FaceComparisonBackend {
+    /** No comparison backend produced a score (for example, a missing face). */
+    NotRun,
+    /** The pinned local YuNet detector + SFace recognizer pipeline. */
+    YuNetSFace,
+    /** An imported or bundled ONNX/TFLite embedding model. */
+    ImportedEmbeddingModel,
+    /** The dependency-free local appearance descriptor fallback. */
+    AppearanceDescriptor,
+    /** Legacy payloads that predate structured face provenance. */
+    Unknown
+}
+
+@Serializable
+enum class FaceComparisonCalibrationState {
+    /** An identity-disjoint, consented calibration artifact was active. */
+    Measured,
+    /** A shipped/reference operating policy was active; benchmark claims are absent. */
+    ReferencePolicy,
+    /** A user/imported calibration artifact was present without Dossier guarantees. */
+    ImportedArtifact,
+    /** No calibration matched the active model. */
+    Unavailable,
+    /** The selected backend does not use a threshold calibration. */
+    NotApplicable,
+    /** Legacy payloads that predate structured face provenance. */
+    Unknown
+}
+
+@Serializable
+data class FaceComparisonQuality(
+    val accepted: Boolean,
+    val reason: String,
+    val detectorScore: Float? = null,
+    val faceWidth: Float? = null,
+    val faceHeight: Float? = null,
+    val eyeDistance: Float? = null,
+    val rollDegrees: Float? = null,
+    val brightness: Float? = null,
+    val sharpness: Float? = null
+) {
+    init {
+        require(reason.length <= MAX_REASON_CHARS) {
+            "Face quality reason exceeds the bounded provenance limit."
+        }
+    }
+
+    private companion object {
+        const val MAX_REASON_CHARS = 256
+    }
+}
+
+@Serializable
+data class FaceComparisonProvenance(
+    val backend: FaceComparisonBackend = FaceComparisonBackend.Unknown,
+    val calibration: FaceComparisonCalibrationState = FaceComparisonCalibrationState.Unknown,
+    val modelSource: String? = null,
+    val modelHashes: List<String> = emptyList(),
+    val pipelineVersion: String? = null,
+    val selfieQuality: FaceComparisonQuality? = null,
+    val profileQuality: FaceComparisonQuality? = null
+) {
+    init {
+        require(modelHashes.size <= MAX_MODEL_HASHES) {
+            "Face provenance may retain at most $MAX_MODEL_HASHES model hashes."
+        }
+        require(modelHashes.all { it.matches(MODEL_HASH_PATTERN) }) {
+            "Face provenance model hashes must be SHA-256 values."
+        }
+        require(modelSource == null || modelSource.length <= MAX_TEXT_CHARS) {
+            "Face provenance model source exceeds the bounded limit."
+        }
+        require(pipelineVersion == null || pipelineVersion.length <= MAX_TEXT_CHARS) {
+            "Face provenance pipeline version exceeds the bounded limit."
+        }
+    }
+
+    private companion object {
+        const val MAX_MODEL_HASHES = 2
+        const val MAX_TEXT_CHARS = 160
+        val MODEL_HASH_PATTERN = Regex("[a-fA-F0-9]{64}")
+    }
+}
+
+@Serializable
 data class FaceConsistencyMatch(
     val profileUrl: String,
     val similarityScore: Float,
-    val warning: String = "Profile image appears visually similar — confirm account ownership"
+    val warning: String = "Profile image appears visually similar — confirm account ownership",
+    /**
+     * Structured backend/calibration/quality provenance kept beside the score.
+     * The score remains supporting visual evidence and never proves identity.
+     */
+    val provenance: FaceComparisonProvenance = FaceComparisonProvenance()
 )
 
 enum class Platform {

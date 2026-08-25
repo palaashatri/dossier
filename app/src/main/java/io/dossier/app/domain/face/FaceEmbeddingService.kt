@@ -14,7 +14,10 @@ import io.dossier.app.data.face.FaceEmbeddingModelRunner
 import io.dossier.app.data.face.FaceEmbeddingModelStore
 import io.dossier.app.data.face.FaceEmbeddingThresholds
 import io.dossier.app.data.face.YuNetSFaceCorrelationEngine
+import io.dossier.app.domain.model.FaceComparisonBackend
+import io.dossier.app.domain.model.FaceComparisonCalibrationState
 import io.dossier.app.domain.model.FaceConsistencyMatch
+import io.dossier.app.domain.model.FaceComparisonProvenance
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -126,7 +129,11 @@ class FaceEmbeddingService(context: Context) {
             return FaceConsistencyMatch(
                 profileUrl = profileUrl,
                 similarityScore = 0f,
-                warning = "No face detected in selected selfie; visual consistency was not scored."
+                warning = "No face detected in selected selfie; visual consistency was not scored.",
+                provenance = FaceComparisonProvenance(
+                    backend = FaceComparisonBackend.NotRun,
+                    calibration = FaceComparisonCalibrationState.NotApplicable
+                )
             )
         }
 
@@ -136,7 +143,11 @@ class FaceEmbeddingService(context: Context) {
             return FaceConsistencyMatch(
                 profileUrl = profileUrl,
                 similarityScore = 0f,
-                warning = "No face detected in profile image; visual consistency was not scored."
+                warning = "No face detected in profile image; visual consistency was not scored.",
+                provenance = FaceComparisonProvenance(
+                    backend = FaceComparisonBackend.NotRun,
+                    calibration = FaceComparisonCalibrationState.NotApplicable
+                )
             )
         }
 
@@ -168,7 +179,8 @@ class FaceEmbeddingService(context: Context) {
         FaceConsistencyMatch(
             profileUrl = profileUrl,
             similarityScore = score,
-            warning = warningForModelScore(score, thresholds)
+            warning = warningForModelScore(score, thresholds),
+            provenance = embeddingProvenance(thresholds)
         )
     }.getOrElse { error ->
         val fallback = runAppearanceFallback(
@@ -207,7 +219,33 @@ class FaceEmbeddingService(context: Context) {
                 "Built-in local appearance descriptor reports low visual similarity. " +
                     "This fallback does not identify people across unrelated photographs."
         }
-        return FaceConsistencyMatch(profileUrl, score, warning)
+        return FaceConsistencyMatch(
+            profileUrl = profileUrl,
+            similarityScore = score,
+            warning = warning,
+            provenance = FaceComparisonProvenance(
+                backend = FaceComparisonBackend.AppearanceDescriptor,
+                calibration = FaceComparisonCalibrationState.NotApplicable,
+                modelSource = "Built-in local appearance descriptor"
+            )
+        )
+    }
+
+    private fun embeddingProvenance(
+        thresholds: FaceEmbeddingThresholds?
+    ): FaceComparisonProvenance {
+        val calibration = when {
+            thresholds == null -> FaceComparisonCalibrationState.Unavailable
+            calibrationStore.isUsingBundledCalibration() ->
+                FaceComparisonCalibrationState.ReferencePolicy
+            else -> FaceComparisonCalibrationState.ImportedArtifact
+        }
+        return FaceComparisonProvenance(
+            backend = FaceComparisonBackend.ImportedEmbeddingModel,
+            calibration = calibration,
+            modelSource = modelStore.modelSourceLabel(),
+            modelHashes = modelStore.importedModelSha256()?.let(::listOf).orEmpty()
+        )
     }
 
     private fun warningForModelScore(
