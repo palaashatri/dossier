@@ -9,6 +9,7 @@ import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ProviderExecutionRuntime
 import io.dossier.app.domain.discovery.ProviderPlanFingerprint
 import io.dossier.app.domain.discovery.ProviderResponseClassifier
+import io.dossier.app.domain.discovery.ProviderResponseDecision
 import io.dossier.app.domain.discovery.ProviderRendererPolicy
 import io.dossier.app.domain.discovery.ProviderVerificationState
 import io.dossier.app.domain.discovery.ExtractionRules
@@ -26,11 +27,9 @@ import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.username.UsernameVariant
 import io.dossier.app.domain.username.UsernameVariantGenerator
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.io.IOException
 import java.net.URI
 import java.util.concurrent.TimeUnit
 import android.content.Context
@@ -772,8 +771,10 @@ class ProfileScanner(
     }
 
     private fun queueProviderCandidate(candidate: UsernameCandidate, scanId: ScanId) {
-        val providerId = candidate.providerId ?: return
-        if (ProviderCatalogV2.findById(providerId) == null) return
+        val catalogProviderId = candidate.providerId ?: resolveProfileUrl(candidate.url)?.providerId
+        val providerId = catalogProviderId?.takeIf { ProviderCatalogV2.findById(it) != null }
+            ?: ProviderExecutionRuntime.uncataloguedProviderId(candidate.url)
+            ?: return
         ScanCoordinatorRuntime.onProviderQueued(providerId, scanId)
     }
 
@@ -1126,112 +1127,165 @@ class ProfileScanner(
         val confidenceSignals = mutableListOf<String>()
         var adjustedConfidence = candidate.confidence
 
+        val fallbackDefinition = ProviderExecutionRuntime.uncataloguedProfileDefinition(candidate.url)
+            ?: return buildResult(
+                candidate, exists = false, verified = false,
+                verificationStatus = "Unverifiable — profile URL is not a supported HTTP(S) URL",
+                httpStatus = null, adjustedConfidence = 0.0f,
+                provenance = provenance,
+                providerVerificationState = ProviderVerificationState.InvalidResponse
+            )
+
         try {
-            val request = Request.Builder()
-                .url(candidate.url)
-                .header("User-Agent", ProviderExecutionRuntime.USER_AGENT)
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                httpStatus = response.code
-                when {
-                    response.code == 404 -> {
-                        return buildResult(
-                            candidate, exists = false, verified = false,
-                            verificationStatus = "HTTP 404 — not found",
-                            httpStatus = httpStatus, adjustedConfidence = 0.0f,
-                            provenance = provenance
+            val execution = providerRuntime.execute(
+                provider = fallbackDefinition,
+                url = candidate.url,
+                scanId = scanId,
+                // Preserve the legacy fallback's explicit 401/403 handling
+                // while using the shared declarative classifier everywhere
+                // else.  The status is an authorization boundary, not absence.
+                classifier = { _, observation ->
+                    if (observation.statusCode == 401 || observation.statusCode == 403) {
+                        ProviderResponseDecision(
+                            ProviderVerificationState.AuthenticationRequired,
+                            "Public response requires authentication"
                         )
+                    } else {
+                        ProviderResponseClassifier.classify(fallbackDefinition, observation)
                     }
-                    response.code == 401 || response.code == 403 -> {
+                }
+            )
+            httpStatus = execution.statusCode
+
+            when (execution.decision.state) {
+                ProviderVerificationState.NotFound -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "HTTP ${httpStatus ?: 404} — not found",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.NotFound
+                )
+                ProviderVerificationState.SoftNotFound -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Not found (soft-404)",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.SoftNotFound
+                )
+                ProviderVerificationState.AuthenticationRequired -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — public response requires authentication",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.AuthenticationRequired
+                )
+                ProviderVerificationState.AutomationChallenged -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — automation or login challenge",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.AutomationChallenged
+                )
+                ProviderVerificationState.RateLimited -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — provider rate limit is active",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.RateLimited
+                )
+                ProviderVerificationState.Timeout -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — provider request timed out",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.Timeout
+                )
+                ProviderVerificationState.NetworkUnavailable -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Offline — could not reach host",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.NetworkUnavailable
+                )
+                ProviderVerificationState.RedirectedOutsideProvider -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — redirected outside provider host",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.RedirectedOutsideProvider
+                )
+                ProviderVerificationState.UnexpectedStatus,
+                ProviderVerificationState.InvalidResponse -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — ${execution.decision.explanation}",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = execution.decision.state
+                )
+                ProviderVerificationState.Present -> {
+                    val html = execution.bodyText
+                    val doc = Jsoup.parse(html, candidate.url)
+                    val text = doc.text()
+                    val title = doc.title()
+                    if (isAccessChallengePage(html, text)) {
                         return buildResult(
                             candidate, exists = false, verified = false,
-                            verificationStatus = "Unverifiable — public response requires authentication",
+                            verificationStatus = "Unverifiable — automation or login challenge",
                             httpStatus = httpStatus, adjustedConfidence = 0.0f,
                             provenance = provenance,
-                            providerVerificationState = ProviderVerificationState.AuthenticationRequired
+                            providerId = fallbackDefinition.id,
+                            providerVerificationState = ProviderVerificationState.AutomationChallenged
                         )
                     }
-                    response.code == 429 -> {
+                    if (isStrongNotFoundPage(text, title, candidate.platform)) {
                         return buildResult(
                             candidate, exists = false, verified = false,
-                            verificationStatus = "Unverifiable — provider rate limit is active",
+                            verificationStatus = "Not found (soft-404)",
                             httpStatus = httpStatus, adjustedConfidence = 0.0f,
                             provenance = provenance,
-                            providerVerificationState = ProviderVerificationState.RateLimited
+                            providerId = fallbackDefinition.id,
+                            providerVerificationState = ProviderVerificationState.SoftNotFound
                         )
                     }
-                    response.isSuccessful -> {
-                        val finalUrl = response.request.url.toString()
-                        if (!ProviderResponseClassifier.sameProviderHost(candidate.url, finalUrl)) {
-                            return buildResult(
-                                candidate, exists = false, verified = false,
-                                verificationStatus = "Unverifiable — redirected outside provider host",
-                                httpStatus = httpStatus, adjustedConfidence = 0.0f,
-                                provenance = provenance,
-                                providerVerificationState = ProviderVerificationState.RedirectedOutsideProvider
-                            )
-                        }
-                        val html = ProviderExecutionRuntime.readBoundedBody(response.body, ProviderExecutionRuntime.MAX_BODY_CHARS)
-                        val doc = Jsoup.parse(html, candidate.url)
-                        val text = doc.text()
-                        val title = doc.title()
-                        if (isAccessChallengePage(html, text)) {
-                            return buildResult(
-                                candidate, exists = false, verified = false,
-                                verificationStatus = "Unverifiable — automation or login challenge",
-                                httpStatus = httpStatus, adjustedConfidence = 0.0f,
-                                provenance = provenance,
-                                providerVerificationState = ProviderVerificationState.AutomationChallenged
-                            )
-                        }
-                        if (isStrongNotFoundPage(text, title, candidate.platform)) {
-                            return buildResult(
-                                candidate, exists = false, verified = false,
-                                verificationStatus = "Not found (soft-404)",
-                                httpStatus = httpStatus, adjustedConfidence = 0.0f,
-                                provenance = provenance
-                            )
-                        }
-                        okhttpTitle = title
+                    okhttpTitle = title
 
-                        if (text.trim().length >= 300 &&
-                            !isProfileNotFoundPage(html, text, title, candidate.username, candidate.platform)) {
-                            if (isProfileBelongingToUser(candidate, text, title, input)) {
-                                displayName = title.ifBlank { null }
-                                bio = doc.select("meta[name=description]").attr("content").trim().ifBlank {
-                                    doc.select("p").firstOrNull()?.text()?.take(200)
-                                }
-                                profileImageUrl = extractProfileImageUrl(doc)
-                                doc.select("a[href]").forEach { element ->
-                                    val linkUrl = element.attr("abs:href")
-                                    if (linkUrl.startsWith("http")) {
-                                        links.add(linkUrl)
-                                    }
-                                }
-                                extractedText = text
-                                confidenceSignals.add("Direct HTTP 200 page access — real content")
-                                okhttpConfirmed = true
-                            } else {
-                                return buildSoftExistenceResult(
-                                    candidate = candidate,
-                                    httpStatus = httpStatus,
-                                    displayName = title.ifBlank { null },
-                                    extractedText = text,
-                                    verificationStatus = "Exists but not attributed to this identity — possible account",
-                                    provenance = provenance
-                                )
+                    if (text.trim().length >= 300 &&
+                        !isProfileNotFoundPage(html, text, title, candidate.username, candidate.platform)) {
+                        if (isProfileBelongingToUser(candidate, text, title, input)) {
+                            displayName = title.ifBlank { null }
+                            bio = doc.select("meta[name=description]").attr("content").trim().ifBlank {
+                                doc.select("p").firstOrNull()?.text()?.take(200)
                             }
+                            profileImageUrl = extractProfileImageUrl(doc)
+                            doc.select("a[href]").forEach { element ->
+                                val linkUrl = element.attr("abs:href")
+                                if (linkUrl.startsWith("http")) {
+                                    links.add(linkUrl)
+                                }
+                            }
+                            extractedText = text
+                            confidenceSignals.add("Direct HTTP 200 page access — real content")
+                            okhttpConfirmed = true
+                        } else {
+                            return buildSoftExistenceResult(
+                                candidate = candidate,
+                                httpStatus = httpStatus,
+                                displayName = title.ifBlank { null },
+                                extractedText = text,
+                                verificationStatus = "Exists but not attributed to this identity — possible account",
+                                provenance = provenance,
+                                providerId = fallbackDefinition.id
+                            )
                         }
-                    }
-                    else -> {
-                        return buildResult(
-                            candidate, exists = false, verified = false,
-                            verificationStatus = "Unverifiable — unexpected HTTP ${response.code}",
-                            httpStatus = httpStatus, adjustedConfidence = 0.0f,
-                            provenance = provenance,
-                            providerVerificationState = ProviderVerificationState.UnexpectedStatus
-                        )
                     }
                 }
             }
@@ -1255,6 +1309,7 @@ class ProfileScanner(
                 verificationStatus = status,
                 httpStatus = null, adjustedConfidence = 0.0f,
                 provenance = provenance,
+                providerId = fallbackDefinition.id,
                 providerVerificationState = state
             )
         }
@@ -1267,7 +1322,8 @@ class ProfileScanner(
                 displayName = displayName, bio = bio, profileImageUrl = profileImageUrl,
                 links = links, extractedText = extractedText, findings = findings,
                 confidenceSignals = confidenceSignals, adjustedConfidenceIn = adjustedConfidence,
-                input = input, provenance = provenance
+                input = input, provenance = provenance,
+                providerId = fallbackDefinition.id
             )
         }
 
@@ -1287,7 +1343,8 @@ class ProfileScanner(
                     candidate, exists = false, verified = false,
                     verificationStatus = "Unverifiable — ${render.reason}",
                     httpStatus = httpStatus, adjustedConfidence = 0.0f,
-                    provenance = provenance
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id
                 )
             }
             is WebViewScraper.Result.TimedOut -> {
@@ -1295,7 +1352,8 @@ class ProfileScanner(
                     candidate, exists = false, verified = false,
                     verificationStatus = "Unverifiable — render timed out",
                     httpStatus = httpStatus, adjustedConfidence = 0.0f,
-                    provenance = provenance
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id
                 )
             }
             is WebViewScraper.Result.Failed -> {
@@ -1303,7 +1361,8 @@ class ProfileScanner(
                     candidate, exists = false, verified = false,
                     verificationStatus = "Unverifiable — ${render.reason}",
                     httpStatus = httpStatus, adjustedConfidence = 0.0f,
-                    provenance = provenance
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id
                 )
             }
             is WebViewScraper.Result.Rendered -> {
@@ -1315,7 +1374,8 @@ class ProfileScanner(
                         candidate, exists = false, verified = false,
                         verificationStatus = "Not found (rendered 404)",
                         httpStatus = httpStatus, adjustedConfidence = 0.0f,
-                        provenance = provenance
+                        provenance = provenance,
+                        providerId = fallbackDefinition.id
                     )
                 }
 
@@ -1340,7 +1400,8 @@ class ProfileScanner(
                         displayName = displayName, bio = bio, profileImageUrl = profileImageUrl,
                         links = links, extractedText = extractedText, findings = findings,
                         confidenceSignals = confidenceSignals, adjustedConfidenceIn = adjustedConfidence,
-                        input = input, provenance = provenance
+                        input = input, provenance = provenance,
+                        providerId = fallbackDefinition.id
                     )
                 } else {
                     return buildSoftExistenceResult(
@@ -1349,7 +1410,8 @@ class ProfileScanner(
                         displayName = doc.title().ifBlank { okhttpTitle },
                         extractedText = extractedText,
                         verificationStatus = "Exists but not attributed to this identity — possible account",
-                        provenance = provenance
+                        provenance = provenance,
+                        providerId = fallbackDefinition.id
                     )
                 }
             }

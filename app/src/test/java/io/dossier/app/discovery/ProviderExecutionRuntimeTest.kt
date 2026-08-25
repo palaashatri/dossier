@@ -403,6 +403,59 @@ class ProviderExecutionRuntimeTest {
     }
 
     @Test
+    fun uncataloguedProfileDefinitionUsesOpaqueHostIdentityAndValidatedPolicy() {
+        val definition = ProviderExecutionRuntime.uncataloguedProfileDefinition(
+            "https://www.example.test/profile/jane?token=redacted"
+        )
+        assertNotNull(definition)
+        assertTrue(definition!!.id.startsWith("unmapped-"))
+        assertEquals(29, definition.id.length)
+        assertFalse(definition.id.contains("example"))
+        assertEquals(setOf(QueryCapability.Url), definition.queryCapabilities)
+        assertEquals(setOf("example.test"), definition.approvedHosts)
+        assertEquals(1, definition.requestPolicy.maxConcurrency)
+        assertEquals(750L, definition.requestPolicy.minimumIntervalMs)
+        assertEquals(5_000L, definition.requestPolicy.timeoutMs)
+        assertEquals(1, definition.requestPolicy.retryBudget)
+        assertTrue(ProviderDefinitionValidator.validate(definition).isEmpty())
+        assertEquals(
+            definition.id,
+            ProviderExecutionRuntime.uncataloguedProviderId("https://example.test/other")
+        )
+        assertNull(ProviderExecutionRuntime.uncataloguedProfileDefinition("ftp://example.test/profile"))
+        assertNull(ProviderExecutionRuntime.uncataloguedProfileDefinition("not a URL"))
+    }
+
+    @Test
+    fun uncataloguedRuntimeRetainsBodyBoundAndRedirectLifecycle() = runBlocking {
+        val definition = checkNotNull(
+            ProviderExecutionRuntime.uncataloguedProfileDefinition("https://example.test/profile/jane")
+        )
+        val hugeBody = "x".repeat(ProviderExecutionRuntime.MAX_BODY_CHARS + 50_000)
+        val client = createMockClient { request ->
+            mockResponse(
+                request,
+                200,
+                hugeBody,
+                finalUrl = "https://login.example.invalid/auth"
+            )
+        }
+        val runtime = ProviderExecutionRuntime(client)
+        ScanCoordinatorRuntime.onProviderQueued(definition.id)
+
+        val result = runtime.execute(definition, "https://example.test/profile/jane")
+
+        assertEquals(ProviderVerificationState.RedirectedOutsideProvider, result.decision.state)
+        assertEquals(ProviderExecutionRuntime.MAX_BODY_CHARS, result.bodyText.length)
+        assertEquals(1, result.attemptCount)
+        val snapshot = ScanCoordinatorRuntime.snapshot.value
+        assertEquals(1, snapshot.scheduledProviderCount)
+        assertEquals(1, snapshot.startedProviderCount)
+        assertEquals(0, snapshot.completedProviderCount)
+        assertEquals(1, snapshot.unavailableProviderCount)
+    }
+
+    @Test
     fun customSchedulingKeyAndClassifierWorksCorrectlyAndCapsBody() = runBlocking {
         val hugeBody = "X".repeat(300_000)
         val provider = sampleProvider.copy(id = "test-provider")

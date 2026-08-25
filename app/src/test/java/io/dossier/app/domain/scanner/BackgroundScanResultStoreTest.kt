@@ -426,11 +426,58 @@ class BackgroundScanResultStoreTest {
         assertNull(store.load())
     }
 
+    @Test
+    fun clearSyncsParentDirectoryAfterDeletingResultFile() {
+        val syncer = RecordingDirectorySyncer()
+        val context = FakeContext(root)
+        val store = BackgroundScanResultStore(context, syncer, JvmBackgroundResultCrypto())
+        val case = DossierCase(
+            caseId = "clear-sync",
+            createdAt = "2026-08-24T00:00:00Z",
+            subjectName = "Subject",
+            input = IdentityInput(fullName = "Subject")
+        )
+        assertTrue(store.save("work-clear-sync", case))
+        syncer.synced.clear()
+
+        assertTrue(store.clear())
+        assertEquals(listOf(root.canonicalFile), syncer.synced.map(File::getCanonicalFile))
+    }
+
+    @Test
+    fun clearFailsClosedWhenParentDirectorySyncFails() {
+        val syncer = FailingDirectorySyncer()
+        val context = FakeContext(root)
+        val store = BackgroundScanResultStore(context, syncer, JvmBackgroundResultCrypto())
+        val case = DossierCase(
+            caseId = "clear-sync-failure",
+            createdAt = "2026-08-24T00:00:00Z",
+            subjectName = "Subject",
+            input = IdentityInput(fullName = "Subject")
+        )
+        // The write itself must succeed; only the later clear sync is failed.
+        syncer.fail = false
+        assertTrue(store.save("work-clear-sync-failure", case))
+        val file = File(root, BackgroundScanResultStore.FILE_NAME)
+        syncer.fail = true
+
+        assertFalse(store.clear())
+        assertFalse(file.exists())
+    }
+
     private class RecordingDirectorySyncer : DirectorySyncer {
         val synced = mutableListOf<File>()
 
         override fun sync(dir: File) {
             synced += dir
+        }
+    }
+
+    private class FailingDirectorySyncer : DirectorySyncer {
+        var fail = true
+
+        override fun sync(dir: File) {
+            if (fail) error("simulated directory sync failure")
         }
     }
 

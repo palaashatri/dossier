@@ -9,11 +9,13 @@ import kotlinx.coroutines.isActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.ResponseBody
+import java.net.URI
 import java.io.InterruptedIOException
 import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -292,6 +294,77 @@ class ProviderExecutionRuntime(
         const val MAX_BODY_CHARS = 1_000_000
         private val providerIdPattern = Regex("^[a-z0-9]+(?:-[a-z0-9]+)*$")
         private val schedulingKeyPattern = Regex("^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
+
+        /**
+         * Build a bounded declarative definition for an explicitly supplied
+         * public URL that is not present in the reviewed provider catalog.
+         *
+         * This is an execution adapter, not a catalog entry: the host is
+         * hashed into the lifecycle ID, so coordinator events never expose a
+         * user URL or inflate catalog breadth/health counts.  The definition
+         * exists only for the duration of the request and keeps the same
+         * scheduler, retry, timeout, body-bound and redirect policy as a
+         * catalog-backed provider.
+         */
+        fun uncataloguedProfileDefinition(url: String): ProviderDefinition? {
+            val uri = runCatching { URI(url.trim()) }.getOrNull() ?: return null
+            val scheme = uri.scheme?.lowercase(Locale.ROOT)
+            if (scheme !in setOf("http", "https")) return null
+            val host = uri.host
+                ?.trim()
+                ?.lowercase(Locale.ROOT)
+                ?.removePrefix("www.")
+                ?.takeIf(String::isNotBlank)
+                ?: return null
+            val providerId = "unmapped-${sha256(host).take(20)}"
+            return ProviderDefinition(
+                id = providerId,
+                displayName = "Uncatalogued public host",
+                category = ProviderCategory.PersonalWebsite,
+                queryCapabilities = setOf(QueryCapability.Url),
+                existenceRules = ExistenceRules(
+                    requiredStatus = setOf(200),
+                    notFoundStatus = setOf(404, 410),
+                    softNotFoundText = listOf(
+                        "page not found",
+                        "profile not found",
+                        "user not found",
+                        "account not found",
+                        "does not exist",
+                        "doesn't exist"
+                    ),
+                    authenticationText = listOf(
+                        "sign in to continue",
+                        "log in to continue",
+                        "login required"
+                    ),
+                    challengeText = listOf(
+                        "verify you are human",
+                        "checking your browser",
+                        "unusual traffic"
+                    )
+                ),
+                priority = 0,
+                reliability = SourceReliability.DirectPersonalWebsite,
+                requestPolicy = ProviderRequestPolicy(
+                    maxConcurrency = 1,
+                    minimumIntervalMs = 750,
+                    timeoutMs = 5_000,
+                    retryBudget = 1,
+                    cooldownMs = 30_000
+                ),
+                legacyTemplateCompatible = false,
+                approvedHosts = setOf(host)
+            )
+        }
+
+        /** Stable, URL-free lifecycle ID for an uncatalogued public host. */
+        fun uncataloguedProviderId(url: String): String? =
+            uncataloguedProfileDefinition(url)?.id
+
+        private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
 
         internal fun normalizeSchedulingKey(value: String, fallbackProviderId: String): String {
             val normalized = value.trim().lowercase(Locale.ROOT)

@@ -246,7 +246,14 @@ class BackgroundScanResultStore internal constructor(
 
     fun clear(): Boolean = runCatching {
         val file = resultFile()
-        !file.exists() || file.delete()
+        if (!file.exists()) return@runCatching true
+        if (!file.delete()) return@runCatching false
+        // A successful unlink is not durable until the containing directory
+        // entry is synced. Report failure when that durability boundary cannot
+        // be established so callers do not mistake an in-memory deletion for
+        // a committed clear after a power loss.
+        directorySyncer.sync(file.parentFile ?: context.filesDir)
+        true
     }.getOrDefault(false)
 
     private fun resultFile(): File = File(context.filesDir, FILE_NAME)
