@@ -6,15 +6,15 @@ It collects public evidence, preserves provenance, separates verification from r
 
 ## Current status
 
-The current implementation branch is **80/100 under the strict production rubric**.
+The current implementation branch is **82/100 under the strict production rubric**.
 
 Validated implementation commit:
 
 ```text
-416d625
+61ece02
 ```
 
-`416d625` is the evidence-relationship persistence tranche; the validated tree also includes scanner/Reddit/WhatsMyName provenance, direct verified-profile media linkage, reverse-video picker semantics and bounded encrypted save/restore migration for canonical relationship assertions.
+`61ece02` is the report-evidence accessibility tranche; the validated tree also includes bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
 
 That exact implementation passed the current final-tree build and deterministic validation gates:
 
@@ -23,23 +23,23 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 5 tests / no-network schema fixtures
-Debug JVM unit tests                PASS — 700 tests / 115 suites / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 700 tests / 115 suites / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 719 tests / 115 suites / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 719 tests / 115 suites / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 115,483,112 bytes
-Debug APK SHA-256                   D4F61C9034CE557934316120401F4CE7F124071F5F3031506616FAF1E425A936
-uiTest APK assembly                 PASS — 242,964,921 bytes
-uiTest APK SHA-256                  852472937126B7E52037651AD7CB907AF6AAC046F77FC87F8D3AF1FBEA49D1DE
-Android-test APK                    PASS — 1,013,716 bytes
-Android-test APK SHA-256             758E0AB7C94E1FB0C4B7EBA8BC41EC532B3ED60E665AAD4315BFFFA8E0E5E622
+Debug APK assembly                  PASS — 115,499,496 bytes
+Debug APK SHA-256                   70050737459590336F9C355F34C67B1CC2EF39697B6DBB21D718B6DDAD444536
+uiTest APK assembly                 PASS — 242,981,305 bytes
+uiTest APK SHA-256                  447CC96A921BFB8C63840668860FC13460CB2D162F37C49FFAFAD80E97A48F9B
+Android-test APK                    PASS — 1,020,008 bytes
+Android-test APK SHA-256             F49197FFFB67E5E7AF6338010EC82876C3D9D6ECB8B7C4572C32E9E4079B2E31
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 72 warnings
-Connected uiTest suite              PASS — 44 tests / 0 failures on API 36 `medium_phone` emulator
+Connected uiTest suite              PASS — 47 tests / 0 failures on API 36 `medium_phone` emulator
 ```
 
-The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, async saved-case persistence, HUD status semantics, and reverse-video picker semantics. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical devices, process-death/reboot, TalkBack, and battery/thermal behavior remain unvalidated.
+The complete connected uiTest suite ran on the API 36 `medium_phone` emulator, including the provider-health panel, 8 WorkManager pause/resume tests, encrypted Activity-recreation recovery, report-evidence button semantics, async saved-case persistence, HUD status semantics and reverse-video picker semantics. A separate ADB smoke check seeded the production encrypted result store through the uiTest-only fixture, then verified restoration after an external `am force-stop`/relaunch and after an emulator reboot. The uiTest APK was built with a pre-existing uncommitted fixture-only edit that remains outside the implementation commits; its hash is therefore a current-worktree artifact. Physical Samsung/Pixel/lower-memory devices, TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
 
-This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, automatic verified-account image acquisition, and representative physical-device/accessibility/performance validation remain release gates.
+This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
 See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the target product contract.
 
@@ -114,7 +114,7 @@ The long-term contract calls for 1,000+ useful reviewed providers. `ProviderCata
 - A SHA-256 fingerprint of normalized seed values binds a completed scan to the matching initial explicit encrypted case save without maintaining a duplicate plaintext identity cache.
 - Later case edits cannot silently attach a newer scan to an older case.
 
-Recovery now covers stable initial direct-profile outcomes, the configured-depth pivot frontier, an exact-owner background pause/resume lifecycle, an encrypted mode/provider-plan/stage-order commitment, semantic stage-boundary metadata, bounded completed-stage output counts and encrypted public-search/public-image retry payloads. The payload envelopes are request/plan/stage-bound, bounded, TTL-limited, tamper-checked and cleared with request-scoped tombstones; verified profile outcomes cannot enter these public-discovery caches. A coordinator-owned parser/frontier plan, universal in-flight payload persistence, sole coordinator ownership and full-stage resume semantics remain incomplete. Pivot diagnostics are persisted and the background pause state is surfaced, while some mature custom resolvers still need migration to the declarative execution path. Crash-boundary tests exercise durable states, but an ADB-driven external process-kill/relaunch and reboot campaign is still required before production recovery is claimed.
+Recovery now covers stable initial direct-profile outcomes, the configured-depth pivot frontier, an exact-owner background pause/resume lifecycle, an encrypted mode/provider-plan/stage-order commitment, semantic stage-boundary metadata, bounded completed-stage output counts and encrypted public-search/public-image retry payloads. The payload envelopes are request/plan/stage-bound, bounded, TTL-limited, tamper-checked and cleared with request-scoped tombstones; verified profile outcomes cannot enter these public-discovery caches. A coordinator-owned parser/frontier plan, universal in-flight payload persistence, sole coordinator ownership and full-stage resume semantics remain incomplete. Pivot diagnostics are persisted and the background pause state is surfaced, while some mature custom resolvers still need migration to the declarative execution path. An ADB-driven force-stop/relaunch and emulator-reboot smoke check restored the encrypted background result through the production UI using a uiTest-only synthetic fixture; it does not establish full-stage worker recovery or physical-device acceptance.
 
 ## Evidence, graph and entity resolution
 
@@ -272,7 +272,7 @@ Do not commit `local.properties`, keystores, credentials, API keys, personal tes
 - Providers can change markup, challenge requests, rate-limit or omit content.
 - Some custom resolver operations still bypass unified provider lifecycle events; the persisted coordinator plan is currently a metadata commitment rather than a general parser/frontier payload. Public-search/public-image retry payloads are persisted with bounded encrypted envelopes, but universal in-flight stage/frontier payloads and full coordinator ownership remain incomplete. Background pause/resume is exact-owner bounded rather than a universal coordinator pause contract.
 - Pre-upgrade WorkManager rows may retain legacy raw scan input until WorkManager pruning; new rows are opaque, but no forensic SQLite/WAL erasure claim is made.
-- Generation-bound startup reconciliation and cancellation are implemented, but external process-kill/relaunch and reboot validation is not yet recorded.
+- Generation-bound startup reconciliation and cancellation are implemented; external force-stop/relaunch and emulator-reboot restoration is recorded for the encrypted result path, while full-stage worker recovery remains open.
 - Replacement-generation cleanup is best effort after WorkManager enqueue acknowledgement. A crash or cleanup failure in that narrow hand-off can retain an encrypted prior-request profile scope until explicit purge or later maintenance; a durable retirement ledger remains open.
 - UI latest-result reads, purge, saved-case listing/deletion, case analysis, corrections, remediation updates and case-save actions now use IO-dispatched seams; lower-level synchronous helpers remain for controlled lifecycle paths. Background result envelopes enforce bounded file, metadata, IV, ciphertext and plaintext sizes before allocation/decryption and reject oversized nested case/graph/media/analysis collection shapes before save or after authenticated load. Large-case ANR/storage-corruption testing remains open.
 - Entity resolution has deterministic metrics and a fail-closed calibration-artifact path, but still needs a consented representative corpus and published measured calibration before weights can be treated as empirically fitted.
