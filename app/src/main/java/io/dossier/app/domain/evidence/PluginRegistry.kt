@@ -3,8 +3,13 @@ package io.dossier.app.domain.evidence
 import io.dossier.app.data.web.WaybackHistoryPlugin
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /**
  * Process-local cache of the latest merged plugin evidence. It exists so deterministic
@@ -68,6 +73,9 @@ object PluginRegistry {
     fun clear() = plugins.clear()
 }
 
+private const val MAX_PLUGIN_CONCURRENCY = 3
+private val pluginCoordinator = Semaphore(MAX_PLUGIN_CONCURRENCY)
+
 /**
  * Runs plugins and merges their Evidence collections. A failing source is isolated.
  * The merged result is cached once so post-processing can remain local and bounded.
@@ -78,19 +86,26 @@ suspend fun runPlugins(
 ): EvidenceCollection {
     EvidenceRuntimeCache.clear()
     UsernameSurfaceRuntimeCache.clear()
-    val allEvidence = mutableListOf<Evidence>()
-    val allRelationships = mutableListOf<EvidenceRelationship>()
-    for (plugin in plugins) {
-        try {
-            val result = plugin.scan(input)
-            allEvidence.addAll(result.evidence)
-            allRelationships.addAll(result.relationships)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Throwable) {
-            // Isolation: one brittle provider/import never aborts the authorized scan.
-        }
+
+    // Each plugin is an independent evidence family. The shared permit bounds
+    // family-level work while provider implementations retain their own throttles.
+    val collections = supervisorScope {
+        plugins.map { plugin ->
+            async {
+                try {
+                    pluginCoordinator.withPermit { plugin.scan(input) }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    // Isolation: one brittle provider/import never aborts the authorized scan.
+                    null
+                }
+            }
+        }.awaitAll()
     }
+
+    val allEvidence = collections.filterNotNull().flatMap(EvidenceCollection::evidence)
+    val allRelationships = collections.filterNotNull().flatMap(EvidenceCollection::relationships)
     val merged = EvidenceCollection(
         evidence = allEvidence.distinctBy { it.id },
         relationships = EvidenceRelationshipPolicy.normalize(allRelationships)

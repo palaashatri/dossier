@@ -24,6 +24,33 @@ The new acceptance question is:
 
 Until that question is measured against a real synthetic/consented corpus, mission readiness is not numerically established.
 
+## 1.1 Current working-tree validation — 2026-09-05
+
+The current working tree is on `feat/product-contract-discovery-v2` at `437b50d` with the requested implementation changes still uncommitted. Fresh post-change gates produced:
+
+- `./gradlew test --no-daemon --rerun-tasks`: **BUILD SUCCESSFUL**; 900 tests in each of `testDebugUnitTest`, `testReleaseUnitTest`, and `testUiTestUnitTest`, with 0 failures, errors, or skipped tests.
+- `./gradlew :app:assembleDebug :app:lintDebug --no-daemon`: **BUILD SUCCESSFUL**; debug APK 115,712,440 bytes, SHA-256 `f9de697a9fbc1c97965629db2dd2fb05dd36b13d9b1a556403ad6fc2c73e3965`, lint 0 errors and 69 warnings.
+- `./gradlew :app:lintUiTest --no-daemon`: **BUILD SUCCESSFUL**; uiTest lint 0 errors and 73 warnings.
+- Current artifact readback: uiTest APK 243,243,401 bytes, SHA-256 `02a45ee103ba821340ec2f04aa10293ebbd648c93e122578e55fb8a908526279`; Android-test APK 1,029,856 bytes, SHA-256 `60b7951307f23d1f87df3ac330ed646597a39782be0d529ad35755eee09ba88d`.
+- `./gradlew :app:connectedUiTestAndroidTest --no-daemon`: **BUILD SUCCESSFUL**; 57 tests on the `dossier-api36` API 36 emulator, 0 skipped and 0 failed.
+- `python3 -m unittest tools.test_repository_hygiene_audit`: **OK**, 2 tests (the session-generated ignored `.serena` directory was moved out of the repository before this rerun).
+- `python3 tools/provider_registry_audit.py --json`: `ok: true`, 78 authored providers, 716 pinned WhatsMyName source records, 644 executable rules, and 0 conversion errors.
+- `git diff --check`: clean.
+
+The working tree also contains a network-free synthetic discovery benchmark
+harness in `DiscoveryBenchmark`: a deterministic multi-hop fixture exercises
+exact-value matching, unavailable-vs-recovered facts, recursive pivot counts,
+timing thresholds, provider failure rate, and incomplete-ground-truth handling.
+Its metrics are regression evidence only; no mission-readiness score is derived
+from the fixture. Host-like URLs entered without a scheme are normalized to an
+`https://` seed locally and covered by a classifier regression test.
+
+The host does not have `pwsh`, so `tools/verify_whatsmyname_catalog.ps1` was not executable here; the Python provider audit supplied the equivalent pinned-catalog conversion evidence.
+
+The recursive pivot collector now handles completions as they arrive, persists frontier completion after each result, retains deterministic output order, leaves unfinished work pending across cancellation, and admits only verified existing results as later-depth seeds. Focused JVM coverage for this behavior is included in the totals above. The uiTest visual fixture also clears stale lifecycle ownership before writing its encrypted result; a regression covers a stale terminal marker.
+
+Fresh visual QA was performed against the installed current `uiTest` APK on `emulator-5554` (`dossier-api36`, API 36). Corrected evidence is retained outside Git under `/tmp/dossier-qa-20260905-final4/`, including `10-universal-search-reset.png`, `11-search-classified-name.png`, `12-scan-progress-live.png` (with matching `package="io.dossier.app"` hierarchy), `13-scan-cancelled-reset.png`, `02-analysis-restored.png`, `04-report-overview.png`, `05-report-evidence.png`, `06-report-timeline.png`, `07-report-connections.png`, `08-connections-accessible.png`, and `09-report-actions.png`; every final4 hierarchy XML identifies `io.dossier.app`. The earlier `/tmp/dossier-qa-20260905-final3/04-scan-progress-live.png` is explicitly excluded because its hierarchy identifies `com.google.android.dialer`. The valid screenshots show local seed classification, a genuine running scan with nonzero scheduler counters, cancellation back to search, encrypted fixture restoration, exact evidence, report actions, timeline, graph, and accessible relationship list. This is emulator evidence only; physical-device acceptance and the mission benchmark remain open.
+
 ## 2. Repository/PR scale at reset
 
 At the audited PR head before this documentation reset:
@@ -122,7 +149,9 @@ Existing useful behavior includes:
 
 This is a strong fit for the new Exposure Ledger.
 
-**Status:** strong reusable foundation; needs canonical consolidation and exact-value fact modeling.
+**Status:** strong reusable foundation; the initial bounded exact-value ledger
+model and evidence adapters now exist, while scanner-wide canonical ownership
+remains open.
 
 ### 5.3 Graph and relationship infrastructure
 
@@ -193,9 +222,12 @@ They become more valuable once the discovery layer can actually recover the exac
 
 The current Compose application and many components/screens are usable implementation material.
 
-The launch/navigation contract, however, must change. The app should no longer make the user enter through a complex multi-screen identity/scanner workflow.
+The launch/navigation contract has been updated so the normal post-consent entry
+is a single universal text/photo search that feeds the existing scan and report
+surfaces. Legacy setup screens remain only for saved-navigation compatibility.
 
-**Status:** preserve components; redesign entry flow and results hierarchy.
+**Status:** universal entry implemented; continue simplifying the results
+hierarchy around the ledger and progressive discovery.
 
 ## 6. Core product mismatch discovered in the audit
 
@@ -216,18 +248,12 @@ Dossier needs both halves.
 
 ## 7. Discovery bottlenecks verified
 
-### 7.1 WhatsMyName fixed-batch execution
+### 7.1 WhatsMyName scheduling and yield
 
-`WhatsMyNameUsernamePlugin.scan()` currently constructs operations and executes them using fixed groups equivalent to:
-
-```text
-chunked(MAX_CONCURRENCY)
-  → async each operation
-  → awaitAll for the entire chunk
-  → only then start the next chunk
-```
-
-Current constants include:
+`WhatsMyNameUsernamePlugin.scan()` now feeds a bounded channel to rolling
+workers. Each completion publishes the observation immediately and frees a
+worker for the next operation; cancellation closes the queue and leaves no
+partially fabricated observation. Current constants include:
 
 - maximum 3 handles;
 - Quick: first 50 sites;
@@ -239,25 +265,34 @@ Current constants include:
 
 This architecture creates unnecessary tail latency because one straggler can delay starting work from the next batch.
 
-The provider scheduler also serializes work by scheduling key/domain and enforces request spacing, which is correct for politeness but means fixed six-operation batches can have substantially less than six effective active hosts depending on operation ordering.
+The provider scheduler still serializes work by scheduling key/domain and
+enforces request spacing, which is correct for politeness. Catalog rows are
+ordered by aggregate provider health/yield/latency diagnostics while preserving
+stable source order on ties; malformed or stale diagnostics are treated as
+exploration candidates rather than trusted yield.
 
-**Truth:** slow architecture; replace with rolling workers, not merely a larger constant.
+**Truth:** rolling execution and health-aware ordering are implemented for the
+WhatsMyName family; broader coordinator-wide adaptive scheduling remains open.
 
 ### 7.2 Plugin families execute serially
 
-`runPlugins()` currently loops through registered plugins sequentially.
+`runPlugins()` now launches independent registered families under a bounded
+structured-concurrency scope, merges their outputs deterministically, and keeps
+one family failure from erasing another family's evidence. The default family
+still includes Reddit activity, WhatsMyName, Wayback, and multiple import
+plugins.
 
-The default family includes Reddit activity, WhatsMyName, Wayback, and multiple import plugins.
-
-That means a slow username pass can delay logically independent archive or evidence-family work.
-
-**Truth:** independent families are not yet parallelized under one bounded shared coordinator.
+**Truth:** the default family fan-out is parallelized; a single coordinator-owned
+frontier and universal in-flight persistence remain open.
 
 ### 7.3 Public search is intentionally shallow
 
 `PublicSearchDiscoveryService` currently uses multiple search indexes and direct verification, but the architecture is hard-capped.
 
-Current limits include approximately:
+The catalog remains bounded by scan mode, but the execution path now uses a
+rolling worker queue with per-provider politeness and aggregate health/yield
+ordering rather than fixed completion barriers. Current scan limits include
+approximately:
 
 - default queries: 24;
 - deep queries: 40;
@@ -270,7 +305,9 @@ The query design heavily emphasizes conventional profile sites and a bounded set
 
 This was appropriate for a mobile bounded audit, but it is not enough for the new target of recursive exact exposure reconstruction.
 
-**Truth:** useful component, wrong stopping model.
+**Truth:** rolling execution and health-aware ordering are implemented; the
+general coordinator still needs broader adaptive source yield and recall
+measurement.
 
 ### 7.4 No persistent general exposure frontier
 
@@ -310,13 +347,18 @@ The new contract requires counts for catalogued, executable, automated, live-rea
 
 ## 9. Exact-value exposure support truth
 
-The existing application can store and display many evidence values, but it does not yet have a dedicated first-class Exposure Ledger whose mission is to preserve the exact exposed value plus source, provenance, discovery path, historical/current state, and remediation state.
+The working tree now has a bounded, serializable `ExposureLedger`/`ExposureFact`
+model that preserves exact and normalized values, source classification,
+evidence IDs, discovery paths, timestamps, verification state, historical state,
+and remediation status. Evidence adapters and case migration cover the initial
+integration, while scanner-wide canonical ownership is still incomplete.
 
-The current product often frames evidence around profiles/findings rather than around the question:
+The product is being moved from profile/findings framing toward the question:
 
 > What exact facts about me are exposed?
 
-**Truth:** evidence foundations exist; the exact-value Exposure Ledger product object does not yet exist as defined in the reset contract.
+**Truth:** the initial ledger object exists and is tested; broad exact-value
+extraction and canonical adoption across every source remain open.
 
 ## 10. Universal launch UX truth
 
@@ -332,7 +374,9 @@ The field should accept at least name, username, phone, email, and URL; the app 
 
 The existing application has multiple identity/scan/configuration screens and a broader hub/navigation structure.
 
-**Truth:** current Compose components can be reused, but the universal launch flow is not implemented yet.
+**Truth:** `UniversalSearchScreen` is the normal post-consent entry, classifies
+text/photo seeds locally, starts the existing scan coordinator, and is the reset
+target for scan cancellation, analysis back, and report new-search actions.
 
 ## 11. Photo seed truth
 
@@ -359,7 +403,7 @@ recursive identity/exposure pivots
 
 ### What does not yet exist as one production flow
 
-- photo as the universal initial seed;
+- a local Photo URI as a universal initial seed and valid scan input;
 - one orchestrated fan-out pipeline;
 - reviewed multi-provider reverse-image adapter surface matching the new contract;
 - metadata-stripped derivative upload policy integrated end-to-end;
@@ -367,7 +411,9 @@ recursive identity/exposure pivots
 - source-page location extraction feeding a location evidence model;
 - reverse-image results automatically becoming recursive source-page/identity pivots through one canonical frontier.
 
-**Truth:** strong base, missing integration and mission-level product flow.
+**Truth:** strong base with universal Photo input and local classification;
+parallel metadata/OCR/face/reverse-image/location fusion and mission-level
+benchmark coverage remain incomplete.
 
 ## 12. Photo location reconstruction truth
 
@@ -463,11 +509,13 @@ They are not byte-for-byte duplicates, but coverage overlaps and should be conso
 
 ## 15. README truth
 
-The existing README still describes the previous 83/100 status and older product hierarchy.
+README now describes the reset as unscored, records the current 2026-09-05
+validation gates, and points to the fresh emulator evidence outside Git. Its
+checked-in walkthrough images remain baseline captures for retained legacy and
+configuration surfaces; they are not independent current-head acceptance.
 
-It also embeds the old screenshot walkthrough and explains provider-budget behavior in terms that are no longer the primary mission contract.
-
-**Status:** README is now stale relative to the reset and must be rewritten after the first cleanup/discovery-v3 tranche so it describes implemented reality rather than the target.
+**Status:** aligned with the current reset; update the validation block whenever
+the worktree gates or visual evidence change.
 
 ## 16. Safety/authorization boundary
 
@@ -538,51 +586,44 @@ The exact values remain visible only inside the local private evidence view when
 
 ### P0 — Hygiene, CI, and truthful measurement
 
-Not yet completed under the reset.
+Completed and validated in the current working tree:
 
-Required:
-
-- remove hard-coded device/contributor runtime identifiers;
-- remove editor/agent junk;
-- delete meaningless marker files;
-- review redundant maintenance scripts;
-- consolidate overlapping tests where safe;
-- fix the WhatsMyName license-hash audit failure correctly;
-- establish synthetic end-to-end discovery corpus structure;
-- establish local private benchmark storage contract;
-- rewrite README after the implementation starts matching the new contract.
+- production PII/device/browser-fingerprint cleanup and repository hygiene
+  checks;
+- pinned WhatsMyName catalog/license audit correction;
+- synthetic multi-hop benchmark harness and local-only fixture rules;
+- README reset and current validation record.
 
 ### P1 — Universal launch and Discovery Engine v3 scheduler
 
-Not implemented yet as the new contract.
+Implemented in the current working tree:
 
-Required:
+- one universal text/photo entry flow and local seed classification;
+- rolling bounded username scheduling with immediate cache publication;
+- concurrent independent discovery families and shared request limits;
+- aggregate health/yield/latency ordering for username-source exploration.
 
-- one universal text/photo entry flow;
-- seed type classification;
-- rolling scheduler;
-- concurrent independent evidence families;
-- shared global/per-domain limits;
-- health/yield/latency priority;
-- immediate result streaming;
-- persisted typed frontier.
+Still required:
+
+- coordinator-wide adaptive scheduling and a general persisted typed frontier;
+- measured source yield and time-to-useful-result calibration.
 
 ### P2 — Exact-value Exposure Ledger and recursive search
 
-Not implemented yet as the new contract.
-
-Required:
+Initial model implemented and tested:
 
 - canonical fact types;
 - exact + normalized values;
-- source classification;
-- discovery path;
-- evidence links;
-- first/last observed;
-- historical/current state;
-- remediation state;
-- recursive pivots from newly verified facts;
-- stronger documents/directories/archives/public-web extraction.
+- source classification, discovery path and evidence links;
+- first/last observed, historical/current state, and remediation state;
+- bounded adapters from existing evidence.
+
+Still required:
+
+- scanner-wide canonical ledger ownership;
+- recursive pivots from every verified fact kind;
+- stronger documents/directories/archives/public-web extraction and a
+  representative end-to-end benchmark.
 
 ### P3 — Photo investigation and location reconstruction
 
@@ -641,12 +682,12 @@ These are qualitative reset states, not a disguised numeric score.
 
 | Area | Current reset assessment | Why |
 |---|---|---|
-| Universal one-box launch | **Not implemented** | Existing identity/scan flow is more complex than the new contract. |
+| Universal one-box launch | **Implemented and emulator-verified** | `MainHubScreen` now starts `UniversalSearchScreen`; text and photo seeds route into the existing scan flow, with cancellation/reset returning to the same entry. |
 | Public web discovery | **Partial** | Multiple search engines and direct verification exist, but hard caps and shallow stopping dominate. |
-| Username discovery | **Implemented but slow/secondary** | Large pinned catalogue works as an existence surface; fixed-batch execution and provider-count focus are wrong priorities. |
-| Recursive exposure frontier | **Partial precursor** | Pivot/frontier infrastructure exists, but not the required general typed persisted exposure frontier. |
-| Exact-value extraction | **Partial** | Evidence values exist; no complete first-class exact Exposure Ledger/extractor mission. |
-| Exposure Ledger | **Not implemented as canonical product object** | Must be introduced from existing evidence foundations. |
+| Username discovery | **Implemented but bounded** | Large pinned catalogue uses rolling workers and aggregate health/yield ordering; broader measured source yield and general frontier integration remain open. |
+| Recursive exposure frontier | **Partial precursor** | Typed bounded pivot/frontier persistence and completion checkpoints exist, but the required general persisted exposure frontier across all fact kinds is incomplete. |
+| Exact-value extraction | **Partial** | Evidence adapters now preserve exact and normalized values in the initial ledger model; broad document/page extraction coverage remains incomplete. |
+| Exposure Ledger | **Initial canonical model implemented** | `ExposureLedger` is bounded, normalized, provenance-aware, and adapted from evidence; full scanner-wide canonical ownership remains open. |
 | Evidence/provenance | **Strong base** | Significant existing hardening and IDs/provenance can be reused. |
 | Entity resolution | **Partial/uncalibrated** | Conservative logic exists; representative mission benchmark missing. |
 | Graph | **Strong base but not sole truth** | Typed graph and reconciliation exist; canonical consolidation remains. |
@@ -660,26 +701,26 @@ These are qualitative reset states, not a disguised numeric score.
 | Reverse image | **Partial** | Candidate/matching work exists; multi-provider recursively integrated product does not. |
 | Photo geolocation | **Partial components only** | No complete evidence-ranked location reconstruction contract yet. |
 | Remediation/export | **Useful base** | Worth preserving, but dependent on better discovery. |
-| Performance | **Known discovery bottlenecks** | Fixed batches, serial plugin families, shallow bounded search. |
-| Real-world recall benchmark | **Absent** | Primary reason mission readiness is unscored. |
+| Performance | **Improved but incomplete** | WhatsMyName uses rolling workers and aggregate health/yield ordering; general coordinator/frontier scheduling and live yield calibration remain open. |
+| Real-world recall benchmark | **Synthetic regression harness only** | The deterministic multi-hop harness is regression evidence; a representative synthetic/consented mission benchmark is still absent, so readiness remains unscored. |
 | Physical-device acceptance | **Not established** | Prior evidence is primarily emulator-based. |
 
 ## 22. Immediate next audit/implementation tranche
 
-The next code tranche should be narrow enough to validate independently:
+The universal-entry, rolling-username, parallel-family, initial ledger, and
+synthetic-harness tranche is implemented and validated above. The next narrow
+work should target measurable discovery utility:
 
-1. fix current provider-audit CI failure;
-2. remove hard-coded device/repository runtime identifiers;
-3. remove committed non-product state and obvious marker/redundant artifacts;
-4. consolidate only clearly overlapping tests;
-5. add repository PII/hygiene checks;
-6. implement the universal launch screen and seed classifier without deleting useful downstream screens yet;
-7. create the synthetic end-to-end discovery benchmark skeleton;
-8. replace WhatsMyName fixed batch execution with rolling scheduling;
-9. parallelize independent plugin families under a bounded coordinator;
-10. introduce the initial canonical Exposure Fact/Ledger model and adapt existing evidence into it.
-
-This tranche should be validated before broad source expansion or photo-provider work.
+1. connect the typed Exposure Ledger to every scanner/parser output and persist
+   discovery paths without duplicating evidence truth;
+2. extend the persisted frontier beyond profile pivots to exact email, phone,
+   domain, document, archive, and photo-derived identifiers;
+3. add a representative synthetic/consented end-to-end corpus and publish
+   Recall@known-exposure, precision, false-positive, and time-to-result metrics;
+4. feed measured source yield and provider failure/cooldown data into the
+   bounded coordinator while preserving truthful unavailable states;
+5. validate the resulting flow on physical devices and broad accessibility
+   workflows.
 
 ## 23. Production-readiness statement
 

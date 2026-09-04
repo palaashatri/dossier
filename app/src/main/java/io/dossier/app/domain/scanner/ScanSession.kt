@@ -27,12 +27,14 @@ import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.ExposureEngine
+import io.dossier.app.domain.evidence.ExposureLedger
 import io.dossier.app.domain.evidence.RelationshipConfidence
 import io.dossier.app.domain.evidence.SharedDomainContributor
 import io.dossier.app.domain.evidence.SharedIdentifierContributor
 import io.dossier.app.domain.evidence.UsernameSimilarityContributor
 import io.dossier.app.domain.evidence.withResolvedRelationshipEvidence
 import io.dossier.app.domain.evidence.runPlugins
+import io.dossier.app.domain.evidence.toExposureLedger
 import io.dossier.app.domain.face.FaceConsistencyChecker
 import io.dossier.app.domain.face.FaceEmbeddingService
 import io.dossier.app.domain.graph.EntityGraphBuilder
@@ -110,6 +112,9 @@ object ScanSession {
 
     private val _exposure = MutableStateFlow<ExposureEngine.ExposureResult?>(null)
     val exposure: StateFlow<ExposureEngine.ExposureResult?> = _exposure
+
+    private val _exposureLedger = MutableStateFlow(ExposureLedger())
+    val exposureLedger: StateFlow<ExposureLedger> = _exposureLedger
 
     private val _attackPaths = MutableStateFlow<List<AttackPathFinder.AttackPath>>(emptyList())
     val attackPaths: StateFlow<List<AttackPathFinder.AttackPath>> = _attackPaths
@@ -197,6 +202,7 @@ object ScanSession {
             return
         }
         EvidenceRuntimeCache.clear()
+        _exposureLedger.value = ExposureLedger()
         MediaIntelligenceSession.beginFor(input)
         _scanHistory.value = emptyList()
         _userCorrections.value = emptyList()
@@ -298,12 +304,20 @@ object ScanSession {
         val createdAt = java.time.LocalDateTime.now()
             .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
         val evidenceCollection = EvidenceRuntimeCache.collection.value
+        val ledger = _exposureLedger.value.let { current ->
+            if (current.facts.isEmpty() && evidenceCollection.evidence.isNotEmpty()) {
+                evidenceCollection.toExposureLedger()
+            } else {
+                current
+            }
+        }
         return DossierCase(
             createdAt = createdAt,
             subjectName = input.fullName.trim().ifBlank { input.primaryUsername ?: "UNKNOWN SUBJECT" },
             input = input,
             findings = _findings.value,
             evidenceRecords = evidenceCollection.evidence,
+            exposureLedger = ledger,
             evidenceRelationships = evidenceCollection.relationships,
             profileResults = _profileScanResults.value,
             faceMatches = _faceConsistencyMatches.value,
@@ -324,6 +338,7 @@ object ScanSession {
     fun restoreFromCase(case: DossierCase) {
         val migrated = CaseEvidenceIdMigration.migrate(case)
         EvidenceRuntimeCache.replaceCaseEvidence(migrated.evidenceRecords, migrated.evidenceRelationships)
+        _exposureLedger.value = migrated.exposureLedger.normalized()
         MediaIntelligenceSession.restoreFor(migrated.input, migrated.mediaIntelligence)
         _scanHistory.value = migrated.scanHistory
         _userCorrections.value = migrated.userCorrections
@@ -414,6 +429,7 @@ object ScanSession {
         val inputToUse = input
         _currentInput.value = inputToUse
         EvidenceRuntimeCache.clear()
+        _exposureLedger.value = ExposureLedger()
         MediaIntelligenceSession.beginFor(inputToUse)
         _scanHistory.value = emptyList()
         _userCorrections.value = emptyList()
@@ -620,6 +636,7 @@ object ScanSession {
             val evidence = evidenceSnapshot.evidence
             val relationships = evidenceSnapshot.relationships
             EvidenceRuntimeCache.replace(evidenceSnapshot)
+            _exposureLedger.value = evidenceSnapshot.toExposureLedger()
             val graphInputDigest = GraphCheckpointCodec.inputDigest(
                 input = inputToUse,
                 profileResults = scanResults,
@@ -1087,6 +1104,7 @@ object ScanSession {
     fun purgeSession(context: Context) {
         _currentInput.value = null
         EvidenceRuntimeCache.clear()
+        _exposureLedger.value = ExposureLedger()
         MediaIntelligenceSession.clear()
         _scanHistory.value = emptyList()
         _findings.value = emptyList()

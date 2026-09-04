@@ -96,10 +96,10 @@ class DossierComposeSmokeTest {
     }
 
     @Test
-    fun acceptingConsentOpensIdentitySetupAndRemovesGate() {
+    fun acceptingConsentOpensUniversalSearchAndRemovesGate() {
         acceptConsent()
 
-        composeRule.onNodeWithText("Start a privacy audit").assertIsDisplayed()
+        composeRule.onNodeWithText("Search name, username, phone, email or URL").assertIsDisplayed()
         composeRule.onNodeWithText("One-time usage notice").assertDoesNotExist()
     }
 
@@ -109,49 +109,43 @@ class DossierComposeSmokeTest {
 
         recreateActivity()
 
-        composeRule.onNodeWithText("Start a privacy audit").assertIsDisplayed()
+        composeRule.onNodeWithText("Search name, username, phone, email or URL").assertIsDisplayed()
         composeRule.onNodeWithText("One-time usage notice").assertDoesNotExist()
         composeRule.onNodeWithText("CONTINUE").assertDoesNotExist()
     }
 
     @Test
-    fun identityContinueIsDisabledWithoutASignal() {
+    fun universalSearchIsDisabledWithoutASignal() {
         acceptConsent()
 
-        composeRule.onNodeWithText("Continue").assertIsNotEnabled()
-        composeRule
-            .onNodeWithText("Enter at least one identity signal to continue.")
-            .assertIsDisplayed()
+        composeRule.onNodeWithText("SEARCH").assertIsNotEnabled()
+        composeRule.onNodeWithText("Detected: None").assertIsDisplayed()
     }
 
     @Test
-    fun invalidEmailShowsValidationAndKeepsContinueDisabled() {
+    fun universalSearchClassifiesTextLocallyAndEnablesSearch() {
         acceptConsent()
 
-        identityField(index = 3).performTextInput("not-an-email")
+        composeRule.onAllNodes(hasSetTextAction())[0].performTextInput("Jane Example")
 
-        composeRule
-            .onNodeWithText("Check invalid email input: not-an-email")
-            .assertIsDisplayed()
-        composeRule.onNodeWithText("Continue").assertIsNotEnabled()
+        composeRule.onNodeWithText("Detected: Name").assertIsDisplayed()
+        composeRule.onNodeWithText("SEARCH").assertIsEnabled()
     }
 
     @Test
-    fun validUsernameCompletesIdentityWizardAndOpensUsernameReview() {
-        navigateToUsernameReview()
-        composeRule.onNodeWithText("Username Discovery").assertIsDisplayed()
+    fun universalSearchClassifiesUsernameWithoutLegacyReview() {
+        acceptConsent()
+
+        composeRule.onAllNodes(hasSetTextAction())[0].performTextInput("@dossier_compose_test")
+
+        composeRule.onNodeWithText("Detected: Username").assertIsDisplayed()
+        composeRule.onNodeWithText("Username Discovery").assertDoesNotExist()
     }
 
     @Test
-    fun scanDepthCanSelectDeepAndUpdatesRuntimePreference() {
-        navigateToUsernameReview()
-
-        composeRule.onNodeWithText("Standard").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Deep").performScrollTo().performClick()
-
-        composeRule.runOnIdle {
-            check(DiscoveryScanPreferences.selectedMode.value == ScanMode.Deep)
-        }
+    fun universalSearchDoesNotExposeLegacyUsernameReview() {
+        acceptConsent()
+        composeRule.onNodeWithText("Username Discovery").assertDoesNotExist()
     }
 
     @Test
@@ -335,33 +329,15 @@ class DossierComposeSmokeTest {
             .assertIsDisplayed()
     }
 
-    private fun navigateToUsernameReview() {
-        acceptConsent()
-
-        identityField(index = 2).performTextInput("dossier_compose_test")
-        composeRule.onNodeWithText("Continue").assertIsEnabled().performClick()
-
-        waitForText("2. Add corroborating signals")
-        composeRule.onNodeWithText("Continue").performClick()
-
-        waitForText("3. Add direct sources")
-        composeRule.onNodeWithText("Review usernames").performClick()
-
-        waitForText("Username Discovery")
-    }
-
     private fun acceptConsent() {
         composeRule.onNodeWithText("CONTINUE").performClick()
-        waitForText("Start a privacy audit")
+        waitForText("Search name, username, phone, email or URL")
     }
 
     private fun recreateActivity() {
         composeRule.activityRule.scenario.recreate()
         composeRule.waitForIdle()
     }
-
-    private fun identityField(index: Int) =
-        composeRule.onAllNodes(hasSetTextAction())[index]
 
     private fun openTab(label: String) {
         composeRule

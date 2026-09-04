@@ -8,7 +8,13 @@ import androidx.test.platform.app.InstrumentationRegistry
 import io.dossier.app.data.local.UsageNoticeStore
 import io.dossier.app.domain.case.CaseStore
 import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
+import io.dossier.app.domain.scanner.BackgroundScanManager
 import io.dossier.app.domain.scanner.BackgroundScanResultStore
+import io.dossier.app.domain.scanner.ScanLifecyclePhase
+import io.dossier.app.domain.scanner.ScanLifecycleReadResult
+import io.dossier.app.domain.scanner.ScanLifecycleRecord
+import io.dossier.app.domain.scanner.ScanLifecycleStore
+import io.dossier.app.domain.scanner.ScanLifecycleWriteResult
 import io.dossier.app.uiTest.VisualQaFixtureReceiver
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -36,6 +42,25 @@ class VisualQaFixtureReceiverTest {
         val intent = Intent(ACTION)
             .setComponent(ComponentName(context, "io.dossier.app.uiTest.VisualQaFixtureReceiver"))
 
+        // Seed a stale terminal owner first. The fixture reset must remove it
+        // or the production visibility projection will reject the new owner.
+        context.getSharedPreferences("dossier-background-work", 0)
+            .edit()
+            .clear()
+            .commit()
+        val staleLifecycle = ScanLifecycleRecord(
+            ownerId = "00000000-0000-4000-8000-000000000301",
+            requestId = "00000000-0000-4000-8000-000000000302",
+            generation = "00000000-0000-4000-8000-000000000303",
+            phase = ScanLifecyclePhase.Succeeded,
+            updatedAtEpochMillis = System.currentTimeMillis(),
+            resultReady = true
+        )
+        assertEquals(
+            ScanLifecycleWriteResult.Saved,
+            ScanLifecycleStore(context).publish(staleLifecycle)
+        )
+
         // Invoke the receiver directly so this test remains deterministic and
         // does not depend on the instrumentation/test package's broadcast
         // dispatch policy. The merged uiTest manifest is the adb boundary.
@@ -53,6 +78,8 @@ class VisualQaFixtureReceiverTest {
         assertEquals(FIXED_WORK_ID, snapshot?.workId)
         assertEquals(FIXED_CASE_ID, snapshot?.dossierCase?.caseId)
         assertTrue(snapshot?.analysis?.identitySurface?.entries?.isNotEmpty() == true)
+        assertEquals(ScanLifecycleReadResult.Missing, ScanLifecycleStore(context).read())
+        assertEquals(FIXED_WORK_ID, BackgroundScanManager.latestResult(context)?.workId)
     }
 
     @Test

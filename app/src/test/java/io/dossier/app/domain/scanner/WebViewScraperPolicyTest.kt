@@ -11,9 +11,10 @@ class WebViewScraperPolicyTest {
     fun userAgent_isNonImpersonatingAndDeclaresGenericDossierIdentity() {
         val userAgent = WebViewScraperPolicy.USER_AGENT
 
+        assertEquals("Dossier/0.1 public-self-audit", userAgent)
         assertTrue(userAgent.startsWith("Dossier/"))
-        assertTrue(userAgent.contains("(+https://github.com/palaashatri/dossier)"))
-        assertTrue(userAgent.contains("public-self-audit") || userAgent.contains("authorized"))
+        assertTrue(userAgent.contains("public-self-audit"))
+        assertFalse(userAgent.contains("github.com"))
 
         // Must NOT impersonate browser or hardware devices
         assertFalse(userAgent.contains("Mozilla/5.0"))

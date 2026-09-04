@@ -722,7 +722,7 @@ internal object CaseStoreStoragePolicy {
         val temporary = matchingTemporary.filter { entry ->
             runCatching { entry.canonicalFile.parentFile == canonicalRoot }
                 .getOrDefault(false)
-        }
+        }.map { entry -> File(root, entry.name) }
         return ScopedFilePlan(
             files = listOf(encrypted, backup, legacy) + temporary,
             unsafeFileCount = matchingTemporary.size - temporary.size
@@ -737,7 +737,7 @@ internal object CaseStoreStoragePolicy {
         val safe = matching.filter { entry ->
             runCatching { entry.canonicalFile.parentFile == canonicalRoot }
                 .getOrDefault(false)
-        }
+        }.map { entry -> File(root, entry.name) }
         return ClearPlan(
             files = safe,
             unsafeFileCount = matching.size - safe.size

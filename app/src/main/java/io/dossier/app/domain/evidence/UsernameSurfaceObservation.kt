@@ -31,15 +31,20 @@ data class UsernameSurfaceObservation(
  */
 object UsernameSurfaceRuntimeCache {
     private val _observations = MutableStateFlow<List<UsernameSurfaceObservation>>(emptyList())
+    private val lock = Any()
     val observations: StateFlow<List<UsernameSurfaceObservation>> = _observations
 
     fun replace(source: String, items: List<UsernameSurfaceObservation>) {
-        _observations.value = (
-            _observations.value.filterNot { it.source == source } + items
-        ).distinctBy { "${it.source}|${it.site}|${it.username}|${it.profileUrl}" }
+        synchronized(lock) {
+            _observations.value = (
+                _observations.value.filterNot { it.source == source } + items
+            ).distinctBy { "${it.source}|${it.site}|${it.username}|${it.profileUrl}" }
+        }
     }
 
     fun clear() {
-        _observations.value = emptyList()
+        synchronized(lock) {
+            _observations.value = emptyList()
+        }
     }
 }

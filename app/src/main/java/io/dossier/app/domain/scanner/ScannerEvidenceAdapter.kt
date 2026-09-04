@@ -13,7 +13,10 @@ import io.dossier.app.domain.model.FindingType
  * shim in the scanner package avoids making ScanSession depend on a wildcard import
  * while the legacy Finding model is still part of the pipeline.
  */
-internal fun Finding.toEvidence(retrievedAtEpochMillis: Long? = null): Evidence = Evidence(
+internal fun Finding.toEvidence(
+    retrievedAtEpochMillis: Long? = null,
+    discoveryPath: List<String> = emptyList()
+): Evidence = Evidence(
     id = EvidenceIdPolicy.findingId(this),
     kind = when (type) {
         FindingType.Email -> EvidenceKind.Email
@@ -48,5 +51,6 @@ internal fun Finding.toEvidence(retrievedAtEpochMillis: Long? = null): Evidence 
         FindingType.ImageConsistency -> EvidenceReliability.LocalDerived
         else -> EvidenceReliability.Unknown
     },
-    retrievedAtEpochMillis = retrievedAtEpochMillis
+    retrievedAtEpochMillis = retrievedAtEpochMillis,
+    discoveryPath = discoveryPath
 )

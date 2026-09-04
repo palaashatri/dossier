@@ -64,7 +64,14 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
         ?.route
 
     LaunchedEffect(currentDossierRoute) {
-        if (currentDossierRoute in listOf("identity", "username_discovery", "scan", "analysis", "report")) {
+        if (currentDossierRoute in listOf(
+                "universal_search",
+                "identity",
+                "username_discovery",
+                "scan",
+                "analysis",
+                "report"
+            )) {
             selectedTab = HubTab.DOSSIER
         }
     }
@@ -193,20 +200,23 @@ private fun DossierNavGraph(
     LaunchedEffect(context) {
         val hasActiveMarker = BackgroundScanManager.hasActiveMarkerAsync(context)
         val hasLatestResult = BackgroundScanManager.latestResultAsync(context) != null
-        initialRoute = if (hasActiveMarker || hasLatestResult) "analysis" else "identity"
+        initialRoute = if (hasActiveMarker || hasLatestResult) "analysis" else "universal_search"
     }
     LaunchedEffect(initialRoute, restoredRoute) {
         // Activity recreation can restore an older identity destination even
-        // when durable scan state now points to Analysis. Redirect once for
-        // that restoration seam, then let an explicit user return to setup
-        // remain authoritative.
-        if (!restoredAnalysisRedirected &&
-            initialRoute == "analysis" &&
-            restoredRoute != null &&
-            restoredRoute !in setOf("analysis", "report")
-        ) {
-            restoredAnalysisRedirected = true
-            navController.navigate("analysis") {
+        // when durable scan state now points to Analysis, or restore a legacy
+        // setup route after the universal entry became the default. Check only
+        // the first restored destination so normal in-session navigation stays
+        // authoritative.
+        if (restoredAnalysisRedirected || initialRoute == null || restoredRoute == null) return@LaunchedEffect
+        restoredAnalysisRedirected = true
+        val targetRoute = when {
+            initialRoute == "analysis" && restoredRoute !in setOf("analysis", "report") -> "analysis"
+            initialRoute == "universal_search" && restoredRoute != "universal_search" -> "universal_search"
+            else -> null
+        }
+        if (targetRoute != null) {
+            navController.navigate(targetRoute) {
                 popUpTo(restoredRoute) { inclusive = true }
                 launchSingleTop = true
             }
@@ -227,7 +237,36 @@ private fun DossierNavGraph(
         }
         return
     }
+
+    fun returnToUniversalSearch() {
+        val currentDestinationRoute = navController.currentDestination?.route
+        navController.navigate("universal_search") {
+            // Pop only the current destination. Popping the nested NavHost
+            // graph itself leaves the controller with no active destination
+            // and can destroy the Activity before the search route is added.
+            currentDestinationRoute?.let { destinationRoute ->
+                popUpTo(destinationRoute) { inclusive = true }
+            }
+            launchSingleTop = true
+        }
+    }
+
     NavHost(navController = navController, startDestination = initialRoute!!) {
+        composable("universal_search") {
+            // Search is the Dossier root. Keep system Back from popping the
+            // nested graph to an empty back stack after a reset.
+            BackHandler { }
+            UniversalSearchScreen(
+                onSearch = {
+                    navController.navigate("scan") {
+                        launchSingleTop = true
+                    }
+                }
+            )
+        }
+
+        // Legacy setup routes remain for saved navigation state compatibility,
+        // but the universal search is the only normal entry point.
         composable("identity") {
             IdentityScreen(onNext = { navController.navigate("username_discovery") })
         }
@@ -258,19 +297,10 @@ private fun DossierNavGraph(
                     }
                 },
                 onScanCancelled = {
-                    val returned = navController.popBackStack("username_discovery", inclusive = false)
-                    if (!returned) {
-                        navController.navigate("identity") {
-                            popUpTo("identity") { inclusive = false }
-                            launchSingleTop = true
-                        }
-                    }
+                    returnToUniversalSearch()
                 },
                 onInvalidInput = {
-                    navController.navigate("identity") {
-                        popUpTo("identity") { inclusive = false }
-                        launchSingleTop = true
-                    }
+                    returnToUniversalSearch()
                 }
             )
         }
@@ -283,26 +313,21 @@ private fun DossierNavGraph(
                     }
                 },
                 onBackToSetup = {
-                    navController.navigate("identity") {
-                        popUpTo("identity") { inclusive = false }
-                        launchSingleTop = true
-                    }
+                    returnToUniversalSearch()
                 }
             )
         }
         composable("report") {
             ReportScreen(
                 onReset = {
-                    navController.navigate("identity") {
-                        popUpTo("identity") { inclusive = true }
-                    }
+                    returnToUniversalSearch()
                 },
                 onNavigateToBrowser = onNavigateToBrowser,
                 onDeepResearch = {
                     DiscoveryScanPreferences.setMode(ScanMode.Deep)
                     ScanSession.setDeepResearch(true)
                     navController.navigate("scan") {
-                        popUpTo("scan") { inclusive = true }
+                        popUpTo("report") { inclusive = true }
                     }
                 }
             )

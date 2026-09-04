@@ -86,7 +86,9 @@ import io.dossier.app.ui.theme.NeuralTheme
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private enum class ReportView(val label: String) {
     Overview("Overview"),
@@ -263,7 +265,9 @@ fun ReportScreen(
                         confirmSessionDelete = false
                         purgeScope.launch {
                             ScanSession.purgeSessionAsync(context)
-                            onReset()
+                            withContext(Dispatchers.Main.immediate) {
+                                onReset()
+                            }
                         }
                     }
                 ) {
@@ -420,7 +424,9 @@ fun ReportScreen(
                     onNewAudit = {
                         purgeScope.launch {
                             ScanSession.purgeSessionAsync(context)
-                            onReset()
+                            withContext(Dispatchers.Main.immediate) {
+                                onReset()
+                            }
                         }
                     },
                     onDeleteSession = { confirmSessionDelete = true }

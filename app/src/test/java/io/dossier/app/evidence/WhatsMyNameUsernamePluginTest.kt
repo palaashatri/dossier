@@ -9,11 +9,17 @@ import io.dossier.app.domain.discovery.WhatsMyNameCatalog
 import io.dossier.app.domain.discovery.WhatsMyNameCatalogState
 import io.dossier.app.domain.discovery.WhatsMyNameSite
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.UsernameSurfaceObservation
 import io.dossier.app.domain.evidence.UsernameSurfaceRuntimeCache
 import io.dossier.app.domain.evidence.UsernameSurfaceState
 import io.dossier.app.domain.evidence.WhatsMyNameUsernamePlugin
 import io.dossier.app.domain.model.IdentityInput
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
@@ -25,7 +31,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.TimeUnit
 
 class WhatsMyNameUsernamePluginTest {
 
@@ -234,5 +242,173 @@ class WhatsMyNameUsernamePluginTest {
         assertEquals(12, snapshot.scheduledProviderCount)
         assertEquals(12, snapshot.completedProviderCount)
         assertEquals(0, snapshot.unavailableProviderCount)
+    }
+
+    @Test
+    fun rollingWorkersStartLaterOperationsBeforeSlowOperationCompletes() = runBlocking {
+        val sites = (1..7).map { index ->
+            WhatsMyNameSite(
+                id = "site-$index",
+                name = "Site $index",
+                category = ProviderCategory.Social,
+                uriPretty = "https://site$index.example/{account}",
+                uriCheck = "https://site$index.example/{account}",
+                eCode = 200,
+                eString = "found",
+                mCode = 404,
+                mString = "missing",
+                stripBadChar = ""
+            )
+        }
+        WhatsMyNameCatalog.setTestState(
+            WhatsMyNameCatalogState.Ready(
+                sites,
+                emptyList(),
+                emptyList(),
+                emptyList(),
+                emptyList(),
+                7,
+                7,
+                0
+            )
+        )
+
+        val inFlight = AtomicInteger(0)
+        val maxInFlight = AtomicInteger(0)
+        val firstStarted = CountDownLatch(1)
+        val laterStarted = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val client = createMockClient { request ->
+            val active = inFlight.incrementAndGet()
+            maxInFlight.updateAndGet { previous -> maxOf(previous, active) }
+            try {
+                when {
+                    request.url.host == "site1.example" -> {
+                        firstStarted.countDown()
+                        releaseFirst.await(10, TimeUnit.SECONDS)
+                    }
+                    request.url.host == "site7.example" -> laterStarted.countDown()
+                }
+                mockResponse(request, 200, "found")
+            } finally {
+                inFlight.decrementAndGet()
+            }
+        }
+
+        val plugin = WhatsMyNameUsernamePlugin(ProviderExecutionRuntime(client))
+        val scan = async { plugin.scan(IdentityInput(fullName = "Test", primaryUsername = "bounded")) }
+
+        val firstWasStarted = withContext(Dispatchers.IO) {
+            firstStarted.await(3, TimeUnit.SECONDS)
+        }
+        val laterWasStartedBeforeRelease = withContext(Dispatchers.IO) {
+            laterStarted.await(3, TimeUnit.SECONDS)
+        }
+        releaseFirst.countDown()
+        scan.await()
+
+        assertTrue("The first operation did not start", firstWasStarted)
+        assertTrue("The rolling queue waited for the first operation", laterWasStartedBeforeRelease)
+        assertTrue("Expected concurrent checks", maxInFlight.get() >= 2)
+        assertTrue("Observed ${maxInFlight.get()} in-flight checks", maxInFlight.get() <= 6)
+        assertEquals(
+            (1..7).map { "Site $it" },
+            UsernameSurfaceRuntimeCache.observations.value.map(UsernameSurfaceObservation::site)
+        )
+
+        val snapshot = ScanCoordinatorRuntime.snapshot.value
+        assertEquals(7, snapshot.scheduledProviderCount)
+        assertEquals(7, snapshot.completedProviderCount)
+        assertEquals(0, snapshot.unavailableProviderCount)
+    }
+
+    @Test
+    fun publishesCompletedObservationsImmediatelyInFinalOpsOrder() = runBlocking {
+        val sites = (1..3).map { index ->
+            WhatsMyNameSite(
+                id = "site-$index",
+                name = "Site $index",
+                category = ProviderCategory.Social,
+                uriPretty = "https://site$index.example/{account}",
+                uriCheck = "https://site$index.example/{account}",
+                eCode = 200,
+                eString = "found",
+                mCode = 404,
+                mString = "missing",
+                stripBadChar = ""
+            )
+        }
+        WhatsMyNameCatalog.setTestState(
+            WhatsMyNameCatalogState.Ready(
+                sites,
+                emptyList(),
+                emptyList(),
+                emptyList(),
+                emptyList(),
+                3,
+                3,
+                0
+            )
+        )
+
+        val firstStarted = CountDownLatch(1)
+        val secondStarted = CountDownLatch(1)
+        val thirdCompleted = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val releaseSecond = CountDownLatch(1)
+        val client = createMockClient { request ->
+            when (request.url.host) {
+                "site1.example" -> {
+                    firstStarted.countDown()
+                    releaseFirst.await(10, TimeUnit.SECONDS)
+                }
+                "site2.example" -> {
+                    secondStarted.countDown()
+                    releaseSecond.await(10, TimeUnit.SECONDS)
+                }
+                "site3.example" -> thirdCompleted.countDown()
+            }
+            mockResponse(request, 200, "found")
+        }
+
+        val plugin = WhatsMyNameUsernamePlugin(ProviderExecutionRuntime(client))
+        val scan = async {
+            plugin.scan(IdentityInput(fullName = "Test", primaryUsername = "streamed"))
+        }
+        try {
+            assertTrue("The first operation did not start", withContext(Dispatchers.IO) {
+                firstStarted.await(3, TimeUnit.SECONDS)
+            })
+            assertTrue("The second operation did not start", withContext(Dispatchers.IO) {
+                secondStarted.await(3, TimeUnit.SECONDS)
+            })
+            assertTrue("The third operation did not complete", withContext(Dispatchers.IO) {
+                thirdCompleted.await(3, TimeUnit.SECONDS)
+            })
+
+            val firstPartial = withTimeout(3_000) {
+                UsernameSurfaceRuntimeCache.observations.first { observations ->
+                    observations.size == 1
+                }
+            }
+            assertEquals(listOf("Site 3"), firstPartial.map(UsernameSurfaceObservation::site))
+
+            releaseSecond.countDown()
+            val secondPartial = withTimeout(3_000) {
+                UsernameSurfaceRuntimeCache.observations.first { observations ->
+                    observations.size == 2
+                }
+            }
+            assertEquals(listOf("Site 2", "Site 3"), secondPartial.map(UsernameSurfaceObservation::site))
+        } finally {
+            releaseFirst.countDown()
+            releaseSecond.countDown()
+        }
+
+        scan.await()
+        assertEquals(
+            listOf("Site 1", "Site 2", "Site 3"),
+            UsernameSurfaceRuntimeCache.observations.value.map(UsernameSurfaceObservation::site)
+        )
     }
 }

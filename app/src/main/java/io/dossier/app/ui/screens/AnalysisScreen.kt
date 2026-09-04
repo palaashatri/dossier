@@ -309,7 +309,7 @@ fun AnalysisScreen(
             modifier = Modifier.fillMaxWidth().height(48.dp),
             shape = io.dossier.app.ui.theme.DossierButtonShape
         ) {
-            Text("IDENTITY SETUP", fontWeight = FontWeight.SemiBold)
+            Text("RETURN TO SEARCH", fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.height(12.dp))
     }

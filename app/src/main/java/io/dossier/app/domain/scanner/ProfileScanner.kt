@@ -34,11 +34,13 @@ import java.net.URI
 import java.util.concurrent.TimeUnit
 import android.content.Context
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.selects.select
 
 
 class ProfileScanner(
@@ -487,25 +489,21 @@ class ProfileScanner(
 
         pending.forEach { queueProviderCandidate(it.candidate, scanId) }
 
-        return coroutineScope {
-            val deferredPivots = pending.map { entry ->
-                async(Dispatchers.IO) {
-                    entry to fetchAndParse(
-                        entry.candidate,
-                        input,
-                        provenance = entry.provenance,
-                        scanId = scanId
-                    )
-                }
-            }
-            deferredPivots.map { deferred ->
-                val (entry, scanResult) = deferred.await()
-                frontier.complete(entry.key)
-                frontierStore?.save(frontier)
-                publishPivotDiagnostics(scanId, frontier)
-                scanResult
-            }
+        val fetchPivot: suspend (PivotFrontierEntry) -> ProfileScanResult = { entry ->
+            fetchAndParse(
+                entry.candidate,
+                input,
+                provenance = entry.provenance,
+                scanId = scanId
+            )
         }
+        return collectPivotFetches(
+            pending = pending,
+            frontier = frontier,
+            frontierStore = frontierStore,
+            fetch = fetchPivot,
+            onCompleted = { _, _ -> publishPivotDiagnostics(scanId, frontier) }
+        )
     }
 
     /**
@@ -552,7 +550,7 @@ class ProfileScanner(
                 BoundedPivotFrontier.canonicalUrlKey(result.candidate.url)?.let(scanned::add)
             }
             remainingBudget = (remainingBudget - fetched.size).coerceAtLeast(0)
-            seeds = fetched.filter { it.exists && it.verified }
+            seeds = verifiedPivotSeeds(fetched)
         }
 
         return results
@@ -2082,6 +2080,53 @@ internal object DeclarativeProfileExtractor {
 }
 
 /**
+ * Collects recursive fetches as they finish while retaining queue order in the
+ * returned list. Frontier completion is owned by this collector, so a fetch
+ * that is still running (or is cancelled/throws) remains pending for resume.
+ */
+internal suspend fun collectPivotFetches(
+    pending: List<PivotFrontierEntry>,
+    frontier: BoundedPivotFrontier,
+    frontierStore: PivotFrontierStore?,
+    fetch: suspend (PivotFrontierEntry) -> ProfileScanResult,
+    onCompleted: (PivotFrontierEntry, ProfileScanResult) -> Unit = { _, _ -> }
+): List<ProfileScanResult> = coroutineScope {
+    if (pending.isEmpty()) return@coroutineScope emptyList()
+
+    val orderedResults = arrayOfNulls<ProfileScanResult>(pending.size)
+    val deferredPivots = pending.mapIndexed { index, entry ->
+        async(Dispatchers.IO) {
+            index to fetch(entry)
+        }
+    }.toMutableList()
+
+    while (deferredPivots.isNotEmpty()) {
+        val completed = select<
+            Pair<Deferred<Pair<Int, ProfileScanResult>>, Pair<Int, ProfileScanResult>>
+            > {
+            deferredPivots.forEach { deferred ->
+                deferred.onAwait { deferred to it }
+            }
+        }
+        deferredPivots.remove(completed.first)
+
+        val (index, scanResult) = completed.second
+        val entry = pending[index]
+        frontier.complete(entry.key)
+        frontierStore?.save(frontier)
+        onCompleted(entry, scanResult)
+        orderedResults[index] = scanResult
+    }
+
+    orderedResults.mapIndexed { index, result ->
+        requireNotNull(result) { "Missing recursive result at index $index" }
+    }
+}
+
+internal fun verifiedPivotSeeds(results: List<ProfileScanResult>): List<ProfileScanResult> =
+    results.filter { it.exists && it.verified }
+
+/**
  * Bridges only bounded frontier metadata to the coordinator. The diagnostic
  * intentionally excludes candidate/source URLs and normalized handles so the
  * live scan surface cannot become a second evidence store.
@@ -2126,6 +2171,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
     forEach { result ->
         val url = result.candidate.url
         val conf = result.candidate.confidence.coerceIn(0f, 1f)
+        val path = if (!result.provenance.isNullOrBlank()) listOf(result.provenance) else emptyList()
 
         // Profile observation (native, not via the Finding adapter).
         val profileEvidence = Evidence(
@@ -2148,7 +2194,8 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 EvidenceReliability.DirectPublicProfile
             } else {
                 EvidenceReliability.SearchEngineCandidate
-            }
+            },
+            discoveryPath = path
         )
         evidence.add(profileEvidence)
 
@@ -2170,7 +2217,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
 
         // Each finding bridges losslessly; PII-on-profile is asserted explicitly.
         result.findings.forEach { finding ->
-            val findingEvidence = finding.toEvidence(retrievedAtEpochMillis)
+            val findingEvidence = finding.toEvidence(retrievedAtEpochMillis, path)
             evidence.add(findingEvidence)
             if (finding.sourceUrl == url || result.exists) {
                 relationships.add(

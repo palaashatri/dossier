@@ -62,8 +62,19 @@ data class Evidence(
     val contentHashSha256: String? = null,
     val parserVersion: String? = null,
     val historical: Boolean = false,
-    val attributeKind: HistoricalAttributeKind? = null
-)
+    val attributeKind: HistoricalAttributeKind? = null,
+    val discoveryPath: List<String> = emptyList()
+) {
+    init {
+        require(discoveryPath.size <= MAX_DISCOVERY_PATH_STEPS) {
+            "Evidence may retain at most $MAX_DISCOVERY_PATH_STEPS discovery steps."
+        }
+    }
+
+    companion object {
+        const val MAX_DISCOVERY_PATH_STEPS = 64
+    }
+}
 
 /**
  * Explicit semantic attribute kind for historical profile/snapshot metadata.

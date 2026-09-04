@@ -1,9 +1,11 @@
 package io.dossier.app.domain.evidence
 
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
 import io.dossier.app.domain.discovery.ProviderExecutionRuntime
 import io.dossier.app.domain.discovery.ProviderRequestScheduler
 import io.dossier.app.domain.discovery.ProviderVerificationState
+import io.dossier.app.domain.discovery.ProviderYieldRanking
 import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.discovery.ScanMode
@@ -13,11 +15,13 @@ import io.dossier.app.domain.discovery.WhatsMyNameSite
 import io.dossier.app.domain.discovery.WhatsMyNameResponseClassifier
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
 import java.net.URI
 import java.security.MessageDigest
 import java.util.Locale
@@ -54,7 +58,12 @@ class WhatsMyNameUsernamePlugin(
         }
 
         val mode = DiscoveryScanPreferences.selectedMode.value
-        val eligibleSites = catalogState.sites.take(siteLimit(mode))
+        val allSites = catalogState.sites
+        val report = ProviderDiagnosticsRuntime.report(allSites.map { it.id })
+        val assessmentById = report.assessments.associateBy { it.providerId }
+
+        val rankedSites = ProviderYieldRanking.rank(allSites) { site -> assessmentById[site.id] }
+        val eligibleSites = rankedSites.take(siteLimit(mode))
 
         val scanId = ScanCoordinatorRuntime.activeScanId()
             ?: ScanCoordinatorRuntime.claimProviderScanId()
@@ -76,13 +85,40 @@ class WhatsMyNameUsernamePlugin(
         }
 
         val observations = try {
-            finalOps.chunked(MAX_CONCURRENCY).flatMap { chunk ->
-                coroutineScope {
-                    chunk.map { (site, handle) ->
+            coroutineScope {
+                val results = arrayOfNulls<UsernameSurfaceObservation>(finalOps.size)
+                val publicationLock = Any()
+                val queue = Channel<Int>(capacity = MAX_CONCURRENCY)
+                try {
+                    launch {
+                        try {
+                            finalOps.indices.forEach { queue.send(it) }
+                        } finally {
+                            queue.close()
+                        }
+                    }
+
+                    List(minOf(MAX_CONCURRENCY, finalOps.size)) {
                         async(Dispatchers.IO) {
-                            checkSite(site, handle, scanId)
+                            for (index in queue) {
+                                val (site, handle) = finalOps[index]
+                                val observation = checkSite(site, handle, scanId)
+                                synchronized(publicationLock) {
+                                    results[index] = observation
+                                    UsernameSurfaceRuntimeCache.replace(
+                                        SOURCE_ID,
+                                        results.filterNotNull()
+                                    )
+                                }
+                            }
                         }
                     }.awaitAll()
+                } finally {
+                    queue.cancel()
+                }
+
+                results.map { result ->
+                    checkNotNull(result) { "Username operation completed without an observation" }
                 }
             }
         } finally {

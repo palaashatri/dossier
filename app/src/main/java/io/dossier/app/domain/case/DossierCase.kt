@@ -4,6 +4,7 @@ import io.dossier.app.domain.discovery.ScanMode
 import io.dossier.app.domain.evidence.AttackPathFinder.AttackPath
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceRelationship
+import io.dossier.app.domain.evidence.ExposureLedger
 import io.dossier.app.domain.evidence.ExposureEngine.ExposureResult
 import io.dossier.app.domain.evidence.RelationshipConfidence
 import io.dossier.app.domain.model.*
@@ -101,6 +102,8 @@ data class DossierCase(
     val authorizedScope: AuthorizedScope = AuthorizedScope.SelfAudit,
     val findings: List<Finding> = emptyList(),
     val evidenceRecords: List<Evidence> = emptyList(),
+    /** Canonical exact-value exposure facts; absent in legacy cases. */
+    val exposureLedger: ExposureLedger = ExposureLedger(),
     /** Canonical scanner/plugin assertions retained independently of graph edges. */
     val evidenceRelationships: List<EvidenceRelationship> = emptyList(),
     val profileResults: List<ProfileScanResult> = emptyList(),
@@ -142,7 +145,7 @@ data class DossierCase(
     fun canonicalEvidenceRelationships(): List<EvidenceRelationship> = evidenceRelationships
 
     companion object {
-        /** v8 persists canonical evidence relationships alongside evidence records. */
-        const val CURRENT_SCHEMA_VERSION = 8
+        /** v9 persists canonical exact-value exposure facts alongside evidence records. */
+        const val CURRENT_SCHEMA_VERSION = 9
     }
 }

@@ -33,6 +33,9 @@ import io.dossier.app.domain.model.UsernameCandidate
 import io.dossier.app.domain.model.UsernameMatchType
 import io.dossier.app.domain.evidence.ExposureEngine
 import io.dossier.app.domain.scanner.BackgroundScanResultStore
+import io.dossier.app.domain.scanner.ScanLifecycleReadResult
+import io.dossier.app.domain.scanner.ScanLifecycleStore
+import io.dossier.app.domain.scanner.ScanLifecycleWriteResult
 
 /**
  * Test-only seed entry point for visual QA on the uiTest APK.
@@ -61,9 +64,11 @@ class VisualQaFixtureReceiver : BroadcastReceiver() {
         val fixtureCase = VisualQaFixture.caseSnapshot()
         val caseStore = CaseStore(appContext)
         val resultStore = BackgroundScanResultStore(appContext)
+        val lifecycleStore = ScanLifecycleStore(appContext)
 
         // A fixture invocation is an explicit reset of the uiTest app's local
         // state. It does not touch production code paths or remote services.
+        clearLifecycleState(appContext, lifecycleStore)
         resultStore.clear()
         caseStore.clear()
         UsageNoticeStore.accept(appContext)
@@ -76,6 +81,50 @@ class VisualQaFixtureReceiver : BroadcastReceiver() {
                 analysis = VisualQaFixture.analysisBundle()
             )
         ) { "Unable to persist visual-QA encrypted transient result" }
+    }
+
+    /**
+     * A previous scan can leave a terminal owner marker behind. The production
+     * result projection correctly hides a result whose owner does not match
+     * that marker, so fixture reset must clear the lifecycle marker as well as
+     * the encrypted result. Invalid records cannot be cleared by exact-record
+     * CAS and therefore reset the fixture-only preference file wholesale.
+     */
+    private fun clearLifecycleState(
+        context: Context,
+        lifecycleStore: ScanLifecycleStore
+    ) {
+        when (val current = lifecycleStore.read()) {
+            is ScanLifecycleReadResult.Available -> {
+                val cleared = lifecycleStore.clear(current.record)
+                check(
+                    cleared == ScanLifecycleWriteResult.Cleared ||
+                        cleared == ScanLifecycleWriteResult.Missing
+                ) { "Unable to clear visual-QA lifecycle marker" }
+            }
+            ScanLifecycleReadResult.Missing -> Unit
+            is ScanLifecycleReadResult.Invalid,
+            ScanLifecycleReadResult.StorageFailure -> {
+                check(
+                    context.getSharedPreferences(LIFECYCLE_PREFS, Context.MODE_PRIVATE)
+                        .edit()
+                        .clear()
+                        .commit()
+                ) { "Unable to clear invalid visual-QA lifecycle marker" }
+            }
+        }
+
+        // Legacy active markers are intentionally not part of ScanLifecycleStore
+        // read()'s canonical record detection, so remove them after every reset.
+        val preferences = context.getSharedPreferences(LIFECYCLE_PREFS, Context.MODE_PRIVATE)
+        if (preferences.contains(LEGACY_ACTIVE_OWNER) || preferences.contains(LEGACY_ACTIVE)) {
+            check(
+                preferences.edit()
+                    .remove(LEGACY_ACTIVE_OWNER)
+                    .remove(LEGACY_ACTIVE)
+                    .commit()
+            ) { "Unable to clear legacy visual-QA lifecycle marker" }
+        }
     }
 
     private fun seedProviderProgress() {
@@ -118,6 +167,9 @@ class VisualQaFixtureReceiver : BroadcastReceiver() {
         const val ACTION_SEED = "io.dossier.app.action.SEED_VISUAL_QA_FIXTURE"
         const val ACTION_PROVIDER_PROGRESS = "io.dossier.app.action.SHOW_PROVIDER_PROGRESS_QA"
         const val PROVIDER_PROGRESS_SCAN_ID = "00000000-0000-4000-8000-000000000300"
+        const val LIFECYCLE_PREFS = "dossier-background-work"
+        const val LEGACY_ACTIVE_OWNER = "active_owner"
+        const val LEGACY_ACTIVE = "active"
     }
 }
 

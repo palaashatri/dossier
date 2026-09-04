@@ -136,11 +136,11 @@ class SavedCaseAiReanalysisTest {
     private fun openCases() {
         composeRule.waitUntil(timeoutMillis = 20_000) {
             composeRule.onAllNodesWithText("CONTINUE").fetchSemanticsNodes().isNotEmpty() ||
-                composeRule.onAllNodesWithText("Start a privacy audit").fetchSemanticsNodes().isNotEmpty()
+                composeRule.onAllNodesWithText("Search name, username, phone, email or URL").fetchSemanticsNodes().isNotEmpty()
         }
         if (composeRule.onAllNodesWithText("CONTINUE").fetchSemanticsNodes().isNotEmpty()) {
             composeRule.onNodeWithText("CONTINUE").performClick()
-            waitForText("Start a privacy audit")
+            waitForText("Search name, username, phone, email or URL")
         }
         composeRule
             .onNode(

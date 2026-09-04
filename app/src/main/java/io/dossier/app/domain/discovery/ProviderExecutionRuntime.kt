@@ -2,9 +2,12 @@ package io.dossier.app.domain.discovery
 
 import io.dossier.app.data.web.DiscoveryHttpPolicy
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -66,6 +69,7 @@ class ProviderExecutionRuntime(
         cooldowns.clear()
     }
 
+    @OptIn(InternalCoroutinesApi::class)
     suspend fun execute(
         provider: ProviderDefinition,
         url: String,
@@ -144,21 +148,33 @@ class ProviderExecutionRuntime(
                         .followSslRedirects(provider.existenceRules?.followRedirects != false)
                         .build()
 
-                    callClient.newCall(request).execute().use { response ->
-                        finalStatusCode = response.code
-                        finalUrl = response.request.url.toString()
-                        val rawBody = readBoundedBody(response.body, cappedBodyChars)
-                        finalBody = rawBody
-                        val observation = ProviderResponseObservation(
-                            statusCode = response.code,
-                            requestedUrl = url,
-                            finalUrl = finalUrl,
-                            bodyText = rawBody
-                        )
-                        finalDecision = classifier(provider, observation)
+                    val call = callClient.newCall(request)
+                    val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion(
+                        onCancelling = true,
+                        invokeImmediately = true
+                    ) {
+                        call.cancel()
+                    }
+                    try {
+                        call.execute().use { response ->
+                            finalStatusCode = response.code
+                            finalUrl = response.request.url.toString()
+                            val rawBody = readBoundedBody(response.body, cappedBodyChars)
+                            finalBody = rawBody
+                            val observation = ProviderResponseObservation(
+                                statusCode = response.code,
+                                requestedUrl = url,
+                                finalUrl = finalUrl,
+                                bodyText = rawBody
+                            )
+                            finalDecision = classifier(provider, observation)
+                        }
+                    } finally {
+                        cancellationHandle?.dispose()
                     }
                 }
 
+                currentCoroutineContext().ensureActive()
                 val latency = ((nanoTime() - startNano) / 1_000_000L).coerceAtLeast(0L)
                 totalLatencyMs += latency
 
@@ -181,19 +197,11 @@ class ProviderExecutionRuntime(
                     break
                 }
             } catch (cancelled: CancellationException) {
-                if (cancelled !is TimeoutCancellationException && !currentCoroutineContext().isActive) {
-                    throw cancelled
-                }
-                val latency = ((nanoTime() - startNano) / 1_000_000L).coerceAtLeast(0L)
-                totalLatencyMs += latency
-                lastException = cancelled
-                if (attempt < maxAttempts) {
-                    val retryDelay = DiscoveryHttpPolicy.retryDelayMillis(attempt, null, policy.minimumIntervalMs)
-                    delay(retryDelay)
-                    continue
-                }
-                finalDecision = ProviderResponseDecision(ProviderVerificationState.Timeout, "Request timed out")
+                throw cancelled
             } catch (ioe: IOException) {
+                if (!currentCoroutineContext().isActive) {
+                    currentCoroutineContext().ensureActive()
+                }
                 val latency = ((nanoTime() - startNano) / 1_000_000L).coerceAtLeast(0L)
                 totalLatencyMs += latency
                 lastException = ioe
@@ -217,6 +225,9 @@ class ProviderExecutionRuntime(
                     )
                 }
             } catch (t: Exception) {
+                if (!currentCoroutineContext().isActive) {
+                    currentCoroutineContext().ensureActive()
+                }
                 val latency = ((nanoTime() - startNano) / 1_000_000L).coerceAtLeast(0L)
                 totalLatencyMs += latency
                 lastException = t

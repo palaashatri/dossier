@@ -45,6 +45,7 @@ import io.dossier.app.data.face.FaceCorrelationConsentStore
 import io.dossier.app.data.face.FaceCorrelationModelPack
 import io.dossier.app.data.face.FaceCorrelationSessionPolicy
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.search.hasUsableUniversalSeed
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanRequest
@@ -173,9 +174,9 @@ fun ScanScreen(
         FaceCorrelationSessionPolicy.useBasicMatching()
         val resume = ScanSession.loadResumePoint(context)
         val input = ScanSession.tempInput ?: ScanSession.currentInput.value ?: resume?.first
-        if (input == null || !hasUsableIdentityInput(input)) {
-            startError = "No valid identity input was supplied. Return to Identity Setup and enter at least one name, username, email, phone number, or profile URL."
-            liveLogs.add("Scan not started: identity input is missing")
+        if (input == null || !input.hasUsableUniversalSeed()) {
+            startError = "No usable search seed was supplied. Return to Search and enter text or choose a photo."
+            liveLogs.add("Scan not started: search seed is missing")
             return@LaunchedEffect
         }
 
@@ -407,7 +408,7 @@ fun ScanScreen(
                             .fillMaxWidth()
                             .height(48.dp)
                     ) {
-                        Text("RETURN TO IDENTITY SETUP", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text("RETURN TO SEARCH", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     }
                 }
 
@@ -636,14 +637,6 @@ private fun FaceCorrelationChoiceDialog(
         containerColor = NeuralTheme.CardBackground
     )
 }
-
-private fun hasUsableIdentityInput(input: IdentityInput): Boolean =
-    input.fullName.isNotBlank() ||
-        !input.primaryUsername.isNullOrBlank() ||
-        input.usernames.any { it.isNotBlank() } ||
-        input.emails.any { it.isNotBlank() } ||
-        input.phones.any { it.isNotBlank() } ||
-        input.profileUrls.any { it.isNotBlank() }
 
 private fun formatFacePackSize(bytes: Long): String =
     "%.1f MB".format(bytes.toDouble() / (1024.0 * 1024.0))

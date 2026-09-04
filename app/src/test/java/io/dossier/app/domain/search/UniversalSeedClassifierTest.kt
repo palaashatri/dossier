@@ -60,6 +60,44 @@ class UniversalSeedClassifierTest {
     }
 
     @Test
+    fun hostLikeUrlWithoutSchemeIsNormalizedLocally() {
+        val seed = requireNotNull(UniversalSeedClassifier.classify("example.test/profile/jane"))
+        assertEquals(UniversalSeedType.Url, seed.type)
+        assertEquals("https://example.test/profile/jane", seed.normalized)
+    }
+
+    @Test
+    fun blankTextFallsBackToLocalPhotoUriSeed() {
+        val seed = requireNotNull(
+            UniversalSeedClassifier.classify(
+                "",
+                "content://dossier.test/photo"
+            )
+        )
+        assertEquals(UniversalSeedType.Photo, seed.type)
+        assertEquals("content://dossier.test/photo", seed.normalized)
+        assertEquals("content://dossier.test/photo", seed.toIdentityInput().selfieUri)
+    }
+
+    @Test
+    fun contentPhotoUriIsRecognizedWhenEnteredDirectly() {
+        val seed = requireNotNull(UniversalSeedClassifier.classify("content://dossier.test/photo"))
+        assertEquals(UniversalSeedType.Photo, seed.type)
+        assertEquals("content://dossier.test/photo", seed.toIdentityInput().selfieUri)
+    }
+
+    @Test
+    fun textTakesPrecedenceOverOptionalPhotoUri() {
+        val seed = requireNotNull(
+            UniversalSeedClassifier.classify(
+                "Jane Example",
+                "content://dossier.test/photo"
+            )
+        )
+        assertEquals(UniversalSeedType.Name, seed.type)
+    }
+
+    @Test
     fun plainCapitalizedSingleWordRemainsAName() {
         val seed = requireNotNull(UniversalSeedClassifier.classify("Jane"))
         assertEquals(UniversalSeedType.Name, seed.type)

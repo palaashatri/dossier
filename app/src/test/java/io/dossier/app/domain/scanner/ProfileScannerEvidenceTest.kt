@@ -3,6 +3,7 @@ package io.dossier.app.domain.scanner
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.toExposureLedger
 import io.dossier.app.domain.graph.EntityGraphBuilder
 import io.dossier.app.domain.model.*
 import org.junit.Assert.assertEquals
@@ -11,7 +12,13 @@ import org.junit.Test
 
 class ProfileScannerEvidenceTest {
 
-    private fun result(username: String, url: String, exists: Boolean, verified: Boolean) = ProfileScanResult(
+    private fun result(
+        username: String,
+        url: String,
+        exists: Boolean,
+        verified: Boolean,
+        provenance: String? = null
+    ) = ProfileScanResult(
         candidate = UsernameCandidate(
             username = username,
             platform = Platform.GitHub,
@@ -39,7 +46,8 @@ class ProfileScannerEvidenceTest {
         ),
         confidenceSignals = listOf("ok"),
         verified = verified,
-        verificationStatus = if (verified) "Verified" else "Exists"
+        verificationStatus = if (verified) "Verified" else "Exists",
+        provenance = provenance
     )
 
     @Test
@@ -132,5 +140,28 @@ class ProfileScannerEvidenceTest {
         assertEquals(EvidenceReliability.SearchEngineCandidate, unverified.reliability)
         assertEquals(EvidenceState.Observed, unverified.state)
         assertEquals(42_000L, missing.retrievedAtEpochMillis)
+    }
+
+    @Test
+    fun profileProvenanceFlowsIntoProfileFindingAndLedgerFacts() {
+        val path = "seed:name -> verified-profile"
+        val input = IdentityInput(fullName = "Jane Doe")
+        val collection = listOf(
+            result(
+                username = "janedoe",
+                url = "https://github.com/janedoe",
+                exists = true,
+                verified = true,
+                provenance = path
+            )
+        ).toEvidenceCollection(input)
+
+        val profile = collection.evidence.single { it.kind == EvidenceKind.Profile }
+        val email = collection.evidence.single { it.kind == EvidenceKind.Email }
+        assertEquals(listOf(path), profile.discoveryPath)
+        assertEquals(listOf(path), email.discoveryPath)
+        assertEquals(listOf(path), collection.toExposureLedger().facts.mapNotNull {
+            it.discoveryPath.takeIf { discoveryPath -> discoveryPath.isNotEmpty() }
+        }.distinct().single())
     }
 }

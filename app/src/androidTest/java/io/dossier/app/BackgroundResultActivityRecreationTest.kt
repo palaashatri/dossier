@@ -5,6 +5,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.dossier.app.data.local.UsageNoticeStore
 import io.dossier.app.domain.case.CaseScanHistoryEntry
@@ -64,7 +65,7 @@ class BackgroundResultActivityRecreationTest {
             composeRule.onNodeWithText("CONTINUE").performClick()
         }
         composeRule.waitUntil(timeoutMillis = 20_000) {
-            composeRule.onAllNodesWithText("Start a privacy audit")
+            composeRule.onAllNodesWithText("Search name, username, phone, email or URL")
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
@@ -159,8 +160,8 @@ class BackgroundResultActivityRecreationTest {
             .onAllNodesWithText("Background analysis")
             .fetchSemanticsNodes()
             .isNotEmpty()
-        val hasIdentity = composeRule
-            .onAllNodesWithText("Start a privacy audit")
+        val hasUniversalSearch = composeRule
+            .onAllNodesWithText("Search name, username, phone, email or URL")
             .fetchSemanticsNodes()
             .isNotEmpty()
         val hasConsent = composeRule
@@ -168,7 +169,7 @@ class BackgroundResultActivityRecreationTest {
             .fetchSemanticsNodes()
             .isNotEmpty()
         assertTrue(
-            "Expected analysis route; analysis=$hasAnalysis identity=$hasIdentity consent=$hasConsent",
+            "Expected analysis route; analysis=$hasAnalysis universalSearch=$hasUniversalSearch consent=$hasConsent",
             hasAnalysis
         )
         composeRule.onNodeWithText("Background analysis").assertIsDisplayed()
@@ -186,6 +187,72 @@ class BackgroundResultActivityRecreationTest {
 
         val restored = BackgroundScanResultStore(context).load()?.dossierCase
         assertEquals(expectedCase, restored)
+    }
+
+    @Test
+    fun returningToSearchClearsReportStackAfterDurableAnalysisRestore() {
+        val ownerId = UUID.randomUUID().toString()
+        val expectedCase = DossierCase(
+            createdAt = "2026-08-25T00:05:00Z",
+            subjectName = "Navigation Recovery Subject",
+            input = IdentityInput(fullName = "Navigation Recovery Subject")
+        )
+        val lifecycle = ScanLifecycleRecord(
+            ownerId = ownerId,
+            requestId = UUID.randomUUID().toString(),
+            generation = UUID.randomUUID().toString(),
+            phase = ScanLifecyclePhase.Succeeded,
+            updatedAtEpochMillis = System.currentTimeMillis(),
+            resultReady = true,
+            errorCode = null
+        )
+
+        assertTrue(BackgroundScanResultStore(context).save(ownerId, expectedCase))
+        assertEquals(
+            ScanLifecycleWriteResult.Saved,
+            ScanLifecycleStore(context).publish(lifecycle)
+        )
+        assertNotNull(BackgroundScanManager.latestResult(context))
+
+        ScanLifecycleStartup.resetForTesting()
+        composeRule.activityRule.scenario.recreate()
+        composeRule.waitUntil(timeoutMillis = 20_000) {
+            composeRule.onAllNodesWithText("Background analysis")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+
+        composeRule
+            .onNodeWithText("OPEN FULL REPORT")
+            .performScrollTo()
+            .performClick()
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithText("Privacy audit report")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        composeRule.onNodeWithText("Actions").performClick()
+        composeRule
+            .onNodeWithText("Start a new audit")
+            .performScrollTo()
+            .performClick()
+        composeRule.waitUntil(timeoutMillis = 20_000) {
+            composeRule.onAllNodesWithText("Search name, username, phone, email or URL")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+
+        composeRule.runOnIdle {
+            composeRule.activity.onBackPressedDispatcher.onBackPressed()
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Search name, username, phone, email or URL").assertIsDisplayed()
+        assertTrue(
+            "Back must not resurrect the previous report",
+            composeRule.onAllNodesWithText("Privacy audit report")
+                .fetchSemanticsNodes()
+                .isEmpty()
+        )
     }
 
     private fun clearBackgroundState() {

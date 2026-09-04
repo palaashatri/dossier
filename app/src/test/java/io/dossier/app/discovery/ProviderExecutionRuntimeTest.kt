@@ -6,10 +6,14 @@ import io.dossier.app.domain.model.Platform
 import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.model.UsernameCandidate
 import io.dossier.app.domain.model.UsernameMatchType
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.*
@@ -20,6 +24,8 @@ import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
 import java.io.InterruptedIOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class ProviderExecutionRuntimeTest {
@@ -558,5 +564,109 @@ class ProviderExecutionRuntimeTest {
         val decodedNewResult = json.decodeFromString<ProfileScanResult>(encodedNewResult)
         assertEquals("github", decodedNewResult.providerId)
         assertEquals(ProviderVerificationState.Present, decodedNewResult.providerVerificationState)
+    }
+
+    @Test
+    fun jobCancellationCancelsInFlightOkHttpCallAndDoesNotReportUnavailable() = runBlocking {
+        val callStarted = CountDownLatch(1)
+        val callCanceledByOkHttp = CountDownLatch(1)
+        val client = OkHttpClient.Builder()
+            .eventListener(object : EventListener() {
+                override fun canceled(call: Call) {
+                    callCanceledByOkHttp.countDown()
+                }
+            })
+            .addInterceptor { chain ->
+                callStarted.countDown()
+                callCanceledByOkHttp.await(5, TimeUnit.SECONDS)
+                if (chain.call().isCanceled()) {
+                    throw java.io.IOException("Canceled")
+                }
+                mockResponse(chain.request(), 200, "OK")
+            }
+            .build()
+
+        val runtime = ProviderExecutionRuntime(client)
+        val provider = sampleProvider.copy(
+            requestPolicy = sampleProvider.requestPolicy.copy(
+                timeoutMs = 10_000,
+                retryBudget = 0
+            )
+        )
+        ScanCoordinatorRuntime.onProviderQueued(provider.id)
+
+        val deferred = async(Dispatchers.IO) {
+            runtime.execute(provider, "https://test.example.com/target")
+        }
+
+        assertTrue("Call never started", callStarted.await(3, TimeUnit.SECONDS))
+        deferred.cancel()
+
+        assertTrue("OkHttp Call was not canceled on Job cancellation", callCanceledByOkHttp.await(3, TimeUnit.SECONDS))
+
+        var threwCancellation = false
+        try {
+            deferred.await()
+        } catch (e: CancellationException) {
+            threwCancellation = true
+        }
+        assertTrue("Expected CancellationException from cancelled deferred", threwCancellation)
+
+        val snapshot = ScanCoordinatorRuntime.snapshot.value
+        assertEquals(0, snapshot.completedProviderCount)
+        assertEquals(0, snapshot.unavailableProviderCount)
+    }
+
+    @Test
+    fun outerTimeoutCancellationPropagatesInsteadOfReportingUnavailable() = runBlocking {
+        val callStarted = CountDownLatch(1)
+        val callCanceledByOkHttp = CountDownLatch(1)
+        val client = OkHttpClient.Builder()
+            .eventListener(object : EventListener() {
+                override fun canceled(call: Call) {
+                    callCanceledByOkHttp.countDown()
+                }
+            })
+            .addInterceptor { chain ->
+                callStarted.countDown()
+                callCanceledByOkHttp.await(5, TimeUnit.SECONDS)
+                if (chain.call().isCanceled()) {
+                    throw java.io.IOException("Canceled")
+                }
+                mockResponse(chain.request(), 200, "OK")
+            }
+            .build()
+
+        val runtime = ProviderExecutionRuntime(client)
+        val provider = sampleProvider.copy(
+            requestPolicy = sampleProvider.requestPolicy.copy(
+                timeoutMs = 10_000,
+                retryBudget = 0
+            )
+        )
+        ScanCoordinatorRuntime.onProviderQueued(provider.id)
+
+        val deferred = async(Dispatchers.IO) {
+            withTimeout(1_000) {
+                runtime.execute(provider, "https://test.example.com/outer-timeout")
+            }
+        }
+
+        assertTrue("Call never started", callStarted.await(3, TimeUnit.SECONDS))
+        var threwTimeoutCancellation = false
+        try {
+            deferred.await()
+        } catch (_: TimeoutCancellationException) {
+            threwTimeoutCancellation = true
+        }
+        assertTrue("Expected outer timeout to propagate", threwTimeoutCancellation)
+        assertTrue(
+            "OkHttp Call was not canceled on outer timeout",
+            callCanceledByOkHttp.await(3, TimeUnit.SECONDS)
+        )
+
+        val snapshot = ScanCoordinatorRuntime.snapshot.value
+        assertEquals(0, snapshot.completedProviderCount)
+        assertEquals(0, snapshot.unavailableProviderCount)
     }
 }
