@@ -60,6 +60,8 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
         .connectTimeout(7, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
         .callTimeout(18, TimeUnit.SECONDS)
+        .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+        .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
         .followRedirects(true)
         .retryOnConnectionFailure(true)
         .build()
@@ -300,7 +302,7 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
     }
 
     private suspend fun download(url: String): DownloadedImage? {
-        if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) return null
+        if (!DiscoveryHttpPolicy.isSafePublicHttpUrl(url)) return null
 
         repeat(MAX_DOWNLOAD_ATTEMPTS) { attempt ->
             try {

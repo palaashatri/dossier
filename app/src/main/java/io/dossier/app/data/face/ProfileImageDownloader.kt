@@ -2,6 +2,7 @@ package io.dossier.app.data.face
 
 import android.content.Context
 import android.net.Uri
+import io.dossier.app.data.web.DiscoveryHttpPolicy
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -19,11 +20,14 @@ class ProfileImageDownloader(context: Context) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
+        .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+        .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
         .followRedirects(true)
         .build()
 
     fun download(imageUrl: String): Uri? {
         val normalized = normalizeHttpUrl(imageUrl) ?: return null
+        if (!DiscoveryHttpPolicy.isSafePublicHttpUrl(normalized)) return null
         val target = File(cacheDir, cacheFileName(normalized))
         if (target.exists() && target.length() in MIN_BYTES..MAX_BYTES) {
             return Uri.fromFile(target)
