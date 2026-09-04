@@ -1,11 +1,14 @@
-name: Provider registry audit
+name: Provider registry and repository hygiene audit
 
 on:
   pull_request:
     paths:
-      - "app/src/main/java/io/dossier/app/data/platform/ProviderCatalogV2.kt"
-      - "app/src/main/java/io/dossier/app/domain/discovery/**"
-      - "tools/provider_registry_audit.py"
+      - "app/src/main/java/**"
+      - ".idea/**"
+      - ".serena/**"
+      - ".vscode/**"
+      - ".gitignore"
+      - "tools/**"
       - "TRUTH.md"
       - ".github/workflows/provider-registry-audit.yml"
   workflow_dispatch:
@@ -22,5 +25,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Audit repository hygiene
+        run: python -m unittest tools.test_repository_hygiene_audit
       - name: Audit declarative provider registry
         run: python tools/provider_registry_audit.py --json
