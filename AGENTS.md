@@ -1,471 +1,887 @@
-# AGENTS.md — Dossier Product Contract
+# AGENTS.md — Dossier Product and Engineering Contract
 
 ## 0. Purpose
 
 This document is the authoritative implementation contract for Dossier.
 
-Dossier is a local-first personal digital-footprint, privacy-exposure, account-discovery, identity-correlation, breach-awareness, historical-evidence, and remediation application for self-audits and explicitly authorized subjects.
+Dossier is a local-first personal exposure reconstruction and authorized public-source investigation application. Its primary job is not to enumerate usernames or count providers. Its primary job is to answer:
 
-The final product must behave as one evidence-oriented privacy system: accept authorized identity seeds, discover permitted public sources, verify candidates, extract structured identity signals, perform bounded recursive discovery, build an explainable graph, correlate accounts and public images using multiple independent signals, retrieve historical and authoritative breach metadata where legitimate integrations allow it, explain risk, support evidence-grounded AI analysis, and help the user reduce exposure.
+> Starting with one piece of information the user is authorized to investigate, what exact information can be recovered, from which accessible sources, through what discovery chain, and how quickly?
 
-Dossier is not a platform for covert monitoring, unauthorized access, private-data acquisition, or evading access controls.
+For self-audit mode the product contract is stricter:
 
-## 1. Repository rules
+> Starting only from information the user chooses to provide about themselves, reconstruct as completely as practical the exact information an outside observer can recover from accessible sources, preserve the exact exposed values locally, show the evidence and discovery path for every fact, and help the user reduce that exposure.
 
-The repository root contains only three canonical prose documents:
+The implementation must optimize for measured recall, precision, exact-value recovery, provenance, time-to-useful-result, recursive discovery, and remediation. Provider count, test count, UI completeness, graph size, or the existence of an integration stub are not substitutes for those outcomes.
 
-- `AGENTS.md` — immutable product and engineering contract.
-- `README.md` — user-facing project description.
-- `TRUTH.md` — current factual implementation and readiness record.
+Dossier is not being rewritten from scratch. Preserve and reuse proven foundations unless an audit demonstrates they are incorrect, duplicated, unsafe, or obstruct the new mission.
 
-Do not add root-level roadmap, audit, milestone, handoff, or status documents. Update `TRUTH.md` instead.
+## 1. Canonical repository documents
 
-Never weaken this contract because a milestone is difficult. Never report a capability as complete merely because an interface exists, a screen renders, mocks pass, or code compiles. End-to-end acceptance criteria and validation determine completion.
+The repository has three canonical prose documents:
 
-Prefer deterministic systems before AI, local computation before remote computation, explicit evidence before inference, explainability before opaque scoring, bounded work before uncontrolled recursion, declarative providers before site-specific code, platform APIs before brittle workarounds, secure persistence before plaintext, and truthful unsupported states before simulated success.
+- `AGENTS.md` — product contract, architecture, engineering rules, acceptance criteria, and implementation priorities.
+- `README.md` — public-facing description and build/use documentation.
+- `TRUTH.md` — factual current implementation state, audit findings, validation evidence, defects, and blockers.
 
-## 2. Product workflow
+Do not create extra roadmap, audit, handoff, milestone, completion, status, plan, or findings Markdown files. Update these documents instead.
 
-The target workflow is:
+## 2. Product principles
+
+Dossier follows these principles in order:
+
+1. **Measured discovery utility over feature count.**
+2. **Exact exposed values over vague exposure categories in local self-audit views.**
+3. **Evidence and provenance over unsupported inference.**
+4. **Recursive discovery over one-shot enumeration.**
+5. **Useful results early while deeper work continues.**
+6. **Local processing and local sensitive storage by default.**
+7. **Truthful source limitations over simulated capability.**
+8. **Preserve good existing infrastructure instead of gratuitous rewrites.**
+9. **Delete dead, duplicated, generated, misleading, or purely theatrical code and tests.**
+10. **Do not weaken identity attribution standards just to improve apparent recall.**
+
+## 3. Primary user experience
+
+### 3.1 Launch screen
+
+Application launch must present one dominant universal search control, not a dashboard or multi-step identity wizard.
+
+The first screen contains:
+
+- one text field;
+- a camera action;
+- an upload/gallery action;
+- minimal supporting copy;
+- recent local cases only if they do not compete visually with the primary search action.
+
+The universal text input accepts at least:
+
+- person name;
+- username or handle;
+- phone number;
+- email address;
+- public profile URL or other URL;
+- other explicitly supported seed types added later.
+
+The app detects the likely seed type locally. Detection must be inspectable and correctable by the user when ambiguous. The app must not require the user to manually populate a large identity form before useful discovery begins.
+
+Example conceptual flow using synthetic data only:
 
 ```text
-Authorized identity seeds
-  → scan configuration
-  → discovery fabric
-  → candidate verification
-  → evidence extraction
-  → bounded pivot frontier
-  → entity resolution
-  → identity graph
-  → image correlation
-  → historical analysis
-  → breach intelligence
-  → exposure analysis
-  → evidence-grounded AI analysis
-  → investigation dashboard
-  → remediation
-  → report/export
+Search name, username, phone, email or URL…     [camera] [upload]
 ```
 
-A disconnected collection of scanners is not the finished product.
+Typing `Jane Example`, `@sample_user`, `jane@example.test`, a test phone value, or an authorized URL must enter the same discovery system with the appropriate initial seed type.
 
-## 3. Safety and authorization boundary
+### 3.2 Progressive results
 
-Production behavior is limited to user-provided data, publicly accessible information, legitimate public APIs, explicitly connected services, and user-authorized local data.
+After search starts, Dossier streams evidence as soon as it is verified or meaningfully classified. The user must not wait for the entire scan before seeing useful findings.
 
-When a source rejects automated access or requires authorization Dossier does not possess, return a truthful structured state such as `Unavailable`, `RateLimited`, `AuthenticationRequired`, `UnsupportedAutomation`, or `ProviderChanged`. Do not bypass the restriction.
+The results surface converges on three first-class representations:
 
-Do not collect private communications, secrets, credentials, or non-public device data. Do not implement hidden tracking, compromise, access-control evasion, or traffic-evasion mechanisms. Do not distribute raw leaked credential material.
+- **Exposure Ledger** — exact facts and where they were observed;
+- **Exposure Graph** — relationships and discovery paths between facts, sources, accounts, documents, images, and historical observations;
+- **Attacker View** — what was derivable from the original seed alone and in what order.
 
-## 4. Evidence principles
+## 4. Universal discovery architecture
 
-Every substantive claim must connect to inspectable evidence. Confidence is not proof.
-
-Inferred relationships distinguish at least:
+All supported initial seed types enter one discovery system:
 
 ```text
-Confirmed
-High
-Medium
-Low
-Unresolved
-Conflicting
+Initial seed
+  → normalization and seed classification
+  → query expansion
+  → rolling multi-source scheduler
+  → search / profiles / documents / archives / exposure indexes / image providers
+  → fetch and content extraction
+  → verification and provenance
+  → Exposure Ledger + Exposure Graph
+  → newly verified identifiers
+  → priority frontier
+  ↺ until exhausted, cancelled, or budget reached
 ```
 
-Evidence provenance should retain, as applicable:
+Do not build separate disconnected scanners whose findings never become new search pivots.
+
+## 5. Seed types and frontier
+
+The frontier must support typed seeds. Initial and discovered seed kinds should include at least:
 
 ```text
-source/provider
-canonical URL
-retrieval timestamp
-observed timestamp
-evidence type
-verification state
-content hash
-historical/current state
-parser version
-source reliability
+Name
+Username
+Email
+Phone
+URL
+Domain
+Photo
+ImageURL
+Organization
+Location
+PostalCode
+Document
+Profile
+Alias
 ```
 
-Historical evidence must remain visibly historical. Search results are candidates until directly verified where possible. Visual similarity is supporting evidence, not identity proof. Authoritative breach metadata remains separate from ordinary public-web exposure.
+Additional types may be introduced when justified by observed benchmark misses.
 
-## 5. Core domain model
-
-Evolve the current model into a typed graph supporting at least:
+Each frontier item stores at least:
 
 ```text
-Subject, Account, Username, DisplayName, Email, Phone, Domain, URL,
-Image, Organization, Location, Occupation, Document, ArchiveSnapshot,
-Breach, Website, EvidenceArtifact
-```
-
-Relationships include at least:
-
-```text
-HAS_USERNAME, HAS_EMAIL, HAS_PHONE, USES_ACCOUNT, USES_AVATAR,
-LINKS_TO, MENTIONS, OWNS_DOMAIN, AFFILIATED_WITH, LOCATED_IN,
-APPEARED_IN_BREACH, ARCHIVED_AS, SAME_IMAGE_AS, SIMILAR_IMAGE_TO,
-VISUALLY_SIMILAR_TO, REDIRECTS_TO, CLAIMS_IDENTITY,
-CROSS_LINKS_ACCOUNT, DERIVED_FROM
-```
-
-Every relationship must be independently evidential. Storage must not be permanently coupled to UI models.
-
-## 6. Discovery Fabric v2
-
-This is the highest-priority major capability.
-
-Build a declarative provider registry capable of several thousand definitions without one Kotlin implementation per site.
-
-A provider definition should capture:
-
-```text
-id
-display name
-category
-profile URL template where applicable
-query capabilities
-existence rules
-extraction rules
+normalized value
+exact observed value when applicable
+seed type
+origin evidence IDs
+parent discovery path
+depth
 priority
-regions
-tags
-enabled state
-source reliability
-request policy
+confidence / verification state
+first seen timestamp
+last attempted timestamp
+provider/source eligibility
+visited state
 ```
 
-Provider categories include Developer, Social, Forum, Gaming, Creative, Publishing, Professional, Media, Commerce, Education, CodeHosting, PackageRegistry, PersonalWebsite, PublicDirectory, Archive, BreachMetadata, and SearchEngine.
+Every verified useful identifier may become a pivot subject to confidence, recursion, provider, and budget rules.
 
-Provider definitions must be validated for duplicate IDs, malformed templates, unsupported schemes, invalid priorities, contradictory HTTP rules, soft-error handling, and policy state. A definition is not considered healthy just because it returns HTTP 200.
+Weak/common signals must not create uncontrolled identity expansion. A common name, broad location, generic occupation, or visual resemblance alone must not recursively merge unrelated people.
 
-Target 1,000+ useful legitimate definitions over time. Never fabricate provider count to satisfy the target. `TRUTH.md` records the actual validated count.
+## 6. Discovery Engine v3
 
-## 7. Scan modes and scheduling
+Discovery Engine v3 is the highest-priority product subsystem.
 
-Support four explicit budgets:
+### 6.1 Rolling scheduler
 
-- Quick — highest-value subset for ordinary mobile use.
-- Standard — balanced provider coverage.
-- Deep — larger provider and historical coverage.
-- Exhaustive — all enabled providers, explicit opt-in, resumable and cancellable.
+Replace fixed batch barriers and serial evidence-family execution with a rolling bounded scheduler.
 
-Progress always derives from scheduled operations; never hardcode fake totals.
+Requirements:
 
-Each provider has bounded concurrency, minimum request spacing, timeout, retry budget, and cooldown. Global network concurrency is bounded. Provider failures remain isolated.
+- global network concurrency is bounded;
+- per-domain/provider politeness is independent from global concurrency;
+- one slow request must not stall an entire fixed batch;
+- when one operation finishes, the next eligible operation begins immediately;
+- independent evidence families run concurrently when safe;
+- cancellation is prompt;
+- scan state is persistable and resumable;
+- provider cooldowns, challenge states, and rate limits are respected;
+- provider failures remain isolated;
+- a common shared HTTP client/pool should be reused where practical instead of constructing unnecessary per-call clients;
+- priority changes as better evidence is discovered.
 
-## 8. Scan coordinator and event bus
+Do not solve performance merely by increasing one concurrency constant.
 
-Introduce a central scan coordinator responsible for seed ingestion, deduplication, plan construction, scheduling, cancellation, persistence, resume, pivot budgets, and event streaming.
+### 6.2 Query expansion
 
-Every meaningful operation produces a typed event. At minimum the event model supports scan start/completion, provider queue/start/completion/unavailable, candidate discovery, evidence verification, identity-signal discovery, pivot admission/rejection, relationship creation, image discovery/match, archive discovery, breach discovery, and analysis updates.
+Query generation is adaptive and evidence-driven rather than a short hard-coded list.
 
-The UI updates incrementally from real events.
+For a name seed, query families may include exact-name searches, profile domains, documents, public directories, organizations, locations, archives, and later combinations with newly verified identifiers.
 
-## 9. Candidate verification and extraction
+For a discovered email, phone, username, alias, domain, profile URL, or other high-entropy value, generate appropriate exact and normalized variants.
 
-Discovery and verification are separate. A URL existing does not prove account ownership.
+The query system must learn from measured source yield. High-yield queries and sources are scheduled earlier; low-yield or unhealthy routes move later or are skipped within bounded modes.
 
-Verification must detect ordinary not-found responses, soft errors, redirects, login walls, policy challenges, malformed responses, and pages that exist but cannot be attributed to the subject.
+### 6.3 Search source accounting
 
-Provider extraction should capture structured public signals such as username, display name, bio, public contact details, websites, account links, avatar, banner, location claim, organization claim, occupation claim, join date, external IDs, and canonical URL when legitimately present.
+Keep these counts separate everywhere:
 
-## 10. Recursive discovery frontier
+- catalogued source;
+- executable source;
+- automated source;
+- live-reachable source;
+- live-validated source;
+- import-only source;
+- manual-only source;
+- retired/unsupported source.
 
-Replace ad-hoc pivoting with a bounded frontier containing visited signals/providers, admitted and rejected pivots, depth, and budgets.
+Never present a large catalogue of manual/import-only tools as autonomous Dossier coverage.
 
-Default maximum depth starts conservatively at two. Strong explicit cross-links and supplied identifiers may expand automatically. Weak or common signals do not recursively expand without corroboration. The purpose is to improve recall without false-positive cascades.
+## 7. Exact-value extraction
 
-## 11. Entity resolution
+Exact-value extraction is first-class functionality.
 
-Entity resolution combines independent positive and negative signals. Never implement a `same username = same person` shortcut.
+Fetched accessible pages and documents should be parsed for supported exposed data such as:
 
-Preserve contribution explanations and supporting evidence IDs for every inferred relationship. Contradictions such as incompatible names, websites, timelines, or strongly conflicting visual evidence must reduce or block a merge.
+- names and aliases;
+- usernames/handles;
+- email addresses;
+- phone numbers;
+- postal addresses;
+- postal/PIN codes;
+- public profile URLs;
+- websites/domains;
+- organization and employment claims;
+- location claims;
+- messaging/profile identifiers where openly present;
+- payment-address-like public identifiers where legitimately visible;
+- image and avatar URLs;
+- document metadata;
+- other structured facts justified by observed user needs.
 
-Weights are engineering parameters until calibrated against benchmark data and must not be described as scientific probabilities.
-
-## 12. Identity Graph v2
-
-The graph becomes the central internal representation:
+For every extracted value preserve:
 
 ```text
-Discovery → Evidence → Graph → Correlation → Analysis → UI
+exact source string
+normalized value
+type
+source/provider
+source URL or local evidence source
+retrieval timestamp
+observed/historical timestamp when available
+parser version
+content/evidence hash
+verification state
+confidence/source reliability
+discovery path
+current vs historical state
 ```
 
-Support queries for linked accounts, evidence behind a relationship, shared identifiers, reused images, earliest known evidence, historical changes, organizations, breach links, unresolved candidate branches, and conflicting evidence.
+Self-audit local views must not mask an exact value merely because it is sensitive. The user needs to know what is exposed in order to verify and remediate it. Redaction belongs to sharing/export controls, not the private local evidence ledger.
 
-Do not create parallel sources of truth.
+## 8. Exposure Ledger
 
-## 13. Images and local face correlation
+The Exposure Ledger is a central product object rather than a report-only projection.
 
-Acquire candidate images only from public/authorized sources and preserve provenance. Use cheap deterministic deduplication before face comparison:
+Each fact should support at least:
 
 ```text
-download → SHA-256 → decode → exact cluster → perceptual hashes
-→ normalized crops → face detection where useful → embedding where useful
+exact value
+normalized value
+fact type
+subject/entity association
+one or more evidence IDs
+source classification
+first observed
+last observed
+verification state
+confidence
+historical/current state
+discovery path
+remediation status
 ```
 
-Maintain the current local-first YuNet/SFace approach with pinned redistributable models, integrity checks, deterministic preprocessing, documented color conversion, alignment, quality rejection, embedding normalization, and reproducible cosine comparison.
-
-Face similarity remains supporting evidence. Production thresholds require a consented or legally distributable identity-disjoint benchmark with FAR/FRR/ROC-oriented reporting and a versioned calibration artifact.
-
-## 14. Historical identity and timeline
-
-Archive evidence is first-class and remains distinct from current claims. For verified current URLs, permitted archive lookups may produce snapshots and timestamped evidence. Extract historical names, usernames, avatars, public links, organization/location claims, and other supported signals without silently merging old and current state.
-
-Construct an inspectable identity timeline from timestamped evidence.
-
-## 15. Breach intelligence
-
-Use legitimate breach-intelligence providers and privacy-preserving query modes where available. Never display or distribute secret credential material.
-
-Breach records preserve breach name, relevant dates, data classes, verification state, provider, retrieval time, and affected supplied identifier. Breach events may appear on the timeline but remain semantically separate from public-profile observations.
-
-## 16. Exposure analysis
-
-Prioritize exposure by inspectable categories such as public accounts, contact exposure, history, image reuse, location, employment, breach exposure, identifier reuse, data-broker exposure, and high-value account exposure.
-
-If Dossier exposes an aggregate score, its contributing factors must be inspectable. Weights remain documented engineering parameters until calibrated and user-tested.
-
-## 17. AI analyst
-
-AI consumes a deterministic structured snapshot derived from evidence and graph state. AI does not create evidence.
-
-Structured AI conclusions must cite existing evidence IDs, distinguish supporting and contradicting evidence, and return an uncertainty-aware summary. Reject or downgrade output that cites nonexistent evidence or asserts unsupported facts.
-
-Local models are preferred where practical. Remote providers remain opt-in and the UI discloses what leaves the device.
-
-## 18. Investigation UX
-
-Keep the coherent four-area investigation structure:
-
-- Overview — privacy posture and scan summary.
-- Evidence — findings and provenance.
-- Connections — identity graph and explanations.
-- Actions — remediation.
-
-During scans, display real scheduled/completed provider counts and stream useful discoveries as they occur.
-
-Evidence cards should expose source, URL, timestamp, current/historical state, verification state, confidence, relationship to subject, and safe normalized/raw values. Users must eventually be able to confirm, reject, ignore, or annotate evidence, and corrections must influence downstream graph/risk/AI behavior without silently deleting raw evidence.
-
-Connections must support accessible navigation and a non-visual alternative. Status must never depend on color alone.
-
-## 19. Remediation and differential rescans
-
-Remediation supports provider-specific privacy/deletion/correction resources where legitimate, action-state tracking, and later verification. Never report that data was removed unless a later check supports that claim.
-
-Persist remediation states such as NotStarted, InProgress, Submitted, AwaitingResponse, Completed, Rejected, and NeedsManualAction.
-
-Scan history must retain enough state to compare new, changed, unchanged, unavailable/removed, and historical-only evidence across rescans.
-
-## 20. Cases, reports, and local security
-
-A versioned encrypted case eventually contains authorized scope, seeds, scan history, evidence, graph entities/relationships, image clusters, breach metadata, analysis, user corrections, remediation state, and export metadata.
-
-Sensitive case data must use platform-backed secure storage where available. Do not log secrets. Do not commit API keys. Credentials use secure storage. Case deletion and cache cleanup are explicit.
-
-Exports support machine-readable evidence JSON and human-readable PDF/HTML where appropriate. Reports include scope, scan time, inputs, findings, confidence, provenance, timeline, risk categories, remediation checklist, limitations, and redaction controls.
-
-## 21. Offline and privacy controls
-
-Users eventually control local-only mode, remote-AI permission, scan depth, provider categories, historical lookup, image analysis, face correlation, breach query, case persistence, and export redaction. Defaults favor privacy.
-
-Offline operation should retain useful case browsing, graph inspection, local image/face comparison, deterministic analysis, local AI where installed, report generation, and cached evidence. Network-dependent providers show truthful unavailable states.
-
-## 22. Provider reliability and caching
-
-Track provider success, timeout, soft-error, rate-limit, and parser-failure rates, median latency, and last validation date. Development diagnostics should expose stale/broken providers.
-
-Cache entries retain provider, request key, timestamp, expiry, content hash, and validation state. Stale data never masquerades as a fresh fetch.
-
-Use a structured error taxonomy including NetworkUnavailable, Timeout, RateLimited, AuthenticationRequired, UnsupportedAutomation, ProviderChanged, ParseFailure, InvalidCandidate, PolicyRestriction, RemoteServiceUnavailable, ModelUnavailable, StorageFailure, and Cancelled.
-
-## 23. Testing contract
-
-Unit tests cover normalization, provider parsing/validation, graph operations, confidence contributions, pivot admission, hashing, image preprocessing, evidence serialization, risk calculation, and AI-result validation.
-
-Provider contract tests include present, absent, soft-error, redirect, policy/auth, and malformed fixtures. Deterministic fixtures remain separate from live network checks.
-
-Recursive discovery tests use synthetic identity networks and verify valid multi-hop discovery, depth limits, loop prevention, weak-branch rejection, and contradiction handling.
-
-Entity-resolution benchmarks measure precision, recall, false positives, false negatives, and calibration on synthetic/consented data. False positives are especially costly.
-
-Image tests cover exact copies, recompression, resize, crop, small edits, different photos of the same consented subject, different subjects, no-face, multi-face, low-quality, and pose variation.
-
-Security tests cover case encryption, key behavior, credential handling, deletion, redaction, logs, and accidental remote transmission.
-
-Compose instrumentation covers critical flows including seed entry, scan configuration, cancellation, resume, finding inspection, graph drill-down, image review, breach review, remediation, export, and case deletion.
-
-## 24. Real-device, performance, accessibility, and UX gates
-
-Production readiness requires real-device validation on at least a recent Samsung flagship, a Pixel-class device, and a lower-memory Android device. Measure startup, scan responsiveness, memory, battery/network behavior, rotation/resizing, background restoration, process-death recovery, and large-case performance.
-
-Architecture must remain capable of thousands of provider definitions, bounded concurrent work, thousands of graph nodes, tens of thousands of relationships, incremental UI updates, resumable scans, and bounded memory. Profile before optimizing.
-
-Production UI requires screen-reader semantics, scalable typography, sufficient contrast, reduced-motion handling, non-color-only status, accessible graph alternatives, and suitable touch targets.
-
-Dossier should feel like a modern privacy application rather than a terminal-themed demo. Animation communicates state, remains interruptible, honors reduced motion, and never blocks work.
-
-## 25. No fake capability
-
-Production code must not inject fabricated findings, counters, confidence values, AI responses, graph nodes, breach data, archive data, or successful placeholders. Mocks belong only in explicit tests/fixtures.
-
-## 26. Observability and dependency policy
-
-Development diagnostics may expose provider requests/latency, parse failures, pivot decisions, graph mutations, AI validation failures, image stages, memory, case size, and network failures without unnecessarily logging sensitive values.
-
-Dependencies must be justified, maintained, license-compatible, security-reviewed, and pinned appropriately. Avoid large frameworks for trivial utilities.
-
-Provider-maintenance tooling must validate definitions, duplicate IDs, templates, schema, statistics, staleness, and sampled health. Import tooling may transform legitimate public metadata into Dossier's own reviewed schema, but production must not depend on external CLIs.
-
-## 27. README and TRUTH requirements
-
-`README.md` describes only implemented capabilities plus honest limitations, privacy model, build instructions, supported provider categories, breach requirements, AI options, and security considerations.
-
-`TRUTH.md` must always include:
+Source classifications should include at least:
 
 ```text
-overall strict product score
-subsystem scores
-implemented / partial / not implemented
-validated / unvalidated
-known defects
-production blockers
-last validated commit
-last validated devices
-actual validated provider count
+PUBLIC_WEB
+PUBLIC_PROFILE
+PUBLIC_DOCUMENT
+PUBLIC_RECORD
+DATA_BROKER
+ARCHIVE
+BREACH_INDEX
+AUTHORIZED_API
+LOCAL_IMPORT
+USER_IMPORTED
+UNKNOWN_ORIGIN
 ```
 
-## 28. Strict 100-point rubric
+Do not automatically treat a locally imported or breach-derived record as a verified identity fact. It is evidence whose relationship to the audited subject still requires correlation and provenance.
+
+## 9. Attacker View and benchmark mode
+
+Attacker View answers what can be derived from the initial seed without silently using additional user profile information.
+
+The user can choose a starting condition such as:
 
 ```text
-Discovery breadth and reliability        15
-Recursive orchestration                  10
-Evidence/provenance                      10
-Entity resolution                        10
-Identity graph                            8
-Image acquisition/correlation             8
-Face-correlation validation               6
-Historical evidence                       6
-Breach intelligence                       5
-AI analyst                                5
-UX/UI                                     8
-Security/privacy                          4
-Testing/device validation                 5
-                                         ---
-                                         100
+Name only
+Username only
+Email only
+Phone only
+URL only
+Photo only
 ```
 
-Never award full points without real validation.
-
-## 29. Milestones
-
-### M0 — Baseline audit
-
-Build, run tests, inspect architecture/screens/stubs, inventory providers, graph, image/face, archive/breach, and refresh `TRUTH.md`.
-
-### M1 — Discovery Fabric v2
-
-Deliver declarative provider schema/registry, categories, validation, health, scan presets, bounded request policy, maintenance tooling, and the closest honestly validated provider count toward the 1,000+ target. Real providers must be queried, soft errors handled, fake counts impossible, and failures visible.
-
-### M2 — Scan Coordinator + live events
-
-Deliver central coordination, resumable/cancellable scans, typed events, real-time progress, and duplicate suppression.
-
-### M3 — Recursive frontier
-
-Deliver bounded pivot queue, visited state, confidence admission, depth/budget enforcement, and loop prevention.
-
-### M4 — Identity Graph v2
-
-Deliver typed nodes/relationships, edge evidence, historical state, graph queries, migrations, and one graph source of truth.
-
-### M5 — Entity Resolver v2
-
-Deliver multi-signal resolution, contradiction handling, contribution explanations, benchmark, and calibration tooling.
-
-### M6 — Image acquisition + correlation
-
-Deliver public candidate acquisition, deduplication/clustering, provenance, and face-pipeline integration.
-
-### M7 — Face validation
-
-Deliver benchmarked thresholds and measured FAR/FRR/ROC behavior with versioned calibration.
-
-### M8 — Historical identity
-
-Deliver archive snapshot discovery, historical extraction, timeline, and historical graph relationships.
-
-### M9 — Breach intelligence
-
-Deliver authoritative integration, privacy-preserving lookup where supported, timeline, and quota/error handling.
-
-### M10 — Evidence-grounded AI
-
-Deliver graph snapshot, structured output, evidence-ID validation, contradiction-aware summaries, and local/remote privacy controls.
-
-### M11 — Premium investigation UX
-
-Deliver polished overview, live scan, evidence explorer, graph interactions, timeline, image clusters, risk breakdown, remediation dashboard, and accessibility validation.
-
-### M12 — Remediation workflow
-
-Deliver provider-specific actions, request assistance, status tracking, rescan verification, and before/after comparison.
-
-### M13 — Production hardening
-
-Deliver encryption/migration validation, crash recovery, offline behavior, large-case performance, real-device QA, accessibility, battery/network profiling, and release packaging.
-
-## 30. Completion and agent rules
-
-A milestone is complete only when production implementation exists, relevant tests pass, integration/UI wiring works, error paths are truthful, canonical documentation matches reality, and `TRUTH.md` is updated.
-
-Agents must inspect before rewriting, preserve working behavior, add tests, execute them, fix regressions, avoid speculative claims/dependencies/duplicate architecture, keep changes reviewable, and update `TRUTH.md`.
-
-After every meaningful tranche ask:
+Dossier records the derivation timeline:
 
 ```text
-Does it compile?
-Do tests pass?
-Does it work end-to-end?
-Is the UI wired?
-Are errors truthful?
-Are findings evidence-backed?
-Could this create false identity links?
-Could sensitive data leave unexpectedly?
-Did performance regress?
-Does TRUTH.md reflect reality?
+T+00:00 initial seed
+T+00:04 first verified profile
+T+00:12 verified username
+T+00:18 public email
+T+00:31 public document
+T+00:44 phone candidate
+...
 ```
 
-Production code favors explicit types, structured concurrency, bounded resources, deterministic parsing, immutable evidence records where practical, structured failures, and maintainable module boundaries. Adapt the existing repository instead of reorganizing it for style alone.
+The benchmark must measure at least:
 
-## 31. Definition of 100/100
+- exact facts recovered;
+- Recall@known-exposure;
+- precision;
+- false-positive rate;
+- unresolved candidate count;
+- time to first useful result;
+- time to first verified identity anchor;
+- time to email/phone/address when present in ground truth;
+- time to 50% recall;
+- time to 80% recall;
+- total scan duration;
+- provider/source failure rate;
+- useful findings per request;
+- useful pivots per verified finding.
 
-Dossier earns 100/100 only when an authorized user can create an encrypted case, supply identity seeds, select scan depth, scan hundreds or thousands of legitimate public sources, watch real progress, verify relevant accounts, safely follow corroborated pivots, inspect an explainable graph, review image and face-supporting evidence, inspect history and authoritative breach metadata, receive evidence-grounded analysis, understand risk, perform remediation, rescan to verify change, export a useful report, and do all of this with production-level privacy, security, performance, accessibility, and stability.
+Provider count is not a mission metric.
 
-A polished demo, large provider count, AI summary, or identity graph alone is not 100/100. The entire workflow must work together.
+### 9.1 Private ground truth
 
-## 32. Immediate execution order
+Real self-audit ground truth must remain local to the user's device or development machine.
+
+Never commit or upload a real person's:
+
+- name used as a private benchmark identity;
+- phone numbers;
+- email addresses;
+- addresses;
+- account identifiers;
+- government identifiers;
+- financial identifiers;
+- photos/face data;
+- private bot outputs;
+- breach rows;
+- benchmark manifests containing real identity values.
+
+Use synthetic fixtures in Git and CI. Private benchmark storage must be gitignored, encrypted where practical, excluded from logs, excluded from screenshots, excluded from telemetry, and never automatically included in AI prompts.
+
+## 10. Photo as a first-class seed
+
+A user-provided photo is a universal discovery seed, not a separate utility screen.
+
+Photo search immediately fans out into independent local and remote-capable pipelines:
 
 ```text
-1. Audit current repository and refresh TRUTH.md.
-2. Preserve working evidence, graph, image, face, breach, AI, case, UI, and tests.
-3. Build Discovery Fabric v2.
-4. Introduce Scan Coordinator and typed event bus.
-5. Replace ad-hoc pivots with bounded recursive frontier logic.
-6. Upgrade the identity graph schema.
-7. Build calibrated entity resolution.
-8. Expand image candidate acquisition.
-9. Validate face correlation scientifically.
-10. Expand archive/timeline support.
-11. Harden breach presentation.
-12. Make AI graph-native and evidence-validated.
-13. Polish the investigation UX around streaming results.
-14. Implement remediation and differential rescans.
-15. Perform production hardening and real-device QA.
-16. Continue until the strict rubric truthfully reaches 100/100.
+Photo
+  ├─ metadata / EXIF / XMP / IPTC
+  ├─ OCR
+  ├─ face detection and local face correlation
+  ├─ object / landmark / scene cues
+  ├─ image hashing and duplicate clustering
+  ├─ reverse-image provider search
+  └─ location reconstruction
+        ↓
+   evidence fusion
+        ↓
+   identity/location candidates
+        ↓
+   normal recursive Dossier frontier
 ```
 
-Do not stop at scaffolding when a vertical implementation can reasonably be completed.
+### 10.1 Metadata
 
-The final product standard is an evidence-backed, explainable, measurable, local-first, privacy-preserving, secure, polished, and actionable self-audit application.
+Analyze the original image locally before any upload.
+
+Extract where available:
+
+- GPS latitude/longitude/altitude;
+- capture timestamp/timezone;
+- camera/device model;
+- orientation;
+- software/editor fields;
+- image dimensions;
+- embedded thumbnail metadata;
+- XMP/IPTC location fields;
+- GPS direction/bearing;
+- other relevant local metadata.
+
+EXIF coordinates are evidence that coordinates were embedded in the file. They are not automatically proof that the visible scene was captured there if other evidence contradicts them.
+
+### 10.2 OCR
+
+OCR all useful visible text locally where possible. Text such as place names, business names, roads, transit labels, phone numbers, domains, usernames, event names, signs, and postal codes may create new discovery pivots.
+
+OCR observations must retain bounding/provenance information sufficient for user inspection where practical.
+
+### 10.3 Face analysis
+
+Reuse the existing local face pipeline where sound.
+
+The desired flow is:
+
+```text
+input photo
+  → face detection
+  → quality gate
+  → aligned crop
+  → local embedding
+  → public candidate images discovered by other providers
+  → local candidate comparison
+  → evidence-backed candidate identity
+  → newly verified name/username/profile seeds
+```
+
+Face similarity is supporting evidence, never identity proof by itself.
+
+Do not automatically send face crops or embeddings to remote AI providers.
+
+### 10.4 Reverse image search
+
+Support multiple reverse-image providers through a provider adapter contract. Prefer documented APIs where available.
+
+Where a useful service has no stable API, a user-visible embedded browser or browser-backed adapter may be used when technically and contractually appropriate. Such adapters must fail truthfully with states such as `ProviderChanged`, `AuthenticationRequired`, `Challenge`, or `UnsupportedAutomation` rather than using brittle or evasive behavior.
+
+Playwright is appropriate for browser-adapter CI, regression testing, and external tooling. Do not make Playwright-over-ADB a required Android runtime architecture.
+
+Candidate providers may include services such as Google Lens, Yandex Images, TinEye, and later reviewed services. Provider availability and integration mode must be recorded truthfully in `TRUTH.md`.
+
+Reverse-image results should yield at least:
+
+```text
+candidate image URL
+source page URL
+provider
+page title/snippet when available
+exact-copy / near-duplicate / visual-candidate state
+retrieval timestamp
+provider evidence IDs
+```
+
+Source pages discovered through reverse-image search must feed back into normal Dossier fetching, extraction, and recursive search.
+
+### 10.5 Metadata-stripped remote copies
+
+By default, before sending a photo to a remote reverse-image service:
+
+```text
+original image
+  → local metadata extraction
+  → decode pixels locally
+  → remove EXIF/XMP/IPTC and unrelated metadata
+  → create temporary derivative
+  → upload derivative only
+```
+
+The UI must disclose that a derivative image will leave the device and identify the destination service.
+
+## 11. Photo location reconstruction
+
+Photo geolocation/location reconstruction is a first-class evidence product.
+
+Candidate location evidence may come from:
+
+- embedded GPS metadata;
+- explicit source-page geotags;
+- exact/near-identical reverse-image source pages;
+- OCR of unique place names or addresses;
+- landmark matches;
+- multiple independent page/location references;
+- public map/place resolution of already discovered location strings;
+- visual environmental cues;
+- AI/geolocation model suggestions.
+
+Weight these evidence classes differently. Visual guessing must never be presented at the same confidence tier as exact GPS or multiple independent corroborating sources.
+
+Location results use explicit classes such as:
+
+```text
+EXACT_METADATA
+CORROBORATED_LOCATION
+LIKELY_LOCATION
+VISUAL_GUESS
+CONFLICTING
+```
+
+Every location candidate must show why it exists.
+
+Where multiple candidate locations exist, display ranked candidates and their evidence rather than forcing one coordinate.
+
+## 12. Documents, archives, directories, and historical identity
+
+Public documents are first-class sources. Discovery must handle relevant accessible PDFs, text documents, public directories, event lists, resumes, organization pages, indexed spreadsheets where safely parseable, and similar evidence.
+
+Extract text and metadata locally after retrieval and feed verified identifiers into the frontier.
+
+Archives are first-class historical evidence. Historical names, handles, links, contact information, avatars, organizations, and locations remain visibly historical and must not silently overwrite current state.
+
+## 13. Breach and exposure intelligence
+
+Breach intelligence supports the self-audit mission but does not replace public discovery.
+
+Use legitimate exposure/breach providers and privacy-preserving query modes where available. A provider may confirm that a class of data was exposed without returning the original stolen value; Dossier must represent that distinction explicitly.
+
+Support local ingestion of user-authorized exposure evidence and datasets where practical, including structured CSV/JSON/JSONL and other reviewed formats. Larger or more complex formats may be added when justified.
+
+Imported local exposure data remains local by default and must never be automatically uploaded.
+
+Dossier may use an exact identifier learned from authorized local evidence as a pivot into public/authorized sources while preserving provenance.
+
+Do not build acquisition mechanisms for stolen/private databases or credentials.
+
+## 14. Evidence and identity resolution
+
+Preserve the existing evidence-oriented philosophy.
+
+Every substantive claim must connect to inspectable evidence IDs. Confidence is not proof.
+
+Entity resolution combines independent positive and negative signals and must preserve explanations.
+
+A same/similar username alone cannot confirm identity. A face similarity score alone cannot confirm identity. A search snippet alone cannot confirm identity. A common name alone cannot confirm identity.
+
+Contradictions remain first-class evidence and may block or downgrade a merge.
+
+## 15. Graph architecture
+
+Reuse the existing typed evidence/graph foundations where possible, but make the Exposure Ledger and canonical evidence relationships the source material from which graph projections derive.
+
+The graph should support at least:
+
+```text
+Subject
+Account
+Username
+DisplayName
+Email
+Phone
+Address
+PostalCode
+Domain
+URL
+Image
+Photo
+Document
+Organization
+Location
+ArchiveSnapshot
+Breach
+Website
+EvidenceArtifact
+```
+
+Useful relationships include:
+
+```text
+HAS_USERNAME
+HAS_EMAIL
+HAS_PHONE
+HAS_ADDRESS
+USES_ACCOUNT
+USES_AVATAR
+LINKS_TO
+MENTIONS
+AFFILIATED_WITH
+LOCATED_IN
+OBSERVED_AT
+APPEARED_IN_BREACH
+ARCHIVED_AS
+SAME_IMAGE_AS
+SIMILAR_IMAGE_TO
+CROSS_LINKS_ACCOUNT
+DERIVED_FROM
+SOURCE_OF
+```
+
+Storage must not depend permanently on one UI graph representation.
+
+## 16. Reuse existing foundations
+
+Do not rewrite working foundations without evidence.
+
+The following existing areas are presumptively reusable and should be adapted rather than discarded:
+
+- encrypted case persistence and bounded records;
+- evidence IDs and provenance models;
+- canonical relationship assertions;
+- graph schema and reconciliation diagnostics;
+- WorkManager/background scan ownership and recovery concepts;
+- request/plan-bound checkpoint patterns;
+- user correction semantics;
+- remediation tracking;
+- report/export redaction infrastructure;
+- archive/Wayback support;
+- HIBP/breach provider scaffolding;
+- local image hashing and duplicate clustering;
+- YuNet/SFace local face-correlation pipeline and quality gates;
+- OCR and local image analysis dependencies already used successfully;
+- Compose navigation/components that remain useful after the launch-flow simplification;
+- provider response taxonomy, bounded reads, cooldowns, and conservative verification logic.
+
+Reuse does not mean preserve all current abstractions. If an existing component forces shallow one-shot behavior, serial execution, duplicate sources of truth, misleading capability claims, unnecessary dependencies, or poor UX, refactor or remove it.
+
+## 17. UI restructuring
+
+The existing multi-screen shell is a base, not a product contract.
+
+Priority UI work:
+
+1. universal launch/search screen;
+2. live progressive discovery screen;
+3. Exposure Ledger;
+4. Attacker View timeline;
+5. evidence/source drill-down;
+6. Exposure Graph;
+7. photo analysis/location candidate panel;
+8. remediation actions;
+9. saved local cases;
+10. settings/advanced scan controls.
+
+Advanced provider selection and technical diagnostics must not block ordinary search startup.
+
+## 18. Provider/browser behavior
+
+Network identity must be generic and product-owned.
+
+Do not hard-code:
+
+- a contributor's device model;
+- a contributor's username;
+- a contributor repository URL in runtime User-Agent strings;
+- fake Chrome/Firefox device identities solely to impersonate browsers or evade provider controls.
+
+Use a generic Dossier product User-Agent where a custom UA is appropriate. Embedded WebView requests may use the platform's normal WebView UA when required for compatibility, but do not override it with a developer-specific hardware fingerprint.
+
+No CAPTCHA bypass, challenge bypass, login/session theft, credential collection, or access-control evasion.
+
+## 19. PII and repository hygiene
+
+Never commit real personal benchmark data.
+
+Use obvious synthetic fixtures such as:
+
+```text
+Jane Example
+sample_user
+jane@example.test
+https://profile.example.test/sample_user
+```
+
+Use reserved domains such as `example.com`, `example.org`, `example.net`, and `.test` where appropriate.
+
+Before a change is considered complete, scan for:
+
+- real contributor names used as identity fixtures;
+- real personal usernames used as fixtures;
+- non-reserved email fixtures;
+- phone/address/government/financial identifiers;
+- developer-specific absolute paths;
+- device model fingerprints;
+- committed secrets or keys;
+- screenshots containing real identity/account/device data;
+- local benchmark files;
+- IDE/editor state.
+
+Do not commit `.idea/`, `.vscode/`, agent-tool state directories, local caches, build products, temporary screenshots, benchmark secrets, or generated markers that do not contribute to the product.
+
+Do not rewrite Git history unless the repository owner explicitly requests history rewriting. Removing information from the current tree does not remove it from prior commits, forks, caches, release artifacts, or external indexes.
+
+## 20. Code and test pruning
+
+Delete unnecessary material deliberately.
+
+Candidates include:
+
+- duplicate tests that assert the same contract at the same level;
+- obsolete tests for removed behavior;
+- empty marker files;
+- duplicate maintenance scripts where one maintained implementation is sufficient;
+- committed IDE/editor/agent state;
+- abandoned integrations and unreachable code;
+- catalogue entries that exist only as product-theater metadata when a generic import concept is sufficient;
+- dependencies with no production or test use;
+- stale screenshots no longer referenced by current documentation.
+
+Do **not** delete regression, security, encryption, persistence, provenance, parser, or recovery tests merely to reduce test count. Test count is not a metric; meaningful defect coverage is.
+
+After pruning, all remaining tests must have a clear responsibility.
+
+## 21. Performance contract
+
+The product should prioritize sub-minute useful discovery even when complete deep scans take longer.
+
+Track at minimum:
+
+```text
+time to first useful finding
+time to first verified identity anchor
+time to first high-value exact identifier
+frontier queue size
+active workers
+provider wait/cooldown time
+provider p50/p95 latency
+useful findings per provider/request
+new pivots per finding
+cache hit rate
+failure/challenge/rate-limit rate
+```
+
+The UI should remain responsive while work proceeds. Persist enough frontier/checkpoint state for useful recovery after process death where practical.
+
+## 22. Security and local privacy
+
+Sensitive cases, exact exposed values, private ground truth, face data, imported exposure evidence, and derived identity graph material require local security controls.
+
+Requirements:
+
+- platform-backed encryption/key storage where practical;
+- bounded storage;
+- explicit case deletion;
+- explicit cache cleanup;
+- no sensitive values in routine logs;
+- no automatic cloud backup assumption for private case material;
+- remote AI is opt-in and receives a deliberately constructed/redacted snapshot by default;
+- exact sensitive values remain local unless the user intentionally chooses a network operation that requires them;
+- reverse-image uploads use metadata-stripped derivatives by default.
+
+## 23. AI
+
+AI is not a discovery source unless a specific evidence-producing provider contract explicitly says otherwise.
+
+AI may:
+
+- summarize evidence;
+- explain discovery paths;
+- rank remediation priorities;
+- help interpret contradictions;
+- suggest next reviewed search strategies using already available structured facts.
+
+AI may not create evidence or invent identifiers. Factual AI output must cite existing evidence IDs. Remote AI must not automatically receive the private ground-truth benchmark or raw high-sensitivity identifiers.
+
+AI/UI polish is lower priority than Discovery Engine v3 recall, extraction, scheduling, and benchmarks.
+
+## 24. Testing strategy
+
+### 24.1 Unit/contract tests
+
+Maintain targeted tests for:
+
+- seed classification and normalization;
+- query generation;
+- frontier admission/deduplication/depth/budgets;
+- rolling scheduling semantics;
+- provider throttling/cooldowns;
+- parser/extractor correctness;
+- exact-value normalization while retaining source strings;
+- provenance and evidence IDs;
+- identity resolution and contradictions;
+- document parsing;
+- EXIF/OCR/photo metadata;
+- image hashing/duplicate clustering;
+- face quality and comparison math;
+- location evidence fusion;
+- breach-provider states;
+- encrypted persistence;
+- deletion/redaction;
+- AI evidence validation.
+
+### 24.2 Synthetic end-to-end discovery corpus
+
+Create a synthetic/consented benchmark corpus where the expected discovery paths are known. It must exercise multi-hop reconstruction rather than only confusion-matrix arithmetic.
+
+Examples should test:
+
+```text
+name → profile → username → email → document → phone
+username → profile → website → email → archive
+photo → OCR/place clue → source page → profile
+photo → reverse-image page → location → identity candidate
+photo → face candidate → verified account → recursive search
+email → exposure provider → public profile/document pivots
+```
+
+### 24.3 Private local benchmark
+
+Real user-owned benchmark values stay local and produce aggregate metrics only unless the user opens the local exact evidence view.
+
+CI must not depend on real people or arbitrary live identities.
+
+### 24.4 Device and UX gates
+
+Retain emulator tests, but production readiness eventually requires physical-device measurements, accessibility, large-font behavior, process-death recovery, memory, battery, thermal, and network variability.
+
+## 25. Mission-readiness scoring
+
+The previous rubric that heavily rewarded provider breadth and implementation hardening is retired as the primary product score.
+
+Do not publish a new overall mission-readiness score until a real end-to-end discovery benchmark exists.
+
+When scoring resumes, weight outcomes approximately as follows:
+
+```text
+Measured discovery recall and exact-value recovery     25
+Precision / false-positive control                     15
+Recursive frontier and query expansion                 10
+Time-to-useful-result and scheduling                    10
+Evidence / provenance / Exposure Ledger                10
+Photo / reverse-image / location reconstruction        10
+Identity resolution / graph                             7
+Breach / document / archive coverage                    5
+Local security and privacy                              4
+Remediation / UX / accessibility / recovery             4
+                                                      ----
+                                                       100
+```
+
+A subsystem cannot receive full credit from unit tests or architecture alone when its production outcome is unmeasured.
+
+## 26. Implementation priorities
+
+### P0 — Reset and measurement
+
+- rewrite `AGENTS.md` and `TRUTH.md` around the new mission;
+- remove hard-coded contributor/device PII and browser fingerprints;
+- remove obvious repository junk and duplicate maintenance artifacts;
+- fix current CI failures;
+- establish the synthetic end-to-end discovery benchmark framework;
+- establish local private benchmark storage rules;
+- make the universal search/photo launch screen the default entry flow.
+
+### P1 — Discovery Engine v3
+
+- replace fixed `chunked(...).awaitAll()` username batches with rolling scheduling;
+- parallelize independent evidence families;
+- add provider health/yield/latency prioritization;
+- expand general web search beyond the current hard-capped shallow model;
+- implement typed recursive frontier persistence;
+- stream findings immediately;
+- implement exact-value extraction and Exposure Ledger persistence.
+
+### P2 — Documents, exposure sources, and recursion
+
+- first-class document discovery/extraction;
+- stronger archive/history pivots;
+- public directory/data-broker adapters where appropriate;
+- authorized exposure-provider connectors;
+- local exposure-evidence ingestion;
+- broad recursive query expansion from newly verified identifiers.
+
+### P3 — Photo and location reconstruction
+
+- unify upload/camera as `Photo` seed;
+- local metadata extraction;
+- OCR pivots;
+- reuse existing face pipeline against newly discovered candidate images;
+- reverse-image provider adapters;
+- metadata-stripped remote derivatives;
+- source-page recursive extraction;
+- ranked evidence-backed photo location candidates.
+
+### P4 — Graph consolidation and remediation
+
+- make Exposure Ledger/evidence assertions the canonical source for downstream graph projections;
+- reduce parallel representations;
+- preserve user corrections and contradictions;
+- improve remediation resources and differential rescans;
+- preserve exact local evidence while supporting share-safe exports.
+
+### P5 — Product hardening
+
+- physical devices;
+- accessibility;
+- performance/battery/thermal profiling;
+- large-case performance;
+- release/security review;
+- production calibration for entity/face/location confidence where relevant.
+
+## 27. Definition of success
+
+Dossier is successful when a user can launch it, enter one authorized seed or provide one photo, and quickly begin seeing an evidence-backed reconstruction that becomes richer as each verified fact creates new discovery pivots.
+
+The defining acceptance test is not:
+
+> How many providers or tests exist?
+
+It is:
+
+> Starting from only the chosen seed, how much correct exact exposure can Dossier independently recover, how quickly, from which accessible sources, with what evidence, and with how few false positives?
+
+`TRUTH.md` must always answer how close the current implementation is to that standard.
