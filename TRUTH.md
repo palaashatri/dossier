@@ -13,6 +13,7 @@ This is the authoritative current-state record for Dossier.
 - **Audit/reset date:** 2026-09-04
 - **Previous strict readiness score:** **83/100 — RETIRED as the primary product metric**
 - **Current mission-readiness score:** **UNSCORED / NOT ESTABLISHED**
+- **Declarative provider definitions:** **78 authored**
 - **Reason:** Dossier does not yet have a representative end-to-end exposure-reconstruction benchmark, so publishing another flattering overall score would be misleading.
 
 The previous implementation accumulated substantial engineering hardening, provenance, persistence, graph, image, face, recovery, remediation, and UI work. That work is not discarded. The failure was primarily a product-contract and discovery-architecture mismatch: Dossier was optimized heavily for bounded, conservative provider checks and implementation completeness instead of maximizing measurable exact exposure recovery from a minimal seed.

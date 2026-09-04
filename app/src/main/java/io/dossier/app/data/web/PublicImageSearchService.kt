@@ -126,7 +126,7 @@ class PublicImageSearchService(private val context: Context) {
         private const val MIN_IMAGE_SCORE = 0.24f
         private const val MIN_IMAGE_HTML_BYTES = 500
         private const val USER_AGENT =
-            "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0"
+            "Dossier/0.1 public-exposure-audit"
 
         private val json = Json { ignoreUnknownKeys = true }
 

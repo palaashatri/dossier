@@ -290,7 +290,7 @@ class ProviderExecutionRuntime(
     }
 
     companion object {
-        const val USER_AGENT = "Dossier/0.1 authorized-assessment (+https://github.com/palaashatri/dossier)"
+        const val USER_AGENT = "Dossier/0.1 authorized-assessment"
         const val MAX_BODY_CHARS = 1_000_000
         private val providerIdPattern = Regex("^[a-z0-9]+(?:-[a-z0-9]+)*$")
         private val schedulingKeyPattern = Regex("^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")

@@ -87,7 +87,7 @@ class ProfileImageDownloader(context: Context) {
         private const val MIN_BYTES = 256L
         private const val MAX_BYTES = 5L * 1024L * 1024L
         private const val USER_AGENT =
-            "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0"
+            "Dossier/0.1 public-exposure-audit"
 
         fun normalizeHttpUrl(raw: String): String? {
             val trimmed = raw.trim()

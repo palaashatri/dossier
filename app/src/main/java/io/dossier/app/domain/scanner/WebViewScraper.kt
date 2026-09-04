@@ -29,7 +29,7 @@ object WebViewScraperPolicy {
      * Non-impersonating generic Dossier user agent indicating authorized public self-audit.
      */
     const val USER_AGENT =
-        "Dossier/0.1 public-self-audit (+https://github.com/palaashatri/dossier)"
+        "Dossier/0.1 public-self-audit"
 
     /**
      * Maximum settle polls allowed before capturing a snapshot.

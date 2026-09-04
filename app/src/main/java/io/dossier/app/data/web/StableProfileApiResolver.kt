@@ -421,7 +421,7 @@ internal class StableProfileApiResolver(
         private const val FAILURE_CACHE_TTL_MS = 45 * 1_000L
         private const val UNSUPPORTED_CACHE_TTL_MS = 5 * 60 * 1_000L
         private const val USER_AGENT =
-            "Dossier/0.1 public-self-audit (+https://github.com/palaashatri/dossier)"
+            "Dossier/0.1 public-self-audit"
 
         private val sharedCache = ConcurrentHashMap<String, CachedResolution>()
         private val sharedBreaker = ProviderCircuitBreaker(failureThreshold = 3, cooldownMillis = 90_000L)

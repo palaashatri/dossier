@@ -46,7 +46,7 @@ class WebLocationSearcher(private val context: Context) {
         try {
             val request = Request.Builder()
                 .url("https://html.duckduckgo.com/html/?q=${urlEncode(query)}")
-                .header("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0")
+                .header("User-Agent", "Dossier/0.1 public-exposure-audit")
                 .build()
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
@@ -104,7 +104,7 @@ class WebLocationSearcher(private val context: Context) {
                     try {
                         val req = Request.Builder()
                             .url(ev.url)
-                            .header("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0")
+                            .header("User-Agent", "Dossier/0.1 public-exposure-audit")
                             .build()
                         client.newCall(req).execute().use { resp ->
                             if (resp.isSuccessful) {

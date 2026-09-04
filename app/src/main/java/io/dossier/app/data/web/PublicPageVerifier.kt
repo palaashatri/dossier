@@ -196,7 +196,7 @@ internal class PublicPageVerifier(
         private const val MAX_BODY_BYTES = 2_000_000L
         private const val MAX_TEXT_CHARS = 8_000
         private const val USER_AGENT =
-            "Dossier/0.1 public-self-audit (+https://github.com/palaashatri/dossier)"
+            "Dossier/0.1 public-self-audit"
         private const val HISTORICAL_CONFIDENCE_CEILING = 0.78f
         private const val HISTORICAL_SCORE_FACTOR = 0.90f
 

@@ -212,7 +212,7 @@ class RedditPublicActivityPlugin(
 
     companion object {
         private const val USER_AGENT =
-            "Dossier/0.1 authorized-public-self-audit (+https://github.com/palaashatri/dossier)"
+            "Dossier/0.1 authorized-public-self-audit"
         private const val PARSER_VERSION = "reddit-public-activity-v1"
         private const val MAX_HANDLES = 6
         private const val MAX_POST_PAGES = 2

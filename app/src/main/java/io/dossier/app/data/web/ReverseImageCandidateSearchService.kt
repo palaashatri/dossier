@@ -201,8 +201,8 @@ internal class ReverseImageCandidateSearchService(private val context: Context) 
         private const val CACHE_TTL_MS = 20 * 60 * 1_000L
 
         private val USER_AGENTS = listOf(
-            "Mozilla/5.0 (Linux; Android 14; SM-S931B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36",
-            "Mozilla/5.0 (Android 14; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0"
+            "Dossier/0.1 public-exposure-audit",
+            "Dossier/0.1 public-exposure-audit"
         )
 
         private val ENGINE_HOSTS = setOf(

@@ -220,7 +220,7 @@ class GeoCorroborationService {
     private fun format2(value: Double): String = "%.2f".format(Locale.US, value)
 
     private companion object {
-        const val USER_AGENT = "Dossier/0.1 authorized-self-audit (+https://github.com/palaashatri/dossier)"
+        const val USER_AGENT = "Dossier/0.1 authorized-self-audit"
         const val MAX_RESPONSE_CHARS = 500_000
         const val MAX_PLACE_CHARS = 240
         val JSON = Json { ignoreUnknownKeys = true }
