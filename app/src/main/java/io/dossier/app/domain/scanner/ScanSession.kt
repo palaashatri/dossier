@@ -50,8 +50,11 @@ import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.PlaceScanResult
 import io.dossier.app.domain.model.ProfileScanResult
+import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.domain.place.MediaIntelligenceSession
+import io.dossier.app.domain.place.MediaIntelligenceSnapshot
+import io.dossier.app.domain.place.ReverseImageLookupService
 import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.remediation.RemediationItem
 import io.dossier.app.domain.remediation.RemediationProvider
@@ -417,6 +420,29 @@ object ScanSession {
         saveCase(context)
     }
 
+    /** Testable seam for the durable scan's optional photo lookup. */
+    internal suspend fun lookupMediaForScan(
+        input: IdentityInput,
+        deepResearch: Boolean,
+        bindingToken: String,
+        lookup: suspend (String, Boolean, String) -> ReverseImageLookupResult
+    ): ReverseImageLookupResult? {
+        val selfieUri = input.selfieUri?.trim()?.takeIf(String::isNotBlank) ?: return null
+        if (bindingToken.isBlank()) return null
+        return try {
+            currentCoroutineContext().ensureActive()
+            val result = lookup(selfieUri, deepResearch, bindingToken)
+            currentCoroutineContext().ensureActive()
+            result
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Media is optional; a provider/model failure must not discard
+            // profile observations already collected by the durable scan.
+            null
+        }
+    }
+
     suspend fun executeScan(
         context: Context,
         input: IdentityInput,
@@ -430,7 +456,7 @@ object ScanSession {
         _currentInput.value = inputToUse
         EvidenceRuntimeCache.clear()
         _exposureLedger.value = ExposureLedger()
-        MediaIntelligenceSession.beginFor(inputToUse)
+        val mediaBindingToken = MediaIntelligenceSession.beginFor(inputToUse)
         _scanHistory.value = emptyList()
         _userCorrections.value = emptyList()
         _findings.value = emptyList()
@@ -500,6 +526,20 @@ object ScanSession {
 
             val allFindings = mutableListOf<Finding>()
             scanResults.filter { it.exists }.forEach { allFindings.addAll(it.findings) }
+
+            var mediaRetrievedAtEpochMillis: Long? = null
+            if (!inputToUse.selfieUri.isNullOrBlank()) {
+                _progressText.value = "ANALYZING_MEDIA..."
+                val mediaStartedAt = System.currentTimeMillis()
+                val mediaResult = lookupMediaForScan(
+                    input = inputToUse,
+                    deepResearch = deepResearch,
+                    bindingToken = mediaBindingToken
+                ) { uri, deep, token ->
+                    ReverseImageLookupService(context).lookup(Uri.parse(uri), deep, token)
+                }
+                if (mediaResult != null) mediaRetrievedAtEpochMillis = mediaStartedAt
+            }
 
             checkpointStage(
                 context,
@@ -631,7 +671,14 @@ object ScanSession {
                 profileResults = scanResults,
                 pluginCollection = pluginCollection,
                 findings = allFindings,
-                retrievedAtEpochMillis = System.currentTimeMillis()
+                retrievedAtEpochMillis = System.currentTimeMillis(),
+                mediaIntelligence = MediaIntelligenceSession.snapshotFor(inputToUse),
+                mediaDiscoveryPath = if (inputToUse.selfieUri.isNullOrBlank()) {
+                    emptyList()
+                } else {
+                    listOf("seed:photo")
+                },
+                mediaRetrievedAtEpochMillis = mediaRetrievedAtEpochMillis
             )
             val evidence = evidenceSnapshot.evidence
             val relationships = evidenceSnapshot.relationships
@@ -1652,19 +1699,29 @@ object ScanSession {
         profileResults: List<ProfileScanResult>,
         pluginCollection: EvidenceCollection,
         findings: List<Finding>,
-        retrievedAtEpochMillis: Long? = null
+        retrievedAtEpochMillis: Long? = null,
+        mediaIntelligence: MediaIntelligenceSnapshot = MediaIntelligenceSnapshot(),
+        mediaDiscoveryPath: List<String> = emptyList(),
+        mediaRetrievedAtEpochMillis: Long? = null
     ): EvidenceCollection {
         val scannerEvidence = profileResults.toEvidenceCollection(input, retrievedAtEpochMillis)
+        val mediaEvidence = mediaIntelligence.toEvidenceCollection(
+            discoveryPath = mediaDiscoveryPath,
+            retrievedAtEpochMillis = mediaRetrievedAtEpochMillis
+        )
         return EvidenceCollection(
             evidence = (
                 scannerEvidence.evidence +
                     pluginCollection.evidence +
-                    buildEvidence(input, findings, retrievedAtEpochMillis)
+                    buildEvidence(input, findings, retrievedAtEpochMillis) +
+                    mediaEvidence.evidence
                 ).distinctBy { it.id },
-            relationships = EvidenceRelationshipPolicy.normalize(
-                scannerEvidence.relationships + pluginCollection.relationships
-            )
-        ).withResolvedRelationshipEvidence()
+                relationships = EvidenceRelationshipPolicy.normalize(
+                    scannerEvidence.relationships +
+                        pluginCollection.relationships +
+                        mediaEvidence.relationships
+                )
+            ).withResolvedRelationshipEvidence()
     }
 
     internal fun buildAiAnalysisSnapshot(
