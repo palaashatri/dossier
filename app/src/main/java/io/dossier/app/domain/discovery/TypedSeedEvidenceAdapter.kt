@@ -1,6 +1,7 @@
 package io.dossier.app.domain.discovery
 
 import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceState
@@ -13,6 +14,17 @@ import io.dossier.app.domain.model.IdentityInput
  * carrying pivots for a future reviewed executor.
  */
 object TypedSeedEvidenceAdapter {
+    /**
+     * Projects the canonical evidence collection into bounded typed pivots.
+     * The collection remains the source of truth; callers retain this returned
+     * model only for the lifetime of the operation that executes it.
+     */
+    fun fromCollection(
+        collection: EvidenceCollection,
+        input: IdentityInput? = null,
+        config: TypedSeedAdmissionConfig = TypedSeedAdmissionConfig()
+    ): TypedSeedAdmissionModel = admit(collection.evidence, input, config)
+
     fun admit(
         evidence: List<Evidence>,
         input: IdentityInput? = null,

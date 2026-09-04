@@ -23,7 +23,8 @@ class ProfileScannerEvidenceTest {
         displayName: String? = username,
         bio: String? = null,
         links: List<String> = emptyList(),
-        profileImageUrl: String? = null
+        profileImageUrl: String? = null,
+        findingSourceUrl: String? = null
     ) = ProfileScanResult(
         candidate = UsernameCandidate(
             username = username,
@@ -44,7 +45,7 @@ class ProfileScannerEvidenceTest {
             Finding(
                 type = FindingType.Email,
                 value = "jane@example.com",
-                sourceUrl = url,
+                sourceUrl = findingSourceUrl ?: url,
                 evidenceSnippet = "contact",
                 confidence = 0.9f,
                 risk = RiskLevel.High,
@@ -179,6 +180,26 @@ class ProfileScannerEvidenceTest {
     }
 
     @Test
+    fun verifiedProfileDoesNotPromoteFindingFromAnotherSource() {
+        val profileUrl = "https://github.com/janedoe"
+        val collection = listOf(
+            result(
+                username = "janedoe",
+                url = profileUrl,
+                exists = true,
+                verified = true,
+                findingSourceUrl = "https://example.test/directory"
+            )
+        ).toEvidenceCollection(IdentityInput(fullName = "Jane Doe"))
+
+        val email = collection.evidence.single {
+            it.kind == EvidenceKind.Email && it.value == "jane@example.com"
+        }
+        assertEquals(EvidenceState.Observed, email.state)
+        assertEquals(EvidenceReliability.Unknown, email.reliability)
+    }
+
+    @Test
     fun extractsVerifiedProfileFieldsAsTypedEvidence() {
         val input = IdentityInput(fullName = "Jane Doe")
         val collection = listOf(
@@ -206,6 +227,31 @@ class ProfileScannerEvidenceTest {
         assertTrue(collection.relationships.any {
             it.relation == "uses_avatar" && avatarEv?.id in it.evidenceIds
         })
+    }
+
+    @Test
+    fun profileFieldAndLinkEvidenceRetainExactObservedStrings() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val collection = listOf(
+            result(
+                username = "janedoe",
+                url = "https://github.com/janedoe",
+                exists = true,
+                verified = true,
+                displayName = "  Jane  Verified  ",
+                bio = "  Software   Engineer  ",
+                profileImageUrl = "  https://example.com/avatar.jpg  ",
+                links = listOf("  https://example.com/resume.pdf?download=1  ")
+            )
+        ).toEvidenceCollection(input)
+
+        assertTrue(collection.evidence.any { it.value == "  Jane  Verified  " })
+        assertTrue(collection.evidence.any { it.value == "  Software   Engineer  " })
+        assertTrue(collection.evidence.any { it.value == "  https://example.com/avatar.jpg  " })
+        val link = collection.evidence.single {
+            it.kind == EvidenceKind.Document
+        }
+        assertEquals("  https://example.com/resume.pdf?download=1  ", link.value)
     }
 
     @Test
@@ -241,6 +287,24 @@ class ProfileScannerEvidenceTest {
         assertTrue(typed.admittedSeeds.any { it.kind == TypedSeedKind.Document && docEv?.id in it.evidenceIds })
         assertTrue(typed.admittedSeeds.any { it.kind == TypedSeedKind.Archive && archiveEv?.id in it.evidenceIds })
         assertTrue(typed.admittedSeeds.any { it.kind == TypedSeedKind.Domain && domainEv?.id in it.evidenceIds })
+    }
+
+    @Test
+    fun archiveHostClassificationDoesNotUseSubstringMatches() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val collection = listOf(
+            result(
+                username = "janedoe",
+                url = "https://github.com/janedoe",
+                exists = true,
+                verified = true,
+                links = listOf("https://notarchive.today.example.test/page")
+            )
+        ).toEvidenceCollection(input)
+
+        assertEquals(EvidenceKind.Url, collection.evidence.single {
+            it.value == "https://notarchive.today.example.test/page"
+        }.kind)
     }
 
     @Test

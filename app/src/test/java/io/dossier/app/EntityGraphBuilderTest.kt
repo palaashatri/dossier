@@ -13,6 +13,7 @@ import io.dossier.app.domain.model.EntityType
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
+import io.dossier.app.domain.model.GraphEntityKind
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.Platform
 import io.dossier.app.domain.model.ProfileScanResult
@@ -81,6 +82,34 @@ class EntityGraphBuilderTest {
         assertEquals(256, entity.evidenceIds.size)
         assertEquals("evidence-0", entity.evidenceIds.first())
         assertEquals("evidence-255", entity.evidenceIds.last())
+    }
+
+    @Test
+    fun typedEvidenceRetainsDocumentArchiveDomainAndUrlGraphKinds() {
+        val documentUrl = "https://example.test/resume.pdf"
+        val archiveUrl = "https://archive.today/abc123"
+        val domain = "example.test"
+        val url = "https://example.test/about"
+        val graph = EntityGraphBuilder.build(
+            input = IdentityInput(fullName = "Authorized subject"),
+            evidence = listOf(
+                Evidence(id = "document", kind = EvidenceKind.Document, value = documentUrl),
+                Evidence(
+                    id = "archive",
+                    kind = EvidenceKind.Archive,
+                    value = archiveUrl,
+                    historical = true,
+                    reliability = EvidenceReliability.ArchiveSnapshot
+                ),
+                Evidence(id = "domain", kind = EvidenceKind.Domain, value = domain),
+                Evidence(id = "url", kind = EvidenceKind.Url, value = url)
+            )
+        )
+
+        assertEquals(GraphEntityKind.Document, graph.entity("website:$documentUrl")?.kind)
+        assertEquals(GraphEntityKind.ArchiveSnapshot, graph.entity("website:$archiveUrl")?.kind)
+        assertEquals(GraphEntityKind.Domain, graph.entity("website:$domain")?.kind)
+        assertEquals(GraphEntityKind.URL, graph.entity("website:$url")?.kind)
     }
 
     @Test

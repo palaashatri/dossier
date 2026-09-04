@@ -128,6 +128,82 @@ class TypedSeedAdmissionModelTest {
     }
 
     @Test
+    fun rejectsVerifiedImportsAndBreachEvidenceByDefault() {
+        val imported = TypedSeedAdmissionModel()
+        assertFalse(
+            imported.offer(
+                kind = TypedSeedKind.Email,
+                rawValue = "imported@example.test",
+                depth = 1,
+                origin = TypedSeedOrigin.Import,
+                evidenceState = EvidenceState.Verified,
+                sourceClassification = ExposureSourceClassification.LOCAL_IMPORT
+            )
+        )
+
+        val explicitlyAuthorized = TypedSeedAdmissionModel(
+            TypedSeedAdmissionConfig(allowAuthorizedImports = true)
+        )
+        assertTrue(
+            explicitlyAuthorized.offer(
+                kind = TypedSeedKind.Email,
+                rawValue = "imported@example.test",
+                depth = 1,
+                origin = TypedSeedOrigin.Import,
+                evidenceState = EvidenceState.Verified,
+                sourceClassification = ExposureSourceClassification.LOCAL_IMPORT
+            )
+        )
+
+        listOf(
+            ExposureSourceClassification.BREACH_INDEX,
+            ExposureSourceClassification.BREACH_DERIVED
+        ).forEach { source ->
+            assertFalse(
+                "breach source $source must remain evidence-only",
+                TypedSeedAdmissionModel().offer(
+                    kind = TypedSeedKind.Email,
+                    rawValue = "exposed@example.test",
+                    depth = 1,
+                    origin = TypedSeedOrigin.Evidence,
+                    evidenceState = EvidenceState.Verified,
+                    sourceClassification = source
+                )
+            )
+        }
+    }
+
+    @Test
+    fun publicSeedConstructorRejectsInconsistentVerificationMetadata() {
+        assertThrows(IllegalArgumentException::class.java) {
+            TypedSeed(
+                kind = TypedSeedKind.Email,
+                value = "person@example.test",
+                isVerified = true,
+                evidenceState = EvidenceState.Observed
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            TypedSeed(
+                kind = TypedSeedKind.Email,
+                value = "person@example.test",
+                evidenceState = EvidenceState.Verified,
+                origin = TypedSeedOrigin.Unknown,
+                isVerified = true
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            TypedSeed(
+                kind = TypedSeedKind.Email,
+                value = "person@example.test",
+                evidenceState = EvidenceState.Verified,
+                origin = TypedSeedOrigin.Candidate,
+                isVerified = true
+            )
+        }
+    }
+
+    @Test
     fun normalizesEmailPhoneUrlsDomainsUsernamesAndMediaDeterministically() {
         val model = TypedSeedAdmissionModel()
         assertTrue(model.offer(TypedSeedKind.Email, " USER@EXAMPLE.TEST ", 0))
@@ -187,5 +263,20 @@ class TypedSeedAdmissionModelTest {
         assertEquals(ExposureSourceClassification.PUBLIC_PROFILE, email.sourceClassification)
         assertEquals(TypedSeedExecutionAvailability.Unavailable, model.availabilityFor(TypedSeedKind.Email))
         assertFalse(model.isExecutionAvailable)
+    }
+
+    @Test
+    fun adapterAcceptsCanonicalEvidenceCollectionWithoutCreatingAnotherStore() {
+        val record = Evidence(
+            id = "profile-email",
+            kind = EvidenceKind.Email,
+            value = "person@example.test",
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.DirectPublicProfile
+        )
+        val collection = io.dossier.app.domain.evidence.EvidenceCollection(evidence = listOf(record))
+        val model = TypedSeedEvidenceAdapter.fromCollection(collection)
+        assertEquals(listOf(record.id), model.admittedSeeds.single().evidenceIds)
+        assertEquals(collection.evidence, listOf(record))
     }
 }

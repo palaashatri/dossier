@@ -64,6 +64,15 @@ data class TypedSeed(
 
     init {
         require(value == normalizedValue) { "Typed seed value must equal normalizedValue." }
+        require(isVerified == (evidenceState == EvidenceState.Verified)) {
+            "Typed seed verification state and isVerified must agree."
+        }
+        require(origin != TypedSeedOrigin.Candidate || evidenceState == EvidenceState.Candidate) {
+            "Candidate seeds must retain Candidate evidence state."
+        }
+        require(origin != TypedSeedOrigin.Unknown || evidenceState != EvidenceState.Verified) {
+            "Unknown-origin seeds cannot be marked Verified."
+        }
         require(exactValue.length <= MAX_VALUE_CHARS) { "Typed seed exact value is too long." }
         require(depth >= 0) { "Typed seed depth must not be negative." }
         require(evidenceIds.size <= MAX_EVIDENCE_IDS) { "Too many typed seed evidence IDs." }
@@ -81,7 +90,13 @@ data class TypedSeed(
 data class TypedSeedAdmissionConfig(
     val maxDepth: Int = 2,
     val maxTotalSeeds: Int = 30,
-    val perKindBudgets: Map<TypedSeedKind, Int> = defaultBudgets()
+    val perKindBudgets: Map<TypedSeedKind, Int> = defaultBudgets(),
+    /**
+     * Local imports are evidence by default, not recursive pivots. A caller
+     * may opt in only when the imported record is explicitly authorized for
+     * discovery by the user and the source contract permits that use.
+     */
+    val allowAuthorizedImports: Boolean = false
 ) {
     init {
         require(maxDepth in 0..MAX_ALLOWED_DEPTH) {
@@ -243,9 +258,10 @@ class TypedSeedAdmissionModel(
         val index = admitted.indexOfFirst { "${it.kind.name}:${it.normalizedValue}" == key }
         if (index < 0) return
         val existing = admitted[index]
+        val mergedState = strongerState(existing.evidenceState, evidenceState)
         val merged = existing.copy(
-            isVerified = existing.isVerified || evidenceState == EvidenceState.Verified,
-            evidenceState = strongerState(existing.evidenceState, evidenceState),
+            isVerified = mergedState == EvidenceState.Verified,
+            evidenceState = mergedState,
             sourceClassification = if (existing.origin == TypedSeedOrigin.UserInput) {
                 existing.sourceClassification
             } else {
@@ -290,13 +306,23 @@ class TypedSeedAdmissionModel(
         evidenceState: EvidenceState,
         sourceClassification: ExposureSourceClassification
     ): Boolean {
+        // Breach membership/derived rows are retained as evidence, but never
+        // promoted into recursive pivots. They do not establish public
+        // identity and may contain sensitive or stolen data.
+        if (sourceClassification == ExposureSourceClassification.BREACH_INDEX ||
+            sourceClassification == ExposureSourceClassification.BREACH_DERIVED
+        ) {
+            return false
+        }
         // Initial user values are authorized pivots even before a fetch verifies them.
         if (origin == TypedSeedOrigin.UserInput) return true
         if (evidenceState != EvidenceState.Verified) return false
         return when (origin) {
             TypedSeedOrigin.Evidence,
-            TypedSeedOrigin.Import,
             TypedSeedOrigin.LocalAnalysis -> sourceClassification != ExposureSourceClassification.UNKNOWN_ORIGIN
+            TypedSeedOrigin.Import ->
+                config.allowAuthorizedImports &&
+                    sourceClassification == ExposureSourceClassification.LOCAL_IMPORT
             TypedSeedOrigin.Candidate,
             TypedSeedOrigin.Unknown,
             TypedSeedOrigin.UserInput -> false

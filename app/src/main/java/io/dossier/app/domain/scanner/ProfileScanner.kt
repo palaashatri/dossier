@@ -15,7 +15,6 @@ import io.dossier.app.domain.discovery.ProviderVerificationState
 import io.dossier.app.domain.discovery.ExtractionRules
 import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanId
-import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceReliability
@@ -2222,8 +2221,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
 
         // Verified Profile Fields
         if (verifiedProfile) {
-            if (!result.displayName.isNullOrBlank()) {
-                val displayName = result.displayName.trim()
+            result.displayName?.takeIf(String::isNotBlank)?.let { displayName ->
                 val ev = Evidence(
                     id = stableProfileEvidenceId("display-name", url, displayName),
                     kind = EvidenceKind.Username,
@@ -2241,8 +2239,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 evidence.add(ev)
                 relationships.add(EvidenceRelationship(fromValue = url, toValue = displayName, relation = "has_name", evidence = "Verified Display Name", evidenceIds = listOf(ev.id)))
             }
-            if (!result.bio.isNullOrBlank()) {
-                val bio = result.bio.trim()
+            result.bio?.takeIf(String::isNotBlank)?.let { bio ->
                 val ev = Evidence(
                     id = stableProfileEvidenceId("bio", url, bio),
                     kind = EvidenceKind.SensitiveSnippet,
@@ -2260,8 +2257,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 evidence.add(ev)
                 relationships.add(EvidenceRelationship(fromValue = url, toValue = bio, relation = "has_bio", evidence = "Verified Bio", evidenceIds = listOf(ev.id)))
             }
-            result.profileImageUrl?.takeIf(String::isNotBlank)?.let { rawImageUrl ->
-                val imageUrl = rawImageUrl.trim()
+            result.profileImageUrl?.takeIf(String::isNotBlank)?.let { imageUrl ->
                 val ev = Evidence(
                     id = stableProfileEvidenceId("image", url, imageUrl),
                     kind = EvidenceKind.Image,
@@ -2290,13 +2286,14 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
         }
 
         // Extracted Public Links as Evidence
-        result.links.filter { it.isNotBlank() }.forEach { link ->
-            val cleanLink = link.trim()
-            val kind = classifyProfileLink(cleanLink)
+        result.links.filter { it.isNotBlank() }.forEach { rawLink ->
+            val kind = classifyProfileLink(rawLink)
             val ev = Evidence(
-                id = stableProfileEvidenceId(kind.name.lowercase(Locale.ROOT), url, cleanLink),
+                id = stableProfileEvidenceId(kind.name.lowercase(Locale.ROOT), url, rawLink),
                 kind = kind,
-                value = cleanLink,
+                // Keep the exact observed source string; normalization is only
+                // used by classification, IDs, and downstream deduplication.
+                value = rawLink,
                 sourceUrl = url,
                 confidence = conf,
                 risk = RiskLevel.Low,
@@ -2315,9 +2312,9 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 discoveryPath = path
             )
             evidence.add(ev)
-            relationships.add(EvidenceRelationship(fromValue = url, toValue = cleanLink, relation = "links_to", evidence = "Profile Link", evidenceIds = listOf(ev.id)))
+            relationships.add(EvidenceRelationship(fromValue = url, toValue = rawLink, relation = "links_to", evidence = "Profile Link", evidenceIds = listOf(ev.id)))
 
-            runCatching { java.net.URI(cleanLink).host?.lowercase(Locale.ROOT)?.removeSuffix(".") }
+            runCatching { java.net.URI(rawLink.trim()).host?.lowercase(Locale.ROOT)?.removeSuffix(".") }
                 .getOrNull()
                 ?.takeIf { it.isNotBlank() }
                 ?.let { host ->
@@ -2349,8 +2346,9 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
 
         // Each finding bridges losslessly; PII-on-profile is asserted explicitly.
         result.findings.forEach { finding ->
+            val directlyObservedOnProfile = verifiedProfile && sameSourceUrl(finding.sourceUrl, url)
             val findingEvidence = finding.toEvidence(retrievedAtEpochMillis, path).let { record ->
-                if (verifiedProfile && finding.type in setOf(FindingType.Email, FindingType.Phone)) {
+                if (directlyObservedOnProfile && finding.type in setOf(FindingType.Email, FindingType.Phone)) {
                     record.copy(
                         state = EvidenceState.Verified,
                         reliability = EvidenceReliability.DirectPublicProfile
@@ -2389,18 +2387,15 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
         evidence = evidence.distinctBy { it.id },
         relationships = EvidenceRelationshipPolicy.normalize(relationships)
     )
-    // Keep typed frontier admission on the production conversion path. The
-    // returned model is intentionally not executed until each kind has a
-    // reviewed provider adapter; unsupported execution stays explicit.
-    TypedSeedEvidenceAdapter.admit(collection.evidence, input)
     return collection
 }
 
 private fun classifyProfileLink(link: String): EvidenceKind {
-    val uri = runCatching { URI(link) }.getOrNull()
+    val uri = runCatching { URI(link.trim()) }.getOrNull()
     val host = uri?.host.orEmpty().lowercase(Locale.ROOT)
     if (host == "web.archive.org" || host.endsWith(".web.archive.org") ||
-        host == "archive.org" || host.endsWith(".archive.org") || host.contains("archive.today")
+        host == "archive.org" || host.endsWith(".archive.org") ||
+        host == "archive.today" || host.endsWith(".archive.today")
     ) {
         return EvidenceKind.Archive
     }
@@ -2413,6 +2408,9 @@ private fun classifyProfileLink(link: String): EvidenceKind {
         EvidenceKind.Url
     }
 }
+
+private fun sameSourceUrl(first: String?, second: String): Boolean =
+    first?.trim()?.equals(second.trim(), ignoreCase = true) == true
 
 private val DOCUMENT_EXTENSION = Regex(
     "\\.(?:pdf|docx?|rtf|odt|txt|csv|xlsx?|pptx?|ods|odp)(?:$|[?#&])",

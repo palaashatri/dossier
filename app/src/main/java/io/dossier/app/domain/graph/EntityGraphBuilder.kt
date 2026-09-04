@@ -19,6 +19,7 @@ import io.dossier.app.domain.model.EntityType
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
+import io.dossier.app.domain.model.GraphEntityKind
 import io.dossier.app.domain.model.GraphNodeState
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ProfileScanResult
@@ -66,6 +67,7 @@ object EntityGraphBuilder {
                     confidence = maxOf(existing.confidence, entity.confidence),
                     sourceUrls = (existing.sourceUrls + entity.sourceUrls).distinct(),
                     label = if (entity.label.length > existing.label.length) entity.label else existing.label,
+                    kind = mergeGraphEntityKind(existing.kind, entity.kind),
                     evidenceIds = mergeEvidenceIds(existing.evidenceIds, entity.evidenceIds),
                     historical = existing.historical || entity.historical,
                     firstObservedAtEpochMillis = minNullable(
@@ -439,6 +441,46 @@ object EntityGraphBuilder {
         EvidenceKind.Image -> EntityType.Image
     }
 
+    /**
+     * Maps evidence to the richer graph taxonomy while retaining the stable
+     * [EntityType] storage enum for old cases and renderers.
+     */
+    private fun graphEntityKind(ev: Evidence): GraphEntityKind = when (ev.attributeKind) {
+        HistoricalAttributeKind.AvatarUrl -> GraphEntityKind.Image
+        HistoricalAttributeKind.Username -> GraphEntityKind.Username
+        HistoricalAttributeKind.ExternalLink -> when (ev.kind) {
+            EvidenceKind.Document -> GraphEntityKind.Document
+            EvidenceKind.Archive -> GraphEntityKind.ArchiveSnapshot
+            EvidenceKind.Domain -> GraphEntityKind.Domain
+            else -> GraphEntityKind.URL
+        }
+        HistoricalAttributeKind.Organization -> GraphEntityKind.Organization
+        HistoricalAttributeKind.Location -> GraphEntityKind.Location
+        HistoricalAttributeKind.DisplayName -> GraphEntityKind.DisplayName
+        HistoricalAttributeKind.Bio -> GraphEntityKind.EvidenceArtifact
+        null -> when (ev.kind) {
+            EvidenceKind.Email -> GraphEntityKind.Email
+            EvidenceKind.Phone -> GraphEntityKind.Phone
+            EvidenceKind.Address,
+            EvidenceKind.Location -> GraphEntityKind.Location
+            EvidenceKind.Username,
+            EvidenceKind.UsernameReuse -> GraphEntityKind.Username
+            EvidenceKind.Profile,
+            EvidenceKind.PlausibleProfileMatch -> GraphEntityKind.Account
+            EvidenceKind.Organization -> GraphEntityKind.Organization
+            EvidenceKind.PublicSearchEvidence,
+            EvidenceKind.PublicImageEvidence -> GraphEntityKind.Website
+            EvidenceKind.ImageConsistency,
+            EvidenceKind.Photo,
+            EvidenceKind.Image -> GraphEntityKind.Image
+            EvidenceKind.Url -> GraphEntityKind.URL
+            EvidenceKind.Document -> GraphEntityKind.Document
+            EvidenceKind.Archive -> GraphEntityKind.ArchiveSnapshot
+            EvidenceKind.Domain -> GraphEntityKind.Domain
+            EvidenceKind.SensitiveSnippet -> GraphEntityKind.EvidenceArtifact
+        }
+    }
+
     private fun findingTypeToEntityType(type: FindingType): EntityType? = when (type) {
         FindingType.Email -> EntityType.Email
         FindingType.Phone -> EntityType.Phone
@@ -460,8 +502,6 @@ object EntityGraphBuilder {
         val value = ev.value.trim()
         if (value.isBlank()) return
         val timestamp = ev.observedAtEpochMillis ?: ev.retrievedAtEpochMillis
-        val firstObserved = ev.firstObservedAtEpochMillis ?: timestamp
-        val lastObserved = ev.lastObservedAtEpochMillis ?: timestamp
         val historicalArchive = ev.historical && ev.reliability == EvidenceReliability.ArchiveSnapshot
         val sourceId = if (historicalArchive && ev.attributeKind != null) {
             ev.sourceUrl?.trim()?.takeIf(String::isNotBlank)?.let { sourceUrl ->
@@ -479,8 +519,9 @@ object EntityGraphBuilder {
                         state = ev.state.toGraphState(),
                         evidenceIds = listOf(ev.id),
                         historical = historicalArchive,
-                        firstObservedAtEpochMillis = firstObserved,
-                        lastObservedAtEpochMillis = lastObserved
+                        firstObservedAtEpochMillis = timestamp,
+                        lastObservedAtEpochMillis = timestamp,
+                        kind = GraphEntityKind.ArchiveSnapshot
                     )
                 )
                 id
@@ -517,8 +558,8 @@ object EntityGraphBuilder {
                             sourceUrls = listOf(sourceUrl),
                             state = ev.state.toGraphState(),
                             evidenceIds = listOf(ev.id),
-                            firstObservedAtEpochMillis = firstObserved,
-                            lastObservedAtEpochMillis = lastObserved
+                            firstObservedAtEpochMillis = timestamp,
+                            lastObservedAtEpochMillis = timestamp
                         )
                     )
                     link(
@@ -554,8 +595,11 @@ object EntityGraphBuilder {
                 state = ev.state.toGraphState(),
                 evidenceIds = listOf(ev.id),
                 historical = ev.historical,
-                firstObservedAtEpochMillis = firstObserved,
-                lastObservedAtEpochMillis = lastObserved
+                firstObservedAtEpochMillis = timestamp,
+                lastObservedAtEpochMillis = timestamp,
+                // EntityType is a stable legacy enum. Preserve the richer
+                // URL/document/archive/domain distinction in GraphEntityKind.
+                kind = graphEntityKind(ev)
             )
         )
         if (sourceId != null && historicalArchive) {
@@ -681,6 +725,19 @@ object EntityGraphBuilder {
             GraphNodeState.Confirmed
         )
         return if (order.indexOf(a) >= order.indexOf(b)) a else b
+    }
+
+    private fun mergeGraphEntityKind(
+        existing: GraphEntityKind,
+        incoming: GraphEntityKind
+    ): GraphEntityKind = when {
+        existing == incoming -> existing
+        existing == GraphEntityKind.Website -> incoming
+        incoming == GraphEntityKind.Website -> existing
+        existing == GraphEntityKind.URL && incoming == GraphEntityKind.Document -> incoming
+        existing == GraphEntityKind.URL && incoming == GraphEntityKind.ArchiveSnapshot -> incoming
+        existing == GraphEntityKind.Document && incoming == GraphEntityKind.ArchiveSnapshot -> incoming
+        else -> existing
     }
 
     private fun minNullable(a: Long?, b: Long?): Long? = when {
