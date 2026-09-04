@@ -2,8 +2,9 @@
 """Repository hygiene regression tests for Dossier.
 
 These tests intentionally inspect the repository tree rather than runtime behavior.
-They prevent developer/device fingerprints and local editor state from re-entering
-production source after the September 2026 product reset.
+They prevent developer/device fingerprints, browser impersonation strings, local
+editor/agent state, and completed one-time migration helpers from re-entering the
+production tree after the September 2026 product reset.
 """
 
 from __future__ import annotations
@@ -30,13 +31,15 @@ class RepositoryHygieneAuditTest(unittest.TestCase):
                     violations.append(f"{path.relative_to(ROOT)}: {reason} ({needle})")
         self.assertEqual([], violations, "\n".join(violations))
 
-    def test_local_editor_and_agent_state_is_not_committed(self) -> None:
+    def test_local_editor_agent_and_migration_state_is_not_committed(self) -> None:
         forbidden_paths = [
             ROOT / ".idea",
             ROOT / ".serena",
             ROOT / ".vscode",
             ROOT / "tools/provider_registry_audit_fixed_marker.txt",
             ROOT / "tools/verify_whatsmyname_catalog.ps1",
+            ROOT / "tools/apply_repository_hygiene.py",
+            ROOT / ".github/workflows/hygiene-apply.yml",
         ]
         present = [str(path.relative_to(ROOT)) for path in forbidden_paths if path.exists()]
         self.assertEqual([], present, f"Remove repository-local/generated state: {present}")
