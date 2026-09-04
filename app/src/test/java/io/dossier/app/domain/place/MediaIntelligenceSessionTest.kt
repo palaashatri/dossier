@@ -59,6 +59,47 @@ class MediaIntelligenceSessionTest {
     }
 
     @Test
+    fun scopedSnapshotRejectsStaleTokenAfterSameSeedReplacement() {
+        val target = IdentityInput(fullName = "Same Subject", primaryUsername = "same")
+
+        val staleToken = MediaIntelligenceSession.beginFor(target)
+        assertTrue(MediaIntelligenceSession.recordImage(staleToken, sampleImage()))
+        val replacementToken = MediaIntelligenceSession.beginFor(target)
+
+        assertTrue(MediaIntelligenceSession.snapshotFor(target, staleToken).isEmpty)
+        assertTrue(MediaIntelligenceSession.snapshotFor(target, replacementToken).isEmpty)
+    }
+
+    @Test
+    fun inputFingerprintIncludesSelfieUri() {
+        val first = IdentityInput(
+            fullName = "Same Subject",
+            primaryUsername = "same",
+            selfieUri = "content://example/first-photo"
+        )
+        val second = first.copy(selfieUri = "content://example/second-photo")
+        val token = MediaIntelligenceSession.bindTo(first)
+        assertTrue(MediaIntelligenceSession.recordImage(token, sampleImage()))
+
+        assertTrue(MediaIntelligenceSession.snapshotFor(second).isEmpty)
+        assertTrue(MediaIntelligenceSession.snapshotFor(second, token).isEmpty)
+    }
+
+    @Test
+    fun cancellationInvalidatesScopedSnapshotWithoutDiscardingPartialResults() {
+        val target = IdentityInput(fullName = "Cancelled Subject", primaryUsername = "cancelled")
+
+        val token = MediaIntelligenceSession.beginFor(target)
+        assertTrue(MediaIntelligenceSession.recordImage(token, sampleImage()))
+        assertFalse(MediaIntelligenceSession.snapshotFor(target, token).isEmpty)
+
+        ScanSession.cancelScan()
+
+        assertTrue(MediaIntelligenceSession.snapshotFor(target, token).isEmpty)
+        assertFalse(MediaIntelligenceSession.snapshotFor(target).isEmpty)
+    }
+
+    @Test
     fun restoreForRehydratesOnlyTheBoundInputAfterProcessDeath() {
         val target = IdentityInput(fullName = "Alice Target", primaryUsername = "alice")
         val foreign = IdentityInput(fullName = "Bob Foreign", primaryUsername = "bob")
@@ -95,10 +136,11 @@ class MediaIntelligenceSessionTest {
     fun verifiedProfileAvatarsAreAutomaticallyBoundAndRemainIndexedObservations() {
         val target = IdentityInput(fullName = "Alice Target", primaryUsername = "alice")
         val foreign = IdentityInput(fullName = "Foreign Subject", primaryUsername = "foreign")
-        MediaIntelligenceSession.beginFor(target)
+        val token = MediaIntelligenceSession.beginFor(target)
 
         assertTrue(
             MediaIntelligenceSession.recordVerifiedProfileAvatars(
+                token,
                 target,
                 listOf(
                     ProfileScanResult(
@@ -141,6 +183,7 @@ class MediaIntelligenceSessionTest {
 
         assertFalse(
             MediaIntelligenceSession.recordVerifiedProfileAvatars(
+                token,
                 foreign,
                 emptyList()
             )

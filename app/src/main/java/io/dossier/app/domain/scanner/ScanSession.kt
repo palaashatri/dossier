@@ -225,6 +225,7 @@ object ScanSession {
     /** Cancellation is coordinator-owned; this is an internal state bridge. */
     internal fun cancelScan() {
         _progressText.value = "SCAN_CANCELLED"
+        MediaIntelligenceSession.invalidateBinding()
         scanApplicationContext?.let(BackgroundScanManager::cancel)
         _isScanning.value = false
     }
@@ -256,6 +257,7 @@ object ScanSession {
 
     internal fun markBackgroundCancelled() {
         _progressText.value = "SCAN_CANCELLED"
+        MediaIntelligenceSession.invalidateBinding()
         _isScanning.value = false
     }
 
@@ -509,7 +511,11 @@ object ScanSession {
             val scanResults = profileScanner.scanIdentity(inputToUse, deepResearch = deepResearch, requestId = requestId)
             currentCoroutineContext().ensureActive()
             _profileScanResults.value = scanResults
-            MediaIntelligenceSession.recordVerifiedProfileAvatars(inputToUse, scanResults)
+            MediaIntelligenceSession.recordVerifiedProfileAvatars(
+                token = mediaBindingToken,
+                input = inputToUse,
+                profiles = scanResults
+            )
             checkpointStage(
                 context,
                 requestId,
@@ -672,7 +678,10 @@ object ScanSession {
                 pluginCollection = pluginCollection,
                 findings = allFindings,
                 retrievedAtEpochMillis = System.currentTimeMillis(),
-                mediaIntelligence = MediaIntelligenceSession.snapshotFor(inputToUse),
+                mediaIntelligence = MediaIntelligenceSession.snapshotFor(
+                    input = inputToUse,
+                    token = mediaBindingToken
+                ),
                 mediaDiscoveryPath = if (inputToUse.selfieUri.isNullOrBlank()) {
                     emptyList()
                 } else {

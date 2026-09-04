@@ -2,6 +2,7 @@ package io.dossier.app.domain.scanner
 
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
+import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.toExposureLedger
 import io.dossier.app.domain.model.IdentityInput
@@ -193,7 +194,7 @@ class MediaEvidenceAdapterTest {
 
         val imageFact = ledger.facts.single { it.exactValue == candidate.imageUrl }
         assertEquals(candidate.imageUrl.lowercase(), imageFact.normalizedValue)
-        assertEquals(retrievedAt, imageFact.firstObservedAtEpochMillis)
+        assertEquals(candidate.retrievedAtEpochMillis, imageFact.firstObservedAtEpochMillis)
         assertEquals(retrievedAt, imageFact.lastObservedAtEpochMillis)
         assertEquals(path, imageFact.discoveryPath)
 
@@ -300,6 +301,102 @@ class MediaEvidenceAdapterTest {
         val photoText = collection.evidence.single { it.value == "Text from selected photo" }
         assertEquals(listOf("profile:avatar"), avatarEvidence.discoveryPath)
         assertEquals(listOf("seed:photo"), photoText.discoveryPath)
+    }
+
+    @Test
+    fun exactMediaStringsUseNormalizedIdsWhileMergedRecordsRetainObservationWindowAndPaths() {
+        val first = ReverseImageLookupResult.ImageCandidateProvenance(
+            id = "candidate-first",
+            title = "  Public repost  ",
+            imageUrl = "  HTTPS://IMAGES.EXAMPLE.TEST/repost.jpg#fragment  ",
+            sourcePageUrl = "  HTTPS://PAGES.EXAMPLE.TEST/repost/  ",
+            source = "provider-a",
+            acquisitionQuery = "first query",
+            retrievedAtEpochMillis = 100L,
+            contentSha256 = "hash-first",
+            comparisonScore = 0.80f,
+            state = ReverseImageLookupResult.ImageCandidateState.Matched
+        )
+        val second = first.copy(
+            id = "candidate-second",
+            title = "Public repost",
+            imageUrl = "https://images.example.test/repost.jpg",
+            sourcePageUrl = "https://pages.example.test/repost",
+            source = "provider-b",
+            acquisitionQuery = "second query",
+            retrievedAtEpochMillis = 200L,
+            contentSha256 = "hash-second",
+            comparisonScore = 0.90f
+        )
+        val snapshot = MediaIntelligenceSnapshot(
+            imageResults = listOf(
+                sampleResult().copy(visualCandidates = listOf(first)),
+                sampleResult().copy(
+                    visualCandidates = listOf(second),
+                    visualSearchNote = "Directly verified public profile avatars were recorded"
+                )
+            )
+        )
+
+        val collection = snapshot.toEvidenceCollection(discoveryPath = listOf("seed:photo"))
+        val image = collection.evidence.single {
+            it.value == first.imageUrl
+        }
+        assertEquals(first.imageUrl, image.value)
+        assertEquals(100L, image.firstObservedAtEpochMillis)
+        assertEquals(200L, image.lastObservedAtEpochMillis)
+        assertEquals(200L, image.retrievedAtEpochMillis)
+        assertEquals(200L, image.observedAtEpochMillis)
+        assertEquals(listOf("seed:photo", "profile:avatar"), image.discoveryPath)
+        assertEquals("provider-b", image.providerId)
+        assertEquals("hash-second", image.contentHashSha256)
+
+        val fact = collection.toExposureLedger().facts.single {
+            it.exactValue == first.imageUrl
+        }
+        assertEquals(100L, fact.firstObservedAtEpochMillis)
+        assertEquals(200L, fact.lastObservedAtEpochMillis)
+    }
+
+    @Test
+    fun unknownWebOriginRemainsUnknownInTheLedger() {
+        val unknown = ReverseImageLookupResult.WebEvidence(
+            title = "Unclassified result",
+            snippet = "Origin was not supplied by the provider",
+            url = "https://unknown.example.test/result",
+            origin = ReverseImageLookupResult.WebEvidenceOrigin.Unknown
+        )
+        val collection = sampleResult().copy(webEvidence = listOf(unknown)).toEvidenceCollection()
+
+        val evidence = collection.evidence.single { it.sourceUrl == unknown.url }
+        assertEquals(EvidenceKind.PublicSearchEvidence, evidence.kind)
+        assertEquals(EvidenceReliability.Unknown, evidence.reliability)
+        assertEquals(
+            ExposureSourceClassification.UNKNOWN_ORIGIN,
+            collection.toExposureLedger().facts.single().sourceClassification
+        )
+    }
+
+    @Test
+    fun verifiedProfileAvatarEvidenceUsesDirectProfileReliability() {
+        val avatar = candidateState("verified-avatar", ReverseImageLookupResult.ImageCandidateState.Indexed)
+        val snapshot = MediaIntelligenceSnapshot(
+            imageResults = listOf(
+                sampleResult().copy(
+                    visualCandidates = listOf(avatar),
+                    visualSearchNote = "Directly verified public profile avatars were recorded"
+                )
+            )
+        )
+
+        val collection = snapshot.toEvidenceCollection(discoveryPath = listOf("seed:photo"))
+        val evidence = collection.evidence.single { it.value == avatar.imageUrl }
+        assertEquals(EvidenceReliability.DirectPublicProfile, evidence.reliability)
+        assertEquals(
+            ExposureSourceClassification.PUBLIC_PROFILE,
+            collection.toExposureLedger().facts.single { it.exactValue == avatar.imageUrl }
+                .sourceClassification
+        )
     }
 
     private fun candidateState(

@@ -61,10 +61,13 @@ object MediaIntelligenceSession {
      * compared, so the resulting candidates remain Indexed with no visual score.
      */
     fun recordVerifiedProfileAvatars(
+        token: String,
         input: IdentityInput,
         profiles: List<ProfileScanResult>
     ): Boolean = synchronized(lock) {
-        if (boundInputFingerprint != fingerprint(input)) return@synchronized false
+        if (token.isBlank() || token != bindingToken || boundInputFingerprint != fingerprint(input)) {
+            return@synchronized false
+        }
 
         val existingCandidateIds = _snapshot.value.imageResults
             .asSequence()
@@ -123,6 +126,22 @@ object MediaIntelligenceSession {
         else MediaIntelligenceSnapshot()
     }
 
+    /** Returns media only when both the input and the scan-owned binding match. */
+    fun snapshotFor(input: IdentityInput, token: String): MediaIntelligenceSnapshot = synchronized(lock) {
+        if (token.isNotBlank() && token == bindingToken && boundInputFingerprint == fingerprint(input)) {
+            _snapshot.value
+        } else {
+            MediaIntelligenceSnapshot()
+        }
+    }
+
+    /** Invalidates late writes from a cancelled or terminal scan while retaining partial results. */
+    fun invalidateBinding(token: String? = null): Boolean = synchronized(lock) {
+        if (token != null && token != bindingToken) return@synchronized false
+        bindingToken = null
+        true
+    }
+
     /** Rehydrates a process-death result into the exact restored subject scope. */
     fun restoreFor(input: IdentityInput, snapshot: MediaIntelligenceSnapshot) = synchronized(lock) {
         boundInputFingerprint = fingerprint(input)
@@ -158,6 +177,7 @@ object MediaIntelligenceSession {
             append('\u001e').append(normalized(input.usernames))
             append('\u001e').append(input.primaryUsername?.trim()?.lowercase(Locale.ROOT).orEmpty())
             append('\u001e').append(normalized(input.profileUrls))
+            append('\u001e').append(input.selfieUri?.trim()?.lowercase(Locale.ROOT).orEmpty())
         }
         return MessageDigest.getInstance("SHA-256")
             .digest(canonical.toByteArray(Charsets.UTF_8))

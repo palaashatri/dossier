@@ -63,7 +63,11 @@ data class Evidence(
     val parserVersion: String? = null,
     val historical: Boolean = false,
     val attributeKind: HistoricalAttributeKind? = null,
-    val discoveryPath: List<String> = emptyList()
+    val discoveryPath: List<String> = emptyList(),
+    /** Earliest observation represented by a merged evidence record, when known. */
+    val firstObservedAtEpochMillis: Long? = null,
+    /** Latest observation represented by a merged evidence record, when known. */
+    val lastObservedAtEpochMillis: Long? = null
 ) {
     init {
         require(discoveryPath.size <= MAX_DISCOVERY_PATH_STEPS) {

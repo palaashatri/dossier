@@ -30,7 +30,8 @@ internal fun MediaIntelligenceSnapshot.toEvidenceCollection(
                     boundedPath
                 },
                 mediaSourceUri = mediaSourceUri.takeUnless { profileAvatarObservation },
-                retrievedAtEpochMillis = retrievedAtEpochMillis
+                retrievedAtEpochMillis = retrievedAtEpochMillis,
+                profileAvatarObservation = profileAvatarObservation
             )
         }
         .fold(EvidenceCollection(), ::mergeEvidenceCollections)
@@ -39,11 +40,11 @@ internal fun MediaIntelligenceSnapshot.toEvidenceCollection(
 internal fun ReverseImageLookupResult.toEvidenceCollection(
     discoveryPath: List<String> = emptyList(),
     retrievedAtEpochMillis: Long? = null,
-    mediaSourceUri: String? = null
+    mediaSourceUri: String? = null,
+    profileAvatarObservation: Boolean = false
 ): EvidenceCollection {
     val boundedPath = boundedDiscoveryPath(discoveryPath)
     val localSource = mediaSourceUri
-        ?.trim()
         ?.takeIf(String::isNotBlank)
     val evidence = mutableListOf<Evidence>()
     val relationships = mutableListOf<EvidenceRelationship>()
@@ -61,9 +62,11 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
         providerId: String? = null,
         contentHashSha256: String? = null
     ): String? {
-        val exact = value?.trim()?.takeIf(String::isNotBlank) ?: return null
+        // Retain the exact observed value/source string. Normalization is
+        // restricted to the stable ID key so the private ledger can show what
+        // the provider actually returned without losing whitespace/casing.
+        val exact = value?.takeIf(String::isNotBlank) ?: return null
         val source = sourceUrl
-            ?.trim()
             ?.takeIf(String::isNotBlank)
         val id = mediaEvidenceId(kind, exact, source)
         evidence += Evidence(
@@ -79,7 +82,9 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             retrievedAtEpochMillis = timestamp,
             observedAtEpochMillis = timestamp,
             contentHashSha256 = contentHashSha256?.trim()?.takeIf(String::isNotBlank),
-            discoveryPath = boundedDiscoveryPath(path)
+            discoveryPath = boundedDiscoveryPath(path),
+            firstObservedAtEpochMillis = timestamp,
+            lastObservedAtEpochMillis = timestamp
         )
         return id
     }
@@ -124,56 +129,85 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             it.url.isNotBlank()
     }
     val imageSearchSupport = webEvidence.firstOrNull {
-        it.origin != ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration &&
+        it.origin == ReverseImageLookupResult.WebEvidenceOrigin.ImageSearch &&
             it.url.isNotBlank()
     }
+    val unknownOriginSupport = webEvidence.firstOrNull {
+        it.origin == ReverseImageLookupResult.WebEvidenceOrigin.Unknown &&
+            it.url.isNotBlank()
+    }
+    val locationSupport = geoSupport ?: imageSearchSupport ?: unknownOriginSupport
     resolvedLocation
         ?.takeIf { it.isNotBlank() && !it.equals(gps, ignoreCase = false) }
         ?.let { location ->
-            val support = geoSupport ?: imageSearchSupport
             add(
                 kind = EvidenceKind.Location,
                 value = location,
-                sourceUrl = support?.url ?: localSource,
+                sourceUrl = locationSupport?.url ?: localSource,
                 snippet = when {
                     geoSupport != null -> "Location candidate corroborated from EXIF coordinates"
                     imageSearchSupport != null -> "Location candidate derived from public image-search observations"
+                    unknownOriginSupport != null -> "Location candidate derived from a web observation with unknown origin"
                     else -> "Location label derived from local media analysis"
                 },
-                confidence = if (geoSupport != null) 0.9f else 0.5f,
-                state = if (geoSupport != null) EvidenceState.Observed else EvidenceState.Candidate,
-                reliability = when {
-                    geoSupport != null -> EvidenceReliability.AuthoritativeApi
-                    imageSearchSupport != null -> EvidenceReliability.SearchEngineCandidate
-                    else -> EvidenceReliability.LocalDerived
+                confidence = when (locationSupport?.origin) {
+                    ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration -> 0.9f
+                    else -> 0.5f
+                },
+                state = when (locationSupport?.origin) {
+                    ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration -> EvidenceState.Observed
+                    else -> EvidenceState.Candidate
+                },
+                reliability = when (locationSupport?.origin) {
+                    ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration ->
+                        EvidenceReliability.AuthoritativeApi
+                    ReverseImageLookupResult.WebEvidenceOrigin.ImageSearch ->
+                        EvidenceReliability.SearchEngineCandidate
+                    ReverseImageLookupResult.WebEvidenceOrigin.Unknown,
+                    null -> if (locationSupport == null) {
+                        EvidenceReliability.LocalDerived
+                    } else {
+                        EvidenceReliability.Unknown
+                    }
                 }
             )
         }
 
     webEvidence.forEach { web ->
-        val isGeoCorroboration = web.origin == ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration
-        val kind = if (isGeoCorroboration) {
-            // Geo observations are public API/search evidence, not image evidence.
-            EvidenceKind.PublicSearchEvidence
-        } else {
-            EvidenceKind.PublicImageEvidence
+        val (kind, reliability, isObserved) = when (web.origin) {
+            ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration -> Triple(
+                EvidenceKind.PublicSearchEvidence,
+                EvidenceReliability.AuthoritativeApi,
+                true
+            )
+            ReverseImageLookupResult.WebEvidenceOrigin.ImageSearch -> Triple(
+                EvidenceKind.PublicImageEvidence,
+                EvidenceReliability.SearchEngineCandidate,
+                false
+            )
+            ReverseImageLookupResult.WebEvidenceOrigin.Unknown -> Triple(
+                // Unknown origin must remain explicit; do not present it as
+                // an autonomous public-web/image-search observation.
+                EvidenceKind.PublicSearchEvidence,
+                EvidenceReliability.Unknown,
+                false
+            )
         }
         val webId = add(
             kind = kind,
             value = web.title.ifBlank { web.url },
             sourceUrl = web.url,
             snippet = web.snippet,
-            state = if (isGeoCorroboration) EvidenceState.Observed else EvidenceState.Candidate,
-            reliability = if (isGeoCorroboration) {
-                EvidenceReliability.AuthoritativeApi
-            } else {
-                EvidenceReliability.SearchEngineCandidate
-            }
+            state = if (isObserved) EvidenceState.Observed else EvidenceState.Candidate,
+            reliability = reliability
         )
         // A geo API response is observed directly. Search-index URLs are only
         // candidates until their source page is fetched, so no page relation is
         // asserted for them here.
-        if (isGeoCorroboration && web.url.isNotBlank() && webId != null) {
+        if (web.origin == ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration &&
+            web.url.isNotBlank() &&
+            webId != null
+        ) {
             relationships += EvidenceRelationship(
                 fromValue = web.url,
                 toValue = web.title.ifBlank { web.url },
@@ -187,6 +221,11 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
     val candidateImageEvidenceIds = mutableMapOf<String, String>()
     val observedCandidatePages = mutableMapOf<String, String>()
     val candidateLinkageEvidenceIds = mutableMapOf<String, List<String>>()
+    val candidateReliability = if (profileAvatarObservation) {
+        EvidenceReliability.DirectPublicProfile
+    } else {
+        EvidenceReliability.SearchEngineCandidate
+    }
     visualCandidates.forEach { candidate ->
         val candidateState = candidate.state.toEvidenceState()
         val candidateTimestamp = candidate.retrievedAtEpochMillis ?: retrievedAtEpochMillis
@@ -198,7 +237,7 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             snippet = metadata,
             confidence = candidate.comparisonScore ?: 0.5f,
             state = candidateState,
-            reliability = EvidenceReliability.SearchEngineCandidate,
+            reliability = candidateReliability,
             timestamp = candidateTimestamp,
             providerId = candidate.source,
             contentHashSha256 = candidate.contentSha256
@@ -210,7 +249,7 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             snippet = metadata,
             confidence = candidate.comparisonScore ?: 0.5f,
             state = candidateState,
-            reliability = EvidenceReliability.SearchEngineCandidate,
+            reliability = candidateReliability,
             timestamp = candidateTimestamp,
             providerId = candidate.source,
             contentHashSha256 = candidate.contentSha256
@@ -227,7 +266,7 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
                     snippet = "Compared public image URL",
                     confidence = candidate.comparisonScore ?: 0.5f,
                     state = candidateState,
-                    reliability = EvidenceReliability.SearchEngineCandidate,
+                    reliability = candidateReliability,
                     timestamp = candidateTimestamp,
                     providerId = candidate.source,
                     contentHashSha256 = candidate.contentSha256
@@ -256,6 +295,11 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
         }
     }
 
+    val matchReliability = if (profileAvatarObservation) {
+        EvidenceReliability.DirectPublicProfile
+    } else {
+        EvidenceReliability.SearchEngineCandidate
+    }
     visualMatches.forEach { match ->
         val metadata = matchMetadata(match)
         // Keep the page title and exact image URL as separate structured records.
@@ -268,7 +312,7 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             snippet = metadata,
             confidence = match.similarity,
             state = EvidenceState.Observed,
-            reliability = EvidenceReliability.SearchEngineCandidate,
+            reliability = matchReliability,
             timestamp = retrievedAtEpochMillis,
             providerId = match.source
         )
@@ -279,7 +323,7 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             snippet = metadata,
             confidence = match.similarity,
             state = EvidenceState.Observed,
-            reliability = EvidenceReliability.SearchEngineCandidate,
+            reliability = matchReliability,
             timestamp = retrievedAtEpochMillis,
             providerId = match.source
         )
@@ -433,6 +477,9 @@ private fun mergeEvidence(first: Evidence, second: Evidence): Evidence {
     val preferred = strongerEvidence(first, second)
     val other = if (preferred === first) second else first
     return preferred.copy(
+        // Keep the first observed source string intact. The records share a
+        // normalized ID key, so only metadata is merged below.
+        value = first.value,
         sourceUrl = preferred.sourceUrl ?: other.sourceUrl,
         snippet = listOfNotNull(first.snippet, second.snippet)
             .map(String::trim)
@@ -455,7 +502,15 @@ private fun mergeEvidence(first: Evidence, second: Evidence): Evidence {
         parserVersion = preferred.parserVersion ?: other.parserVersion,
         historical = first.historical && second.historical,
         attributeKind = preferred.attributeKind ?: other.attributeKind,
-        discoveryPath = preferred.discoveryPath.ifEmpty { other.discoveryPath }
+        discoveryPath = boundedDiscoveryPath(first.discoveryPath + second.discoveryPath),
+        firstObservedAtEpochMillis = minTimestamp(
+            first.firstObservedAtEpochMillis ?: first.observedAtEpochMillis,
+            second.firstObservedAtEpochMillis ?: second.observedAtEpochMillis
+        ),
+        lastObservedAtEpochMillis = maxTimestamp(
+            first.lastObservedAtEpochMillis ?: first.observedAtEpochMillis,
+            second.lastObservedAtEpochMillis ?: second.observedAtEpochMillis
+        )
     )
 }
 
@@ -515,12 +570,29 @@ private fun maxTimestamp(first: Long?, second: Long?): Long? = when {
     else -> maxOf(first, second)
 }
 
+private fun minTimestamp(first: Long?, second: Long?): Long? = when {
+    first == null -> second
+    second == null -> first
+    else -> minOf(first, second)
+}
+
 private fun mediaEvidenceId(kind: EvidenceKind, value: String, sourceUrl: String?): String {
-    val input = "$kind\u001f$value\u001f${sourceUrl.orEmpty()}"
+    val input = "$kind\u001f${normalizedMediaKey(value)}\u001f${normalizedMediaKey(sourceUrl.orEmpty())}"
     val digest = MessageDigest.getInstance("SHA-256")
         .digest(input.toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
     return "media:$kind:${digest.take(32)}"
+}
+
+/** Stable dedupe key kept separate from exact observed strings. */
+private fun normalizedMediaKey(value: String): String {
+    val compact = value
+        .trim()
+        .replace(Regex("\\s+"), " ")
+    val urlLike = compact.contains("://")
+    return (if (urlLike) compact.substringBefore('#') else compact)
+        .trimEnd('/')
+        .lowercase(Locale.ROOT)
 }
 
 private val POSITIVE_STATES = setOf(
