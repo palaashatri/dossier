@@ -15,9 +15,11 @@ import io.dossier.app.domain.discovery.ProviderVerificationState
 import io.dossier.app.domain.discovery.ExtractionRules
 import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanId
+import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceReliability
+import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceRelationship
@@ -31,6 +33,8 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import android.content.Context
 import kotlinx.coroutines.CancellationException
@@ -165,7 +169,7 @@ class ProfileScanner(
         input.profileUrls.forEach { url ->
             if (url.isNotBlank()) {
                 var normalizedUrl = url.trim()
-                if (!normalizedUrl.startsWith("http://", ignoreCase = true) && 
+                if (!normalizedUrl.startsWith("http://", ignoreCase = true) &&
                     !normalizedUrl.startsWith("https://", ignoreCase = true)) {
                     normalizedUrl = "https://$normalizedUrl"
                 }
@@ -175,7 +179,7 @@ class ProfileScanner(
                 val platform = resolved?.platform ?: Platform.Website
                 val username = resolved?.username ?: normalizedUrl.split("/").lastOrNull { it.isNotBlank() } ?: "unknown"
                 val providerId = resolved?.providerId
-                
+
                 allCandidates.add(
                     UsernameCandidate(
                         username = username,
@@ -2172,6 +2176,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
         val url = result.candidate.url
         val conf = result.candidate.confidence.coerceIn(0f, 1f)
         val path = if (!result.provenance.isNullOrBlank()) listOf(result.provenance) else emptyList()
+        val verifiedProfile = result.exists && result.verified
 
         // Profile observation (native, not via the Finding adapter).
         val profileEvidence = Evidence(
@@ -2181,16 +2186,16 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
             sourceUrl = url,
             snippet = result.displayName?.let { "Profile: $it" },
             confidence = conf,
-            risk = if (result.verified && result.exists) RiskLevel.High else RiskLevel.Low,
+            risk = if (verifiedProfile) RiskLevel.High else RiskLevel.Low,
             signals = result.confidenceSignals,
             providerId = result.providerId ?: result.candidate.providerId,
             retrievedAtEpochMillis = retrievedAtEpochMillis,
             state = when {
                 !result.exists -> EvidenceState.Candidate
-                result.verified -> EvidenceState.Verified
+                verifiedProfile -> EvidenceState.Verified
                 else -> EvidenceState.Observed
             },
-            reliability = if (result.exists && result.verified) {
+            reliability = if (verifiedProfile) {
                 EvidenceReliability.DirectPublicProfile
             } else {
                 EvidenceReliability.SearchEngineCandidate
@@ -2216,11 +2221,11 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
         }
 
         // Verified Profile Fields
-        if (result.exists && result.verified) {
+        if (verifiedProfile) {
             if (!result.displayName.isNullOrBlank()) {
                 val displayName = result.displayName.trim()
                 val ev = Evidence(
-                    id = "profile:name:${url}:${displayName.hashCode()}",
+                    id = stableProfileEvidenceId("display-name", url, displayName),
                     kind = EvidenceKind.Username,
                     value = displayName,
                     sourceUrl = url,
@@ -2239,7 +2244,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
             if (!result.bio.isNullOrBlank()) {
                 val bio = result.bio.trim()
                 val ev = Evidence(
-                    id = "profile:bio:${url}:${bio.hashCode()}",
+                    id = stableProfileEvidenceId("bio", url, bio),
                     kind = EvidenceKind.SensitiveSnippet,
                     value = bio,
                     sourceUrl = url,
@@ -2255,18 +2260,41 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 evidence.add(ev)
                 relationships.add(EvidenceRelationship(fromValue = url, toValue = bio, relation = "has_bio", evidence = "Verified Bio", evidenceIds = listOf(ev.id)))
             }
+            result.profileImageUrl?.takeIf(String::isNotBlank)?.let { rawImageUrl ->
+                val imageUrl = rawImageUrl.trim()
+                val ev = Evidence(
+                    id = stableProfileEvidenceId("image", url, imageUrl),
+                    kind = EvidenceKind.Image,
+                    value = imageUrl,
+                    sourceUrl = url,
+                    confidence = conf,
+                    risk = RiskLevel.Low,
+                    providerId = result.providerId ?: result.candidate.providerId,
+                    retrievedAtEpochMillis = retrievedAtEpochMillis,
+                    state = EvidenceState.Verified,
+                    reliability = EvidenceReliability.DirectPublicProfile,
+                    discoveryPath = path,
+                    attributeKind = io.dossier.app.domain.evidence.HistoricalAttributeKind.AvatarUrl
+                )
+                evidence.add(ev)
+                relationships.add(
+                    EvidenceRelationship(
+                        fromValue = url,
+                        toValue = imageUrl,
+                        relation = "uses_avatar",
+                        evidence = "Verified Profile Image",
+                        evidenceIds = listOf(ev.id)
+                    )
+                )
+            }
         }
-        
+
         // Extracted Public Links as Evidence
         result.links.filter { it.isNotBlank() }.forEach { link ->
             val cleanLink = link.trim()
-            val kind = when {
-                cleanLink.endsWith(".pdf", ignoreCase = true) || cleanLink.endsWith(".doc", ignoreCase = true) -> EvidenceKind.Document
-                cleanLink.contains("archive.org", ignoreCase = true) || cleanLink.contains("web.archive.", ignoreCase = true) -> EvidenceKind.Archive
-                else -> EvidenceKind.Url
-            }
+            val kind = classifyProfileLink(cleanLink)
             val ev = Evidence(
-                id = "profile:link:${url}:${cleanLink.hashCode()}",
+                id = stableProfileEvidenceId(kind.name.lowercase(Locale.ROOT), url, cleanLink),
                 kind = kind,
                 value = cleanLink,
                 sourceUrl = url,
@@ -2274,19 +2302,27 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 risk = RiskLevel.Low,
                 providerId = result.providerId ?: result.candidate.providerId,
                 retrievedAtEpochMillis = retrievedAtEpochMillis,
-                state = if (result.verified) EvidenceState.Verified else EvidenceState.Candidate,
-                reliability = if (result.verified) EvidenceReliability.DirectPublicProfile else EvidenceReliability.SearchEngineCandidate,
+                state = when {
+                    verifiedProfile -> EvidenceState.Verified
+                    result.exists -> EvidenceState.Observed
+                    else -> EvidenceState.Candidate
+                },
+                reliability = if (verifiedProfile) {
+                    EvidenceReliability.DirectPublicProfile
+                } else {
+                    EvidenceReliability.SearchEngineCandidate
+                },
                 discoveryPath = path
             )
             evidence.add(ev)
             relationships.add(EvidenceRelationship(fromValue = url, toValue = cleanLink, relation = "links_to", evidence = "Profile Link", evidenceIds = listOf(ev.id)))
-            
-            runCatching { java.net.URI(cleanLink).host }
+
+            runCatching { java.net.URI(cleanLink).host?.lowercase(Locale.ROOT)?.removeSuffix(".") }
                 .getOrNull()
                 ?.takeIf { it.isNotBlank() }
                 ?.let { host ->
                     val domainEv = Evidence(
-                        id = "profile:domain:${url}:${host.hashCode()}",
+                        id = stableProfileEvidenceId("domain", url, host),
                         kind = EvidenceKind.Domain,
                         value = host,
                         sourceUrl = url,
@@ -2294,8 +2330,16 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                         risk = RiskLevel.Low,
                         providerId = result.providerId ?: result.candidate.providerId,
                         retrievedAtEpochMillis = retrievedAtEpochMillis,
-                        state = if (result.verified) EvidenceState.Verified else EvidenceState.Candidate,
-                        reliability = if (result.verified) EvidenceReliability.DirectPublicProfile else EvidenceReliability.SearchEngineCandidate,
+                        state = when {
+                            verifiedProfile -> EvidenceState.Verified
+                            result.exists -> EvidenceState.Observed
+                            else -> EvidenceState.Candidate
+                        },
+                        reliability = if (verifiedProfile) {
+                            EvidenceReliability.DirectPublicProfile
+                        } else {
+                            EvidenceReliability.SearchEngineCandidate
+                        },
                         discoveryPath = path
                     )
                     evidence.add(domainEv)
@@ -2305,7 +2349,16 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
 
         // Each finding bridges losslessly; PII-on-profile is asserted explicitly.
         result.findings.forEach { finding ->
-            val findingEvidence = finding.toEvidence(retrievedAtEpochMillis, path)
+            val findingEvidence = finding.toEvidence(retrievedAtEpochMillis, path).let { record ->
+                if (verifiedProfile && finding.type in setOf(FindingType.Email, FindingType.Phone)) {
+                    record.copy(
+                        state = EvidenceState.Verified,
+                        reliability = EvidenceReliability.DirectPublicProfile
+                    )
+                } else {
+                    record
+                }
+            }
             evidence.add(findingEvidence)
             if (finding.sourceUrl == url || result.exists) {
                 relationships.add(
@@ -2332,8 +2385,45 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
         evidence.add(Evidence(id = "seed:username:$it", kind = EvidenceKind.Username, value = it, confidence = 1.0f))
     }
 
-    return EvidenceCollection(
+    val collection = EvidenceCollection(
         evidence = evidence.distinctBy { it.id },
-        relationships = relationships.distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}" }
+        relationships = EvidenceRelationshipPolicy.normalize(relationships)
     )
+    // Keep typed frontier admission on the production conversion path. The
+    // returned model is intentionally not executed until each kind has a
+    // reviewed provider adapter; unsupported execution stays explicit.
+    TypedSeedEvidenceAdapter.admit(collection.evidence, input)
+    return collection
+}
+
+private fun classifyProfileLink(link: String): EvidenceKind {
+    val uri = runCatching { URI(link) }.getOrNull()
+    val host = uri?.host.orEmpty().lowercase(Locale.ROOT)
+    if (host == "web.archive.org" || host.endsWith(".web.archive.org") ||
+        host == "archive.org" || host.endsWith(".archive.org") || host.contains("archive.today")
+    ) {
+        return EvidenceKind.Archive
+    }
+    val pathAndQuery = listOfNotNull(uri?.rawPath, uri?.rawQuery)
+        .joinToString("?")
+        .lowercase(Locale.ROOT)
+    return if (DOCUMENT_EXTENSION.containsMatchIn(pathAndQuery)) {
+        EvidenceKind.Document
+    } else {
+        EvidenceKind.Url
+    }
+}
+
+private val DOCUMENT_EXTENSION = Regex(
+    "\\.(?:pdf|docx?|rtf|odt|txt|csv|xlsx?|pptx?|ods|odp)(?:$|[?#&])",
+    RegexOption.IGNORE_CASE
+)
+
+private fun stableProfileEvidenceId(kind: String, profileUrl: String, exactValue: String): String {
+    val canonical = listOf(kind, profileUrl, exactValue)
+        .joinToString("\u001f") { it.trim().replace(Regex("\\s+"), " ").lowercase(Locale.ROOT) }
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(canonical.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(Locale.ROOT, byte) }
+    return "profile:$kind:${digest.take(32)}"
 }

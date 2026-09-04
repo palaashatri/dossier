@@ -520,4 +520,51 @@ class EntityGraphBuilderTest {
         val usernameId = graph.entities.first { it.type == EntityType.Username && it.label == "alice-archive" }.id
         assertTrue(graph.edges.none { it.fromId == subjectId && it.toId == usernameId })
     }
+
+    @Test
+    fun currentAttributeEvidenceRemainsAttachedToCurrentProfile() {
+        val profileUrl = "https://example.test/jane"
+        val displayName = Evidence(
+            id = "current-name",
+            kind = EvidenceKind.Username,
+            value = "Jane Verified",
+            sourceUrl = profileUrl,
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.DirectPublicProfile,
+            attributeKind = HistoricalAttributeKind.DisplayName
+        )
+        val bio = Evidence(
+            id = "current-bio",
+            kind = EvidenceKind.SensitiveSnippet,
+            value = "Engineer",
+            sourceUrl = profileUrl,
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.DirectPublicProfile,
+            attributeKind = HistoricalAttributeKind.Bio
+        )
+
+        val graph = EntityGraphBuilder.build(
+            input = IdentityInput(fullName = "Jane Example"),
+            evidence = listOf(displayName, bio)
+        )
+
+        val profile = graph.entities.single {
+            it.type == EntityType.Profile && it.label == profileUrl
+        }
+        assertTrue(profile.evidenceIds.containsAll(listOf(displayName.id, bio.id)))
+        assertTrue(
+            graph.edges.any {
+                it.relation == "mentions" &&
+                    it.toId == profile.id &&
+                    it.evidenceIds.contains(displayName.id)
+            }
+        )
+        assertTrue(
+            graph.edges.any {
+                it.relation == "mentions" &&
+                    it.toId == profile.id &&
+                    it.evidenceIds.contains(bio.id)
+            }
+        )
+    }
 }

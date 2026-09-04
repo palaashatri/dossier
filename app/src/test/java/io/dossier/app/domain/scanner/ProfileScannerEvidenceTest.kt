@@ -4,6 +4,8 @@ import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.toExposureLedger
+import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
+import io.dossier.app.domain.discovery.TypedSeedKind
 import io.dossier.app.domain.graph.EntityGraphBuilder
 import io.dossier.app.domain.model.*
 import org.junit.Assert.assertEquals
@@ -135,7 +137,13 @@ class ProfileScannerEvidenceTest {
         val input = IdentityInput(fullName = "Jane")
         val collection = listOf(
             result("missing", "https://example.test/missing", exists = false, verified = false),
-            result("unverified", "https://example.test/unverified", exists = true, verified = false)
+            result(
+                "unverified",
+                "https://example.test/unverified",
+                exists = true,
+                verified = false,
+                links = listOf("https://links.example.test/resume.pdf?download=1")
+            )
         ).toEvidenceCollection(input, retrievedAtEpochMillis = 42_000L)
 
         val missing = collection.evidence.single { it.id == "profile:https://example.test/missing" }
@@ -145,6 +153,9 @@ class ProfileScannerEvidenceTest {
         assertEquals(EvidenceReliability.SearchEngineCandidate, unverified.reliability)
         assertEquals(EvidenceState.Observed, unverified.state)
         assertEquals(42_000L, missing.retrievedAtEpochMillis)
+        val unverifiedLink = collection.evidence.single { it.value == "https://links.example.test/resume.pdf?download=1" }
+        assertEquals(EvidenceState.Observed, unverifiedLink.state)
+        assertEquals(EvidenceReliability.SearchEngineCandidate, unverifiedLink.reliability)
     }
 
     @Test
@@ -165,10 +176,7 @@ class ProfileScannerEvidenceTest {
         val email = collection.evidence.single { it.kind == EvidenceKind.Email }
         assertEquals(listOf(path), profile.discoveryPath)
         assertEquals(listOf(path), email.discoveryPath)
-            it.discoveryPath.takeIf { discoveryPath -> discoveryPath.isNotEmpty() }
-        }.distinct().single())
     }
-}
 
     @Test
     fun extractsVerifiedProfileFieldsAsTypedEvidence() {
@@ -184,17 +192,20 @@ class ProfileScannerEvidenceTest {
                 profileImageUrl = "https://example.com/avatar.jpg"
             )
         ).toEvidenceCollection(input)
-        
-        val nameEv = collection.evidence.find { it.kind == EvidenceKind.Username && it.value == "Jane Verified" } // wait I used Username in patch? Let me check EvidenceKind in the file. Yes, I used Username for displayName and SensitiveSnippet for bio and Image for profileImageUrl.
+        val nameEv = collection.evidence.find { it.kind == EvidenceKind.Username && it.value == "Jane Verified" }
         assertTrue(nameEv != null)
         assertTrue(nameEv?.state == EvidenceState.Verified)
         assertTrue(nameEv?.reliability == EvidenceReliability.DirectPublicProfile)
-        
         val bioEv = collection.evidence.find { it.kind == EvidenceKind.SensitiveSnippet && it.value == "Software Engineer" }
         assertTrue(bioEv != null)
-        
+
         val avatarEv = collection.evidence.find { it.kind == EvidenceKind.Image && it.value == "https://example.com/avatar.jpg" }
         assertTrue(avatarEv != null)
+        assertEquals(EvidenceState.Verified, avatarEv?.state)
+        assertEquals(EvidenceReliability.DirectPublicProfile, avatarEv?.reliability)
+        assertTrue(collection.relationships.any {
+            it.relation == "uses_avatar" && avatarEv?.id in it.evidenceIds
+        })
     }
 
     @Test
@@ -206,20 +217,50 @@ class ProfileScannerEvidenceTest {
                 url = "https://github.com/janedoe",
                 exists = true,
                 verified = true,
-                links = listOf("https://example.com/resume.pdf", "https://web.archive.org/web/123/example.com", "https://blog.com")
+                links = listOf(
+                    "https://example.com/resume.pdf?download=1",
+                    "https://web.archive.org/web/123/example.com?output=1",
+                    "https://blog.com"
+                )
             )
         ).toEvidenceCollection(input)
-        
-        val docEv = collection.evidence.find { it.kind == EvidenceKind.Document && it.value == "https://example.com/resume.pdf" }
+        val docEv = collection.evidence.find {
+            it.kind == EvidenceKind.Document && it.value == "https://example.com/resume.pdf?download=1"
+        }
         assertTrue(docEv != null)
-        
-        val archiveEv = collection.evidence.find { it.kind == EvidenceKind.Archive && it.value == "https://web.archive.org/web/123/example.com" }
+        val archiveEv = collection.evidence.find {
+            it.kind == EvidenceKind.Archive && it.value == "https://web.archive.org/web/123/example.com?output=1"
+        }
         assertTrue(archiveEv != null)
-        
         val urlEv = collection.evidence.find { it.kind == EvidenceKind.Url && it.value == "https://blog.com" }
         assertTrue(urlEv != null)
-        
         val domainEv = collection.evidence.find { it.kind == EvidenceKind.Domain && it.value == "blog.com" }
         assertTrue(domainEv != null)
+
+        val typed = TypedSeedEvidenceAdapter.admit(collection.evidence, input)
+        assertTrue(typed.admittedSeeds.any { it.kind == TypedSeedKind.Document && docEv?.id in it.evidenceIds })
+        assertTrue(typed.admittedSeeds.any { it.kind == TypedSeedKind.Archive && archiveEv?.id in it.evidenceIds })
+        assertTrue(typed.admittedSeeds.any { it.kind == TypedSeedKind.Domain && domainEv?.id in it.evidenceIds })
+    }
+
+    @Test
+    fun profileAttributeEvidenceIdsAreStableDigestsAndKeepExactValues() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val result = result(
+            username = "janedoe",
+            url = "https://github.com/janedoe",
+            exists = true,
+            verified = true,
+            displayName = "Jane Verified"
+        )
+        val first = listOf(result).toEvidenceCollection(input)
+        val second = listOf(result).toEvidenceCollection(input)
+        val firstName = first.evidence.single { it.value == "Jane Verified" }
+        val secondName = second.evidence.single { it.value == "Jane Verified" }
+        assertEquals(firstName.id, secondName.id)
+        assertTrue(firstName.id.startsWith("profile:display-name:"))
+        assertTrue("Jane Verified" !in firstName.id)
+        assertEquals("Jane Verified", firstName.value)
+        assertEquals("https://github.com/janedoe", firstName.sourceUrl)
     }
 }

@@ -460,6 +460,8 @@ object EntityGraphBuilder {
         val value = ev.value.trim()
         if (value.isBlank()) return
         val timestamp = ev.observedAtEpochMillis ?: ev.retrievedAtEpochMillis
+        val firstObserved = ev.firstObservedAtEpochMillis ?: timestamp
+        val lastObserved = ev.lastObservedAtEpochMillis ?: timestamp
         val historicalArchive = ev.historical && ev.reliability == EvidenceReliability.ArchiveSnapshot
         val sourceId = if (historicalArchive && ev.attributeKind != null) {
             ev.sourceUrl?.trim()?.takeIf(String::isNotBlank)?.let { sourceUrl ->
@@ -477,8 +479,8 @@ object EntityGraphBuilder {
                         state = ev.state.toGraphState(),
                         evidenceIds = listOf(ev.id),
                         historical = historicalArchive,
-                        firstObservedAtEpochMillis = timestamp,
-                        lastObservedAtEpochMillis = timestamp
+                        firstObservedAtEpochMillis = firstObserved,
+                        lastObservedAtEpochMillis = lastObserved
                     )
                 )
                 id
@@ -487,20 +489,46 @@ object EntityGraphBuilder {
             null
         }
 
-        // Display names and bios are textual claims. Retain them as evidence
-        // on the archived source node but never turn the text into a Profile
-        // entity or a direct subject-ownership edge.
+        // Display names and bios are textual claims. Historical attributes stay
+        // attached to their archive source; current verified attributes stay on
+        // the current profile record without becoming direct subject ownership.
         if (ev.attributeKind == HistoricalAttributeKind.DisplayName ||
             ev.attributeKind == HistoricalAttributeKind.Bio
         ) {
-            sourceId?.let { archiveId ->
-                link(
-                    subjectId,
-                    archiveId,
-                    if (historicalArchive) "archived_as" else "mentions",
-                    ev.snippet,
-                    listOf(ev.id)
-                )
+            if (historicalArchive) {
+                sourceId?.let { archiveId ->
+                    link(
+                        subjectId,
+                        archiveId,
+                        "archived_as",
+                        ev.snippet,
+                        listOf(ev.id)
+                    )
+                }
+            } else {
+                ev.sourceUrl?.trim()?.takeIf(String::isNotBlank)?.let { sourceUrl ->
+                    val profileId = entityId(EntityType.Profile, sourceUrl)
+                    putEntity(
+                        DossierEntity(
+                            id = profileId,
+                            type = EntityType.Profile,
+                            label = sourceUrl,
+                            confidence = ev.confidence.coerceIn(0f, 1f),
+                            sourceUrls = listOf(sourceUrl),
+                            state = ev.state.toGraphState(),
+                            evidenceIds = listOf(ev.id),
+                            firstObservedAtEpochMillis = firstObserved,
+                            lastObservedAtEpochMillis = lastObserved
+                        )
+                    )
+                    link(
+                        subjectId,
+                        profileId,
+                        "mentions",
+                        ev.snippet,
+                        listOf(ev.id)
+                    )
+                }
             }
             return
         }
@@ -526,8 +554,8 @@ object EntityGraphBuilder {
                 state = ev.state.toGraphState(),
                 evidenceIds = listOf(ev.id),
                 historical = ev.historical,
-                firstObservedAtEpochMillis = timestamp,
-                lastObservedAtEpochMillis = timestamp
+                firstObservedAtEpochMillis = firstObserved,
+                lastObservedAtEpochMillis = lastObserved
             )
         )
         if (sourceId != null && historicalArchive) {
