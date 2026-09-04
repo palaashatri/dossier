@@ -86,7 +86,8 @@ class WebLocationSearcher(private val context: Context) {
                         ReverseImageLookupResult.WebEvidence(
                             title = title.ifBlank { "Untitled result" },
                             snippet = snippet.take(200),
-                            url = link
+                            url = link,
+                            origin = ReverseImageLookupResult.WebEvidenceOrigin.ImageSearch
                         )
                     )
                 }

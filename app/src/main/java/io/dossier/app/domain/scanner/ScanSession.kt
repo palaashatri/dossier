@@ -678,6 +678,7 @@ object ScanSession {
                 } else {
                     listOf("seed:photo")
                 },
+                mediaSourceUri = inputToUse.selfieUri,
                 mediaRetrievedAtEpochMillis = mediaRetrievedAtEpochMillis
             )
             val evidence = evidenceSnapshot.evidence
@@ -1702,11 +1703,13 @@ object ScanSession {
         retrievedAtEpochMillis: Long? = null,
         mediaIntelligence: MediaIntelligenceSnapshot = MediaIntelligenceSnapshot(),
         mediaDiscoveryPath: List<String> = emptyList(),
+        mediaSourceUri: String? = null,
         mediaRetrievedAtEpochMillis: Long? = null
     ): EvidenceCollection {
         val scannerEvidence = profileResults.toEvidenceCollection(input, retrievedAtEpochMillis)
         val mediaEvidence = mediaIntelligence.toEvidenceCollection(
             discoveryPath = mediaDiscoveryPath,
+            mediaSourceUri = mediaSourceUri,
             retrievedAtEpochMillis = mediaRetrievedAtEpochMillis
         )
         return EvidenceCollection(

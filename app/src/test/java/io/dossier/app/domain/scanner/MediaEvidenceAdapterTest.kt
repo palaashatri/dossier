@@ -7,6 +7,7 @@ import io.dossier.app.domain.evidence.toExposureLedger
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.place.MediaIntelligenceSession
+import io.dossier.app.domain.place.MediaIntelligenceSnapshot
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -105,7 +106,14 @@ class MediaEvidenceAdapterTest {
                 ReverseImageLookupResult.WebEvidence(
                     title = "Cafe Example",
                     snippet = "Public source page",
-                    url = "https://directory.example.test/cafe"
+                    url = "https://directory.example.test/cafe",
+                    origin = ReverseImageLookupResult.WebEvidenceOrigin.ImageSearch
+                ),
+                ReverseImageLookupResult.WebEvidence(
+                    title = "OpenStreetMap coordinate corroboration",
+                    snippet = "EXIF coordinates reverse-geocode to Cafe Example, Example City.",
+                    url = "https://www.openstreetmap.org/?mlat=12.345&mlon=67.890",
+                    origin = ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration
                 )
             ),
             visualCandidates = listOf(candidate),
@@ -125,29 +133,58 @@ class MediaEvidenceAdapterTest {
 
         val collection = result.toEvidenceCollection(
             discoveryPath = path,
+            mediaSourceUri = "content://example/photo",
             retrievedAtEpochMillis = retrievedAt
         )
         val ledger = collection.toExposureLedger()
 
+        assertEquals(1, collection.evidence.count { it.value == result.gps })
         val gps = collection.evidence.single { it.value == result.gps }
         assertEquals(EvidenceKind.Location, gps.kind)
         assertEquals(EvidenceReliability.LocalDerived, gps.reliability)
         assertEquals(EvidenceState.Observed, gps.state)
+        assertEquals("content://example/photo", gps.sourceUrl)
+        assertFalse(gps.sourceUrl == result.mapsUrl)
         assertEquals(path, gps.discoveryPath)
         assertEquals(retrievedAt, gps.retrievedAtEpochMillis)
 
+        assertEquals(1, collection.evidence.count {
+            it.kind == EvidenceKind.SensitiveSnippet && it.value == result.extractedText
+        })
         val ocr = collection.evidence.single {
             it.kind == EvidenceKind.SensitiveSnippet && it.value == result.extractedText
         }
         assertEquals(EvidenceKind.SensitiveSnippet, ocr.kind)
         assertEquals(EvidenceState.Observed, ocr.state)
 
-        val web = collection.evidence.single { it.sourceUrl == "https://directory.example.test/cafe" }
+        assertEquals(1, collection.evidence.count {
+            it.kind == EvidenceKind.PublicImageEvidence &&
+                it.sourceUrl == "https://directory.example.test/cafe"
+        })
+        val web = collection.evidence.single {
+            it.kind == EvidenceKind.PublicImageEvidence &&
+                it.sourceUrl == "https://directory.example.test/cafe"
+        }
         assertEquals(EvidenceState.Candidate, web.state)
         assertEquals(EvidenceReliability.SearchEngineCandidate, web.reliability)
 
+        val geo = collection.evidence.single {
+            it.kind == EvidenceKind.PublicSearchEvidence &&
+                it.sourceUrl?.startsWith("https://www.openstreetmap.org/") == true
+        }
+        assertEquals(EvidenceKind.PublicSearchEvidence, geo.kind)
+        assertEquals(EvidenceState.Observed, geo.state)
+        assertEquals(EvidenceReliability.AuthoritativeApi, geo.reliability)
+
+        val resolved = collection.evidence.single {
+            it.kind == EvidenceKind.Location && it.value == result.resolvedLocation
+        }
+        assertEquals("https://www.openstreetmap.org/?mlat=12.345&mlon=67.890", resolved.sourceUrl)
+        assertEquals(EvidenceState.Observed, resolved.state)
+
+        assertEquals(1, collection.evidence.count { it.value == candidate.imageUrl })
         val imageUrl = collection.evidence.single { it.value == candidate.imageUrl }
-        assertEquals(candidate.retrievedAtEpochMillis, imageUrl.retrievedAtEpochMillis)
+        assertEquals(retrievedAt, imageUrl.retrievedAtEpochMillis)
         assertEquals(candidate.sourcePageUrl, imageUrl.sourceUrl)
         assertEquals(EvidenceState.Observed, imageUrl.state)
         assertEquals(EvidenceReliability.SearchEngineCandidate, imageUrl.reliability)
@@ -156,13 +193,129 @@ class MediaEvidenceAdapterTest {
 
         val imageFact = ledger.facts.single { it.exactValue == candidate.imageUrl }
         assertEquals(candidate.imageUrl.lowercase(), imageFact.normalizedValue)
-        assertEquals(candidate.retrievedAtEpochMillis, imageFact.firstObservedAtEpochMillis)
-        assertEquals(candidate.retrievedAtEpochMillis, imageFact.lastObservedAtEpochMillis)
+        assertEquals(retrievedAt, imageFact.firstObservedAtEpochMillis)
+        assertEquals(retrievedAt, imageFact.lastObservedAtEpochMillis)
         assertEquals(path, imageFact.discoveryPath)
 
-        val matchRelation = collection.relationships.first { it.toValue == candidate.imageUrl }
-        assertTrue(matchRelation.evidenceIds.isNotEmpty())
+        assertTrue(collection.relationships.none { it.relation == "visual_match_observed" })
     }
+
+    @Test
+    fun candidateStatesAndPageRelationsRemainTruthful() {
+        val page = "https://pages.example.test/observed"
+        val indexed = candidateState("indexed", ReverseImageLookupResult.ImageCandidateState.Indexed)
+        val noMatch = candidateState("no-match", ReverseImageLookupResult.ImageCandidateState.ComparedNoMatch)
+        val unavailable = candidateState(
+            "unavailable",
+            ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable
+        )
+        val observedPage = candidateState(
+            "observed",
+            ReverseImageLookupResult.ImageCandidateState.Matched
+        ).copy(
+            sourcePageUrl = page,
+            accountLinkages = listOf(
+                ReverseImageLookupResult.ImageAccountLinkage(
+                    accountUrl = page,
+                    basis = ReverseImageLookupResult.ImageAccountLinkageBasis.UserReviewed,
+                    evidenceIds = listOf("review-evidence")
+                )
+            )
+        )
+        val result = sampleResult().copy(
+            visualCandidates = listOf(indexed, noMatch, unavailable, observedPage),
+            visualMatches = listOf(
+                ReverseImageLookupResult.VisualMatch(
+                    title = observedPage.title,
+                    imageUrl = observedPage.imageUrl,
+                    sourcePageUrl = page,
+                    source = "fixture",
+                    similarity = 0.91f,
+                    matchType = "exact-content",
+                    evidence = "whole-image comparison",
+                    candidateId = observedPage.id
+                )
+            )
+        )
+
+        val collection = result.toEvidenceCollection(
+            discoveryPath = listOf("seed:photo"),
+            retrievedAtEpochMillis = 42L
+        )
+        fun state(id: String) = collection.evidence.first {
+            it.value == "https://images.example.test/$id.jpg"
+        }.state
+
+        assertEquals(EvidenceState.Candidate, state("indexed"))
+        assertEquals(EvidenceState.Rejected, state("no-match"))
+        assertEquals(EvidenceState.Unavailable, state("unavailable"))
+        assertEquals(EvidenceState.Observed, state("observed"))
+        assertTrue(collection.relationships.none { it.fromValue == indexed.sourcePageUrl })
+
+        val relation = collection.relationships.single { it.relation == "visual_match_observed" }
+        assertTrue(relation.evidenceIds.contains("review-evidence"))
+    }
+
+    @Test
+    fun matchOnlyRetainsExactImageUrlAndBoundsMetadata() {
+        val imageUrl = "https://images.example.test/match-only.jpg"
+        val match = ReverseImageLookupResult.VisualMatch(
+            title = "Match-only result",
+            imageUrl = imageUrl,
+            sourcePageUrl = "https://pages.example.test/match-only",
+            source = "fixture",
+            similarity = 0.88f,
+            matchType = "near-duplicate",
+            evidence = "evidence-${"x".repeat(5_000)}"
+        )
+        val collection = sampleResult().copy(visualMatches = listOf(match)).toEvidenceCollection(
+            discoveryPath = listOf("seed:photo")
+        )
+
+        val image = collection.evidence.single { it.value == imageUrl }
+        assertEquals(match.sourcePageUrl, image.sourceUrl)
+        assertEquals(EvidenceState.Observed, image.state)
+        assertTrue((image.snippet?.length ?: 0) <= 512)
+        assertTrue(collection.relationships.none { it.relation == "visual_match_observed" })
+    }
+
+    @Test
+    fun profileAvatarObservationsDoNotInheritPhotoSeedPath() {
+        val avatar = candidateState("avatar", ReverseImageLookupResult.ImageCandidateState.Indexed)
+        val snapshot = MediaIntelligenceSnapshot(
+            imageResults = listOf(
+                sampleResult().copy(
+                    visualCandidates = listOf(avatar),
+                    visualSearchNote = "Directly verified public profile avatars were recorded"
+                ),
+                sampleResult().copy(extractedText = "Text from selected photo")
+            )
+        )
+
+        val collection = snapshot.toEvidenceCollection(
+            discoveryPath = listOf("seed:photo"),
+            mediaSourceUri = "content://example/photo"
+        )
+        val avatarEvidence = collection.evidence.single { it.value == avatar.imageUrl }
+        val photoText = collection.evidence.single { it.value == "Text from selected photo" }
+        assertEquals(listOf("profile:avatar"), avatarEvidence.discoveryPath)
+        assertEquals(listOf("seed:photo"), photoText.discoveryPath)
+    }
+
+    private fun candidateState(
+        id: String,
+        state: ReverseImageLookupResult.ImageCandidateState
+    ) = ReverseImageLookupResult.ImageCandidateProvenance(
+        id = id,
+        title = id,
+        imageUrl = "https://images.example.test/$id.jpg",
+        sourcePageUrl = "https://pages.example.test/$id",
+        source = "fixture",
+        acquisitionQuery = "fixture",
+        retrievedAtEpochMillis = 1L,
+        comparisonScore = if (state == ReverseImageLookupResult.ImageCandidateState.Indexed) null else 0.4f,
+        state = state
+    )
 
     private fun sampleResult() = ReverseImageLookupResult(
         gps = null,

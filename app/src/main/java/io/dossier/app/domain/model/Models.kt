@@ -242,8 +242,25 @@ data class ReverseImageLookupResult(
     @Serializable
     data class ImageLabel(val text: String, val confidence: Float)
 
+    /**
+     * Origin of a web observation. Keeping this beside the observation avoids
+     * guessing whether a result came from EXIF corroboration or an image/search
+     * index when it is projected into the canonical evidence ledger.
+     */
     @Serializable
-    data class WebEvidence(val title: String, val snippet: String, val url: String)
+    enum class WebEvidenceOrigin {
+        Unknown,
+        ImageSearch,
+        GeoCorroboration
+    }
+
+    @Serializable
+    data class WebEvidence(
+        val title: String,
+        val snippet: String,
+        val url: String,
+        val origin: WebEvidenceOrigin = WebEvidenceOrigin.Unknown
+    )
 
     @Serializable
     enum class ImageCandidateState {

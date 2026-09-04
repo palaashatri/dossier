@@ -74,7 +74,8 @@ class GeoCorroborationService {
                         ReverseImageLookupResult.WebEvidence(
                             title = "OpenStreetMap coordinate corroboration",
                             snippet = "EXIF coordinates reverse-geocode to ${displayName.take(180)}.",
-                            url = "https://www.openstreetmap.org/?mlat=$lat&mlon=$lon#map=16/$lat/$lon"
+                            url = "https://www.openstreetmap.org/?mlat=$lat&mlon=$lon#map=16/$lat/$lon",
+                            origin = ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration
                         )
                     )
                 }
@@ -83,7 +84,8 @@ class GeoCorroborationService {
                         ReverseImageLookupResult.WebEvidence(
                             title = "Temporal corroboration withheld",
                             snippet = "The image contains a camera-local capture time but no unambiguous GPS UTC date/time. Dossier will not guess a timezone for weather or shadow analysis.",
-                            url = "https://exiftool.org/TagNames/GPS.html"
+                            url = "https://exiftool.org/TagNames/GPS.html",
+                            origin = ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration
                         )
                     )
                 }
@@ -98,7 +100,8 @@ class GeoCorroborationService {
                                 weather.precipitationMm?.let { append("precipitation ${format1(it)} mm; ") }
                                 weather.weatherCode?.let { append("weather code $it.") }
                             }.trim().take(220),
-                            url = "https://open-meteo.com/en/docs/historical-weather-api"
+                            url = "https://open-meteo.com/en/docs/historical-weather-api",
+                            origin = ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration
                         )
                     )
                 }
@@ -112,7 +115,8 @@ class GeoCorroborationService {
                                 solar.shadowLengthToObjectHeightRatio?.let { append(", shadow/object-height ratio ≈ ${format2(it)}") }
                                 append(". Use only as temporal corroboration, not identity/location proof.")
                             }.take(270),
-                            url = "https://gml.noaa.gov/grad/solcalc/calcdetails.html"
+                            url = "https://gml.noaa.gov/grad/solcalc/calcdetails.html",
+                            origin = ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration
                         )
                     )
                 }
