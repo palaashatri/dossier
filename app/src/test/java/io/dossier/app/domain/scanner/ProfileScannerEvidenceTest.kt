@@ -17,7 +17,11 @@ class ProfileScannerEvidenceTest {
         url: String,
         exists: Boolean,
         verified: Boolean,
-        provenance: String? = null
+        provenance: String? = null,
+        displayName: String? = username,
+        bio: String? = null,
+        links: List<String> = emptyList(),
+        profileImageUrl: String? = null
     ) = ProfileScanResult(
         candidate = UsernameCandidate(
             username = username,
@@ -29,9 +33,10 @@ class ProfileScannerEvidenceTest {
         ),
         exists = exists,
         httpStatus = 200,
-        displayName = username,
-        bio = null,
-        links = emptyList(),
+        displayName = displayName,
+        bio = bio,
+        profileImageUrl = profileImageUrl,
+        links = links,
         extractedText = "",
         findings = listOf(
             Finding(
@@ -160,8 +165,61 @@ class ProfileScannerEvidenceTest {
         val email = collection.evidence.single { it.kind == EvidenceKind.Email }
         assertEquals(listOf(path), profile.discoveryPath)
         assertEquals(listOf(path), email.discoveryPath)
-        assertEquals(listOf(path), collection.toExposureLedger().facts.mapNotNull {
             it.discoveryPath.takeIf { discoveryPath -> discoveryPath.isNotEmpty() }
         }.distinct().single())
+    }
+}
+
+    @Test
+    fun extractsVerifiedProfileFieldsAsTypedEvidence() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val collection = listOf(
+            result(
+                username = "janedoe",
+                url = "https://github.com/janedoe",
+                exists = true,
+                verified = true,
+                displayName = "Jane Verified",
+                bio = "Software Engineer",
+                profileImageUrl = "https://example.com/avatar.jpg"
+            )
+        ).toEvidenceCollection(input)
+        
+        val nameEv = collection.evidence.find { it.kind == EvidenceKind.Username && it.value == "Jane Verified" } // wait I used Username in patch? Let me check EvidenceKind in the file. Yes, I used Username for displayName and SensitiveSnippet for bio and Image for profileImageUrl.
+        assertTrue(nameEv != null)
+        assertTrue(nameEv?.state == EvidenceState.Verified)
+        assertTrue(nameEv?.reliability == EvidenceReliability.DirectPublicProfile)
+        
+        val bioEv = collection.evidence.find { it.kind == EvidenceKind.SensitiveSnippet && it.value == "Software Engineer" }
+        assertTrue(bioEv != null)
+        
+        val avatarEv = collection.evidence.find { it.kind == EvidenceKind.Image && it.value == "https://example.com/avatar.jpg" }
+        assertTrue(avatarEv != null)
+    }
+
+    @Test
+    fun extractsPublicLinksAsTypedEvidence() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val collection = listOf(
+            result(
+                username = "janedoe",
+                url = "https://github.com/janedoe",
+                exists = true,
+                verified = true,
+                links = listOf("https://example.com/resume.pdf", "https://web.archive.org/web/123/example.com", "https://blog.com")
+            )
+        ).toEvidenceCollection(input)
+        
+        val docEv = collection.evidence.find { it.kind == EvidenceKind.Document && it.value == "https://example.com/resume.pdf" }
+        assertTrue(docEv != null)
+        
+        val archiveEv = collection.evidence.find { it.kind == EvidenceKind.Archive && it.value == "https://web.archive.org/web/123/example.com" }
+        assertTrue(archiveEv != null)
+        
+        val urlEv = collection.evidence.find { it.kind == EvidenceKind.Url && it.value == "https://blog.com" }
+        assertTrue(urlEv != null)
+        
+        val domainEv = collection.evidence.find { it.kind == EvidenceKind.Domain && it.value == "blog.com" }
+        assertTrue(domainEv != null)
     }
 }

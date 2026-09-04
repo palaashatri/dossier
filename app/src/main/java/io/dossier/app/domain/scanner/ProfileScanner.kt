@@ -2215,6 +2215,94 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
             )
         }
 
+        // Verified Profile Fields
+        if (result.exists && result.verified) {
+            if (!result.displayName.isNullOrBlank()) {
+                val displayName = result.displayName.trim()
+                val ev = Evidence(
+                    id = "profile:name:${url}:${displayName.hashCode()}",
+                    kind = EvidenceKind.Username,
+                    value = displayName,
+                    sourceUrl = url,
+                    confidence = conf,
+                    risk = RiskLevel.Low,
+                    providerId = result.providerId ?: result.candidate.providerId,
+                    retrievedAtEpochMillis = retrievedAtEpochMillis,
+                    state = EvidenceState.Verified,
+                    reliability = EvidenceReliability.DirectPublicProfile,
+                    discoveryPath = path,
+                    attributeKind = io.dossier.app.domain.evidence.HistoricalAttributeKind.DisplayName
+                )
+                evidence.add(ev)
+                relationships.add(EvidenceRelationship(fromValue = url, toValue = displayName, relation = "has_name", evidence = "Verified Display Name", evidenceIds = listOf(ev.id)))
+            }
+            if (!result.bio.isNullOrBlank()) {
+                val bio = result.bio.trim()
+                val ev = Evidence(
+                    id = "profile:bio:${url}:${bio.hashCode()}",
+                    kind = EvidenceKind.SensitiveSnippet,
+                    value = bio,
+                    sourceUrl = url,
+                    confidence = conf,
+                    risk = RiskLevel.Low,
+                    providerId = result.providerId ?: result.candidate.providerId,
+                    retrievedAtEpochMillis = retrievedAtEpochMillis,
+                    state = EvidenceState.Verified,
+                    reliability = EvidenceReliability.DirectPublicProfile,
+                    discoveryPath = path,
+                    attributeKind = io.dossier.app.domain.evidence.HistoricalAttributeKind.Bio
+                )
+                evidence.add(ev)
+                relationships.add(EvidenceRelationship(fromValue = url, toValue = bio, relation = "has_bio", evidence = "Verified Bio", evidenceIds = listOf(ev.id)))
+            }
+        }
+        
+        // Extracted Public Links as Evidence
+        result.links.filter { it.isNotBlank() }.forEach { link ->
+            val cleanLink = link.trim()
+            val kind = when {
+                cleanLink.endsWith(".pdf", ignoreCase = true) || cleanLink.endsWith(".doc", ignoreCase = true) -> EvidenceKind.Document
+                cleanLink.contains("archive.org", ignoreCase = true) || cleanLink.contains("web.archive.", ignoreCase = true) -> EvidenceKind.Archive
+                else -> EvidenceKind.Url
+            }
+            val ev = Evidence(
+                id = "profile:link:${url}:${cleanLink.hashCode()}",
+                kind = kind,
+                value = cleanLink,
+                sourceUrl = url,
+                confidence = conf,
+                risk = RiskLevel.Low,
+                providerId = result.providerId ?: result.candidate.providerId,
+                retrievedAtEpochMillis = retrievedAtEpochMillis,
+                state = if (result.verified) EvidenceState.Verified else EvidenceState.Candidate,
+                reliability = if (result.verified) EvidenceReliability.DirectPublicProfile else EvidenceReliability.SearchEngineCandidate,
+                discoveryPath = path
+            )
+            evidence.add(ev)
+            relationships.add(EvidenceRelationship(fromValue = url, toValue = cleanLink, relation = "links_to", evidence = "Profile Link", evidenceIds = listOf(ev.id)))
+            
+            runCatching { java.net.URI(cleanLink).host }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { host ->
+                    val domainEv = Evidence(
+                        id = "profile:domain:${url}:${host.hashCode()}",
+                        kind = EvidenceKind.Domain,
+                        value = host,
+                        sourceUrl = url,
+                        confidence = conf,
+                        risk = RiskLevel.Low,
+                        providerId = result.providerId ?: result.candidate.providerId,
+                        retrievedAtEpochMillis = retrievedAtEpochMillis,
+                        state = if (result.verified) EvidenceState.Verified else EvidenceState.Candidate,
+                        reliability = if (result.verified) EvidenceReliability.DirectPublicProfile else EvidenceReliability.SearchEngineCandidate,
+                        discoveryPath = path
+                    )
+                    evidence.add(domainEv)
+                    relationships.add(EvidenceRelationship(fromValue = url, toValue = host, relation = "links_to_domain", evidence = "Profile Domain Link", evidenceIds = listOf(domainEv.id)))
+                }
+        }
+
         // Each finding bridges losslessly; PII-on-profile is asserted explicitly.
         result.findings.forEach { finding ->
             val findingEvidence = finding.toEvidence(retrievedAtEpochMillis, path)

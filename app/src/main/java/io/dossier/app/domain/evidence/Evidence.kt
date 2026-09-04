@@ -108,7 +108,13 @@ enum class EvidenceKind {
     PublicSearchEvidence,
     PublicImageEvidence,
     ImageConsistency,
-    SensitiveSnippet
+    SensitiveSnippet,
+    Url,
+    Document,
+    Archive,
+    Photo,
+    Image,
+    Domain
 }
 
 /**
@@ -302,6 +308,12 @@ fun Evidence.toFinding(): Finding = Finding(
         EvidenceKind.PublicImageEvidence -> FindingType.PublicImageEvidence
         EvidenceKind.ImageConsistency -> FindingType.ImageConsistency
         EvidenceKind.SensitiveSnippet -> FindingType.SensitiveSnippet
+        EvidenceKind.Url -> FindingType.PublicSearchEvidence
+        EvidenceKind.Document -> FindingType.PublicSearchEvidence
+        EvidenceKind.Archive -> FindingType.PublicSearchEvidence
+        EvidenceKind.Domain -> FindingType.PublicSearchEvidence
+        EvidenceKind.Photo -> FindingType.PublicImageEvidence
+        EvidenceKind.Image -> FindingType.PublicImageEvidence
     },
     value = value,
     sourceUrl = sourceUrl,

@@ -350,6 +350,12 @@ private fun EvidenceKind.toExposureFactKind(): ExposureFactKind = when (this) {
     EvidenceKind.PublicImageEvidence -> ExposureFactKind.PublicImageEvidence
     EvidenceKind.ImageConsistency -> ExposureFactKind.ImageConsistency
     EvidenceKind.SensitiveSnippet -> ExposureFactKind.SensitiveSnippet
+    EvidenceKind.Url -> ExposureFactKind.Website
+    EvidenceKind.Document -> ExposureFactKind.Document
+    EvidenceKind.Archive -> ExposureFactKind.Website
+    EvidenceKind.Domain -> ExposureFactKind.Domain
+    EvidenceKind.Photo -> ExposureFactKind.Photo
+    EvidenceKind.Image -> ExposureFactKind.Image
 }
 
 private fun EvidenceReliability.toExposureSourceClassification(): ExposureSourceClassification = when (this) {

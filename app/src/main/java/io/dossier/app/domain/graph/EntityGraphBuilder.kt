@@ -431,6 +431,12 @@ object EntityGraphBuilder {
         EvidenceKind.PublicSearchEvidence, EvidenceKind.PublicImageEvidence -> EntityType.Website
         EvidenceKind.ImageConsistency -> EntityType.Image
         EvidenceKind.SensitiveSnippet -> null
+        EvidenceKind.Url -> EntityType.Website
+        EvidenceKind.Document -> EntityType.Website
+        EvidenceKind.Archive -> EntityType.Website
+        EvidenceKind.Domain -> EntityType.Website
+        EvidenceKind.Photo -> EntityType.Image
+        EvidenceKind.Image -> EntityType.Image
     }
 
     private fun findingTypeToEntityType(type: FindingType): EntityType? = when (type) {
