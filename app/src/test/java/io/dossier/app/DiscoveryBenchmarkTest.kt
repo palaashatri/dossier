@@ -6,8 +6,10 @@ import io.dossier.app.data.web.DiscoveryBenchmark.Fact
 import io.dossier.app.data.web.DiscoveryBenchmark.SyntheticCase
 import io.dossier.app.data.web.DiscoveryBenchmark.SyntheticRun
 import io.dossier.app.data.web.DiscoveryBenchmark
+import io.dossier.app.data.web.SyntheticDiscoveryBenchmarkFixtures
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -243,4 +245,65 @@ class DiscoveryBenchmarkTest {
         assertEquals(metrics.recall, aggregate.averageRecall, 0.0001)
         assertNull(metrics.falsePositiveRate)
     }
+
+    @Test
+    fun syntheticCorpus_discovererTraversesEveryRequiredMultiHopPath() = runBlocking {
+        val fixtures = SyntheticDiscoveryBenchmarkFixtures.corpus()
+        val discoverer = SyntheticDiscoveryBenchmarkFixtures.Discoverer(fixtures)
+
+        assertEquals(3, fixtures.size)
+        val runs = fixtures.map { fixture ->
+            val trace = discoverer.trace(fixture.case)
+            assertEquals(trace, discoverer.trace(fixture.case))
+            assertRequiredPath(fixture, trace)
+            DiscoveryBenchmark.run(fixture.case) { discoverer.discover(it) }
+        }
+
+        val aggregate = DiscoveryBenchmark.aggregate(runs)
+        assertEquals(3, aggregate.totalCases)
+        assertEquals(9, aggregate.truePositives)
+        assertEquals(1, aggregate.falsePositives)
+        assertEquals(0, aggregate.falseNegatives)
+        assertEquals(28.0 / 30.0, aggregate.averagePrecision, 0.0001)
+        assertEquals(1.0, aggregate.averageRecall, 0.0001)
+        assertEquals(26.0 / 27.0, aggregate.averageF1, 0.0001)
+    }
+
+    @Test
+    fun syntheticCorpus_truthfullyKeepsCandidateUnavailableAndUnlabelledFactsOutOfRecall() {
+        val fixtures = SyntheticDiscoveryBenchmarkFixtures.corpus()
+        val discoverer = SyntheticDiscoveryBenchmarkFixtures.Discoverer(fixtures)
+
+        val nameFixture = fixtures.first { it.id == "name-profile-email-document-phone" }
+        val nameTrace = discoverer.trace(nameFixture.case)
+        val nameMetrics = DiscoveryBenchmark.evaluate(nameFixture.case, nameTrace.run)
+        assertTrue(nameTrace.traversed.any { it.event.status == EventStatus.CANDIDATE })
+        assertTrue(nameTrace.traversed.any { it.event.status == EventStatus.UNAVAILABLE })
+        assertEquals(2, nameMetrics.unresolvedCandidateCount)
+        assertEquals(1, nameMetrics.unlabelledExtraCount)
+        assertEquals(1, nameMetrics.falsePositives)
+        assertEquals(4, nameMetrics.truePositives)
+
+        val photoTrace = discoverer.trace(fixtures.first { it.id == "photo-ocr-location-source-page" }.case)
+        assertTrue(photoTrace.traversed.any { it.event.status == EventStatus.CANDIDATE })
+        assertTrue(photoTrace.traversed.any { it.event.status == EventStatus.UNAVAILABLE })
+    }
+
+    private fun assertRequiredPath(
+        fixture: SyntheticDiscoveryBenchmarkFixtures.CaseFixture,
+        trace: SyntheticDiscoveryBenchmarkFixtures.Trace
+    ) {
+        var previousTime = -1L
+        fixture.requiredPath.windowed(2).forEach { (from, to) ->
+            val transition = trace.traversed.firstOrNull {
+                it.from.matches(from) &&
+                    it.to.matches(to) &&
+                    it.event.status == EventStatus.VERIFIED
+            }
+            assertTrue("${fixture.id} is missing ${from.kind} -> ${to.kind}", transition != null)
+            assertTrue(transition!!.event.elapsedTimeMs > previousTime)
+            previousTime = transition.event.elapsedTimeMs
+        }
+    }
+
 }
