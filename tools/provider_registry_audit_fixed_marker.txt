@@ -1,1 +1,0 @@
-Provider registry audit guard was reviewed during the product-contract implementation tranche.
