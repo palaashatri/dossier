@@ -94,7 +94,7 @@ object TypedSeedEvidenceAdapter {
         }
 
         evidence.forEach { record ->
-            val kind = record.kind.toTypedSeedKind() ?: return@forEach
+            val kind = record.toTypedSeedKind() ?: return@forEach
             val origin = record.origin()
             val source = record.sourceClassification()
             model.offer(
@@ -117,6 +117,15 @@ object TypedSeedEvidenceAdapter {
         input: IdentityInput? = null,
         config: TypedSeedAdmissionConfig = TypedSeedAdmissionConfig()
     ): TypedSeedAdmissionModel = admit(evidence, input, config)
+
+    private fun Evidence.toTypedSeedKind(): TypedSeedKind? =
+        if (kind == EvidenceKind.PublicSearchEvidence &&
+            reliability == EvidenceReliability.ArchiveSnapshot
+        ) {
+            TypedSeedKind.Archive
+        } else {
+            kind.toTypedSeedKind()
+        }
 
     private fun EvidenceKind.toTypedSeedKind(): TypedSeedKind? = when (this) {
         EvidenceKind.Email -> TypedSeedKind.Email

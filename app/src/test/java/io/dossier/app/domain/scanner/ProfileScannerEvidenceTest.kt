@@ -197,6 +197,11 @@ class ProfileScannerEvidenceTest {
         }
         assertEquals(EvidenceState.Observed, email.state)
         assertEquals(EvidenceReliability.Unknown, email.reliability)
+        assertTrue(collection.relationships.none {
+            it.relation == "mentions" &&
+                it.fromValue == profileUrl &&
+                it.toValue == "jane@example.com"
+        })
     }
 
     @Test
@@ -305,6 +310,38 @@ class ProfileScannerEvidenceTest {
         assertEquals(EvidenceKind.Url, collection.evidence.single {
             it.value == "https://notarchive.today.example.test/page"
         }.kind)
+    }
+
+    @Test
+    fun archivePhAndIsHostsClassifyAsArchivesWithoutSubstringMatches() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val collection = listOf(
+            result(
+                username = "janedoe",
+                url = "https://github.com/janedoe",
+                exists = true,
+                verified = true,
+                links = listOf(
+                    "https://archive.ph/abc123",
+                    "https://foo.archive.ph/abc123",
+                    "https://archive.is/def456",
+                    "https://bar.archive.is/def456",
+                    "https://notarchive.ph.example.test/page",
+                    "https://notarchive.is.example.test/page"
+                )
+            )
+        ).toEvidenceCollection(input)
+
+        assertEquals(
+            4,
+            collection.evidence.count { it.kind == EvidenceKind.Archive }
+        )
+        assertTrue(collection.evidence.any {
+            it.kind == EvidenceKind.Url && it.value.contains("notarchive.ph")
+        })
+        assertTrue(collection.evidence.any {
+            it.kind == EvidenceKind.Url && it.value.contains("notarchive.is")
+        })
     }
 
     @Test

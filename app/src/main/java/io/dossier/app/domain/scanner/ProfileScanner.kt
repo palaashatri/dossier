@@ -2358,7 +2358,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 }
             }
             evidence.add(findingEvidence)
-            if (finding.sourceUrl == url || result.exists) {
+            if (sameSourceUrl(finding.sourceUrl, url)) {
                 relationships.add(
                     EvidenceRelationship(
                         fromValue = url,
@@ -2395,7 +2395,9 @@ private fun classifyProfileLink(link: String): EvidenceKind {
     val host = uri?.host.orEmpty().lowercase(Locale.ROOT)
     if (host == "web.archive.org" || host.endsWith(".web.archive.org") ||
         host == "archive.org" || host.endsWith(".archive.org") ||
-        host == "archive.today" || host.endsWith(".archive.today")
+        host == "archive.today" || host.endsWith(".archive.today") ||
+        host == "archive.ph" || host.endsWith(".archive.ph") ||
+        host == "archive.is" || host.endsWith(".archive.is")
     ) {
         return EvidenceKind.Archive
     }

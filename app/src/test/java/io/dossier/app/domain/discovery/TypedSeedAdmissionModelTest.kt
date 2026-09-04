@@ -140,6 +140,16 @@ class TypedSeedAdmissionModelTest {
                 sourceClassification = ExposureSourceClassification.LOCAL_IMPORT
             )
         )
+        assertFalse(
+            TypedSeedAdmissionModel().offer(
+                kind = TypedSeedKind.Email,
+                rawValue = "local@example.test",
+                depth = 1,
+                origin = TypedSeedOrigin.LocalAnalysis,
+                evidenceState = EvidenceState.Verified,
+                sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE
+            )
+        )
 
         val explicitlyAuthorized = TypedSeedAdmissionModel(
             TypedSeedAdmissionConfig(allowAuthorizedImports = true)
@@ -220,6 +230,33 @@ class TypedSeedAdmissionModelTest {
                 origin = TypedSeedOrigin.LocalAnalysis,
                 isVerified = true
             )
+        }
+        listOf(
+            ExposureSourceClassification.BREACH_INDEX,
+            ExposureSourceClassification.BREACH_DERIVED
+        ).forEach { source ->
+            assertThrows(IllegalArgumentException::class.java) {
+                TypedSeed(
+                    kind = TypedSeedKind.Email,
+                    value = "person@example.test",
+                    evidenceState = EvidenceState.Verified,
+                    sourceClassification = source,
+                    origin = TypedSeedOrigin.Evidence,
+                    isVerified = true
+                )
+            }
+        }
+        listOf(TypedSeedOrigin.Import, TypedSeedOrigin.LocalAnalysis).forEach { origin ->
+            assertThrows(IllegalArgumentException::class.java) {
+                TypedSeed(
+                    kind = TypedSeedKind.Email,
+                    value = "person@example.test",
+                    evidenceState = EvidenceState.Observed,
+                    sourceClassification = ExposureSourceClassification.LOCAL_IMPORT,
+                    origin = origin,
+                    isVerified = false
+                )
+            }
         }
         // A verified, explicitly authorized local import is representable, but
         // admission still requires the caller's allowAuthorizedImports opt-in.
@@ -308,5 +345,23 @@ class TypedSeedAdmissionModelTest {
         val model = TypedSeedEvidenceAdapter.fromCollection(collection)
         assertEquals(listOf(record.id), model.admittedSeeds.single().evidenceIds)
         assertEquals(collection.evidence, listOf(record))
+    }
+
+    @Test
+    fun adapterAdmitsVerifiedWaybackSearchEvidenceAsArchivePivot() {
+        val record = Evidence(
+            id = "wayback-snapshot",
+            kind = EvidenceKind.PublicSearchEvidence,
+            value = "https://web.archive.org/web/20240101000000/https://example.test/profile",
+            sourceUrl = "https://web.archive.org/web/20240101000000/https://example.test/profile",
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.ArchiveSnapshot
+        )
+
+        val model = TypedSeedEvidenceAdapter.admit(listOf(record))
+        val archive = model.admittedSeeds.single()
+        assertEquals(TypedSeedKind.Archive, archive.kind)
+        assertEquals(listOf(record.id), archive.evidenceIds)
+        assertEquals(ExposureSourceClassification.ARCHIVE, archive.sourceClassification)
     }
 }

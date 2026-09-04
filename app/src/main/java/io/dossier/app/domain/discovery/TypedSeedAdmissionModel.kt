@@ -99,16 +99,32 @@ data class TypedSeed(
         }
         require(
             origin !in setOf(TypedSeedOrigin.Import, TypedSeedOrigin.LocalAnalysis) ||
-                sourceClassification == ExposureSourceClassification.LOCAL_IMPORT
+                (evidenceState == EvidenceState.Verified &&
+                    sourceClassification == ExposureSourceClassification.LOCAL_IMPORT)
         ) {
-            "Import and local-analysis seeds must use LOCAL_IMPORT source classification."
+            "Import and local-analysis seeds must be verified LOCAL_IMPORT evidence."
         }
         require(
             origin != TypedSeedOrigin.Evidence ||
                 evidenceState != EvidenceState.Verified ||
-                sourceClassification != ExposureSourceClassification.UNKNOWN_ORIGIN
+                sourceClassification !in setOf(
+                    ExposureSourceClassification.UNKNOWN_ORIGIN,
+                    ExposureSourceClassification.BREACH_INDEX,
+                    ExposureSourceClassification.BREACH_DERIVED,
+                    ExposureSourceClassification.LOCAL_IMPORT,
+                    ExposureSourceClassification.USER_IMPORTED
+                )
         ) {
-            "Verified evidence seeds require a known source classification."
+            "Verified evidence seeds require a public or authorized source classification."
+        }
+        require(
+            evidenceState != EvidenceState.Verified ||
+                sourceClassification !in setOf(
+                    ExposureSourceClassification.BREACH_INDEX,
+                    ExposureSourceClassification.BREACH_DERIVED
+                )
+        ) {
+            "Breach evidence cannot become a verified typed seed."
         }
         require(origin != TypedSeedOrigin.Unknown || evidenceState != EvidenceState.Verified) {
             "Unknown-origin seeds cannot be marked Verified."
@@ -361,12 +377,23 @@ class TypedSeedAdmissionModel(
         ) {
             return false
         }
+        if (origin == TypedSeedOrigin.Import || origin == TypedSeedOrigin.LocalAnalysis) {
+            if (evidenceState != EvidenceState.Verified ||
+                sourceClassification != ExposureSourceClassification.LOCAL_IMPORT
+            ) {
+                return false
+            }
+        }
         // Initial user values are authorized pivots even before a fetch verifies them.
         if (origin == TypedSeedOrigin.UserInput) return true
         if (evidenceState != EvidenceState.Verified) return false
         return when (origin) {
-            TypedSeedOrigin.Evidence,
-            TypedSeedOrigin.LocalAnalysis -> sourceClassification != ExposureSourceClassification.UNKNOWN_ORIGIN
+            TypedSeedOrigin.Evidence -> sourceClassification !in setOf(
+                ExposureSourceClassification.UNKNOWN_ORIGIN,
+                ExposureSourceClassification.LOCAL_IMPORT,
+                ExposureSourceClassification.USER_IMPORTED
+            )
+            TypedSeedOrigin.LocalAnalysis -> true
             TypedSeedOrigin.Import ->
                 config.allowAuthorizedImports &&
                     sourceClassification == ExposureSourceClassification.LOCAL_IMPORT
