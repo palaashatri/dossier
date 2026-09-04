@@ -7,6 +7,7 @@ import io.dossier.app.domain.model.ProfileScanResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.Serializable
+import java.net.URI
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
@@ -177,11 +178,64 @@ object MediaIntelligenceSession {
             append('\u001e').append(normalized(input.usernames))
             append('\u001e').append(input.primaryUsername?.trim()?.lowercase(Locale.ROOT).orEmpty())
             append('\u001e').append(normalized(input.profileUrls))
-            append('\u001e').append(input.selfieUri?.trim()?.lowercase(Locale.ROOT).orEmpty())
+            append('\u001e').append(canonicalMediaUri(input.selfieUri))
         }
         return MessageDigest.getInstance("SHA-256")
             .digest(canonical.toByteArray(Charsets.UTF_8))
             .joinToString("") { byte -> "%02x".format(byte) }
+    }
+
+    /**
+     * Canonicalizes only the URI components whose casing is identifier-insensitive.
+     * Path, query, and fragment casing remain exact so distinct media objects or
+     * provider tokens cannot accidentally share a media scope.
+     */
+    private fun canonicalMediaUri(raw: String?): String {
+        val trimmed = raw?.trim().orEmpty()
+        if (trimmed.isBlank()) return ""
+
+        return runCatching {
+            val uri = URI(trimmed)
+            val scheme = uri.scheme ?: return@runCatching trimmed
+            val rawAuthority = uri.rawAuthority
+            val authority = if (rawAuthority != null && uri.host != null) {
+                canonicalAuthority(rawAuthority, uri.host)
+            } else {
+                rawAuthority
+            }
+
+            buildString {
+                append(scheme.lowercase(Locale.ROOT)).append(':')
+                if (rawAuthority != null) append("//").append(authority)
+                if (uri.isOpaque) {
+                    append(uri.rawSchemeSpecificPart)
+                } else {
+                    append(uri.rawPath.orEmpty())
+                    uri.rawQuery?.let { append('?').append(it) }
+                }
+                uri.rawFragment?.let { append('#').append(it) }
+            }
+        }.getOrDefault(trimmed)
+    }
+
+    private fun canonicalAuthority(rawAuthority: String, host: String): String {
+        val hostStart = rawAuthority.lastIndexOf('@') + 1
+        val hostEnd = if (rawAuthority.getOrNull(hostStart) == '[') {
+            rawAuthority.indexOf(']', hostStart)
+                .takeIf { it >= 0 }
+                ?.plus(1)
+                ?: rawAuthority.length
+        } else {
+            rawAuthority.indexOf(':', hostStart)
+                .takeIf { it >= 0 }
+                ?: rawAuthority.length
+        }
+        val canonicalHost = if (host.startsWith("[") && host.endsWith("]")) {
+            "[${host.substring(1, host.length - 1).lowercase(Locale.ROOT)}]"
+        } else {
+            host.lowercase(Locale.ROOT)
+        }
+        return rawAuthority.replaceRange(hostStart, hostEnd, canonicalHost)
     }
 
     private const val MAX_IMAGE_RESULTS = 12

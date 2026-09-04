@@ -22,16 +22,10 @@ internal fun MediaIntelligenceSnapshot.toEvidenceCollection(
     val boundedPath = boundedDiscoveryPath(discoveryPath)
     return imageResults
         .map { result ->
-            val profileAvatarObservation = result.isDirectProfileAvatarObservation()
             result.toEvidenceCollection(
-                discoveryPath = if (profileAvatarObservation) {
-                    listOf(PROFILE_AVATAR_PATH)
-                } else {
-                    boundedPath
-                },
-                mediaSourceUri = mediaSourceUri.takeUnless { profileAvatarObservation },
-                retrievedAtEpochMillis = retrievedAtEpochMillis,
-                profileAvatarObservation = profileAvatarObservation
+                discoveryPath = boundedPath,
+                mediaSourceUri = mediaSourceUri,
+                retrievedAtEpochMillis = retrievedAtEpochMillis
             )
         }
         .fold(EvidenceCollection(), ::mergeEvidenceCollections)
@@ -40,8 +34,7 @@ internal fun MediaIntelligenceSnapshot.toEvidenceCollection(
 internal fun ReverseImageLookupResult.toEvidenceCollection(
     discoveryPath: List<String> = emptyList(),
     retrievedAtEpochMillis: Long? = null,
-    mediaSourceUri: String? = null,
-    profileAvatarObservation: Boolean = false
+    mediaSourceUri: String? = null
 ): EvidenceCollection {
     val boundedPath = boundedDiscoveryPath(discoveryPath)
     val localSource = mediaSourceUri
@@ -84,7 +77,8 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             contentHashSha256 = contentHashSha256?.trim()?.takeIf(String::isNotBlank),
             discoveryPath = boundedDiscoveryPath(path),
             firstObservedAtEpochMillis = timestamp,
-            lastObservedAtEpochMillis = timestamp
+            lastObservedAtEpochMillis = timestamp,
+            sourceUrls = listOfNotNull(source)
         )
         return id
     }
@@ -221,15 +215,12 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
     val candidateImageEvidenceIds = mutableMapOf<String, String>()
     val observedCandidatePages = mutableMapOf<String, String>()
     val candidateLinkageEvidenceIds = mutableMapOf<String, List<String>>()
-    val candidateReliability = if (profileAvatarObservation) {
-        EvidenceReliability.DirectPublicProfile
-    } else {
-        EvidenceReliability.SearchEngineCandidate
-    }
     visualCandidates.forEach { candidate ->
         val candidateState = candidate.state.toEvidenceState()
         val candidateTimestamp = candidate.retrievedAtEpochMillis ?: retrievedAtEpochMillis
         val metadata = candidateMetadata(candidate)
+        val candidatePath = candidate.discoveryPath(boundedPath)
+        val candidateReliability = candidate.evidenceReliability()
         val pageId = add(
             kind = EvidenceKind.PublicImageEvidence,
             value = candidate.title.ifBlank { candidate.sourcePageUrl },
@@ -239,6 +230,7 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             state = candidateState,
             reliability = candidateReliability,
             timestamp = candidateTimestamp,
+            path = candidatePath,
             providerId = candidate.source,
             contentHashSha256 = candidate.contentSha256
         )
@@ -251,6 +243,7 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             state = candidateState,
             reliability = candidateReliability,
             timestamp = candidateTimestamp,
+            path = candidatePath,
             providerId = candidate.source,
             contentHashSha256 = candidate.contentSha256
         )
@@ -268,6 +261,7 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
                     state = candidateState,
                     reliability = candidateReliability,
                     timestamp = candidateTimestamp,
+                    path = candidatePath,
                     providerId = candidate.source,
                     contentHashSha256 = candidate.contentSha256
                 )
@@ -295,13 +289,13 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
         }
     }
 
-    val matchReliability = if (profileAvatarObservation) {
-        EvidenceReliability.DirectPublicProfile
-    } else {
-        EvidenceReliability.SearchEngineCandidate
-    }
+    val candidatesById = visualCandidates.associateBy { it.id }
     visualMatches.forEach { match ->
         val metadata = matchMetadata(match)
+        val linkedCandidate = match.candidateId?.let(candidatesById::get)
+        val matchReliability = linkedCandidate?.evidenceReliability()
+            ?: EvidenceReliability.SearchEngineCandidate
+        val matchPath = linkedCandidate?.discoveryPath(boundedPath) ?: boundedPath
         // Keep the page title and exact image URL as separate structured records.
         // This also makes match-only results useful when no candidate provenance
         // record survived a provider response.
@@ -314,6 +308,7 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             state = EvidenceState.Observed,
             reliability = matchReliability,
             timestamp = retrievedAtEpochMillis,
+            path = matchPath,
             providerId = match.source
         )
         val matchImageId = add(
@@ -325,6 +320,7 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             state = EvidenceState.Observed,
             reliability = matchReliability,
             timestamp = retrievedAtEpochMillis,
+            path = matchPath,
             providerId = match.source
         )
         val candidateId = match.candidateId
@@ -387,8 +383,26 @@ private fun ReverseImageLookupResult.ImageCandidateState.toEvidenceState(): Evid
     ReverseImageLookupResult.ImageCandidateState.Matched -> EvidenceState.Observed
 }
 
-private fun ReverseImageLookupResult.isDirectProfileAvatarObservation(): Boolean =
-    visualSearchNote?.startsWith(PROFILE_AVATAR_NOTE_PREFIX, ignoreCase = true) == true
+private fun ReverseImageLookupResult.ImageCandidateProvenance.evidenceReliability(): EvidenceReliability =
+    if (hasVerifiedProfileLinkage()) {
+        EvidenceReliability.DirectPublicProfile
+    } else {
+        EvidenceReliability.SearchEngineCandidate
+    }
+
+private fun ReverseImageLookupResult.ImageCandidateProvenance.discoveryPath(
+    fallback: List<String>
+): List<String> = if (hasVerifiedProfileLinkage()) {
+    listOf(PROFILE_AVATAR_PATH)
+} else {
+    fallback
+}
+
+private fun ReverseImageLookupResult.ImageCandidateProvenance.hasVerifiedProfileLinkage(): Boolean =
+    sourcePageUrl.isNotBlank() && accountLinkages.any { linkage ->
+        linkage.basis == ReverseImageLookupResult.ImageAccountLinkageBasis.VerifiedProfile &&
+            sameMediaIdentifier(linkage.accountUrl, sourcePageUrl)
+    }
 
 private fun ReverseImageLookupResult.ImageCandidateProvenance.hasObservedSourcePage(): Boolean =
     sourcePageUrl.isNotBlank() && accountLinkages.any { linkage ->
@@ -451,6 +465,11 @@ private fun boundedDiscoveryPath(path: List<String>): List<String> = path
     .distinct()
     .take(Evidence.MAX_DISCOVERY_PATH_STEPS)
 
+private fun boundedSourceUrls(sourceUrls: List<String>): List<String> = sourceUrls
+    .filter(String::isNotBlank)
+    .distinct()
+    .take(Evidence.MAX_SOURCE_URLS)
+
 private fun sameMediaIdentifier(first: String, second: String): Boolean =
     first.trim().trimEnd('/').substringBefore('#').equals(
         second.trim().trimEnd('/').substringBefore('#'),
@@ -480,7 +499,7 @@ private fun mergeEvidence(first: Evidence, second: Evidence): Evidence {
         // Keep the first observed source string intact. The records share a
         // normalized ID key, so only metadata is merged below.
         value = first.value,
-        sourceUrl = preferred.sourceUrl ?: other.sourceUrl,
+        sourceUrl = first.sourceUrl ?: second.sourceUrl,
         snippet = listOfNotNull(first.snippet, second.snippet)
             .map(String::trim)
             .filter(String::isNotBlank)
@@ -510,6 +529,9 @@ private fun mergeEvidence(first: Evidence, second: Evidence): Evidence {
         lastObservedAtEpochMillis = maxTimestamp(
             first.lastObservedAtEpochMillis ?: first.observedAtEpochMillis,
             second.lastObservedAtEpochMillis ?: second.observedAtEpochMillis
+        ),
+        sourceUrls = boundedSourceUrls(
+            first.sourceUrls + second.sourceUrls + listOfNotNull(first.sourceUrl, second.sourceUrl)
         )
     )
 }
@@ -601,7 +623,6 @@ private val POSITIVE_STATES = setOf(
     EvidenceState.Verified
 )
 
-private const val PROFILE_AVATAR_NOTE_PREFIX = "Directly verified public profile avatars"
 private const val PROFILE_AVATAR_PATH = "profile:avatar"
 private const val MAX_METADATA_CHARS = 512
 private const val MAX_RELATIONSHIP_EVIDENCE_IDS = 256

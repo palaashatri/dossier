@@ -283,6 +283,7 @@ class MediaEvidenceAdapterTest {
     @Test
     fun profileAvatarObservationsDoNotInheritPhotoSeedPath() {
         val avatar = candidateState("avatar", ReverseImageLookupResult.ImageCandidateState.Indexed)
+            .copy(accountLinkages = listOf(verifiedProfileLinkage(avatarPageUrl("avatar"))))
         val snapshot = MediaIntelligenceSnapshot(
             imageResults = listOf(
                 sampleResult().copy(
@@ -326,7 +327,8 @@ class MediaEvidenceAdapterTest {
             acquisitionQuery = "second query",
             retrievedAtEpochMillis = 200L,
             contentSha256 = "hash-second",
-            comparisonScore = 0.90f
+            comparisonScore = 0.90f,
+            accountLinkages = listOf(verifiedProfileLinkage("https://pages.example.test/repost"))
         )
         val snapshot = MediaIntelligenceSnapshot(
             imageResults = listOf(
@@ -348,6 +350,10 @@ class MediaEvidenceAdapterTest {
         assertEquals(200L, image.retrievedAtEpochMillis)
         assertEquals(200L, image.observedAtEpochMillis)
         assertEquals(listOf("seed:photo", "profile:avatar"), image.discoveryPath)
+        assertEquals(
+            listOf(first.sourcePageUrl, second.sourcePageUrl),
+            image.sourceUrls
+        )
         assertEquals("provider-b", image.providerId)
         assertEquals("hash-second", image.contentHashSha256)
 
@@ -380,6 +386,7 @@ class MediaEvidenceAdapterTest {
     @Test
     fun verifiedProfileAvatarEvidenceUsesDirectProfileReliability() {
         val avatar = candidateState("verified-avatar", ReverseImageLookupResult.ImageCandidateState.Indexed)
+            .copy(accountLinkages = listOf(verifiedProfileLinkage(avatarPageUrl("verified-avatar"))))
         val snapshot = MediaIntelligenceSnapshot(
             imageResults = listOf(
                 sampleResult().copy(
@@ -399,6 +406,65 @@ class MediaEvidenceAdapterTest {
         )
     }
 
+    @Test
+    fun mixedVisualResultsKeepProfileReliabilityScopedToExplicitLinkageAndCandidateMatch() {
+        val ordinary = candidateState("ordinary", ReverseImageLookupResult.ImageCandidateState.Matched)
+        val verified = candidateState("verified", ReverseImageLookupResult.ImageCandidateState.Matched)
+            .copy(accountLinkages = listOf(verifiedProfileLinkage(avatarPageUrl("verified"))))
+        val result = sampleResult().copy(
+            visualCandidates = listOf(ordinary, verified),
+            visualMatches = listOf(
+                ReverseImageLookupResult.VisualMatch(
+                    title = "Ordinary match",
+                    imageUrl = ordinary.imageUrl,
+                    sourcePageUrl = ordinary.sourcePageUrl,
+                    source = "fixture",
+                    similarity = 0.91f,
+                    matchType = "exact-content",
+                    evidence = "ordinary candidate match",
+                    candidateId = ordinary.id
+                ),
+                ReverseImageLookupResult.VisualMatch(
+                    title = "Verified match",
+                    imageUrl = verified.imageUrl,
+                    sourcePageUrl = verified.sourcePageUrl,
+                    source = "fixture",
+                    similarity = 0.92f,
+                    matchType = "exact-content",
+                    evidence = "verified candidate match",
+                    candidateId = verified.id
+                ),
+                ReverseImageLookupResult.VisualMatch(
+                    title = "Unlinked match",
+                    imageUrl = "https://images.example.test/unlinked-match.jpg",
+                    sourcePageUrl = "https://pages.example.test/unlinked-match",
+                    source = "fixture",
+                    similarity = 0.93f,
+                    matchType = "near-duplicate",
+                    evidence = "no candidate linkage"
+                )
+            )
+        )
+
+        val collection = result.toEvidenceCollection()
+        val ledger = collection.toExposureLedger()
+        fun evidenceFor(value: String) = collection.evidence.single { it.value == value }
+        fun factFor(value: String) = ledger.facts.single { it.exactValue == value }
+
+        assertEquals(EvidenceReliability.SearchEngineCandidate, evidenceFor(ordinary.imageUrl).reliability)
+        assertEquals(ExposureSourceClassification.PUBLIC_WEB, factFor(ordinary.imageUrl).sourceClassification)
+        assertEquals(EvidenceReliability.DirectPublicProfile, evidenceFor(verified.imageUrl).reliability)
+        assertEquals(ExposureSourceClassification.PUBLIC_PROFILE, factFor(verified.imageUrl).sourceClassification)
+        assertEquals(
+            EvidenceReliability.SearchEngineCandidate,
+            evidenceFor("https://images.example.test/unlinked-match.jpg").reliability
+        )
+        assertEquals(
+            ExposureSourceClassification.PUBLIC_WEB,
+            factFor("https://images.example.test/unlinked-match.jpg").sourceClassification
+        )
+    }
+
     private fun candidateState(
         id: String,
         state: ReverseImageLookupResult.ImageCandidateState
@@ -413,6 +479,15 @@ class MediaEvidenceAdapterTest {
         comparisonScore = if (state == ReverseImageLookupResult.ImageCandidateState.Indexed) null else 0.4f,
         state = state
     )
+
+    private fun verifiedProfileLinkage(accountUrl: String) =
+        ReverseImageLookupResult.ImageAccountLinkage(
+            accountUrl = accountUrl,
+            basis = ReverseImageLookupResult.ImageAccountLinkageBasis.VerifiedProfile,
+            evidenceIds = listOf("profile:$accountUrl")
+        )
+
+    private fun avatarPageUrl(id: String): String = "https://pages.example.test/$id"
 
     private fun sampleResult() = ReverseImageLookupResult(
         gps = null,

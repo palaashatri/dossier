@@ -67,16 +67,22 @@ data class Evidence(
     /** Earliest observation represented by a merged evidence record, when known. */
     val firstObservedAtEpochMillis: Long? = null,
     /** Latest observation represented by a merged evidence record, when known. */
-    val lastObservedAtEpochMillis: Long? = null
+    val lastObservedAtEpochMillis: Long? = null,
+    /** Alternate exact source strings retained when duplicate observations merge. */
+    val sourceUrls: List<String> = emptyList()
 ) {
     init {
         require(discoveryPath.size <= MAX_DISCOVERY_PATH_STEPS) {
             "Evidence may retain at most $MAX_DISCOVERY_PATH_STEPS discovery steps."
         }
+        require(sourceUrls.size <= MAX_SOURCE_URLS) {
+            "Evidence may retain at most $MAX_SOURCE_URLS source URLs."
+        }
     }
 
     companion object {
         const val MAX_DISCOVERY_PATH_STEPS = 64
+        const val MAX_SOURCE_URLS = 64
     }
 }
 

@@ -86,6 +86,34 @@ class MediaIntelligenceSessionTest {
     }
 
     @Test
+    fun inputFingerprintCanonicalizesOnlyMediaUriSchemeAndHost() {
+        val canonical = IdentityInput(
+            fullName = "Same Subject",
+            primaryUsername = "same",
+            selfieUri = "content://example.test/Photo?Token=AbC#Frag"
+        )
+        val schemeAndHostCase = canonical.copy(
+            selfieUri = "CONTENT://EXAMPLE.TEST/Photo?Token=AbC#Frag"
+        )
+        val pathCase = canonical.copy(
+            selfieUri = "content://example.test/photo?Token=AbC#Frag"
+        )
+        val queryCase = canonical.copy(
+            selfieUri = "content://example.test/Photo?token=AbC#Frag"
+        )
+        val fragmentCase = canonical.copy(
+            selfieUri = "content://example.test/Photo?Token=AbC#frag"
+        )
+        val token = MediaIntelligenceSession.bindTo(canonical)
+        assertTrue(MediaIntelligenceSession.recordImage(token, sampleImage()))
+
+        assertFalse(MediaIntelligenceSession.snapshotFor(schemeAndHostCase).isEmpty)
+        assertTrue(MediaIntelligenceSession.snapshotFor(pathCase).isEmpty)
+        assertTrue(MediaIntelligenceSession.snapshotFor(queryCase).isEmpty)
+        assertTrue(MediaIntelligenceSession.snapshotFor(fragmentCase).isEmpty)
+    }
+
+    @Test
     fun cancellationInvalidatesScopedSnapshotWithoutDiscardingPartialResults() {
         val target = IdentityInput(fullName = "Cancelled Subject", primaryUsername = "cancelled")
 
