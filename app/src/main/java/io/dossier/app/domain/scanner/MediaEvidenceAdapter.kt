@@ -57,7 +57,9 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
         state: EvidenceState,
         reliability: EvidenceReliability,
         timestamp: Long? = retrievedAtEpochMillis,
-        path: List<String> = boundedPath
+        path: List<String> = boundedPath,
+        providerId: String? = null,
+        contentHashSha256: String? = null
     ): String? {
         val exact = value?.trim()?.takeIf(String::isNotBlank) ?: return null
         val source = sourceUrl
@@ -71,10 +73,12 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             sourceUrl = source,
             snippet = snippet?.trim()?.takeIf(String::isNotBlank)?.take(MAX_METADATA_CHARS),
             confidence = confidence.takeIf(Float::isFinite)?.coerceIn(0f, 1f) ?: 0f,
+            providerId = providerId?.trim()?.takeIf(String::isNotBlank),
             state = state,
             reliability = reliability,
             retrievedAtEpochMillis = timestamp,
             observedAtEpochMillis = timestamp,
+            contentHashSha256 = contentHashSha256?.trim()?.takeIf(String::isNotBlank),
             discoveryPath = boundedDiscoveryPath(path)
         )
         return id
@@ -195,7 +199,9 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             confidence = candidate.comparisonScore ?: 0.5f,
             state = candidateState,
             reliability = EvidenceReliability.SearchEngineCandidate,
-            timestamp = candidateTimestamp
+            timestamp = candidateTimestamp,
+            providerId = candidate.source,
+            contentHashSha256 = candidate.contentSha256
         )
         val imageId = add(
             kind = EvidenceKind.PublicImageEvidence,
@@ -205,7 +211,9 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             confidence = candidate.comparisonScore ?: 0.5f,
             state = candidateState,
             reliability = EvidenceReliability.SearchEngineCandidate,
-            timestamp = candidateTimestamp
+            timestamp = candidateTimestamp,
+            providerId = candidate.source,
+            contentHashSha256 = candidate.contentSha256
         )
         imageId?.let { candidateImageEvidenceIds[candidate.id] = it }
 
@@ -220,7 +228,9 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
                     confidence = candidate.comparisonScore ?: 0.5f,
                     state = candidateState,
                     reliability = EvidenceReliability.SearchEngineCandidate,
-                    timestamp = candidateTimestamp
+                    timestamp = candidateTimestamp,
+                    providerId = candidate.source,
+                    contentHashSha256 = candidate.contentSha256
                 )
             }
 
@@ -259,7 +269,8 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             confidence = match.similarity,
             state = EvidenceState.Observed,
             reliability = EvidenceReliability.SearchEngineCandidate,
-            timestamp = retrievedAtEpochMillis
+            timestamp = retrievedAtEpochMillis,
+            providerId = match.source
         )
         val matchImageId = add(
             kind = EvidenceKind.PublicImageEvidence,
@@ -269,7 +280,8 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             confidence = match.similarity,
             state = EvidenceState.Observed,
             reliability = EvidenceReliability.SearchEngineCandidate,
-            timestamp = retrievedAtEpochMillis
+            timestamp = retrievedAtEpochMillis,
+            providerId = match.source
         )
         val candidateId = match.candidateId
         val candidatePage = candidateId?.let(observedCandidatePages::get)
