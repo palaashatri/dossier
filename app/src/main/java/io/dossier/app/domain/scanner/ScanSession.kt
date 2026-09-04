@@ -63,6 +63,8 @@ import io.dossier.app.domain.username.UsernameVariantGenerator
 import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.discovery.ProviderDiagnosticsRuntime
+import io.dossier.app.domain.discovery.TypedSeedAdmissionSnapshot
+import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -118,6 +120,10 @@ object ScanSession {
 
     private val _exposureLedger = MutableStateFlow(ExposureLedger())
     val exposureLedger: StateFlow<ExposureLedger> = _exposureLedger
+
+    /** Bounded typed-pivot projection derived from the canonical evidence cache. */
+    private val _typedSeedAdmission = MutableStateFlow(TypedSeedAdmissionSnapshot())
+    val typedSeedAdmission: StateFlow<TypedSeedAdmissionSnapshot> = _typedSeedAdmission
 
     private val _attackPaths = MutableStateFlow<List<AttackPathFinder.AttackPath>>(emptyList())
     val attackPaths: StateFlow<List<AttackPathFinder.AttackPath>> = _attackPaths
@@ -206,6 +212,7 @@ object ScanSession {
         }
         EvidenceRuntimeCache.clear()
         _exposureLedger.value = ExposureLedger()
+        _typedSeedAdmission.value = TypedSeedAdmissionSnapshot()
         MediaIntelligenceSession.beginFor(input)
         _scanHistory.value = emptyList()
         _userCorrections.value = emptyList()
@@ -344,6 +351,13 @@ object ScanSession {
         val migrated = CaseEvidenceIdMigration.migrate(case)
         EvidenceRuntimeCache.replaceCaseEvidence(migrated.evidenceRecords, migrated.evidenceRelationships)
         _exposureLedger.value = migrated.exposureLedger.normalized()
+        _typedSeedAdmission.value = TypedSeedEvidenceAdapter.fromCollection(
+            EvidenceCollection(
+                evidence = migrated.evidenceRecords,
+                relationships = migrated.evidenceRelationships
+            ),
+            migrated.input
+        ).snapshot()
         MediaIntelligenceSession.restoreFor(migrated.input, migrated.mediaIntelligence)
         _scanHistory.value = migrated.scanHistory
         _userCorrections.value = migrated.userCorrections
@@ -458,6 +472,7 @@ object ScanSession {
         _currentInput.value = inputToUse
         EvidenceRuntimeCache.clear()
         _exposureLedger.value = ExposureLedger()
+        _typedSeedAdmission.value = TypedSeedAdmissionSnapshot()
         val mediaBindingToken = MediaIntelligenceSession.beginFor(inputToUse)
         _scanHistory.value = emptyList()
         _userCorrections.value = emptyList()
@@ -1162,6 +1177,7 @@ object ScanSession {
         _currentInput.value = null
         EvidenceRuntimeCache.clear()
         _exposureLedger.value = ExposureLedger()
+        _typedSeedAdmission.value = TypedSeedAdmissionSnapshot()
         MediaIntelligenceSession.clear()
         _scanHistory.value = emptyList()
         _findings.value = emptyList()
@@ -1721,7 +1737,7 @@ object ScanSession {
             mediaSourceUri = mediaSourceUri,
             retrievedAtEpochMillis = mediaRetrievedAtEpochMillis
         )
-        return EvidenceCollection(
+        val snapshot = EvidenceCollection(
             evidence = (
                 scannerEvidence.evidence +
                     pluginCollection.evidence +
@@ -1734,6 +1750,8 @@ object ScanSession {
                         mediaEvidence.relationships
                 )
             ).withResolvedRelationshipEvidence()
+        _typedSeedAdmission.value = TypedSeedEvidenceAdapter.fromCollection(snapshot, input).snapshot()
+        return snapshot
     }
 
     internal fun buildAiAnalysisSnapshot(

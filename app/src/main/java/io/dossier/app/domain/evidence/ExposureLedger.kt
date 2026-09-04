@@ -25,6 +25,7 @@ enum class ExposureFactKind {
     Image,
     Photo,
     Document,
+    Archive,
     MessagingIdentifier,
     PaymentIdentifier,
     BreachMembership,
@@ -175,7 +176,8 @@ object ExposureLedgerPolicy {
             ExposureFactKind.Website,
             ExposureFactKind.Domain,
             ExposureFactKind.Image,
-            ExposureFactKind.Photo -> normalizeUrl(trimmed)
+            ExposureFactKind.Photo,
+            ExposureFactKind.Archive -> normalizeUrl(trimmed)
             else -> collapseWhitespace(trimmed).lowercase(Locale.ROOT)
         }
     }
@@ -352,7 +354,7 @@ private fun EvidenceKind.toExposureFactKind(): ExposureFactKind = when (this) {
     EvidenceKind.SensitiveSnippet -> ExposureFactKind.SensitiveSnippet
     EvidenceKind.Url -> ExposureFactKind.Website
     EvidenceKind.Document -> ExposureFactKind.Document
-    EvidenceKind.Archive -> ExposureFactKind.Website
+    EvidenceKind.Archive -> ExposureFactKind.Archive
     EvidenceKind.Domain -> ExposureFactKind.Domain
     EvidenceKind.Photo -> ExposureFactKind.Photo
     EvidenceKind.Image -> ExposureFactKind.Image

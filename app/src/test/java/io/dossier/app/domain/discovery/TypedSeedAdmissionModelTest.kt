@@ -201,6 +201,36 @@ class TypedSeedAdmissionModelTest {
                 isVerified = true
             )
         }
+        assertThrows(IllegalArgumentException::class.java) {
+            TypedSeed(
+                kind = TypedSeedKind.Email,
+                value = "person@example.test",
+                evidenceState = EvidenceState.Verified,
+                sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+                origin = TypedSeedOrigin.Import,
+                isVerified = true
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            TypedSeed(
+                kind = TypedSeedKind.Email,
+                value = "person@example.test",
+                evidenceState = EvidenceState.Verified,
+                sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+                origin = TypedSeedOrigin.LocalAnalysis,
+                isVerified = true
+            )
+        }
+        // A verified, explicitly authorized local import is representable, but
+        // admission still requires the caller's allowAuthorizedImports opt-in.
+        TypedSeed(
+            kind = TypedSeedKind.Email,
+            value = "person@example.test",
+            evidenceState = EvidenceState.Verified,
+            sourceClassification = ExposureSourceClassification.LOCAL_IMPORT,
+            origin = TypedSeedOrigin.Import,
+            isVerified = true
+        )
     }
 
     @Test

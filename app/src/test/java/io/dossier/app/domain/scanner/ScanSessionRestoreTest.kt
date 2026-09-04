@@ -4,6 +4,7 @@ import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.case.CaseTimelineBuilder
 import io.dossier.app.domain.case.CaseScanHistoryEntry
 import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.discovery.TypedSeedKind
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
@@ -116,6 +117,13 @@ class ScanSessionRestoreTest {
             findings = listOf(finding),
             retrievedAtEpochMillis = 123_000L
         )
+        assertTrue(ScanSession.typedSeedAdmission.value.admittedSeeds.any {
+            it.kind == TypedSeedKind.Url && it.evidenceIds.isNotEmpty()
+        })
+        assertTrue(ScanSession.typedSeedAdmission.value.admittedSeeds.any {
+            it.kind == TypedSeedKind.Username
+        })
+        assertTrue(!ScanSession.typedSeedAdmission.value.isExecutionAvailable)
         EvidenceRuntimeCache.replace(snapshot)
         val case = DossierCase(
             createdAt = "2026-08-24 12:00",

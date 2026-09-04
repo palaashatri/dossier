@@ -41,6 +41,33 @@ enum class TypedSeedExecutionAvailability {
     Unavailable
 }
 
+/**
+ * Immutable derived view for UI/checkpoint diagnostics. The evidence
+ * collection remains canonical; this snapshot is bounded and disposable.
+ */
+@Serializable
+data class TypedSeedAdmissionSnapshot(
+    val seeds: List<TypedSeed> = emptyList(),
+    val pendingCount: Int = 0,
+    val admittedCount: Int = 0,
+    val executionAvailability: Map<TypedSeedKind, TypedSeedExecutionAvailability> =
+        TypedSeedKind.entries.associateWith { TypedSeedExecutionAvailability.Unavailable }
+) {
+    init {
+        require(seeds.size <= MAX_SEEDS) { "Too many typed seed snapshot records." }
+        require(pendingCount >= 0) { "Typed seed pending count must not be negative." }
+        require(admittedCount >= seeds.size) { "Typed seed admitted count is inconsistent." }
+    }
+
+    val admittedSeeds: List<TypedSeed> get() = seeds
+    val isExecutionAvailable: Boolean
+        get() = executionAvailability.values.any { it != TypedSeedExecutionAvailability.Unavailable }
+
+    companion object {
+        const val MAX_SEEDS = TypedSeedAdmissionConfig.MAX_ALLOWED_TOTAL_SEEDS
+    }
+}
+
 @Serializable
 data class TypedSeed(
     val kind: TypedSeedKind,
@@ -69,6 +96,19 @@ data class TypedSeed(
         }
         require(origin != TypedSeedOrigin.Candidate || evidenceState == EvidenceState.Candidate) {
             "Candidate seeds must retain Candidate evidence state."
+        }
+        require(
+            origin !in setOf(TypedSeedOrigin.Import, TypedSeedOrigin.LocalAnalysis) ||
+                sourceClassification == ExposureSourceClassification.LOCAL_IMPORT
+        ) {
+            "Import and local-analysis seeds must use LOCAL_IMPORT source classification."
+        }
+        require(
+            origin != TypedSeedOrigin.Evidence ||
+                evidenceState != EvidenceState.Verified ||
+                sourceClassification != ExposureSourceClassification.UNKNOWN_ORIGIN
+        ) {
+            "Verified evidence seeds require a known source classification."
         }
         require(origin != TypedSeedOrigin.Unknown || evidenceState != EvidenceState.Verified) {
             "Unknown-origin seeds cannot be marked Verified."
@@ -155,6 +195,13 @@ class TypedSeedAdmissionModel(
         TypedSeedKind.entries.associateWith { TypedSeedExecutionAvailability.Unavailable }
     val availability: Map<TypedSeedKind, TypedSeedExecutionAvailability>
         get() = executionAvailability
+
+    fun snapshot(): TypedSeedAdmissionSnapshot = TypedSeedAdmissionSnapshot(
+        seeds = admittedSeeds,
+        pendingCount = pendingCount,
+        admittedCount = admittedCount,
+        executionAvailability = executionAvailability
+    )
 
     fun availabilityFor(kind: TypedSeedKind): TypedSeedExecutionAvailability =
         executionAvailability.getValue(kind)

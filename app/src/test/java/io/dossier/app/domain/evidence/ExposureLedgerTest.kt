@@ -85,6 +85,24 @@ class ExposureLedgerTest {
     }
 
     @Test
+    fun archiveEvidenceRetainsDistinctLedgerKindAndArchiveSource() {
+        val evidence = Evidence(
+            id = "archive-1",
+            kind = EvidenceKind.Archive,
+            value = "HTTPS://Archive.Today/ABC#snapshot",
+            reliability = EvidenceReliability.ArchiveSnapshot,
+            historical = true
+        )
+
+        val fact = evidence.toExposureFact()
+        assertEquals(ExposureFactKind.Archive, fact.kind)
+        assertEquals("https://archive.today/ABC", fact.normalizedValue)
+        assertEquals("HTTPS://Archive.Today/ABC#snapshot", fact.exactValue)
+        assertEquals(ExposureSourceClassification.ARCHIVE, fact.sourceClassification)
+        assertTrue(fact.historical)
+    }
+
+    @Test
     fun reliabilityMapsToExplicitSourceClassification() {
         val expected = mapOf(
             EvidenceReliability.AuthoritativeApi to ExposureSourceClassification.AUTHORIZED_API,
