@@ -11,7 +11,7 @@ The current branch is the product-contract discovery-v2 reset. Mission readiness
 Current source baseline:
 
 ```text
-6863fd8 (SSRF-hardened image URL policy; docs below record this verified head)
+12458a5 (verified typed public-search pivot provenance; docs below record this verified head)
 ```
 
 The hardening history below is retained for context; the current source and validation record are listed above. `45520a1` added fail-closed frontier recovery for unreadable persisted pivot state and routed deep-research website traversal through the bounded declarative provider runtime with opaque host IDs, lifecycle events, redirect/auth/challenge classification, response limits and the existing six-page bound. `5f5ba8d` hardened calibration artifacts so configured contradiction weights cannot disable negative evidence.
@@ -25,19 +25,19 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 11 tests / no-network schema, conversion-parity + pinned source-catalog fixtures
-Debug JVM unit tests                PASS — 900 tests / 145 result XML files / 0 failures, errors, or skips
-Release JVM unit tests              PASS — 900 tests / 145 result XML files / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 900 tests / 145 result XML files / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 972 tests / 145 result XML files / 0 failures, errors, or skips
+Release JVM unit tests              PASS — 972 tests / 145 result XML files / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 972 tests / 145 result XML files / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 115,761,592 bytes; SHA-256 `bdba1fa37f1c179e5421053f728ecaa4a6be91f916d10150557a3a1e1ef8a0c2`
-uiTest APK assembly                 PASS — 243,308,937 bytes; SHA-256 `8b85dde746b9836998600a3e0fedbaca7b89c3a58a394796e6ed155968f53bc2`
-Android-test APK                    PASS — 1,029,876 bytes; SHA-256 `8ffed11e1f0c184fcabbde4cced3193dab8d1f36f574fbf450f3ea808a64b5d2`
+Debug APK assembly                  PASS — 115,794,360 bytes; SHA-256 `0d70eb643fb55e0baee3c79320a75206e1eebc3d97f9e6e9f42c1eab3568d5b1`
+uiTest APK assembly                 PASS — 243,325,321 bytes; SHA-256 `a00ca69d5cac85ff24b321d165fea60656b7aeddf0b7e02fd988d434c56b5581`
+Android-test APK                    PASS — 1,029,896 bytes; SHA-256 `de715e9d7eff3e8d66e5d1e0f4de303e3b7affb878f13784580731375bcfd81a`
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 73 warnings
-Connected uiTest suite              PASS — 57 tests / 0 failures on API 36 `dossier-api36` emulator
+Connected uiTest suite              PASS — 57 tests / 0 failures on API 36 `dossier-api36` emulator (`emulator-5554`)
 ```
 
-The current debug, uiTest, and Android-test APKs were rebuilt from `6863fd8`; their SHA-256 values are recorded above. Debug lint reported 0 errors and 69 warnings, and uiTest lint reported 0 errors and 73 warnings. The connected suite ran on `emulator-5554` (API 36). The Python hygiene audit passed (2 tests), the provider audit passed (78 authored providers, 716 pinned source records, 644 executable rules, 0 conversion errors), and `git diff --check` is clean.
+The current debug, uiTest, and Android-test APKs were rebuilt from `12458a5`; their SHA-256 values are recorded above. Debug lint reported 0 errors and 69 warnings, and uiTest lint reported 0 errors and 73 warnings. The connected suite ran on `emulator-5554` (API 36); a targeted rerun also covered the universal-search correction path after one transient full-suite menu race. The Python hygiene audit passed (2 tests), the provider audit passed (78 authored providers, 716 pinned source records, 644 executable rules, 0 conversion errors), and `git diff --check` was clean before this documentation update.
 
 The connected suite covers the provider-health panel, WorkManager pause/resume, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, graph/export redaction, HUD status, reverse-video picker semantics, and the universal-search seed-correction path. Fresh visual evidence from the installed uiTest APK is outside Git at `/tmp/dossier-qa-20260905-final6/`: consent, universal-search reset and local Name classification (`11`–`16`), live scan progress with nonzero counters (`17`–`18`), cancellation reset (`19`), encrypted analysis restore (`01`–`03`), report overview/evidence/timeline/tabs/actions/connections/accessibility (`04`–`10`), and Images/Breaches/Cases/Engines tabs (`20`–`23`). Every final6 hierarchy XML identifies `package="io.dossier.app"`. All fixture values and URLs use reserved `.test` domains. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
 

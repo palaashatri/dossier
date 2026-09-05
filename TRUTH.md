@@ -9,7 +9,7 @@ This is the authoritative current-state record for Dossier.
 - **Current branch:** `feat/product-contract-discovery-v2`
 - **Open pull request:** PR #4
 - **Audited implementation baseline before the documentation reset:** `22b158fd45bcbe58c1a946ed0864ff8a2b3a3b69`
-- **Current verified source head:** `6863fd8b0b65f55f8ece562e14feed26cd5621a2`
+- **Current verified source head:** `12458a5b3ebf1b37ca5caf0c5a4e81ebf7bf8628`
 - **Product-contract reset commit:** `cf0f11d67974ce881513ff36130bbe2d9a7aa3d7`
 - **Audit/reset date:** 2026-09-04
 - **Previous strict readiness score:** **83/100 — RETIRED as the primary product metric**
@@ -27,13 +27,12 @@ Until that question is measured against a real synthetic/consented corpus, missi
 
 ## 1.1 Current working-tree validation — 2026-09-05
 
-The current working tree is on `feat/product-contract-discovery-v2` at `6863fd8`. Fresh post-change gates produced:
+The current working tree is on `feat/product-contract-discovery-v2` at `12458a5`. Fresh post-change gates produced:
 
-- `./gradlew test --no-daemon --rerun-tasks`: **BUILD SUCCESSFUL**; 900 tests in each of `testDebugUnitTest`, `testReleaseUnitTest`, and `testUiTestUnitTest`, with 0 failures, errors, or skipped tests.
-- `./gradlew :app:assembleDebug :app:lintDebug --no-daemon`: **BUILD SUCCESSFUL**; debug APK 115,761,592 bytes, SHA-256 `bdba1fa37f1c179e5421053f728ecaa4a6be91f916d10150557a3a1e1ef8a0c2`, lint 0 errors and 69 warnings.
-- `./gradlew :app:lintUiTest --no-daemon`: **BUILD SUCCESSFUL**; uiTest lint 0 errors and 73 warnings.
-- Current artifact readback: uiTest APK 243,308,937 bytes, SHA-256 `8b85dde746b9836998600a3e0fedbaca7b89c3a58a394796e6ed155968f53bc2`; Android-test APK 1,029,876 bytes, SHA-256 `8ffed11e1f0c184fcabbde4cced3193dab8d1f36f574fbf450f3ea808a64b5d2`.
-- `./gradlew :app:connectedUiTestAndroidTest --no-daemon`: **BUILD SUCCESSFUL**; 57 tests on the `dossier-api36` API 36 emulator (`emulator-5554`), 0 skipped and 0 failed.
+- `./gradlew test --no-daemon --rerun-tasks`: **BUILD SUCCESSFUL**; 972 tests in each of `testDebugUnitTest`, `testReleaseUnitTest`, and `testUiTestUnitTest`, with 0 failures, errors, or skipped tests.
+- `./gradlew :app:assembleDebug :app:assembleUiTest :app:lintDebug :app:lintUiTest --no-daemon --rerun-tasks`: **BUILD SUCCESSFUL**; debug APK 115,794,360 bytes, SHA-256 `0d70eb643fb55e0baee3c79320a75206e1eebc3d97f9e6e9f42c1eab3568d5b1`, lint 0 errors and 69 warnings; uiTest lint 0 errors and 73 warnings.
+- Current artifact readback: uiTest APK 243,325,321 bytes, SHA-256 `a00ca69d5cac85ff24b321d165fea60656b7aeddf0b7e02fd988d434c56b5581`; Android-test APK 1,029,896 bytes, SHA-256 `de715e9d7eff3e8d66e5d1e0f4de303e3b7affb878f13784580731375bcfd81a`.
+- `./gradlew :app:connectedUiTestAndroidTest --no-daemon`: **BUILD SUCCESSFUL** on the final rerun; 57 tests on the `dossier-api36` API 36 emulator (`emulator-5554`), 0 skipped and 0 failed. The first full-suite attempt surfaced one correction-menu touch race; its isolated test and subsequent full-suite rerun passed.
 - `python3 -m unittest tools.test_repository_hygiene_audit`: **OK**, 2 tests (the session-generated ignored `.serena` directory was moved out of the repository before this rerun).
 - `python3 tools/provider_registry_audit.py --json`: `ok: true`, 78 authored providers, 716 pinned WhatsMyName source records, 644 executable rules, and 0 conversion errors.
 - `git diff --check`: clean.
@@ -50,7 +49,7 @@ The host does not have `pwsh`, so `tools/verify_whatsmyname_catalog.ps1` was not
 
 The recursive pivot collector now handles completions as they arrive, persists frontier completion after each result, retains deterministic output order, leaves unfinished work pending across cancellation, and admits only verified existing results as later-depth seeds. Focused JVM coverage for this behavior is included in the totals above. The uiTest visual fixture also clears stale lifecycle ownership before writing its encrypted result; a regression covers a stale terminal marker.
 
-Fresh visual QA was performed against the installed current `uiTest` APK on `emulator-5554` (`dossier-api36`, API 36). Corrected evidence is retained outside Git under `/tmp/dossier-qa-20260905-final6/`, including consent, universal-search reset and classification (`11`–`16`), live scan progress with nonzero counters (`17`–`18`), cancellation reset (`19`), encrypted analysis restoration (`01`–`03`), report overview/evidence/timeline/tabs/actions/connections/accessibility (`04`–`10`), and Images/Breaches/Cases/Engines tabs (`20`–`23`). Every final6 hierarchy XML identifies `io.dossier.app`. The valid screenshots show local seed classification, a genuine running scan with nonzero scheduler counters, cancellation back to search, encrypted fixture restoration, exact evidence, report actions, timeline, graph, accessible relationship list, and the additional top-level tabs. This is emulator evidence only; physical-device acceptance, broad accessibility, and the mission benchmark remain open.
+Fresh visual QA was performed against the installed current `uiTest` APK on `emulator-5554` (`dossier-api36`, API 36). Corrected evidence is retained outside Git under `/tmp/dossier-qa-current/`, including universal-search correction (`05-correction-menu.png`, `06-corrected-name.png`), live scan/report states (`17-analysis-fixed-bottom.png`, `20-report-final.png`) and corresponding hierarchy XML. The final report screenshot was inspected at 1080×1920; its hierarchy identifies `package="io.dossier.app"`. The valid screenshots show local seed classification, cancellation back to search, encrypted fixture restoration, exact evidence, report actions, timeline, graph, accessible relationship list, and the additional top-level tabs. This is emulator evidence only; physical-device acceptance, broad accessibility, and the mission benchmark remain open.
 
 ## 2. Repository/PR scale at reset
 
