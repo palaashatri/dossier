@@ -2,7 +2,11 @@ package io.dossier.app.data.web
 
 import android.content.Context
 import io.dossier.app.data.platform.resolveProfileUrl
+import io.dossier.app.domain.discovery.ProviderVerificationState
+import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.ProfileScanResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -19,6 +23,7 @@ import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -66,11 +71,21 @@ class PublicSearchDiscoveryService(private val context: Context) {
         val results: List<PublicSearchResult>
     )
 
-    suspend fun discover(input: IdentityInput, deepResearch: Boolean = false): List<PublicSearchResult> =
+    suspend fun discover(
+        input: IdentityInput,
+        deepResearch: Boolean = false,
+        verifiedResults: List<ProfileScanResult> = emptyList()
+    ): List<PublicSearchResult> =
         withContext(Dispatchers.IO) {
             val queryLimit = if (deepResearch) MAX_DEEP_QUERIES else MAX_DEFAULT_QUERIES
-            val queries = buildSearchQueries(input, deepResearch).take(queryLimit)
+            val queries = buildSearchQueries(input, deepResearch, verifiedResults).take(queryLimit)
             if (queries.isEmpty()) return@withContext emptyList()
+
+            val effectiveInput = if (verifiedResults.isNotEmpty()) {
+                expandIdentityInput(input, verifiedResults)
+            } else {
+                input
+            }
 
             val providers = defaultProviders()
             val querySemaphore = Semaphore(MAX_PARALLEL_SEARCH_QUERIES)
@@ -90,7 +105,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
             }
 
             val scored = mergeProviderEvidence(raw)
-                .map { it.copy(score = scoreResult(input, it)) }
+                .map { it.copy(score = scoreResult(effectiveInput, it)) }
                 .filter { it.score >= MIN_INDEX_SCORE }
                 .sortedByDescending { it.score }
                 .take(MAX_PRE_VERIFICATION_RESULTS)
@@ -113,7 +128,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
 
                         verifySemaphore.withPermit {
                             when (val verification = pageVerifier.verify(
-                                input = input,
+                                input = effectiveInput,
                                 url = result.url,
                                 indexedTitle = result.title,
                                 indexedSnippet = result.snippet
@@ -336,17 +351,179 @@ class PublicSearchDiscoveryService(private val context: Context) {
             "gclid", "fbclid", "msclkid", "ref", "ref_src", "ved", "source", "yclid"
         )
 
+        data class DiscoveredSearchTerms(
+            val emails: List<String> = emptyList(),
+            val phones: List<String> = emptyList(),
+            val handles: List<String> = emptyList()
+        ) {
+            val isEmpty: Boolean get() = emails.isEmpty() && phones.isEmpty() && handles.isEmpty()
+            val totalCount: Int get() = emails.size + phones.size + handles.size
+        }
+
+        const val MAX_EXPANDED_EMAILS = 4
+        const val MAX_EXPANDED_PHONES = 4
+        const val MAX_EXPANDED_HANDLES = 8
+        const val MAX_TOTAL_EXPANDED_TERMS = 16
+        const val MIN_FINDING_CONFIDENCE_FOR_EXPANSION = 0.80f
+
+        fun extractDiscoveredSearchTerms(
+            input: IdentityInput,
+            verifiedResults: List<ProfileScanResult>
+        ): DiscoveredSearchTerms {
+            if (verifiedResults.isEmpty()) return DiscoveredSearchTerms()
+
+            val existingEmails = input.emails
+                .mapNotNull(::cleanTerm)
+                .map { it.lowercase(Locale.ROOT) }
+                .toSet()
+
+            val existingPhones = input.phones
+                .map { value -> value.filter(Char::isDigit) }
+                .filter { it.length >= 8 }
+                .toSet()
+
+            val existingHandles = (listOfNotNull(input.primaryUsername) + input.usernames + input.aliases)
+                .mapNotNull(::cleanTerm)
+                .map { it.lowercase(Locale.ROOT) }
+                .toSet()
+
+            val acceptedEmails = mutableListOf<String>()
+            val acceptedPhones = mutableListOf<String>()
+            val acceptedHandles = mutableListOf<String>()
+
+            for (result in verifiedResults) {
+                if (acceptedEmails.size + acceptedPhones.size + acceptedHandles.size >= MAX_TOTAL_EXPANDED_TERMS) break
+                // Result must exist and be directly verified
+                if (!result.exists || !result.verified) continue
+
+                // Reject candidate / soft existence states
+                if (result.providerVerificationState != null &&
+                    result.providerVerificationState != ProviderVerificationState.Present
+                ) continue
+
+                val status = result.verificationStatus.orEmpty().lowercase(Locale.ROOT)
+                if (isSoftOrCandidateStatus(status)) continue
+
+                // Reject breach-derived, imported, or ambiguous provenance
+                val provenance = result.provenance.orEmpty().lowercase(Locale.ROOT)
+                if (isBreachImportOrAmbiguousText(provenance)) continue
+
+                // 1. Candidate username: Only result.exists && result.verified profiles may contribute candidate username
+                if (acceptedHandles.size < MAX_EXPANDED_HANDLES &&
+                    acceptedEmails.size + acceptedPhones.size + acceptedHandles.size < MAX_TOTAL_EXPANDED_TERMS
+                ) {
+                    val rawUsername = result.candidate.username
+                    val normalizedHandle = cleanTerm(rawUsername)
+                    if (normalizedHandle != null &&
+                        normalizedHandle.length in 2..40 &&
+                        !normalizedHandle.contains(Regex("\\s")) &&
+                        !isAmbiguousHandle(normalizedHandle)
+                    ) {
+                        val handleKey = normalizedHandle.lowercase(Locale.ROOT)
+                        if (handleKey !in existingHandles &&
+                            acceptedHandles.none { it.equals(normalizedHandle, ignoreCase = true) }
+                        ) {
+                            acceptedHandles += normalizedHandle
+                        }
+                    }
+                }
+
+                // 2. Email and Phone findings
+                val canonicalResultUrl = canonicalUrlKey(result.candidate.url)
+                for (finding in result.findings) {
+                    if (acceptedEmails.size + acceptedPhones.size + acceptedHandles.size >= MAX_TOTAL_EXPANDED_TERMS) break
+
+                    // Must be Email or Phone
+                    if (finding.type != FindingType.Email && finding.type != FindingType.Phone) continue
+
+                    // Confidence at least 0.80
+                    if (finding.confidence < MIN_FINDING_CONFIDENCE_FOR_EXPANSION) continue
+
+                    // finding.sourceUrl canonicalizes to exact verified profile URL
+                    val findingSourceUrl = finding.sourceUrl?.takeIf(String::isNotBlank) ?: continue
+                    if (canonicalUrlKey(findingSourceUrl) != canonicalResultUrl) continue
+
+                    // Reject breach / import / ambiguous finding values or snippets
+                    if (isBreachImportOrAmbiguousFinding(finding)) continue
+
+                    when (finding.type) {
+                        FindingType.Email -> {
+                            if (acceptedEmails.size < MAX_EXPANDED_EMAILS) {
+                                val normalizedEmail = normalizeEmailValue(finding.value)
+                                if (normalizedEmail != null && !isAmbiguousEmail(normalizedEmail)) {
+                                    val emailKey = normalizedEmail.lowercase(Locale.ROOT)
+                                    if (emailKey !in existingEmails &&
+                                        acceptedEmails.none { it.equals(normalizedEmail, ignoreCase = true) }
+                                    ) {
+                                        acceptedEmails += normalizedEmail
+                                    }
+                                }
+                            }
+                        }
+                        FindingType.Phone -> {
+                            if (acceptedPhones.size < MAX_EXPANDED_PHONES) {
+                                val digits = finding.value.filter(Char::isDigit)
+                                if (digits.length in 8..15 && !isAmbiguousPhone(digits)) {
+                                    if (digits !in existingPhones && acceptedPhones.none { it == digits }) {
+                                        acceptedPhones += digits
+                                    }
+                                }
+                            }
+                        }
+                        else -> Unit
+                    }
+                }
+            }
+
+            return DiscoveredSearchTerms(
+                emails = acceptedEmails,
+                phones = acceptedPhones,
+                handles = acceptedHandles
+            )
+        }
+
+        fun expandIdentityInput(
+            input: IdentityInput,
+            verifiedResults: List<ProfileScanResult>
+        ): IdentityInput {
+            if (verifiedResults.isEmpty()) return input
+            val discovered = extractDiscoveredSearchTerms(input, verifiedResults)
+            if (discovered.isEmpty) return input
+
+            return input.copy(
+                emails = (discovered.emails + input.emails)
+                    .mapNotNull(::cleanTerm)
+                    .distinctBy { it.lowercase(Locale.ROOT) },
+                phones = (discovered.phones + input.phones)
+                    .map { it.filter(Char::isDigit) }
+                    .filter { it.length >= 8 }
+                    .distinct(),
+                usernames = (discovered.handles + input.usernames)
+                    .mapNotNull(::cleanTerm)
+                    .distinctBy { it.lowercase(Locale.ROOT) }
+            )
+        }
+
         /** High-entropy identifiers are deliberately placed before broad name queries. */
-        fun buildSearchQueries(input: IdentityInput, deepResearch: Boolean = false): List<String> {
+        fun buildSearchQueries(
+            input: IdentityInput,
+            deepResearch: Boolean = false,
+            verifiedResults: List<ProfileScanResult> = emptyList()
+        ): List<String> {
             val queries = linkedSetOf<String>()
+            val discovered = extractDiscoveredSearchTerms(input, verifiedResults)
             val name = input.fullName.trim()
-            val handles = buildHandleTerms(input)
             val aliases = input.aliases.mapNotNull(::cleanTerm)
-            val emails = input.emails.mapNotNull(::cleanTerm)
+            val originalEmails = input.emails.mapNotNull(::cleanTerm)
             val organizations = input.organizations.mapNotNull(::cleanTerm)
             val locations = input.locations.mapNotNull(::cleanTerm)
+            val originalHandles = buildHandleTerms(input)
 
-            emails.take(if (deepResearch) 4 else 2).forEach { email ->
+            val emailsToQuery = (discovered.emails + originalEmails)
+                .distinctBy { it.lowercase(Locale.ROOT) }
+                .take(discovered.emails.size + (if (deepResearch) 4 else 2))
+
+            emailsToQuery.forEach { email ->
                 queries += quote(email)
                 val local = email.substringBefore('@').trim().removePrefix("+")
                 if (local.length >= 3) queries += quote(local)
@@ -357,17 +534,25 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 }
             }
 
-            input.phones
+            val originalPhones = input.phones
                 .map { value -> value.filter(Char::isDigit) }
                 .filter { it.length >= 8 }
                 .distinct()
-                .take(if (deepResearch) 3 else 2)
-                .forEach { digits ->
-                    queries += quote(digits)
-                    if (digits.length >= 10) queries += quote(digits.takeLast(10))
-                }
 
-            handles.take(if (deepResearch) 8 else 5).forEach { handle ->
+            val phonesToQuery = (discovered.phones + originalPhones)
+                .distinct()
+                .take(discovered.phones.size + (if (deepResearch) 3 else 2))
+
+            phonesToQuery.forEach { digits ->
+                queries += quote(digits)
+                if (digits.length >= 10) queries += quote(digits.takeLast(10))
+            }
+
+            val handlesToQuery = (discovered.handles + originalHandles)
+                .distinctBy { it.lowercase(Locale.ROOT) }
+                .take(discovered.handles.size + (if (deepResearch) 8 else 5))
+
+            handlesToQuery.forEach { handle ->
                 val quotedHandle = quote(handle)
                 queries += quotedHandle
                 RELIABLE_PROFILE_QUERY_SITES.forEach { site -> queries += "$quotedHandle site:$site" }
@@ -378,7 +563,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 val quotedName = quote(name)
                 organizations.take(2).forEach { org -> queries += "$quotedName ${quote(org)}" }
                 locations.take(2).forEach { location -> queries += "$quotedName ${quote(location)}" }
-                handles.take(2).forEach { handle -> queries += "$quotedName ${quote(handle)}" }
+                handlesToQuery.take(2).forEach { handle -> queries += "$quotedName ${quote(handle)}" }
                 queries += quotedName
                 queries += "$quotedName github linkedin x twitter reddit twitch instagram youtube"
                 PROFILE_QUERY_SITES.forEach { site -> queries += "$quotedName site:$site" }
@@ -708,6 +893,81 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 "boards.4chan.org", "medium.com", "dev.to", "gitlab.com",
                 "bsky.app", "mastodon.social", "news.ycombinator.com"
             ).any { host == it || host.endsWith(".$it") }
+        }
+
+        private fun isSoftOrCandidateStatus(status: String): Boolean =
+            status.contains("soft") ||
+                status.contains("candidate") ||
+                status.contains("unverified") ||
+                status.contains("unconfirmed") ||
+                status.contains("not found") ||
+                status.contains("not_found") ||
+                status.contains("challenge") ||
+                status.contains("auth")
+
+        private fun isBreachImportOrAmbiguousText(text: String): Boolean =
+            text.contains("breach") ||
+                text.contains("import") ||
+                text.contains("leak") ||
+                text.contains("dump") ||
+                text.contains("ambiguous") ||
+                text.contains("unverified") ||
+                text.contains("unconfirmed") ||
+                text.contains("thirdparty") ||
+                text.contains("third-party") ||
+                text.contains("pwned") ||
+                text.contains("compromised") ||
+                text.contains("stealer")
+
+        private fun isBreachImportOrAmbiguousFinding(finding: Finding): Boolean {
+            val text = "${finding.value} ${finding.evidenceSnippet.orEmpty()} ${finding.remediation}".lowercase(Locale.ROOT)
+            return isBreachImportOrAmbiguousText(text)
+        }
+
+        private fun isAmbiguousHandle(handle: String): Boolean {
+            val lower = handle.lowercase(Locale.ROOT)
+            return lower in AMBIGUOUS_HANDLE_VALUES || isBreachImportOrAmbiguousText(lower)
+        }
+
+        private val AMBIGUOUS_HANDLE_VALUES = setOf(
+            "unknown", "undefined", "null", "none", "anonymous", "n/a", "na",
+            "user", "profile", "admin", "root", "default"
+        )
+
+        private fun normalizeEmailValue(raw: String): String? {
+            val trimmed = raw.trim().removePrefix("@")
+            if (trimmed.length !in 5..254 || trimmed.count { it == '@' } != 1) return null
+            val local = trimmed.substringBefore('@').trim()
+            val domain = trimmed.substringAfter('@').trim()
+            if (local.isBlank() || domain.isBlank() || !domain.contains('.') ||
+                domain.startsWith('.') || domain.endsWith('.') || domain.contains("..") ||
+                trimmed.any(Char::isWhitespace)
+            ) return null
+            return trimmed.lowercase(Locale.ROOT)
+        }
+
+        private fun isAmbiguousEmail(email: String): Boolean {
+            val lower = email.lowercase(Locale.ROOT)
+            val local = lower.substringBefore('@')
+            val domain = lower.substringAfter('@')
+            if (GENERIC_EMAIL_PREFIXES.any { local == it || local.startsWith("$it+") }) return true
+            if (AMBIGUOUS_EMAIL_DOMAINS.any { domain == it }) return true
+            return isBreachImportOrAmbiguousText(lower)
+        }
+
+        private val GENERIC_EMAIL_PREFIXES = setOf(
+            "noreply", "no-reply", "donotreply", "do-not-reply",
+            "support", "info", "admin", "contact", "help", "postmaster"
+        )
+
+        private val AMBIGUOUS_EMAIL_DOMAINS = setOf(
+            "localhost", "invalid"
+        )
+
+        private fun isAmbiguousPhone(digits: String): Boolean {
+            if (digits.toSet().size <= 1) return true
+            if (digits in listOf("12345678", "123456789", "1234567890", "0123456789")) return true
+            return false
         }
     }
 }

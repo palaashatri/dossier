@@ -279,11 +279,12 @@ class ProfileScanner(
         // ownership, so they are surfaced with verified=false.
         val publicSearchResults: List<ProfileScanResult> = payloadStore?.load(ScanPayloadStage.PublicSearch)
             ?: try {
-                val confirmedUrls = (initialResults + pivotResults)
+                val verifiedResults = (initialResults + pivotResults)
                     .filter { it.exists && it.verified }
+                val confirmedUrls = verifiedResults
                     .map { PublicSearchDiscoveryService.canonicalUrlKey(it.candidate.url) }
                     .toSet()
-                val discovered = runPublicSearchPass(input, confirmedUrls, deepResearch)
+                val discovered = runPublicSearchPass(input, confirmedUrls, deepResearch, verifiedResults)
                 // Persist an empty list only after the pass completed normally;
                 // exceptions below remain a cache miss and retry honestly.
                 payloadStore?.save(ScanPayloadStage.PublicSearch, discovered)
@@ -567,10 +568,11 @@ class ProfileScanner(
     private suspend fun runPublicSearchPass(
         input: IdentityInput,
         alreadyConfirmedUrls: Set<String>,
-        deepResearch: Boolean
+        deepResearch: Boolean,
+        verifiedResults: List<ProfileScanResult> = emptyList()
     ): List<ProfileScanResult> {
         val service = PublicSearchDiscoveryService(context)
-        val discovered = service.discover(input, deepResearch)
+        val discovered = service.discover(input, deepResearch, verifiedResults)
         if (discovered.isEmpty()) return emptyList()
 
         return discovered
