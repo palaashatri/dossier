@@ -9,7 +9,7 @@ This is the authoritative current-state record for Dossier.
 - **Current branch:** `feat/product-contract-discovery-v2`
 - **Open pull request:** PR #4
 - **Audited implementation baseline before the documentation reset:** `22b158fd45bcbe58c1a946ed0864ff8a2b3a3b69`
-- **Current verified source head:** `12458a5b3ebf1b37ca5caf0c5a4e81ebf7bf8628`
+- **Current verified source head:** `ec9b70d1d29211f52216d8d0282e30b52d8a38e3`
 - **Product-contract reset commit:** `cf0f11d67974ce881513ff36130bbe2d9a7aa3d7`
 - **Audit/reset date:** 2026-09-04
 - **Previous strict readiness score:** **83/100 — RETIRED as the primary product metric**
@@ -27,11 +27,10 @@ Until that question is measured against a real synthetic/consented corpus, missi
 
 ## 1.1 Current working-tree validation — 2026-09-05
 
-The current working tree is on `feat/product-contract-discovery-v2` at `12458a5`. Fresh post-change gates produced:
+The current working tree is on `feat/product-contract-discovery-v2` at `ec9b70d`. Fresh post-change gates produced:
 
-- `./gradlew test --no-daemon --rerun-tasks`: **BUILD SUCCESSFUL**; 972 tests in each of `testDebugUnitTest`, `testReleaseUnitTest`, and `testUiTestUnitTest`, with 0 failures, errors, or skipped tests.
-- `./gradlew :app:assembleDebug :app:assembleUiTest :app:lintDebug :app:lintUiTest --no-daemon --rerun-tasks`: **BUILD SUCCESSFUL**; debug APK 115,794,360 bytes, SHA-256 `0d70eb643fb55e0baee3c79320a75206e1eebc3d97f9e6e9f42c1eab3568d5b1`, lint 0 errors and 69 warnings; uiTest lint 0 errors and 73 warnings.
-- Current artifact readback: uiTest APK 243,325,321 bytes, SHA-256 `a00ca69d5cac85ff24b321d165fea60656b7aeddf0b7e02fd988d434c56b5581`; Android-test APK 1,029,896 bytes, SHA-256 `de715e9d7eff3e8d66e5d1e0f4de303e3b7affb878f13784580731375bcfd81a`.
+- `./gradlew test :app:assembleDebug :app:assembleUiTest :app:assembleUiTestAndroidTest :app:lintDebug :app:lintUiTest --no-daemon --rerun-tasks --console=plain`: **BUILD SUCCESSFUL**; 1,032 tests in each of `testDebugUnitTest`, `testReleaseUnitTest`, and `testUiTestUnitTest`, with 0 failures, errors, or skipped tests; debug lint 0 errors and 70 warnings; uiTest lint 0 errors and 74 warnings.
+- Current artifact readback: debug APK 115,892,664 bytes, SHA-256 `ba910f023b12488d811467288bc99309cd92751610af405a146140a7bd9a5358`; uiTest APK 243,472,777 bytes, SHA-256 `247f5bda1219d8f594c4673bf622ad3ec1fdfed92d39c7680e0e85b0973507fc`; Android-test APK 1,030,284 bytes, SHA-256 `ccd2ea1357e6d182a9c9bdd59493e79c6ddb0bc902067408bef2ca190ca0af67`.
 - `./gradlew :app:connectedUiTestAndroidTest --no-daemon`: **BUILD SUCCESSFUL** on the final rerun; 57 tests on the `dossier-api36` API 36 emulator (`emulator-5554`), 0 skipped and 0 failed. The first full-suite attempt surfaced one correction-menu touch race; its isolated test and subsequent full-suite rerun passed.
 - `python3 -m unittest tools.test_repository_hygiene_audit`: **OK**, 2 tests (the session-generated ignored `.serena` directory was moved out of the repository before this rerun).
 - `python3 tools/provider_registry_audit.py --json`: `ok: true`, 78 authored providers, 716 pinned WhatsMyName source records, 644 executable rules, and 0 conversion errors.
@@ -49,7 +48,7 @@ The host does not have `pwsh`, so `tools/verify_whatsmyname_catalog.ps1` was not
 
 The recursive pivot collector now handles completions as they arrive, persists frontier completion after each result, retains deterministic output order, leaves unfinished work pending across cancellation, and admits only verified existing results as later-depth seeds. Focused JVM coverage for this behavior is included in the totals above. The uiTest visual fixture also clears stale lifecycle ownership before writing its encrypted result; a regression covers a stale terminal marker.
 
-Fresh visual QA was performed against the installed current `uiTest` APK on `emulator-5554` (`dossier-api36`, API 36). Corrected evidence is retained outside Git under `/tmp/dossier-qa-current/`, including universal-search correction (`05-correction-menu.png`, `06-corrected-name.png`), live scan/report states (`17-analysis-fixed-bottom.png`, `20-report-final.png`) and corresponding hierarchy XML. The final report screenshot was inspected at 1080×1920; its hierarchy identifies `package="io.dossier.app"`. The valid screenshots show local seed classification, cancellation back to search, encrypted fixture restoration, exact evidence, report actions, timeline, graph, accessible relationship list, and the additional top-level tabs. This is emulator evidence only; physical-device acceptance, broad accessibility, and the mission benchmark remain open.
+Fresh visual QA was performed against the installed current `uiTest` APK on `emulator-5554` (`dossier-api36`, API 36). Corrected evidence is retained outside Git under `/tmp/dossier-qa-20260905-current/`, including universal search (`02-universal-search.png`), final analysis (`31-analysis-final.png`), report overview (`34-report-overview-final.png`), report connections list (`38-report-connections-list-final.png`) and corresponding hierarchy XML. The screenshots are 1080×1920 and the hierarchies identify `package="io.dossier.app"`; fixture values use reserved `.test` domains. The valid screenshots show local seed classification, photo picker/analysis, cancellation back to search, encrypted fixture restoration, exact evidence, report actions, timeline, graph, accessible relationship list, and the additional top-level tabs. This is emulator evidence only; physical-device acceptance, broad accessibility, and the mission benchmark remain open.
 
 ## 2. Repository/PR scale at reset
 
@@ -309,11 +308,11 @@ This was appropriate for a mobile bounded audit, but it is not enough for the ne
 general coordinator still needs broader adaptive source yield and recall
 measurement.
 
-### 7.4 No persistent general exposure frontier
+### 7.4 Typed frontier is persisted, but general coverage is incomplete
 
-There is pivot/frontier code, but the product does not yet have the general typed persistent frontier defined in the new `AGENTS.md` where each verified email, phone, alias, document, profile, location, photo/source page, etc. can become a new prioritized search seed.
+The product now has a bounded, encrypted, request/owner/plan-bound typed frontier with queued, in-flight, completed, unavailable, evidence, relationship, and rejection state. URL, domain, document, and archive seeds are executed through the reviewed public-fetch/archive executor; newly verified links and extracted exact values feed back into the same frontier. Email, phone, username, name, photo/image, and location kinds are represented for admission, persistence, diagnostics, and future execution, but do not yet have autonomous per-kind fetchers in this tranche. The admission snapshot now reports this distinction truthfully: URL/domain/document/archive are `Available`, while unsupported kinds remain `Unavailable`.
 
-**Truth:** partial precursor exists; required general frontier does not.
+**Truth:** persistent typed frontier and URL/domain/document/archive execution are implemented; general all-kind frontier execution and broader adaptive source integration remain open.
 
 ### 7.5 Real-world recall is not measured
 
@@ -685,7 +684,7 @@ These are qualitative reset states, not a disguised numeric score.
 | Universal one-box launch | **Implemented and emulator-verified** | `MainHubScreen` now starts `UniversalSearchScreen`; text and photo seeds route into the existing scan flow, with cancellation/reset returning to the same entry. |
 | Public web discovery | **Partial** | Multiple search engines and direct verification exist, but hard caps and shallow stopping dominate. |
 | Username discovery | **Implemented but bounded** | Large pinned catalogue uses rolling workers and aggregate health/yield ordering; broader measured source yield and general frontier integration remain open. |
-| Recursive exposure frontier | **Partial precursor** | Typed bounded pivot/frontier persistence and completion checkpoints exist, but the required general persisted exposure frontier across all fact kinds is incomplete. |
+| Recursive exposure frontier | **Partial, typed URL-family execution** | Encrypted typed frontier persistence, rolling completion, and URL/domain/document/archive execution exist; email/phone/photo/location/name/username execution and broader coordinator ownership remain open. |
 | Exact-value extraction | **Partial** | Evidence adapters now preserve exact and normalized values in the initial ledger model; broad document/page extraction coverage remains incomplete. |
 | Exposure Ledger | **Initial canonical model implemented** | `ExposureLedger` is bounded, normalized, provenance-aware, and adapted from evidence; full scanner-wide canonical ownership remains open. |
 | Evidence/provenance | **Strong base** | Significant existing hardening and IDs/provenance can be reused. |

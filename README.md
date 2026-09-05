@@ -11,7 +11,7 @@ The current branch is the product-contract discovery-v2 reset. Mission readiness
 Current source baseline:
 
 ```text
-12458a5 (verified typed public-search pivot provenance; docs below record this verified head)
+ec9b70d (truthful typed-seed executor availability; builds on persisted typed exposure frontier and exact evidence)
 ```
 
 The hardening history below is retained for context; the current source and validation record are listed above. `45520a1` added fail-closed frontier recovery for unreadable persisted pivot state and routed deep-research website traversal through the bounded declarative provider runtime with opaque host IDs, lifecycle events, redirect/auth/challenge classification, response limits and the existing six-page bound. `5f5ba8d` hardened calibration artifacts so configured contradiction weights cannot disable negative evidence.
@@ -25,21 +25,21 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 11 tests / no-network schema, conversion-parity + pinned source-catalog fixtures
-Debug JVM unit tests                PASS — 972 tests / 145 result XML files / 0 failures, errors, or skips
-Release JVM unit tests              PASS — 972 tests / 145 result XML files / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 972 tests / 145 result XML files / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 1,032 tests / 145 result XML files / 0 failures, errors, or skips
+Release JVM unit tests              PASS — 1,032 tests / 145 result XML files / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 1,032 tests / 145 result XML files / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 115,794,360 bytes; SHA-256 `0d70eb643fb55e0baee3c79320a75206e1eebc3d97f9e6e9f42c1eab3568d5b1`
-uiTest APK assembly                 PASS — 243,325,321 bytes; SHA-256 `a00ca69d5cac85ff24b321d165fea60656b7aeddf0b7e02fd988d434c56b5581`
-Android-test APK                    PASS — 1,029,896 bytes; SHA-256 `de715e9d7eff3e8d66e5d1e0f4de303e3b7affb878f13784580731375bcfd81a`
-Debug lint                          PASS — 0 errors / 69 warnings
-uiTest lint                         PASS — 0 errors / 73 warnings
+Debug APK assembly                  PASS — 115,892,664 bytes; SHA-256 `ba910f023b12488d811467288bc99309cd92751610af405a146140a7bd9a5358`
+uiTest APK assembly                 PASS — 243,472,777 bytes; SHA-256 `247f5bda1219d8f594c4673bf622ad3ec1fdfed92d39c7680e0e85b0973507fc`
+Android-test APK                    PASS — 1,030,284 bytes; SHA-256 `ccd2ea1357e6d182a9c9bdd59493e79c6ddb0bc902067408bef2ca190ca0af67`
+Debug lint                          PASS — 0 errors / 70 warnings
+uiTest lint                         PASS — 0 errors / 74 warnings
 Connected uiTest suite              PASS — 57 tests / 0 failures on API 36 `dossier-api36` emulator (`emulator-5554`)
 ```
 
-The current debug, uiTest, and Android-test APKs were rebuilt from `12458a5`; their SHA-256 values are recorded above. Debug lint reported 0 errors and 69 warnings, and uiTest lint reported 0 errors and 73 warnings. The connected suite ran on `emulator-5554` (API 36); a targeted rerun also covered the universal-search correction path after one transient full-suite menu race. The Python hygiene audit passed (2 tests), the provider audit passed (78 authored providers, 716 pinned source records, 644 executable rules, 0 conversion errors), and `git diff --check` was clean before this documentation update.
+The current debug, uiTest, and Android-test APKs were rebuilt from `ec9b70d`; their SHA-256 values are recorded above. Debug lint reported 0 errors and 70 warnings, and uiTest lint reported 0 errors and 74 warnings. The connected suite ran on `emulator-5554` (API 36); a targeted rerun also covered the universal-search correction path after one transient full-suite menu race. The Python hygiene audit passed (2 tests), the provider audit passed (78 authored providers, 716 pinned source records, 644 executable rules, 0 conversion errors), and `git diff --check` was clean before this documentation update.
 
-The connected suite covers the provider-health panel, WorkManager pause/resume, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, graph/export redaction, HUD status, reverse-video picker semantics, and the universal-search seed-correction path. Fresh visual evidence from the installed uiTest APK is outside Git at `/tmp/dossier-qa-20260905-final6/`: consent, universal-search reset and local Name classification (`11`–`16`), live scan progress with nonzero counters (`17`–`18`), cancellation reset (`19`), encrypted analysis restore (`01`–`03`), report overview/evidence/timeline/tabs/actions/connections/accessibility (`04`–`10`), and Images/Breaches/Cases/Engines tabs (`20`–`23`). Every final6 hierarchy XML identifies `package="io.dossier.app"`. All fixture values and URLs use reserved `.test` domains. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
+The connected suite covers the provider-health panel, WorkManager pause/resume, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, graph/export redaction, HUD status, reverse-video picker semantics, and the universal-search seed-correction path. Fresh visual evidence from the installed uiTest APK is outside Git at `/tmp/dossier-qa-20260905-current/`: consent, universal-search seed classification/correction, photo picker and photo-analysis states, live scan/provider progress, cancellation reset, encrypted analysis restore, report overview/evidence/timeline/actions/connections, and Images/Breaches/Cases/Engines tabs. The final screenshot set includes `02-universal-search.png`, `31-analysis-final.png`, `34-report-overview-final.png`, and `38-report-connections-list-final.png`; corresponding hierarchy XML identifies `package="io.dossier.app"`. All fixture values and URLs use reserved `.test` domains. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
@@ -47,7 +47,7 @@ See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the
 
 ## Visual walkthrough
 
-The checked-in walkthrough captures are retained baseline images from the API 36 Medium Phone emulator. Fresh current-head captures are outside Git at `/tmp/dossier-qa-20260905-final6/`; `18-scan-progress-live-counters.png` is the current live-scan proof. Analysis, report, case, tab, and provider-progress states use deterministic **uiTest-only** fixtures; case data is written through the production encrypted stores and provider counters are emitted through the production coordinator callbacks. All identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish TalkBack, whole-product large-font, reduced-motion, adaptive-layout or physical-device acceptance.
+The checked-in walkthrough captures are retained baseline images from the API 36 Medium Phone emulator. Fresh current-head captures are outside Git at `/tmp/dossier-qa-20260905-current/`; `14-provider-progress.png` and `31-analysis-final.png` are current scan/analysis proofs. Analysis, report, case, tab, and provider-progress states use deterministic **uiTest-only** fixtures; case data is written through the production encrypted stores and provider counters are emitted through the production coordinator callbacks. All identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish TalkBack, whole-product large-font, reduced-motion, adaptive-layout or physical-device acceptance.
 
 | Consent and input validation | Scan configuration |
 |---|---|
