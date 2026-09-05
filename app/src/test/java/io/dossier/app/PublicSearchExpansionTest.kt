@@ -887,4 +887,203 @@ class PublicSearchExpansionTest {
         val candidateDiscovered = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(unverifiedWithLowConf))
         assertTrue(candidateDiscovered.isEmpty)
     }
+
+    @Test
+    fun ambiguityMarkers_tokenAndPhraseBoundaries_doNotRejectSubstringsInValidIdentifiers() {
+        // Valid identifiers with substrings matching marker names must not be rejected
+        assertFalse(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("software_engineer"))
+        assertFalse(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("author_smith"))
+        assertFalse(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("important_dev"))
+        assertFalse(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("dumpling"))
+        assertFalse(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("bleaker"))
+        assertFalse(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("candice"))
+
+        // Exact tokens, hyphenated terms, and multi-word phrases must fail closed
+        assertTrue(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("auth"))
+        assertTrue(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("soft"))
+        assertTrue(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("dump"))
+        assertTrue(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("leak"))
+        assertTrue(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("candidate"))
+        assertTrue(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("review-only"))
+        assertTrue(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("review manually"))
+        assertTrue(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("not-found"))
+        assertTrue(PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata("third-party"))
+
+        // Verified profile with handle "software_dev", email "author@example.test", and snippet mentioning "software"
+        val profileUrl = "https://github.test/software_dev"
+        val result = verifiedResult(
+            username = "software_dev",
+            url = profileUrl,
+            findings = listOf(
+                Finding(
+                    type = FindingType.Email,
+                    value = "author@example.test",
+                    sourceUrl = profileUrl,
+                    confidence = 0.92f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "Lead software engineer and author of privacy tools",
+                    remediation = "Review email exposure"
+                )
+            )
+        )
+        val input = IdentityInput(fullName = "Jane Doe")
+
+        val discovered = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(result))
+        assertEquals("Valid handle containing 'soft' substring must be accepted", listOf("software_dev"), discovered.handles)
+        assertEquals("Valid email containing 'auth' substring must be accepted", listOf("author@example.test"), discovered.emails)
+    }
+
+    @Test
+    fun discoveredLongEmails_emittedAsCompleteDistinctExactQueries() {
+        val email1 = "alice.very.long.address.for.testing.length.exceeding.ninety.characters.account.alpha@example.test"
+        val email2 = "alice.very.long.address.for.testing.length.exceeding.ninety.characters.account.beta@example.test"
+
+        assertTrue("Email 1 must exceed 90 chars", email1.length > 90)
+        assertTrue("Email 2 must exceed 90 chars", email2.length > 90)
+
+        val profileUrl = "https://github.test/alice"
+        val result = verifiedResult(
+            username = "alice",
+            url = profileUrl,
+            findings = listOf(
+                Finding(
+                    type = FindingType.Email,
+                    value = email1,
+                    sourceUrl = profileUrl,
+                    confidence = 0.90f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "contact",
+                    remediation = "remediate"
+                ),
+                Finding(
+                    type = FindingType.Email,
+                    value = email2,
+                    sourceUrl = profileUrl,
+                    confidence = 0.90f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "contact",
+                    remediation = "remediate"
+                )
+            )
+        )
+        val input = IdentityInput(
+            fullName = "Alice Smith",
+            primaryUsername = "orig_handle"
+        )
+
+        val queries = PublicSearchDiscoveryService.buildSearchQueries(input, deepResearch = false, verifiedResults = listOf(result))
+
+        // Both emails must appear as complete, distinct exact queries without 90-char truncation
+        assertTrue("Email 1 must be emitted as complete exact query", queries.contains("\"$email1\""))
+        assertTrue("Email 2 must be emitted as complete exact query", queries.contains("\"$email2\""))
+        assertFalse("Truncated query must not be emitted", queries.contains("\"${email1.take(90)}\""))
+        assertFalse("Truncated query must not be emitted", queries.contains("\"${email2.take(90)}\""))
+
+        // Both distinct emails must appear within the high-priority Phase 1 queries
+        val first16 = queries.take(16)
+        assertTrue("Email 1 must appear in Phase 1 queries", first16.contains("\"$email1\""))
+        assertTrue("Email 2 must appear in Phase 1 queries", first16.contains("\"$email2\""))
+    }
+
+    @Test
+    fun sameSourceExpansion_requiresAbsoluteHttpOrHttpsUrls() {
+        val input = IdentityInput(fullName = "Jane Doe")
+
+        // 1. Result with relative candidate URL must be rejected completely
+        val relativeResult = verifiedResult(
+            username = "relative_user",
+            url = "relative/profile/path",
+            findings = listOf(
+                Finding(
+                    type = FindingType.Email,
+                    value = "jane@example.test",
+                    sourceUrl = "relative/profile/path",
+                    confidence = 0.95f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "contact",
+                    remediation = "remediate"
+                )
+            )
+        )
+        val discoveredRelative = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(relativeResult))
+        assertTrue("Relative candidate URL must reject both handle and findings", discoveredRelative.isEmpty)
+
+        // 2. Result with non-HTTP candidate URL (e.g. file://, ftp://) must be rejected
+        val fileResult = verifiedResult(
+            username = "file_user",
+            url = "file:///tmp/profile",
+            findings = listOf(
+                Finding(
+                    type = FindingType.Email,
+                    value = "file@example.test",
+                    sourceUrl = "file:///tmp/profile",
+                    confidence = 0.95f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "contact",
+                    remediation = "remediate"
+                )
+            )
+        )
+        val discoveredFile = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(fileResult))
+        assertTrue("file:// candidate URL must reject both handle and findings", discoveredFile.isEmpty)
+
+        // 3. Absolute HTTPS result with non-HTTP or relative finding sourceUrls
+        val validProfileUrl = "https://github.test/valid_user"
+        val mixedFindingsResult = verifiedResult(
+            username = "valid_user",
+            url = validProfileUrl,
+            findings = listOf(
+                Finding(
+                    type = FindingType.Email,
+                    value = "relative.source@example.test",
+                    sourceUrl = "/valid_user", // Relative
+                    confidence = 0.95f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "contact",
+                    remediation = "remediate"
+                ),
+                Finding(
+                    type = FindingType.Phone,
+                    value = "+1 555 010 1111",
+                    sourceUrl = "ftp://github.test/valid_user", // Unsupported scheme
+                    confidence = 0.95f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "contact",
+                    remediation = "remediate"
+                ),
+                Finding(
+                    type = FindingType.Email,
+                    value = "blank.source@example.test",
+                    sourceUrl = "   ", // Blank
+                    confidence = 0.95f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "contact",
+                    remediation = "remediate"
+                ),
+                Finding(
+                    type = FindingType.Email,
+                    value = "accepted@example.test",
+                    sourceUrl = "$validProfileUrl?utm_campaign=track#section", // Absolute HTTPS matching canonical
+                    confidence = 0.95f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "contact",
+                    remediation = "remediate"
+                ),
+                Finding(
+                    type = FindingType.Phone,
+                    value = "+1 555 010 2222",
+                    sourceUrl = validProfileUrl, // Absolute HTTPS matching exactly
+                    confidence = 0.95f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "contact",
+                    remediation = "remediate"
+                )
+            )
+        )
+
+        val discoveredMixed = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(mixedFindingsResult))
+        assertEquals(listOf("valid_user"), discoveredMixed.handles)
+        assertEquals(listOf("accepted@example.test"), discoveredMixed.emails)
+        assertEquals(listOf("15550102222"), discoveredMixed.phones)
+    }
 }

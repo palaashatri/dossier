@@ -408,6 +408,9 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 if (result.verificationStatus != null && isAmbiguousOrUnverifiedMetadata(result.verificationStatus)) continue
                 if (result.provenance != null && isAmbiguousOrUnverifiedMetadata(result.provenance)) continue
 
+                // Profile URL must be an absolute HTTP(S) URL
+                if (!isAbsoluteHttpUrl(result.candidate.url)) continue
+
                 // 1. Candidate username: Only result.exists && result.verified profiles may contribute candidate username
                 if (acceptedHandles.size < MAX_EXPANDED_HANDLES &&
                     acceptedEmails.size + acceptedPhones.size + acceptedHandles.size < MAX_TOTAL_EXPANDED_TERMS
@@ -439,8 +442,9 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     // Confidence must be finite and within MIN_FINDING_CONFIDENCE_FOR_EXPANSION..1.0f
                     if (!finding.confidence.isFinite() || finding.confidence !in MIN_FINDING_CONFIDENCE_FOR_EXPANSION..1.0f) continue
 
-                    // finding.sourceUrl canonicalizes to exact verified profile URL
+                    // finding.sourceUrl must be an absolute HTTP(S) URL and canonicalize to exact verified profile URL
                     val findingSourceUrl = finding.sourceUrl?.takeIf(String::isNotBlank) ?: continue
+                    if (!isAbsoluteHttpUrl(findingSourceUrl)) continue
                     if (canonicalUrlKey(findingSourceUrl) != canonicalResultUrl) continue
 
                     // Reject breach / import / ambiguous finding values or snippets
@@ -857,8 +861,23 @@ class PublicSearchDiscoveryService(private val context: Context) {
         private fun bingUrl(query: String): String =
             "https://www.bing.com/search?q=${urlEncode(query)}&count=10"
 
+        fun isAbsoluteHttpUrl(url: String?): Boolean {
+            if (url.isNullOrBlank()) return false
+            val parsed = url.trim().toHttpUrlOrNull() ?: return false
+            return (parsed.scheme.equals("http", ignoreCase = true) ||
+                parsed.scheme.equals("https", ignoreCase = true)) &&
+                parsed.host.isNotBlank()
+        }
+
         private fun userAgentFor(attempt: Int): String = USER_AGENTS[attempt % USER_AGENTS.size]
-        private fun quote(term: String): String = "\"${term.replace("\"", " ").trim().take(90)}\""
+        private fun quote(term: String): String {
+            val cleaned = term.replace("\"", " ").trim()
+            return if (cleaned.contains('@')) {
+                "\"$cleaned\""
+            } else {
+                "\"${cleaned.take(90)}\""
+            }
+        }
         private fun cleanTerm(term: String): String? = term.trim().removePrefix("@").takeIf { it.isNotBlank() }
 
         private fun buildHandleTerms(input: IdentityInput): List<String> =
@@ -916,33 +935,46 @@ class PublicSearchDiscoveryService(private val context: Context) {
             ).any { host == it || host.endsWith(".$it") }
         }
 
+        private val AMBIGUITY_MARKERS = listOf(
+            "candidate",
+            "possible account",
+            "not attributed",
+            "unknown origin",
+            "review only",
+            "review manually",
+            "unverified",
+            "un verified",
+            "unconfirmed",
+            "un confirmed",
+            "not found",
+            "notfound",
+            "soft",
+            "challenge",
+            "auth",
+            "unverifiable",
+            "offline",
+            "breach",
+            "leak",
+            "dump",
+            "compromised",
+            "stealer",
+            "pwned",
+            "import",
+            "third party",
+            "thirdparty",
+            "ambiguous"
+        )
+
+        private val AMBIGUITY_REGEX = Regex(
+            "\\b(?:${AMBIGUITY_MARKERS.joinToString("|") { it.replace(" ", "\\s+") }})\\b",
+            RegexOption.IGNORE_CASE
+        )
+
         fun isAmbiguousOrUnverifiedMetadata(text: String): Boolean {
             val normalized = text.lowercase(Locale.ROOT)
                 .replace('-', ' ')
                 .replace('_', ' ')
-            return normalized.contains("candidate") ||
-                normalized.contains("possible account") ||
-                normalized.contains("not attributed") ||
-                normalized.contains("unknown origin") ||
-                normalized.contains("review only") ||
-                normalized.contains("review manually") ||
-                normalized.contains("unverified") ||
-                normalized.contains("unconfirmed") ||
-                normalized.contains("not found") ||
-                normalized.contains("soft") ||
-                normalized.contains("challenge") ||
-                normalized.contains("auth") ||
-                normalized.contains("unverifiable") ||
-                normalized.contains("offline") ||
-                normalized.contains("breach") ||
-                normalized.contains("leak") ||
-                normalized.contains("dump") ||
-                normalized.contains("compromised") ||
-                normalized.contains("stealer") ||
-                normalized.contains("pwned") ||
-                normalized.contains("import") ||
-                normalized.contains("third party") ||
-                normalized.contains("ambiguous")
+            return AMBIGUITY_REGEX.containsMatchIn(normalized)
         }
 
         private fun isBreachImportOrAmbiguousFinding(finding: Finding): Boolean {

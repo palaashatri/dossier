@@ -1533,6 +1533,7 @@ class ProfileScanner(
 
         val isDirectVerifiedProfile = exists && verified &&
             (providerVerificationState == null || providerVerificationState == ProviderVerificationState.Present) &&
+            PublicSearchDiscoveryService.isAbsoluteHttpUrl(candidate.url) &&
             (verificationStatus == null || !PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata(verificationStatus)) &&
             (provenance == null || !PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata(provenance))
 
@@ -1550,6 +1551,7 @@ class ProfileScanner(
             } else if (isDirectVerifiedProfile &&
                 (finding.type == FindingType.Email || finding.type == FindingType.Phone) &&
                 finding.sourceUrl != null &&
+                PublicSearchDiscoveryService.isAbsoluteHttpUrl(finding.sourceUrl) &&
                 PublicSearchDiscoveryService.canonicalUrlKey(finding.sourceUrl) == PublicSearchDiscoveryService.canonicalUrlKey(candidate.url)
             ) {
                 finding.copy(
