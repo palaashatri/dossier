@@ -686,8 +686,11 @@ class ProfileScanner(
             provenance = "public search via ${searchResult.source}",
             pivotSeedKind = searchResult.pivotSeedKind,
             pivotExactValue = searchResult.pivotExactValue,
+            pivotNormalizedValue = searchResult.pivotNormalizedValue,
             pivotEvidenceIds = searchResult.pivotEvidenceIds,
-            pivotDiscoveryPath = searchResult.pivotDiscoveryPath
+            pivotDiscoveryPath = searchResult.pivotDiscoveryPath,
+            pivotStage = searchResult.pivotStage,
+            pivotSourceUrl = searchResult.pivotSourceUrl
         )
     }
 
@@ -2238,13 +2241,39 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
         val url = result.candidate.url
         val conf = result.candidate.confidence.coerceIn(0f, 1f)
         val path = if (result.pivotDiscoveryPath.isNotEmpty()) {
-            result.pivotDiscoveryPath + url
+            // Keep the candidate URL as the terminal step while respecting
+            // Evidence's bounded path contract, even if a serialized result
+            // supplied an already-full 64-step pivot path.
+            result.pivotDiscoveryPath
+                .filter(String::isNotBlank)
+                .take((Evidence.MAX_DISCOVERY_PATH_STEPS - 1).coerceAtLeast(0)) + url
         } else if (!result.provenance.isNullOrBlank()) {
             listOf(result.provenance)
         } else {
             emptyList()
         }
         val verifiedProfile = result.exists && result.verified
+        val pivotSourceUrl = result.pivotSourceUrl
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && DiscoveryHttpPolicy.isSafePublicHttpUrl(it) }
+        val pivotSignals = buildList {
+            result.pivotStage
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { add("Public search query stage: $it") }
+            result.pivotNormalizedValue
+                ?.trim()
+                ?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) }
+                ?.let { add("Public search pivot normalized value: $it") }
+        }
+        val pivotSourceUrls = listOfNotNull(pivotSourceUrl)
+            .filterNot { sameSourceUrl(it, url) }
+            .take(Evidence.MAX_SOURCE_URLS)
+        val pivotEvidenceIds = result.pivotEvidenceIds
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .distinct()
+            .take(EvidenceRelationshipPolicy.MAX_EVIDENCE_IDS_PER_RELATIONSHIP)
 
         if (result.pivotEvidenceIds.isNotEmpty() && result.pivotExactValue != null) {
             relationships.add(
@@ -2252,8 +2281,11 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                     fromValue = url,
                     toValue = result.pivotExactValue,
                     relation = "derived_from",
-                    evidence = "public search pivot",
-                    evidenceIds = result.pivotEvidenceIds
+                    evidence = publicSearchPivotDescription(
+                        result = result,
+                        sourceUrl = pivotSourceUrl
+                    ),
+                    evidenceIds = pivotEvidenceIds
                 )
             )
         }
@@ -2267,7 +2299,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
             snippet = result.displayName?.let { "Profile: $it" },
             confidence = conf,
             risk = if (verifiedProfile) RiskLevel.High else RiskLevel.Low,
-            signals = result.confidenceSignals,
+            signals = (result.confidenceSignals + pivotSignals).distinct(),
             providerId = result.providerId ?: result.candidate.providerId,
             retrievedAtEpochMillis = retrievedAtEpochMillis,
             state = when {
@@ -2280,7 +2312,8 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
             } else {
                 EvidenceReliability.SearchEngineCandidate
             },
-            discoveryPath = path
+            discoveryPath = path,
+            sourceUrls = pivotSourceUrls
         )
         evidence.add(profileEvidence)
 
@@ -2392,7 +2425,9 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                     EvidenceReliability.SearchEngineCandidate
                 },
                 historical = isArchive,
-                discoveryPath = path
+                discoveryPath = path,
+                signals = pivotSignals,
+                sourceUrls = pivotSourceUrls
             )
             evidence.add(ev)
             relationships.add(EvidenceRelationship(fromValue = url, toValue = rawLink, relation = "links_to", evidence = "Profile Link", evidenceIds = listOf(ev.id)))
@@ -2421,7 +2456,9 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                             EvidenceReliability.SearchEngineCandidate
                         },
                         historical = isArchive,
-                        discoveryPath = path
+                        discoveryPath = path,
+                        signals = pivotSignals,
+                        sourceUrls = pivotSourceUrls
                     )
                     evidence.add(domainEv)
                     relationships.add(EvidenceRelationship(fromValue = url, toValue = host, relation = "links_to_domain", evidence = "Profile Domain Link", evidenceIds = listOf(domainEv.id)))
@@ -2438,13 +2475,23 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
         result.findings.forEach { finding ->
             val directlyObservedOnProfile = verifiedProfile && sameSourceUrl(finding.sourceUrl, url)
             val findingEvidence = finding.toEvidence(retrievedAtEpochMillis, path).let { record ->
-                if (directlyObservedOnProfile && finding.type in setOf(FindingType.Email, FindingType.Phone)) {
+                val withPivotMetadata = if (pivotSignals.isNotEmpty() || pivotSourceUrls.isNotEmpty()) {
                     record.copy(
+                        signals = (record.signals + pivotSignals).distinct(),
+                        sourceUrls = (record.sourceUrls + pivotSourceUrls)
+                            .distinct()
+                            .take(Evidence.MAX_SOURCE_URLS)
+                    )
+                } else {
+                    record
+                }
+                if (directlyObservedOnProfile && finding.type in setOf(FindingType.Email, FindingType.Phone)) {
+                    withPivotMetadata.copy(
                         state = EvidenceState.Verified,
                         reliability = EvidenceReliability.DirectPublicProfile
                     )
                 } else {
-                    record
+                    withPivotMetadata
                 }
             }
             evidence.add(findingEvidence)
@@ -2498,6 +2545,28 @@ private fun classifyProfileLink(link: String): EvidenceKind {
         EvidenceKind.Document
     } else {
         EvidenceKind.Url
+    }
+}
+
+private fun publicSearchPivotDescription(
+    result: ProfileScanResult,
+    sourceUrl: String?
+): String {
+    val metadata = buildList {
+        result.pivotStage
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) }
+            ?.let { add("stage=$it") }
+        result.pivotNormalizedValue
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) }
+            ?.let { add("normalized=$it") }
+        sourceUrl?.let { add("source=$it") }
+    }
+    return if (metadata.isEmpty()) {
+        "public search pivot"
+    } else {
+        "public search pivot (${metadata.joinToString("; ")})"
     }
 }
 

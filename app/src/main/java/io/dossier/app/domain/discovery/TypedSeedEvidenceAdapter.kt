@@ -1,5 +1,6 @@
 package io.dossier.app.domain.discovery
 
+import io.dossier.app.data.web.DiscoveryHttpPolicy
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceKind
@@ -173,7 +174,9 @@ object TypedSeedSafety {
         TypedSeedKind.Url,
         TypedSeedKind.Domain,
         TypedSeedKind.Document,
-        TypedSeedKind.Archive
+        TypedSeedKind.Archive,
+        TypedSeedKind.Email,
+        TypedSeedKind.Phone
     )
 
     private val publicEvidenceSources = setOf(
@@ -198,6 +201,16 @@ object TypedSeedSafety {
             seed.discoveryPath.any { it.isBlank() || it.length > TypedSeed.MAX_VALUE_CHARS }
         ) return false
         if (seed.sourceUrl?.length?.let { it > TypedSeed.MAX_VALUE_CHARS } == true) return false
+        if (seed.sourceUrl != null && !isSafeEvidenceSourceUrl(seed.sourceUrl)) return false
+
+        // URL-like pivots are user-controlled input at the launch screen as
+        // well as evidence-derived values.  The admission model validates
+        // syntax, but it deliberately does not perform the public-network
+        // policy check; do that here before a value can be quoted into a
+        // third-party search query.  Domains are checked through the same
+        // URL policy so localhost/private/reserved literals cannot bypass the
+        // URL-kind branch.
+        if (!isSafePublicSearchValue(seed)) return false
 
         // User-provided values are authorized even before a public fetch has
         // verified them. Evidence-derived pivots must be verified and public.
@@ -237,10 +250,26 @@ object TypedSeedSafety {
     private fun isSafeEvidenceSourceUrl(raw: String): Boolean {
         val value = raw.trim()
         if (value.isBlank() || value.any(Char::isISOControl)) return false
+        if (value.startsWith("javascript:", ignoreCase = true)) return false
         val uri = runCatching { java.net.URI(value) }.getOrNull() ?: return false
         return uri.scheme?.lowercase() in setOf("http", "https") &&
             !uri.host.isNullOrBlank() &&
             uri.rawUserInfo == null &&
-            uri.port in -1..65_535
+            uri.port in -1..65_535 &&
+            DiscoveryHttpPolicy.isSafePublicHttpUrl(value)
+    }
+
+    private fun isSafePublicSearchValue(seed: TypedSeed): Boolean = when (seed.kind) {
+        TypedSeedKind.Url,
+        TypedSeedKind.Document,
+        TypedSeedKind.Archive ->
+            DiscoveryHttpPolicy.isSafePublicHttpUrl(seed.exactValue) &&
+                DiscoveryHttpPolicy.isSafePublicHttpUrl(seed.normalizedValue)
+
+        TypedSeedKind.Domain ->
+            DiscoveryHttpPolicy.isSafePublicHttpUrl("https://${seed.exactValue}") &&
+                DiscoveryHttpPolicy.isSafePublicHttpUrl("https://${seed.normalizedValue}")
+
+        else -> true
     }
 }

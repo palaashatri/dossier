@@ -66,7 +66,13 @@ class PublicSearchDiscoveryService(private val context: Context) {
         val pivotSeedKind: io.dossier.app.domain.discovery.TypedSeedKind? = null,
         val pivotExactValue: String? = null,
         val pivotEvidenceIds: List<String> = emptyList(),
-        val pivotDiscoveryPath: List<String> = emptyList()
+        val pivotDiscoveryPath: List<String> = emptyList(),
+        /** Query-plan stage that produced this candidate, when applicable. */
+        val pivotStage: String? = null,
+        /** Normalized value of the typed pivot used by the query. */
+        val pivotNormalizedValue: String? = null,
+        /** Source URL from which the typed pivot was derived. */
+        val pivotSourceUrl: String? = null
     )
 
     private data class SearchProvider(
@@ -89,8 +95,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
         withContext(Dispatchers.IO) {
             val queryLimit = if (deepResearch) MAX_DEEP_QUERIES else MAX_DEFAULT_QUERIES
             val safeSeeds = typedSeeds.filter(TypedSeedSafety::isSafePublicSearchSeed)
-            val queries = buildSearchQueries(input, deepResearch, verifiedResults, safeSeeds).take(queryLimit)
-            if (queries.isEmpty()) return@withContext emptyList()
+            val plan = buildSearchQueryPlan(input, deepResearch, verifiedResults, safeSeeds).take(queryLimit)
+            if (plan.isEmpty()) return@withContext emptyList()
 
             val effectiveInput = if (verifiedResults.isNotEmpty()) {
                 expandIdentityInput(input, verifiedResults)
@@ -101,37 +107,32 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val providers = defaultProviders()
             val querySemaphore = Semaphore(MAX_PARALLEL_SEARCH_QUERIES)
             val raw = coroutineScope {
-                queries.mapIndexed { index, query ->
+                plan.mapIndexed { index, entry ->
                     async(Dispatchers.IO) {
                         querySemaphore.withPermit {
-                            searchWithFailover(
-                                query = query,
+                            val results = searchWithFailover(
+                                query = entry.query,
                                 providers = providers,
                                 startIndex = index % providers.size,
                                 deepResearch = deepResearch
                             )
+                            results.map {
+                                it.copy(
+                                    pivotSeedKind = entry.pivotSeedKind,
+                                    pivotExactValue = entry.pivotExactValue,
+                                    pivotNormalizedValue = entry.pivotNormalizedValue,
+                                    pivotEvidenceIds = entry.pivotEvidenceIds,
+                                    pivotDiscoveryPath = entry.pivotDiscoveryPath,
+                                    pivotStage = entry.stage,
+                                    pivotSourceUrl = entry.pivotSourceUrl
+                                )
+                            }
                         }
                     }
                 }.awaitAll().flatten()
             }
 
-            val pivotSeedMap = mutableMapOf<String, TypedSeed>()
-            safeSeeds.forEach { seed ->
-                pivotSeedMap.putIfAbsent(quote(seed.exactValue), seed)
-                if (seed.kind == TypedSeedKind.Domain) {
-                    pivotSeedMap.putIfAbsent("site:${seed.exactValue}", seed)
-                }
-            }
-
-            val scored = mergeProviderEvidence(raw.map { result ->
-                val seed = pivotSeedMap[result.query]
-                result.copy(
-                    pivotSeedKind = seed?.kind,
-                    pivotExactValue = seed?.exactValue,
-                    pivotEvidenceIds = seed?.evidenceIds ?: emptyList(),
-                    pivotDiscoveryPath = seed?.discoveryPath ?: emptyList()
-                )
-            })
+            val scored = mergeProviderEvidence(raw)
                 .map { result -> result.copy(score = scoreResult(effectiveInput, result)) }
                 .filter { it.score >= MIN_INDEX_SCORE }
                 .sortedByDescending { it.score }
@@ -539,13 +540,42 @@ class PublicSearchDiscoveryService(private val context: Context) {
          * 4 emails, 4 phones, and 8 handles are discovered. Richer site probes are preserved
          * as budget permits.
          */
-        fun buildSearchQueries(
+        data class PublicSearchQueryPlanEntry(
+            val query: String,
+            val stage: String,
+            val pivotSeedKind: TypedSeedKind? = null,
+            val pivotExactValue: String? = null,
+            val pivotNormalizedValue: String? = null,
+            val pivotEvidenceIds: List<String> = emptyList(),
+            val pivotSourceUrl: String? = null,
+            val pivotDiscoveryPath: List<String> = emptyList()
+        )
+
+        fun buildSearchQueryPlan(
             input: IdentityInput,
             deepResearch: Boolean = false,
             verifiedResults: List<ProfileScanResult> = emptyList(),
-            typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList()
-        ): List<String> {
+            typedSeeds: List<TypedSeed> = emptyList()
+        ): List<PublicSearchQueryPlanEntry> {
             val queries = linkedSetOf<String>()
+            val entries = mutableListOf<PublicSearchQueryPlanEntry>()
+            fun addQuery(query: String, stage: String, seed: TypedSeed? = null) {
+                if (queries.add(query)) {
+                    entries.add(
+                        PublicSearchQueryPlanEntry(
+                            query = query,
+                            stage = stage,
+                            pivotSeedKind = seed?.kind,
+                            pivotExactValue = seed?.exactValue,
+                            pivotNormalizedValue = seed?.normalizedValue,
+                            pivotEvidenceIds = seed?.evidenceIds.orEmpty(),
+                            pivotSourceUrl = seed?.sourceUrl,
+                            pivotDiscoveryPath = seed?.discoveryPath.orEmpty()
+                        )
+                    )
+                }
+            }
+
             val discovered = extractDiscoveredSearchTerms(input, verifiedResults)
             val name = input.fullName.trim()
             val aliases = input.aliases.mapNotNull(::cleanTerm)
@@ -558,49 +588,51 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val locations = input.locations.mapNotNull(::cleanTerm)
             val originalHandles = buildHandleTerms(input)
 
-            // Phase 1: Emit at least one exact quoted query for every discovered term before any original-term query.
-            // Round-robin across handles, emails, and phones so all categories are represented immediately.
-            val maxDiscovered = maxOf(discovered.handles.size, discovered.emails.size, discovered.phones.size)
-            for (i in 0 until maxDiscovered) {
-                if (i < discovered.handles.size) queries += quote(discovered.handles[i])
-                if (i < discovered.emails.size) queries += quote(discovered.emails[i])
-                if (i < discovered.phones.size) queries += quote(discovered.phones[i])
-            }
-
-            // Phase 1b: Safe typed seeds (URLs, domains, documents, archives).
+            // Phase 1b: Safe typed seeds (Emails/Phones before original terms)
             val safeSeeds = typedSeeds
                 .filter(TypedSeedSafety::isSafePublicSearchSeed)
                 .distinctBy { "${it.kind}:${it.normalizedValue}" }
                 .take(if (deepResearch) 8 else 4)
 
-            safeSeeds.forEach { seed ->
-                val quoted = quote(seed.exactValue)
-                queries += quoted
+            safeSeeds.filter { it.kind == TypedSeedKind.Email || it.kind == TypedSeedKind.Phone }.forEach { seed ->
+                addQuery(quote(seed.exactValue), "typed-seed-exact", seed)
+                if (seed.kind == TypedSeedKind.Phone && seed.normalizedValue != seed.exactValue) {
+                    addQuery(quote(seed.normalizedValue), "typed-seed-normalized", seed)
+                }
+            }
+
+            // Phase 1: Emit at least one exact quoted query for every discovered term before any original-term query.
+            val maxDiscovered = maxOf(discovered.handles.size, discovered.emails.size, discovered.phones.size)
+            for (i in 0 until maxDiscovered) {
+                if (i < discovered.handles.size) addQuery(quote(discovered.handles[i]), "discovered-handle")
+                if (i < discovered.emails.size) addQuery(quote(discovered.emails[i]), "discovered-email")
+                if (i < discovered.phones.size) addQuery(quote(discovered.phones[i]), "discovered-phone")
+            }
+
+            // Phase 1b: Other Safe typed seeds (URLs, domains, documents, archives).
+            safeSeeds.filter { it.kind != TypedSeedKind.Email && it.kind != TypedSeedKind.Phone }.forEach { seed ->
+                addQuery(quote(seed.exactValue), "typed-seed-exact", seed)
                 if (seed.kind == TypedSeedKind.Domain) {
-                    queries += "site:${seed.exactValue}"
+                    addQuery("site:${seed.exactValue}", "typed-seed-domain", seed)
                 }
             }
 
             // Phase 2: Original terms exact queries followed by richer site probes as budget permits.
-            // 2A. Exact queries for original terms
-            originalHandles.forEach { queries += quote(it) }
-            originalEmails.forEach { queries += quote(it) }
-            originalPhones.forEach { digits ->
-                queries += quote(digits)
-            }
+            originalHandles.forEach { addQuery(quote(it), "original-handle") }
+            originalEmails.forEach { addQuery(quote(it), "original-email") }
+            originalPhones.forEach { addQuery(quote(it), "original-phone") }
 
-            // 2B. Richer site probes and secondary queries for discovered and original terms
             val allEmails = (discovered.emails + originalEmails)
                 .distinctBy { it.lowercase(Locale.ROOT) }
                 .take(discovered.emails.size + (if (deepResearch) 4 else 2))
 
             allEmails.forEach { email ->
                 val local = email.substringBefore('@').trim().removePrefix("+")
-                if (local.length >= 3) queries += quote(local)
-                queries += "${quote(email)} site:github.com"
+                if (local.length >= 3) addQuery(quote(local), "email-local-probe")
+                addQuery("${quote(email)} site:github.com", "email-site-probe")
                 if (deepResearch) {
-                    queries += "${quote(email)} site:pastebin.com"
-                    queries += "${quote(email)} site:gitlab.com"
+                    addQuery("${quote(email)} site:pastebin.com", "email-site-probe")
+                    addQuery("${quote(email)} site:gitlab.com", "email-site-probe")
                 }
             }
 
@@ -609,45 +641,51 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 .take(discovered.phones.size + (if (deepResearch) 3 else 2))
 
             allPhones.forEach { digits ->
-                if (digits.length >= 10) queries += quote(digits.takeLast(10))
+                if (digits.length >= 10) addQuery(quote(digits.takeLast(10)), "phone-partial-probe")
             }
 
             val allHandles = (discovered.handles + originalHandles)
                 .distinctBy { it.lowercase(Locale.ROOT) }
                 .take(discovered.handles.size + (if (deepResearch) 8 else 5))
 
-            // Probes across reliable profile sites
             RELIABLE_PROFILE_QUERY_SITES.forEach { site ->
                 allHandles.forEach { handle ->
-                    queries += "${quote(handle)} site:$site"
+                    addQuery("${quote(handle)} site:$site", "handle-site-probe")
                 }
             }
             allHandles.forEach { handle ->
-                queries += "${quote(handle)} github reddit gitlab dev.to bluesky youtube"
+                addQuery("${quote(handle)} github reddit gitlab dev.to bluesky youtube", "handle-broad-probe")
             }
 
             if (name.isNotBlank()) {
                 val quotedName = quote(name)
-                organizations.take(2).forEach { org -> queries += "$quotedName ${quote(org)}" }
-                locations.take(2).forEach { location -> queries += "$quotedName ${quote(location)}" }
-                allHandles.take(2).forEach { handle -> queries += "$quotedName ${quote(handle)}" }
-                queries += quotedName
-                queries += "$quotedName github linkedin x twitter reddit twitch instagram youtube"
-                PROFILE_QUERY_SITES.forEach { site -> queries += "$quotedName site:$site" }
-                PUBLIC_FORUM_QUERY_SITES.forEach { site -> queries += "$quotedName site:$site" }
+                organizations.take(2).forEach { org -> addQuery("$quotedName ${quote(org)}", "name-org") }
+                locations.take(2).forEach { location -> addQuery("$quotedName ${quote(location)}", "name-location") }
+                allHandles.take(2).forEach { handle -> addQuery("$quotedName ${quote(handle)}", "name-handle") }
+                addQuery(quotedName, "name-exact")
+                addQuery("$quotedName github linkedin x twitter reddit twitch instagram youtube", "name-broad-probe")
+                PROFILE_QUERY_SITES.forEach { site -> addQuery("$quotedName site:$site", "name-site-probe") }
+                PUBLIC_FORUM_QUERY_SITES.forEach { site -> addQuery("$quotedName site:$site", "name-site-probe") }
             }
 
             aliases.take(if (deepResearch) 6 else 3).forEach { alias ->
                 val quotedAlias = quote(alias)
-                queries += quotedAlias
-                queries += "$quotedAlias site:reddit.com"
+                addQuery(quotedAlias, "alias-exact")
+                addQuery("$quotedAlias site:reddit.com", "alias-site-probe")
                 if (deepResearch) {
-                    queries += "$quotedAlias site:4chan.org"
-                    queries += "$quotedAlias site:boards.4chan.org"
+                    addQuery("$quotedAlias site:4chan.org", "alias-site-probe")
+                    addQuery("$quotedAlias site:boards.4chan.org", "alias-site-probe")
                 }
             }
-            return queries.toList()
+            return entries.toList()
         }
+
+        fun buildSearchQueries(
+            input: IdentityInput,
+            deepResearch: Boolean = false,
+            verifiedResults: List<ProfileScanResult> = emptyList(),
+            typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList()
+        ): List<String> = buildSearchQueryPlan(input, deepResearch, verifiedResults, typedSeeds).map { it.query }
 
         fun parseSearchResults(source: String, query: String, html: String): List<PublicSearchResult> {
             if (html.isBlank() || DiscoveryHttpPolicy.looksBlocked(html)) return emptyList()
@@ -894,6 +932,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     providerCount = sources.size,
                     pivotSeedKind = best.pivotSeedKind ?: pivot?.pivotSeedKind,
                     pivotExactValue = best.pivotExactValue ?: pivot?.pivotExactValue,
+                    pivotNormalizedValue = best.pivotNormalizedValue ?: pivot?.pivotNormalizedValue,
                     pivotEvidenceIds = if (best.pivotEvidenceIds.isNotEmpty()) {
                         best.pivotEvidenceIds
                     } else {
@@ -903,7 +942,9 @@ class PublicSearchDiscoveryService(private val context: Context) {
                         best.pivotDiscoveryPath
                     } else {
                         pivot?.pivotDiscoveryPath.orEmpty()
-                    }
+                    },
+                    pivotStage = best.pivotStage ?: pivot?.pivotStage,
+                    pivotSourceUrl = best.pivotSourceUrl ?: pivot?.pivotSourceUrl
                 )
             }
 

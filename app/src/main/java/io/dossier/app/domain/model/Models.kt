@@ -86,7 +86,13 @@ data class ProfileScanResult(
     val pivotSeedKind: TypedSeedKind? = null,
     val pivotExactValue: String? = null,
     val pivotEvidenceIds: List<String> = emptyList(),
-    val pivotDiscoveryPath: List<String> = emptyList()
+    val pivotDiscoveryPath: List<String> = emptyList(),
+    /** Query-plan stage that produced this public-search candidate. */
+    val pivotStage: String? = null,
+    /** Normalized form of the typed pivot used to build the query. */
+    val pivotNormalizedValue: String? = null,
+    /** Public source URL from which the typed pivot was derived. */
+    val pivotSourceUrl: String? = null
 )
 
 @Serializable
