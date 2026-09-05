@@ -401,12 +401,12 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     result.providerVerificationState != ProviderVerificationState.Present
                 ) continue
 
-                val status = result.verificationStatus.orEmpty().lowercase(Locale.ROOT)
-                if (isSoftOrCandidateStatus(status)) continue
+                // Candidate confidence must be finite and within 0..1
+                if (!result.candidate.confidence.isFinite() || result.candidate.confidence !in 0.0f..1.0f) continue
 
-                // Reject breach-derived, imported, or ambiguous provenance
-                val provenance = result.provenance.orEmpty().lowercase(Locale.ROOT)
-                if (isBreachImportOrAmbiguousText(provenance)) continue
+                // Fail closed for verified-looking results whose status/provenance contains ambiguity markers
+                if (result.verificationStatus != null && isAmbiguousOrUnverifiedMetadata(result.verificationStatus)) continue
+                if (result.provenance != null && isAmbiguousOrUnverifiedMetadata(result.provenance)) continue
 
                 // 1. Candidate username: Only result.exists && result.verified profiles may contribute candidate username
                 if (acceptedHandles.size < MAX_EXPANDED_HANDLES &&
@@ -436,8 +436,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     // Must be Email or Phone
                     if (finding.type != FindingType.Email && finding.type != FindingType.Phone) continue
 
-                    // Confidence at least 0.80
-                    if (finding.confidence < MIN_FINDING_CONFIDENCE_FOR_EXPANSION) continue
+                    // Confidence must be finite and within MIN_FINDING_CONFIDENCE_FOR_EXPANSION..1.0f
+                    if (!finding.confidence.isFinite() || finding.confidence !in MIN_FINDING_CONFIDENCE_FOR_EXPANSION..1.0f) continue
 
                     // finding.sourceUrl canonicalizes to exact verified profile URL
                     val findingSourceUrl = finding.sourceUrl?.takeIf(String::isNotBlank) ?: continue
@@ -490,21 +490,24 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val discovered = extractDiscoveredSearchTerms(input, verifiedResults)
             if (discovered.isEmpty) return input
 
+            // Preserve every original IdentityInput list value and every other field exactly
+            // (including formatting, case, blanks, duplicates, and primaryUsername);
+            // only prepend newly discovered normalized terms.
             return input.copy(
-                emails = (discovered.emails + input.emails)
-                    .mapNotNull(::cleanTerm)
-                    .distinctBy { it.lowercase(Locale.ROOT) },
-                phones = (discovered.phones + input.phones)
-                    .map { it.filter(Char::isDigit) }
-                    .filter { it.length >= 8 }
-                    .distinct(),
-                usernames = (discovered.handles + input.usernames)
-                    .mapNotNull(::cleanTerm)
-                    .distinctBy { it.lowercase(Locale.ROOT) }
+                emails = discovered.emails + input.emails,
+                phones = discovered.phones + input.phones,
+                usernames = discovered.handles + input.usernames
             )
         }
 
-        /** High-entropy identifiers are deliberately placed before broad name queries. */
+        /**
+         * High-entropy identifiers are deliberately placed before broad name queries.
+         * Uses a deterministic two-phase / round-robin ordering that emits at least one
+         * exact quoted query for every discovered term before any original-term query,
+         * ensuring the default 24-query cap cannot starve discovered handles when up to
+         * 4 emails, 4 phones, and 8 handles are discovered. Richer site probes are preserved
+         * as budget permits.
+         */
         fun buildSearchQueries(
             input: IdentityInput,
             deepResearch: Boolean = false,
@@ -515,16 +518,37 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val name = input.fullName.trim()
             val aliases = input.aliases.mapNotNull(::cleanTerm)
             val originalEmails = input.emails.mapNotNull(::cleanTerm)
+            val originalPhones = input.phones
+                .map { value -> value.filter(Char::isDigit) }
+                .filter { it.length >= 8 }
+                .distinct()
             val organizations = input.organizations.mapNotNull(::cleanTerm)
             val locations = input.locations.mapNotNull(::cleanTerm)
             val originalHandles = buildHandleTerms(input)
 
-            val emailsToQuery = (discovered.emails + originalEmails)
+            // Phase 1: Emit at least one exact quoted query for every discovered term before any original-term query.
+            // Round-robin across handles, emails, and phones so all categories are represented immediately.
+            val maxDiscovered = maxOf(discovered.handles.size, discovered.emails.size, discovered.phones.size)
+            for (i in 0 until maxDiscovered) {
+                if (i < discovered.handles.size) queries += quote(discovered.handles[i])
+                if (i < discovered.emails.size) queries += quote(discovered.emails[i])
+                if (i < discovered.phones.size) queries += quote(discovered.phones[i])
+            }
+
+            // Phase 2: Original terms exact queries followed by richer site probes as budget permits.
+            // 2A. Exact queries for original terms
+            originalHandles.forEach { queries += quote(it) }
+            originalEmails.forEach { queries += quote(it) }
+            originalPhones.forEach { digits ->
+                queries += quote(digits)
+            }
+
+            // 2B. Richer site probes and secondary queries for discovered and original terms
+            val allEmails = (discovered.emails + originalEmails)
                 .distinctBy { it.lowercase(Locale.ROOT) }
                 .take(discovered.emails.size + (if (deepResearch) 4 else 2))
 
-            emailsToQuery.forEach { email ->
-                queries += quote(email)
+            allEmails.forEach { email ->
                 val local = email.substringBefore('@').trim().removePrefix("+")
                 if (local.length >= 3) queries += quote(local)
                 queries += "${quote(email)} site:github.com"
@@ -534,36 +558,33 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 }
             }
 
-            val originalPhones = input.phones
-                .map { value -> value.filter(Char::isDigit) }
-                .filter { it.length >= 8 }
-                .distinct()
-
-            val phonesToQuery = (discovered.phones + originalPhones)
+            val allPhones = (discovered.phones + originalPhones)
                 .distinct()
                 .take(discovered.phones.size + (if (deepResearch) 3 else 2))
 
-            phonesToQuery.forEach { digits ->
-                queries += quote(digits)
+            allPhones.forEach { digits ->
                 if (digits.length >= 10) queries += quote(digits.takeLast(10))
             }
 
-            val handlesToQuery = (discovered.handles + originalHandles)
+            val allHandles = (discovered.handles + originalHandles)
                 .distinctBy { it.lowercase(Locale.ROOT) }
                 .take(discovered.handles.size + (if (deepResearch) 8 else 5))
 
-            handlesToQuery.forEach { handle ->
-                val quotedHandle = quote(handle)
-                queries += quotedHandle
-                RELIABLE_PROFILE_QUERY_SITES.forEach { site -> queries += "$quotedHandle site:$site" }
-                queries += "$quotedHandle github reddit gitlab dev.to bluesky youtube"
+            // Probes across reliable profile sites
+            RELIABLE_PROFILE_QUERY_SITES.forEach { site ->
+                allHandles.forEach { handle ->
+                    queries += "${quote(handle)} site:$site"
+                }
+            }
+            allHandles.forEach { handle ->
+                queries += "${quote(handle)} github reddit gitlab dev.to bluesky youtube"
             }
 
             if (name.isNotBlank()) {
                 val quotedName = quote(name)
                 organizations.take(2).forEach { org -> queries += "$quotedName ${quote(org)}" }
                 locations.take(2).forEach { location -> queries += "$quotedName ${quote(location)}" }
-                handlesToQuery.take(2).forEach { handle -> queries += "$quotedName ${quote(handle)}" }
+                allHandles.take(2).forEach { handle -> queries += "$quotedName ${quote(handle)}" }
                 queries += quotedName
                 queries += "$quotedName github linkedin x twitter reddit twitch instagram youtube"
                 PROFILE_QUERY_SITES.forEach { site -> queries += "$quotedName site:$site" }
@@ -895,38 +916,43 @@ class PublicSearchDiscoveryService(private val context: Context) {
             ).any { host == it || host.endsWith(".$it") }
         }
 
-        private fun isSoftOrCandidateStatus(status: String): Boolean =
-            status.contains("soft") ||
-                status.contains("candidate") ||
-                status.contains("unverified") ||
-                status.contains("unconfirmed") ||
-                status.contains("not found") ||
-                status.contains("not_found") ||
-                status.contains("challenge") ||
-                status.contains("auth")
-
-        private fun isBreachImportOrAmbiguousText(text: String): Boolean =
-            text.contains("breach") ||
-                text.contains("import") ||
-                text.contains("leak") ||
-                text.contains("dump") ||
-                text.contains("ambiguous") ||
-                text.contains("unverified") ||
-                text.contains("unconfirmed") ||
-                text.contains("thirdparty") ||
-                text.contains("third-party") ||
-                text.contains("pwned") ||
-                text.contains("compromised") ||
-                text.contains("stealer")
+        fun isAmbiguousOrUnverifiedMetadata(text: String): Boolean {
+            val normalized = text.lowercase(Locale.ROOT)
+                .replace('-', ' ')
+                .replace('_', ' ')
+            return normalized.contains("candidate") ||
+                normalized.contains("possible account") ||
+                normalized.contains("not attributed") ||
+                normalized.contains("unknown origin") ||
+                normalized.contains("review only") ||
+                normalized.contains("review manually") ||
+                normalized.contains("unverified") ||
+                normalized.contains("unconfirmed") ||
+                normalized.contains("not found") ||
+                normalized.contains("soft") ||
+                normalized.contains("challenge") ||
+                normalized.contains("auth") ||
+                normalized.contains("unverifiable") ||
+                normalized.contains("offline") ||
+                normalized.contains("breach") ||
+                normalized.contains("leak") ||
+                normalized.contains("dump") ||
+                normalized.contains("compromised") ||
+                normalized.contains("stealer") ||
+                normalized.contains("pwned") ||
+                normalized.contains("import") ||
+                normalized.contains("third party") ||
+                normalized.contains("ambiguous")
+        }
 
         private fun isBreachImportOrAmbiguousFinding(finding: Finding): Boolean {
-            val text = "${finding.value} ${finding.evidenceSnippet.orEmpty()} ${finding.remediation}".lowercase(Locale.ROOT)
-            return isBreachImportOrAmbiguousText(text)
+            val text = "${finding.value} ${finding.evidenceSnippet.orEmpty()} ${finding.remediation}"
+            return isAmbiguousOrUnverifiedMetadata(text)
         }
 
         private fun isAmbiguousHandle(handle: String): Boolean {
             val lower = handle.lowercase(Locale.ROOT)
-            return lower in AMBIGUOUS_HANDLE_VALUES || isBreachImportOrAmbiguousText(lower)
+            return lower in AMBIGUOUS_HANDLE_VALUES || isAmbiguousOrUnverifiedMetadata(lower)
         }
 
         private val AMBIGUOUS_HANDLE_VALUES = setOf(
@@ -952,7 +978,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val domain = lower.substringAfter('@')
             if (GENERIC_EMAIL_PREFIXES.any { local == it || local.startsWith("$it+") }) return true
             if (AMBIGUOUS_EMAIL_DOMAINS.any { domain == it }) return true
-            return isBreachImportOrAmbiguousText(lower)
+            return isAmbiguousOrUnverifiedMetadata(lower)
         }
 
         private val GENERIC_EMAIL_PREFIXES = setOf(

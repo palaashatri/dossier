@@ -429,11 +429,11 @@ class PublicSearchExpansionTest {
         val originalInput = IdentityInput(
             fullName = "Jane Doe",
             aliases = listOf("JD"),
-            emails = listOf("orig@example.test"),
-            phones = listOf("15550100000"),
+            emails = listOf("ORIG@EXAMPLE.TEST", "  ", "orig@example.test"),
+            phones = listOf("+1 (555) 010-0000", "+1 (555) 010-0000"),
             locations = listOf("Berlin"),
             organizations = listOf("Acme Labs"),
-            usernames = listOf("orig_user"),
+            usernames = listOf("Orig_User", "Orig_User"),
             primaryUsername = "original_primary",
             profileUrls = listOf("https://orig.test/jane"),
             selfieUri = "content://media/selfie"
@@ -467,10 +467,9 @@ class PublicSearchExpansionTest {
         val expanded = PublicSearchDiscoveryService.expandIdentityInput(originalInput, listOf(result))
 
         // Assert original input remains intact
-        assertEquals("original_primary", originalInput.primaryUsername)
-        assertEquals(listOf("orig@example.test"), originalInput.emails)
-        assertEquals(listOf("15550100000"), originalInput.phones)
-        assertEquals(listOf("orig_user"), originalInput.usernames)
+        assertEquals(listOf("ORIG@EXAMPLE.TEST", "  ", "orig@example.test"), originalInput.emails)
+        assertEquals(listOf("+1 (555) 010-0000", "+1 (555) 010-0000"), originalInput.phones)
+        assertEquals(listOf("Orig_User", "Orig_User"), originalInput.usernames)
 
         // Assert expanded input preserved all fields and did not overwrite primaryUsername
         assertEquals("Jane Doe", expanded.fullName)
@@ -481,10 +480,19 @@ class PublicSearchExpansionTest {
         assertEquals(listOf("https://orig.test/jane"), expanded.profileUrls)
         assertEquals("content://media/selfie", expanded.selfieUri)
 
-        // Newly accepted high-entropy terms placed before existing terms
-        assertEquals(listOf("discovered@example.test", "orig@example.test"), expanded.emails)
-        assertEquals(listOf("15550107777", "15550100000"), expanded.phones)
-        assertEquals(listOf("discovered_handle", "orig_user"), expanded.usernames)
+        // Newly accepted high-entropy terms prepended while preserving exact original list items
+        assertEquals(
+            listOf("discovered@example.test", "ORIG@EXAMPLE.TEST", "  ", "orig@example.test"),
+            expanded.emails
+        )
+        assertEquals(
+            listOf("15550107777", "+1 (555) 010-0000", "+1 (555) 010-0000"),
+            expanded.phones
+        )
+        assertEquals(
+            listOf("discovered_handle", "Orig_User", "Orig_User"),
+            expanded.usernames
+        )
     }
 
     @Test
@@ -606,5 +614,277 @@ class PublicSearchExpansionTest {
         assertEquals(4, discovered.phones.size)
         assertEquals(8, discovered.handles.size)
         assertEquals(16, discovered.totalCount)
+    }
+
+    @Test
+    fun confidenceBounds_rejectsNonFiniteAndOutOfRangeConfidences() {
+        val profileUrl = "https://github.test/janedoe"
+        val findings = listOf(
+            Finding(
+                type = FindingType.Email,
+                value = "nan@example.test",
+                sourceUrl = profileUrl,
+                confidence = Float.NaN,
+                risk = RiskLevel.High,
+                evidenceSnippet = "contact",
+                remediation = "remediate"
+            ),
+            Finding(
+                type = FindingType.Email,
+                value = "inf@example.test",
+                sourceUrl = profileUrl,
+                confidence = Float.POSITIVE_INFINITY,
+                risk = RiskLevel.High,
+                evidenceSnippet = "contact",
+                remediation = "remediate"
+            ),
+            Finding(
+                type = FindingType.Email,
+                value = "neginf@example.test",
+                sourceUrl = profileUrl,
+                confidence = Float.NEGATIVE_INFINITY,
+                risk = RiskLevel.High,
+                evidenceSnippet = "contact",
+                remediation = "remediate"
+            ),
+            Finding(
+                type = FindingType.Email,
+                value = "toolarge@example.test",
+                sourceUrl = profileUrl,
+                confidence = 1.5f,
+                risk = RiskLevel.High,
+                evidenceSnippet = "contact",
+                remediation = "remediate"
+            ),
+            Finding(
+                type = FindingType.Phone,
+                value = "+1 555 010 1111",
+                sourceUrl = profileUrl,
+                confidence = Float.NaN,
+                risk = RiskLevel.High,
+                evidenceSnippet = "contact",
+                remediation = "remediate"
+            ),
+            Finding(
+                type = FindingType.Phone,
+                value = "+1 555 010 2222",
+                sourceUrl = profileUrl,
+                confidence = Float.POSITIVE_INFINITY,
+                risk = RiskLevel.High,
+                evidenceSnippet = "contact",
+                remediation = "remediate"
+            ),
+            Finding(
+                type = FindingType.Phone,
+                value = "+1 555 010 3333",
+                sourceUrl = profileUrl,
+                confidence = 1.2f,
+                risk = RiskLevel.High,
+                evidenceSnippet = "contact",
+                remediation = "remediate"
+            )
+        )
+        val result = verifiedResult(
+            username = "valid_handle",
+            url = profileUrl,
+            findings = findings
+        )
+        val input = IdentityInput(fullName = "Jane Doe")
+        val discovered = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(result))
+
+        assertTrue("Non-finite and out-of-range emails must be rejected", discovered.emails.isEmpty())
+        assertTrue("Non-finite and out-of-range phones must be rejected", discovered.phones.isEmpty())
+        assertEquals(listOf("valid_handle"), discovered.handles)
+    }
+
+    @Test
+    fun ambiguityMarkersInMetadata_failClosedForVerifiedLookingResults() {
+        val profileUrl = "https://github.test/janedoe"
+        val finding = Finding(
+            type = FindingType.Email,
+            value = "test@example.test",
+            sourceUrl = profileUrl,
+            confidence = 0.90f,
+            risk = RiskLevel.High,
+            evidenceSnippet = "contact",
+            remediation = "remediate"
+        )
+        val ambiguousCases = listOf(
+            verifiedResult(username = "u1", url = profileUrl, verificationStatus = "Exists but not attributed to this identity — possible account", findings = listOf(finding)),
+            verifiedResult(username = "u2", url = profileUrl, verificationStatus = "Candidate lead only", findings = listOf(finding)),
+            verifiedResult(username = "u3", url = profileUrl, verificationStatus = "Review-only match", findings = listOf(finding)),
+            verifiedResult(username = "u4", url = profileUrl, provenance = "possible-account", findings = listOf(finding)),
+            verifiedResult(username = "u5", url = profileUrl, provenance = "not-attributed", findings = listOf(finding)),
+            verifiedResult(username = "u6", url = profileUrl, provenance = "unknown-origin", findings = listOf(finding)),
+            verifiedResult(username = "u7", url = profileUrl, provenance = "review-only", findings = listOf(finding)),
+            verifiedResult(username = "u8", url = profileUrl, provenance = "candidate", findings = listOf(finding))
+        )
+        val input = IdentityInput(fullName = "Jane Doe")
+        ambiguousCases.forEach { ambiguousResult ->
+            val discovered = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(ambiguousResult))
+            assertTrue(
+                "Result with status '${ambiguousResult.verificationStatus}' or provenance '${ambiguousResult.provenance}' must fail closed",
+                discovered.isEmpty
+            )
+        }
+
+        // Genuinely direct verified statuses and null legacy metadata must be accepted
+        val directHttp = verifiedResult(
+            username = "direct_http_user",
+            url = profileUrl,
+            verificationStatus = "✓ Verified (HTTP 200, direct page access)",
+            provenance = "verified-profile",
+            findings = listOf(finding)
+        )
+        val directBrowser = verifiedResult(
+            username = "direct_browser_user",
+            url = profileUrl,
+            verificationStatus = "✓ Verified in-browser",
+            provenance = "verified-profile",
+            findings = listOf(finding)
+        )
+        val nullLegacy = verifiedResult(
+            username = "legacy_user",
+            url = profileUrl,
+            verificationStatus = null,
+            provenance = null,
+            findings = listOf(finding)
+        )
+
+        val discoveredDirect = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(directHttp))
+        assertFalse(discoveredDirect.isEmpty)
+        assertEquals(listOf("direct_http_user"), discoveredDirect.handles)
+
+        val discoveredBrowser = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(directBrowser))
+        assertFalse(discoveredBrowser.isEmpty)
+        assertEquals(listOf("direct_browser_user"), discoveredBrowser.handles)
+
+        val discoveredLegacy = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(nullLegacy))
+        assertFalse(discoveredLegacy.isEmpty)
+        assertEquals(listOf("legacy_user"), discoveredLegacy.handles)
+    }
+
+    @Test
+    fun roundRobinQueryOrdering_defaultQueryCapCannotStarveDiscoveredHandles() {
+        val input = IdentityInput(
+            fullName = "Jane Doe",
+            primaryUsername = "original_handle",
+            emails = listOf("orig@example.test"),
+            phones = listOf("+1 555 010 0000")
+        )
+        // 8 handles, 4 emails, 4 phones discovered across verified results
+        val results = (1..8).map { i ->
+            val url = "https://github.test/user$i"
+            val findings = mutableListOf<Finding>()
+            if (i <= 4) {
+                findings += Finding(
+                    type = FindingType.Email,
+                    value = "user$i@example.test",
+                    sourceUrl = url,
+                    confidence = 0.90f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "contact",
+                    remediation = "remediate"
+                )
+                findings += Finding(
+                    type = FindingType.Phone,
+                    value = "+1 555 010 000$i",
+                    sourceUrl = url,
+                    confidence = 0.90f,
+                    risk = RiskLevel.High,
+                    evidenceSnippet = "contact",
+                    remediation = "remediate"
+                )
+            }
+            verifiedResult(
+                username = "user$i",
+                url = url,
+                findings = findings
+            )
+        }
+
+        val queries = PublicSearchDiscoveryService.buildSearchQueries(input, deepResearch = false, verifiedResults = results)
+        val cappedQueries = queries.take(24)
+
+        // All 8 discovered handles must be present in the capped 24 queries
+        for (i in 1..8) {
+            assertTrue("Discovered handle user$i must not be starved by 24 query cap", cappedQueries.contains("\"user$i\""))
+        }
+
+        // All 4 discovered emails must be present in the capped 24 queries
+        for (i in 1..4) {
+            assertTrue("Discovered email user$i@example.test must be present in capped queries", cappedQueries.contains("\"user$i@example.test\""))
+        }
+
+        // All 4 discovered phones must be present in the capped 24 queries
+        for (i in 1..4) {
+            assertTrue("Discovered phone 1555010000$i must be present in capped queries", cappedQueries.contains("\"1555010000$i\""))
+        }
+
+        // Phase 1 guarantees all 16 discovered exact queries appear before any original-term queries
+        val first16 = cappedQueries.take(16)
+        for (i in 1..8) {
+            assertTrue("First 16 queries must contain discovered handle user$i", first16.contains("\"user$i\""))
+        }
+        for (i in 1..4) {
+            assertTrue("First 16 queries must contain discovered email user$i@example.test", first16.contains("\"user$i@example.test\""))
+            assertTrue("First 16 queries must contain discovered phone 1555010000$i", first16.contains("\"1555010000$i\""))
+        }
+    }
+
+    @Test
+    fun verifiedProfileAssembly_promotesDirectSameSourceFindingsToExpansion() {
+        val profileUrl = "https://github.test/janedoe"
+        val input = IdentityInput(
+            fullName = "Jane Doe",
+            primaryUsername = "janedoe"
+        )
+        // PiiExtractor generates ~0.72 for non-supplied associated email and ~0.68 for phone
+        val piiExtractor = io.dossier.app.domain.pii.PiiExtractor()
+        val rawPageText = "Jane Doe profile. Contact me at jane.discovered@example.test or call +1 (555) 010-8899 for inquiries."
+        val extractedFindings = piiExtractor.extract(rawPageText, profileUrl, input)
+
+        val emailFinding = extractedFindings.first { it.type == FindingType.Email }
+        val phoneFinding = extractedFindings.first { it.type == FindingType.Phone }
+
+        // Verify PiiExtractor assigned ~0.72 and ~0.68 before promotion
+        assertEquals(0.72f, emailFinding.confidence, 0.01f)
+        assertEquals(0.68f, phoneFinding.confidence, 0.01f)
+
+        // Directly passing unpromoted findings to search expansion would reject them because 0.72 < 0.80 and 0.68 < 0.80
+        val unpromotedResult = verifiedResult(
+            username = "janedoe",
+            url = profileUrl,
+            findings = listOf(emailFinding, phoneFinding)
+        )
+        val unpromotedDiscovered = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(unpromotedResult))
+        assertTrue("Unpromoted findings must be rejected under 0.80 gate", unpromotedDiscovered.emails.isEmpty())
+        assertTrue("Unpromoted findings must be rejected under 0.80 gate", unpromotedDiscovered.phones.isEmpty())
+
+        // Simulated verified profile assembly in ProfileScanner (where direct same-source findings are promoted to >= 0.80)
+        val promotedFindings = listOf(
+            emailFinding.copy(confidence = maxOf(emailFinding.confidence, 0.85f)),
+            phoneFinding.copy(confidence = maxOf(phoneFinding.confidence, 0.85f))
+        )
+        val verifiedAssembledResult = verifiedResult(
+            username = "janedoe",
+            url = profileUrl,
+            findings = promotedFindings
+        )
+
+        val promotedDiscovered = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(verifiedAssembledResult))
+        assertEquals(listOf("jane.discovered@example.test"), promotedDiscovered.emails)
+        assertEquals(listOf("15550108899"), promotedDiscovered.phones)
+
+        // However, if the profile was unverified or candidate, promotion must NOT occur and findings remain rejected
+        val unverifiedWithLowConf = verifiedResult(
+            username = "candidate_user",
+            url = profileUrl,
+            verified = false,
+            providerVerificationState = ProviderVerificationState.SoftNotFound,
+            findings = listOf(emailFinding, phoneFinding)
+        )
+        val candidateDiscovered = PublicSearchDiscoveryService.extractDiscoveredSearchTerms(input, listOf(unverifiedWithLowConf))
+        assertTrue(candidateDiscovered.isEmpty)
     }
 }

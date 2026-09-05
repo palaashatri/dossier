@@ -1531,6 +1531,11 @@ class ProfileScanner(
             )
         }
 
+        val isDirectVerifiedProfile = exists && verified &&
+            (providerVerificationState == null || providerVerificationState == ProviderVerificationState.Present) &&
+            (verificationStatus == null || !PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata(verificationStatus)) &&
+            (provenance == null || !PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata(provenance))
+
         val finalFindings = findings.map { finding ->
             if (finding.type == FindingType.PlausibleProfileMatch) {
                 finding.copy(
@@ -1541,6 +1546,14 @@ class ProfileScanner(
                         adjustedConfidence > 0.50f -> RiskLevel.Low
                         else -> RiskLevel.Low
                     }
+                )
+            } else if (isDirectVerifiedProfile &&
+                (finding.type == FindingType.Email || finding.type == FindingType.Phone) &&
+                finding.sourceUrl != null &&
+                PublicSearchDiscoveryService.canonicalUrlKey(finding.sourceUrl) == PublicSearchDiscoveryService.canonicalUrlKey(candidate.url)
+            ) {
+                finding.copy(
+                    confidence = maxOf(finding.confidence, 0.85f)
                 )
             } else {
                 finding
