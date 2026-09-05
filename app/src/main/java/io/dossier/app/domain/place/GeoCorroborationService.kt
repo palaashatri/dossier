@@ -1,6 +1,7 @@
 package io.dossier.app.domain.place
 
 import io.dossier.app.data.place.ExifParser
+import io.dossier.app.data.web.DiscoveryHttpPolicy
 import io.dossier.app.domain.analysis.GeoTemporalAnalyzer
 import io.dossier.app.domain.analysis.SolarPosition
 import io.dossier.app.domain.model.ReverseImageLookupResult
@@ -53,6 +54,8 @@ class GeoCorroborationService {
     private val client = OkHttpClient.Builder()
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
+        .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+        .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
         .build()
 
     suspend fun corroborate(metadata: ExifParser.Metadata): Result? = withContext(Dispatchers.IO) {

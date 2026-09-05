@@ -24,6 +24,7 @@ import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.ExposureEngine
@@ -35,6 +36,7 @@ import io.dossier.app.domain.evidence.UsernameSimilarityContributor
 import io.dossier.app.domain.evidence.withResolvedRelationshipEvidence
 import io.dossier.app.domain.evidence.runPlugins
 import io.dossier.app.domain.evidence.toExposureLedger
+import io.dossier.app.domain.evidence.toFinding
 import io.dossier.app.domain.face.FaceConsistencyChecker
 import io.dossier.app.domain.face.FaceEmbeddingService
 import io.dossier.app.domain.graph.EntityGraphBuilder
@@ -465,7 +467,8 @@ object ScanSession {
         deepResearch: Boolean = false,
         requestId: String? = null,
         checkpointOwnerId: String? = null,
-        checkpointGeneration: String? = null
+        checkpointGeneration: String? = null,
+        planFingerprint: String? = null
     ) = withContext(Dispatchers.IO) {
         ProviderDiagnosticsRuntime.install(context.applicationContext)
         val inputToUse = input
@@ -523,7 +526,40 @@ object ScanSession {
                     }.getOrNull()
                 }
 
-            val scanResults = profileScanner.scanIdentity(inputToUse, deepResearch = deepResearch, requestId = requestId)
+            var mediaRetrievedAtEpochMillis: Long? = null
+            var mediaEvidence = EvidenceCollection()
+            if (!inputToUse.selfieUri.isNullOrBlank()) {
+                _progressText.value = "ANALYZING_MEDIA..."
+                val mediaStartedAt = System.currentTimeMillis()
+                val mediaResult = lookupMediaForScan(
+                    input = inputToUse,
+                    deepResearch = deepResearch,
+                    bindingToken = mediaBindingToken
+                ) { uri, deep, token ->
+                    ReverseImageLookupService(context).lookup(Uri.parse(uri), deep, token)
+                }
+                if (mediaResult != null) {
+                    mediaRetrievedAtEpochMillis = mediaStartedAt
+                    mediaEvidence = MediaIntelligenceSession.snapshotFor(inputToUse, mediaBindingToken)
+                        .toEvidenceCollection(
+                            discoveryPath = listOf("seed:photo"),
+                            retrievedAtEpochMillis = mediaRetrievedAtEpochMillis,
+                            mediaSourceUri = inputToUse.selfieUri
+                        )
+                }
+                _progressText.value = "DISCOVERING_USERNAMES..."
+            }
+
+            val scanResults = profileScanner.scanIdentity(
+                input = inputToUse,
+                deepResearch = deepResearch,
+                requestId = requestId,
+                checkpointOwnerId = checkpointOwnerId,
+                checkpointGeneration = checkpointGeneration,
+                planFingerprint = planFingerprint,
+                mediaEvidence = mediaEvidence
+            )
+            val typedSeedExecutionEvidence = profileScanner.typedSeedExecutionEvidence()
             currentCoroutineContext().ensureActive()
             _profileScanResults.value = scanResults
             MediaIntelligenceSession.recordVerifiedProfileAvatars(
@@ -548,19 +584,17 @@ object ScanSession {
             val allFindings = mutableListOf<Finding>()
             scanResults.filter { it.exists }.forEach { allFindings.addAll(it.findings) }
 
-            var mediaRetrievedAtEpochMillis: Long? = null
-            if (!inputToUse.selfieUri.isNullOrBlank()) {
-                _progressText.value = "ANALYZING_MEDIA..."
-                val mediaStartedAt = System.currentTimeMillis()
-                val mediaResult = lookupMediaForScan(
-                    input = inputToUse,
-                    deepResearch = deepResearch,
-                    bindingToken = mediaBindingToken
-                ) { uri, deep, token ->
-                    ReverseImageLookupService(context).lookup(Uri.parse(uri), deep, token)
-                }
-                if (mediaResult != null) mediaRetrievedAtEpochMillis = mediaStartedAt
-            }
+            // Typed-seed extraction is canonical Evidence, while the legacy
+            // analysis surfaces still consume Finding. Project only actionable
+            // exact-value kinds here; URL/document/archive seed records remain
+            // in the ledger instead of becoming duplicate generic findings.
+            val typedFindings = typedSeedExecutionEvidence.evidence
+                .filter { it.kind in TYPED_FINDING_EVIDENCE_KINDS }
+                .filter { it.state !in setOf(EvidenceState.Unavailable, EvidenceState.Rejected) }
+                .map(Evidence::toFinding)
+                .distinctBy(::findingIdentityKey)
+            allFindings.addAll(typedFindings)
+            val typedFindingKeys = typedFindings.map(::findingIdentityKey).toSet()
 
             checkpointStage(
                 context,
@@ -703,7 +737,9 @@ object ScanSession {
                     listOf("seed:photo")
                 },
                 mediaSourceUri = inputToUse.selfieUri,
-                mediaRetrievedAtEpochMillis = mediaRetrievedAtEpochMillis
+                mediaRetrievedAtEpochMillis = mediaRetrievedAtEpochMillis,
+                typedSeedCollection = typedSeedExecutionEvidence,
+                excludeFindingKeysFromGeneratedEvidence = typedFindingKeys
             )
             val evidence = evidenceSnapshot.evidence
             val relationships = evidenceSnapshot.relationships
@@ -1729,7 +1765,9 @@ object ScanSession {
         mediaIntelligence: MediaIntelligenceSnapshot = MediaIntelligenceSnapshot(),
         mediaDiscoveryPath: List<String> = emptyList(),
         mediaSourceUri: String? = null,
-        mediaRetrievedAtEpochMillis: Long? = null
+        mediaRetrievedAtEpochMillis: Long? = null,
+        typedSeedCollection: EvidenceCollection = EvidenceCollection(),
+        excludeFindingKeysFromGeneratedEvidence: Set<String> = emptySet()
     ): EvidenceCollection {
         val scannerEvidence = profileResults.toEvidenceCollection(input, retrievedAtEpochMillis)
         val mediaEvidence = mediaIntelligence.toEvidenceCollection(
@@ -1741,13 +1779,20 @@ object ScanSession {
             evidence = (
                 scannerEvidence.evidence +
                     pluginCollection.evidence +
-                    buildEvidence(input, findings, retrievedAtEpochMillis) +
-                    mediaEvidence.evidence
+                    buildEvidence(
+                        input,
+                        findings,
+                        retrievedAtEpochMillis,
+                        excludeFindingKeys = excludeFindingKeysFromGeneratedEvidence
+                    ) +
+                    mediaEvidence.evidence +
+                    typedSeedCollection.evidence
                 ).distinctBy { it.id },
                 relationships = EvidenceRelationshipPolicy.normalize(
                     scannerEvidence.relationships +
                         pluginCollection.relationships +
-                        mediaEvidence.relationships
+                        mediaEvidence.relationships +
+                        typedSeedCollection.relationships
                 )
             ).withResolvedRelationshipEvidence()
         _typedSeedAdmission.value = TypedSeedEvidenceAdapter.fromCollection(snapshot, input).snapshot()
@@ -1777,7 +1822,8 @@ object ScanSession {
     internal fun buildEvidence(
         input: IdentityInput,
         findings: List<Finding>,
-        retrievedAtEpochMillis: Long? = null
+        retrievedAtEpochMillis: Long? = null,
+        excludeFindingKeys: Set<String> = emptySet()
     ): List<Evidence> {
         val seeds = buildList {
             input.emails.filter { it.isNotBlank() }.forEach {
@@ -1793,7 +1839,26 @@ object ScanSession {
                     add(Evidence(id = "seed:username:$it", kind = EvidenceKind.Username, value = it, confidence = 1.0f))
                 }
         }
-        val fromFindings = findings.map { it.toEvidence(retrievedAtEpochMillis) }
+        val fromFindings = findings
+            .filterNot { findingIdentityKey(it) in excludeFindingKeys }
+            .map { it.toEvidence(retrievedAtEpochMillis) }
         return (seeds + fromFindings).distinctBy { it.kind to it.value.lowercase() }
     }
+
+    private fun findingIdentityKey(finding: Finding): String =
+        listOf(
+            finding.type.name,
+            finding.value.trim().lowercase(),
+            finding.sourceUrl?.trim()?.lowercase().orEmpty()
+        ).joinToString("\u001f")
+
+    private val TYPED_FINDING_EVIDENCE_KINDS = setOf(
+        EvidenceKind.Email,
+        EvidenceKind.Phone,
+        EvidenceKind.Address,
+        EvidenceKind.Location,
+        EvidenceKind.Organization,
+        EvidenceKind.Username,
+        EvidenceKind.SensitiveSnippet
+    )
 }

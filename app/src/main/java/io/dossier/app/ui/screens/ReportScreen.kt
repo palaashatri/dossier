@@ -5,7 +5,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,7 +27,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -310,33 +308,20 @@ fun ReportScreen(
                 )
             }
 
-            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                if (maxWidth >= 390.dp) {
-                    TabRow(
-                        selectedTabIndex = selectedViewIndex,
-                        containerColor = NeuralTheme.CardBackground,
-                        contentColor = NeuralTheme.Cobalt,
-                        divider = { HorizontalDivider(color = NeuralTheme.BorderColor) }
-                    ) {
-                        ReportTabItems(
-                            selectedIndex = selectedViewIndex,
-                            onSelected = { selectedViewIndex = it }
-                        )
-                    }
-                } else {
-                    ScrollableTabRow(
-                        selectedTabIndex = selectedViewIndex,
-                        containerColor = NeuralTheme.CardBackground,
-                        contentColor = NeuralTheme.Cobalt,
-                        edgePadding = 12.dp,
-                        divider = { HorizontalDivider(color = NeuralTheme.BorderColor) }
-                    ) {
-                        ReportTabItems(
-                            selectedIndex = selectedViewIndex,
-                            onSelected = { selectedViewIndex = it }
-                        )
-                    }
-                }
+            // Keep every report view reachable without ellipsizing a tab label
+            // on a phone-width layout. The selected tab is brought into view
+            // automatically while the row remains horizontally scrollable.
+            ScrollableTabRow(
+                selectedTabIndex = selectedViewIndex,
+                containerColor = NeuralTheme.CardBackground,
+                contentColor = NeuralTheme.Cobalt,
+                edgePadding = 12.dp,
+                divider = { HorizontalDivider(color = NeuralTheme.BorderColor) }
+            ) {
+                ReportTabItems(
+                    selectedIndex = selectedViewIndex,
+                    onSelected = { selectedViewIndex = it }
+                )
             }
 
             when (ReportView.entries[selectedViewIndex]) {

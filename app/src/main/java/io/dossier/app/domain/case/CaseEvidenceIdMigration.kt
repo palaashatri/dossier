@@ -4,7 +4,6 @@ import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.ExposureLedger
 import io.dossier.app.domain.evidence.ExposureLedgerPolicy
-import io.dossier.app.domain.evidence.toExposureLedger
 
 /** Pure metadata migration used by encrypted case loading/saving and JVM tests. */
 object CaseEvidenceIdMigration {
@@ -35,13 +34,7 @@ object CaseEvidenceIdMigration {
             record.copy(evidenceId = record.evidenceId?.let(EvidenceIdPolicy::migrate))
         }
         val migratedLedger = ExposureLedgerPolicy.normalize(case.exposureLedger.facts)
-            .let { facts ->
-                if (facts.isEmpty() && migratedEvidence.isNotEmpty()) {
-                    migratedEvidence.toExposureLedger().facts
-                } else {
-                    facts
-                }
-            }
+            .let { facts -> ExposureLedgerPolicy.hydrateFromEvidence(facts, migratedEvidence) }
         return case.copy(
             schemaVersion = DossierCase.CURRENT_SCHEMA_VERSION,
             evidenceRecords = migratedEvidence,

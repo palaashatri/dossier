@@ -3,10 +3,12 @@ package io.dossier.app
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.test.espresso.Espresso.closeSoftKeyboard
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.dossier.app.data.local.UsageNoticeStore
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
@@ -45,7 +47,12 @@ class UniversalSearchSeedCorrectionTest {
         composeRule.onAllNodes(hasSetTextAction())[0].performTextInput("jane")
 
         composeRule.onNodeWithText("Detected: Username").assertIsDisplayed()
+        closeSoftKeyboard()
+        composeRule.waitForIdle()
         composeRule.onNodeWithContentDescription("Correct detected seed type").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("Name").fetchSemanticsNodes().isNotEmpty()
+        }
         composeRule.onNodeWithText("Name").performClick()
         composeRule.waitForIdle()
 

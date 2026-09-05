@@ -57,6 +57,8 @@ internal class ReverseImageCandidateSearchService(private val context: Context) 
         .callTimeout(16, TimeUnit.SECONDS)
         .followRedirects(true)
         .retryOnConnectionFailure(true)
+        .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+        .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
         .build()
 
     private val cache = ConcurrentHashMap<String, CacheEntry>()

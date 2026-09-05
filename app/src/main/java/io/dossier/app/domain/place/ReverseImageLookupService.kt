@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 /**
  * Orchestrates location intelligence and whole-image near-duplicate discovery.
@@ -93,6 +94,13 @@ class ReverseImageLookupService(private val context: Context) {
                 val combinedEvidence = (geo?.evidence.orEmpty() + webResult?.evidence.orEmpty())
                     .distinctBy { "${it.title}|${it.url}" }
                     .take(MAX_LOCATION_EVIDENCE)
+                val locationCandidates = buildLocationCandidates(
+                    gps = gps,
+                    resolvedLocation = resolvedLocation,
+                    geoEvidence = geo?.evidence.orEmpty(),
+                    webEvidence = webResult?.evidence.orEmpty(),
+                    labels = labels
+                )
 
                 val result = ReverseImageLookupResult(
                     gps = gps,
@@ -106,15 +114,104 @@ class ReverseImageLookupService(private val context: Context) {
                     visualMatches = visual.matches,
                     visualCandidates = visual.candidates,
                     visualClusters = visual.clusters,
-                    visualSearchNote = visual.note
+                    visualSearchNote = visual.note,
+                    locationCandidates = locationCandidates
                 )
                 MediaIntelligenceSession.recordImage(bindingToken, result)
                 result
             }
         }
 
+    private fun buildLocationCandidates(
+        gps: String?,
+        resolvedLocation: String?,
+        geoEvidence: List<ReverseImageLookupResult.WebEvidence>,
+        webEvidence: List<ReverseImageLookupResult.WebEvidence>,
+        labels: List<ReverseImageLookupResult.ImageLabel>
+    ): List<ReverseImageLookupResult.LocationCandidate> = buildList {
+        gps?.takeIf(String::isNotBlank)?.let { value ->
+            add(
+                ReverseImageLookupResult.LocationCandidate(
+                    value = value,
+                    evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA,
+                    reason = "Embedded GPS metadata from the selected photo"
+                )
+            )
+        }
+
+        val geoSource = geoEvidence.firstOrNull { it.url.isNotBlank() }?.url
+        resolvedLocation
+            ?.takeIf(String::isNotBlank)
+            ?.takeIf { value -> none { sameLocationValue(it.value, value) } }
+            ?.let { value ->
+                val corroborated = geoEvidence.isNotEmpty()
+                val imageSource = webEvidence.firstOrNull { it.url.isNotBlank() }?.url
+                add(
+                    ReverseImageLookupResult.LocationCandidate(
+                        value = value,
+                        evidenceClass = if (corroborated) {
+                            ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION
+                        } else {
+                            ReverseImageLookupResult.LocationEvidenceClass.LIKELY_LOCATION
+                        },
+                        reason = if (corroborated) {
+                            "Location candidate corroborated from EXIF coordinates"
+                        } else {
+                            "Location candidate derived from public image-search observations"
+                        },
+                        sourceUrls = listOfNotNull(geoSource ?: imageSource)
+                    )
+                )
+            }
+
+        labels
+            .asSequence()
+            .filter(::isLocationCue)
+            .take(MAX_VISUAL_LOCATION_LABELS)
+            .forEach { label ->
+                add(
+                    ReverseImageLookupResult.LocationCandidate(
+                        value = label.text,
+                        evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.VISUAL_GUESS,
+                        reason = "On-device image label is a visual scene clue, not a location proof",
+                        confidence = label.confidence
+                    )
+                )
+            }
+    }.take(MAX_LOCATION_CANDIDATES)
+
+    private fun sameLocationValue(first: String, second: String): Boolean =
+        first.trim().replace(Regex("\\s+"), " ").equals(
+            second.trim().replace(Regex("\\s+"), " "),
+            ignoreCase = true
+        )
+
+    /**
+     * ML image labels are broad scene observations. Only labels that carry an
+     * explicit place/landmark cue may enter the location-candidate list; a
+     * generic `person`, `car`, or `cafe` label is not a location.
+     */
+    private fun isLocationCue(label: ReverseImageLookupResult.ImageLabel): Boolean {
+        val normalized = label.text.trim().lowercase(Locale.ROOT)
+        if (normalized.isBlank() || normalized in GENERIC_VISUAL_LABELS) return false
+        return LOCATION_CUE_TERMS.any { term -> normalized.contains(term) }
+    }
+
     private companion object {
         const val MAX_LOCATION_EVIDENCE = 10
+        const val MAX_LOCATION_CANDIDATES = 64
+        const val MAX_VISUAL_LOCATION_LABELS = 8
+        val GENERIC_VISUAL_LABELS = setOf(
+            "person", "man", "woman", "face", "people", "car", "vehicle", "truck",
+            "cafe", "coffee", "restaurant", "food", "dog", "cat", "animal", "tree",
+            "building", "house", "room", "furniture", "clothing", "sky", "water"
+        )
+        val LOCATION_CUE_TERMS = setOf(
+            "landmark", "monument", "statue", "tower", "bridge", "museum", "church",
+            "temple", "mosque", "cathedral", "palace", "castle", "station", "airport",
+            "street sign", "road sign", "city", "town", "village", "square", "park",
+            "beach", "mountain", "river", "lake", "waterfall", "historic district"
+        )
         const val FACE_WARNING =
             "Face detected — facial identification remains disabled. Whole-image duplicate matching may continue because it compares the complete image, not identity across different photos."
     }

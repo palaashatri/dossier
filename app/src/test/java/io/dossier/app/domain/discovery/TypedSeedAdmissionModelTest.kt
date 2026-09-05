@@ -1,5 +1,6 @@
 package io.dossier.app.domain.discovery
 
+import io.dossier.app.data.web.TypedSeedPublicFetchExecutor
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.ExposureSourceClassification
@@ -75,7 +76,8 @@ class TypedSeedAdmissionModelTest {
             TypedSeedKind.Archive,
             TypedSeedKind.Photo,
             TypedSeedKind.Image,
-            TypedSeedKind.Username
+            TypedSeedKind.Username,
+            TypedSeedKind.Location
         )
         kinds.forEach { kind ->
             val model = TypedSeedAdmissionModel()
@@ -90,6 +92,7 @@ class TypedSeedAdmissionModelTest {
                 TypedSeedKind.Domain -> "example.test"
                 TypedSeedKind.Username -> "pivot_user"
                 TypedSeedKind.Name -> "Pivot User"
+                TypedSeedKind.Location -> "Example City"
             }
             assertFalse(
                 "candidate $kind must not become a recursive pivot",
@@ -279,6 +282,7 @@ class TypedSeedAdmissionModelTest {
         assertTrue(model.offer(TypedSeedKind.Domain, "EXAMPLE.TEST.", 0))
         assertTrue(model.offer(TypedSeedKind.Username, "@Alice_User", 0))
         assertTrue(model.offer(TypedSeedKind.Photo, "content://media/item#preview", 0))
+        assertTrue(model.offer(TypedSeedKind.Location, "  Example   City  ", 0))
 
         assertEquals("user@example.test", model.admittedSeeds[0].normalizedValue)
         assertEquals("15550100100", model.admittedSeeds[1].normalizedValue)
@@ -286,6 +290,7 @@ class TypedSeedAdmissionModelTest {
         assertEquals("example.test", model.admittedSeeds[3].normalizedValue)
         assertEquals("alice_user", model.admittedSeeds[4].normalizedValue)
         assertEquals("content://media/item", model.admittedSeeds[5].normalizedValue)
+        assertEquals("example city", model.admittedSeeds[6].normalizedValue)
         assertEquals(" USER@EXAMPLE.TEST ", model.admittedSeeds[0].exactValue)
     }
 
@@ -333,6 +338,34 @@ class TypedSeedAdmissionModelTest {
     }
 
     @Test
+    fun adapterMapsEvidencePathLengthToRecursiveDepthWithoutInflatingHops() {
+        val chain = (0..4).map { depth ->
+            Evidence(
+                id = "chain-$depth",
+                kind = EvidenceKind.Url,
+                value = "https://example.test/chain-$depth",
+                sourceUrl = "https://example.test/source-$depth",
+                state = EvidenceState.Observed,
+                reliability = EvidenceReliability.DirectPublicProfile,
+                discoveryPath = (0 until depth).map { "https://example.test/hop-$it" }
+            )
+        }
+
+        val model = TypedSeedEvidenceAdapter.admit(
+            evidence = chain,
+            config = TypedSeedAdmissionConfig(maxDepth = 4)
+        )
+
+        chain.forEachIndexed { depth, record ->
+            assertEquals(
+                "A -> B -> C -> D -> E path depth",
+                depth,
+                model.admittedSeeds.single { it.exactValue == record.value }.depth
+            )
+        }
+    }
+
+    @Test
     fun adapterAcceptsCanonicalEvidenceCollectionWithoutCreatingAnotherStore() {
         val record = Evidence(
             id = "profile-email",
@@ -363,6 +396,23 @@ class TypedSeedAdmissionModelTest {
         assertEquals(TypedSeedKind.Archive, archive.kind)
         assertEquals(listOf(record.id), archive.evidenceIds)
         assertEquals(ExposureSourceClassification.ARCHIVE, archive.sourceClassification)
+    }
+
+    @Test
+    fun userProvidedArchiveSnapshotUrlIsAdmittedAsHistoricalArchiveSeed() {
+        val snapshot = "https://web.archive.org/web/20240101000000id_/https://example.test/profile"
+        val model = TypedSeedEvidenceAdapter.fromCollection(
+            collection = io.dossier.app.domain.evidence.EvidenceCollection(),
+            input = IdentityInput(
+                fullName = "Jane Example",
+                profileUrls = listOf(snapshot, "https://example.test/profile")
+            )
+        )
+
+        val archive = model.admittedSeeds.single { it.exactValue == snapshot }
+        assertEquals(TypedSeedKind.Archive, archive.kind)
+        assertEquals(ExposureSourceClassification.USER_IMPORTED, archive.sourceClassification)
+        assertTrue(TypedSeedPublicFetchExecutor.classifyArchiveSnapshot(snapshot) != null)
     }
 
     @Test

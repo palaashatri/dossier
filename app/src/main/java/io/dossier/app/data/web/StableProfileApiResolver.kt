@@ -557,6 +557,8 @@ internal class StableProfileApiResolver(
             .readTimeout(10, TimeUnit.SECONDS)
             .callTimeout(14, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
+            .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+            .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
             .build()
 
         private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")

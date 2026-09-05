@@ -2,6 +2,7 @@ package io.dossier.app.domain.evidence
 
 import io.dossier.app.domain.case.DossierCase
 import io.dossier.app.domain.case.RemediationStatus
+import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -240,6 +241,42 @@ class ExposureLedgerTest {
         )
         val fact = evidence.toExposureFact()
         assertEquals(path, fact.discoveryPath)
+    }
+
+    @Test
+    fun explicitAttributionPropagatesToLedgerAndSurvivesJson() {
+        val evidence = Evidence(
+            id = "ev-attribution",
+            kind = EvidenceKind.Email,
+            value = "jane@example.test",
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.DirectPublicProfile,
+            attribution = FindingAttribution.ExactSelfSupplied
+        )
+
+        val ledger = evidence.toExposureLedger()
+        assertEquals(FindingAttribution.ExactSelfSupplied, ledger.facts.single().attribution)
+        assertEquals(ledger, json.decodeFromString<ExposureLedger>(json.encodeToString(ledger)))
+    }
+
+    @Test
+    fun ledgerMergeKeepsExplicitAttributionWhenOtherObservationIsUnconfirmed() {
+        val exact = Evidence(
+            id = "ev-exact",
+            kind = EvidenceKind.Email,
+            value = "jane@example.test",
+            sourceUrl = "https://example.test/profile",
+            attribution = FindingAttribution.ExactSelfSupplied,
+            state = EvidenceState.Verified
+        )
+        val observed = exact.copy(
+            id = "ev-observed",
+            attribution = FindingAttribution.Unconfirmed,
+            state = EvidenceState.Observed
+        )
+
+        val fact = listOf(exact, observed).toExposureLedger().facts.single()
+        assertEquals(FindingAttribution.ExactSelfSupplied, fact.attribution)
     }
 
     @Test

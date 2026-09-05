@@ -6,6 +6,7 @@ import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.FindingType
 
 /**
@@ -39,18 +40,28 @@ internal fun Finding.toEvidence(
     confidence = confidence,
     risk = risk,
     signals = if (remediation.isBlank()) emptyList() else listOf(remediation),
-    state = when (type) {
-        FindingType.PlausibleProfileMatch,
-        FindingType.PublicSearchEvidence,
-        FindingType.PublicImageEvidence -> EvidenceState.Candidate
+    state = when {
+        attribution == FindingAttribution.ExactSelfSupplied ||
+            attribution == FindingAttribution.Verified -> EvidenceState.Verified
+        attribution == FindingAttribution.IndependentPageSignals ||
+            attribution == FindingAttribution.Probable -> EvidenceState.Probable
+        attribution == FindingAttribution.Candidate -> EvidenceState.Candidate
+        attribution == FindingAttribution.Conflicting -> EvidenceState.Conflicting
+        type in setOf(
+            FindingType.PlausibleProfileMatch,
+            FindingType.PublicSearchEvidence,
+            FindingType.PublicImageEvidence
+        ) -> EvidenceState.Candidate
         else -> EvidenceState.Observed
     },
-    reliability = when (type) {
-        FindingType.PublicSearchEvidence,
-        FindingType.PublicImageEvidence -> EvidenceReliability.SearchEngineCandidate
-        FindingType.ImageConsistency -> EvidenceReliability.LocalDerived
+    reliability = when {
+        attribution == FindingAttribution.ExactSelfSupplied -> EvidenceReliability.UserSupplied
+        type in setOf(FindingType.PublicSearchEvidence, FindingType.PublicImageEvidence) ->
+            EvidenceReliability.SearchEngineCandidate
+        type == FindingType.ImageConsistency -> EvidenceReliability.LocalDerived
         else -> EvidenceReliability.Unknown
     },
+    attribution = attribution,
     retrievedAtEpochMillis = retrievedAtEpochMillis,
     discoveryPath = discoveryPath
 )

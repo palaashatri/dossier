@@ -5,11 +5,18 @@ import io.dossier.app.domain.evidence.EvidenceIdPolicy
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceRelationship
+import io.dossier.app.domain.evidence.EvidenceReliability
+import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.ExposureFact
+import io.dossier.app.domain.evidence.ExposureFactKind
+import io.dossier.app.domain.evidence.ExposureLedger
+import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.model.DossierEdge
 import io.dossier.app.domain.model.DossierEntity
 import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.EntityType
 import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
@@ -170,5 +177,52 @@ class CaseEvidenceIdMigrationTest {
             listOf(EvidenceIdPolicy.migrate(rawId), "evidence-explicit"),
             relationship.evidenceIds
         )
+    }
+
+    @Test
+    fun existingLedgerFactsHydrateExplicitEvidenceAttributionAndKeepUserState() {
+        val rawId = "ev:Email:jane@example.test:https://example.test/contact"
+        val original = DossierCase(
+            schemaVersion = 8,
+            caseId = "legacy-ledger-attribution",
+            createdAt = "2026-08-08 00:00",
+            subjectName = "Jane Example",
+            input = IdentityInput(fullName = "Jane Example"),
+            evidenceRecords = listOf(
+                Evidence(
+                    id = rawId,
+                    kind = EvidenceKind.Email,
+                    value = "jane@example.test",
+                    sourceUrl = "https://example.test/contact",
+                    confidence = 0.9f,
+                    state = EvidenceState.Verified,
+                    reliability = EvidenceReliability.DirectPublicProfile,
+                    attribution = FindingAttribution.Verified
+                )
+            ),
+            exposureLedger = ExposureLedger(
+                facts = listOf(
+                    ExposureFact(
+                        exactValue = "jane@example.test",
+                        normalizedValue = "jane@example.test",
+                        kind = ExposureFactKind.Email,
+                        evidenceIds = listOf(rawId),
+                        sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+                        verificationState = EvidenceState.Observed,
+                        confidence = 0.2f,
+                        remediationStatus = RemediationStatus.InProgress
+                    )
+                )
+            )
+        )
+
+        val migrated = CaseEvidenceIdMigration.migrate(original)
+        val fact = migrated.exposureLedger.facts.single()
+
+        assertEquals(FindingAttribution.Verified, fact.attribution)
+        assertEquals(EvidenceState.Verified, fact.verificationState)
+        assertEquals(0.9f, fact.confidence, 1e-6f)
+        assertEquals(RemediationStatus.InProgress, fact.remediationStatus)
+        assertEquals(listOf(EvidenceIdPolicy.migrate(rawId)), fact.evidenceIds)
     }
 }

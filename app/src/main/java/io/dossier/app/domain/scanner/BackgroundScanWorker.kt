@@ -278,7 +278,8 @@ class BackgroundScanWorker(
                 deepResearch = deepResearch,
                 requestId = requestId,
                 checkpointOwnerId = workerId,
-                checkpointGeneration = generation
+                checkpointGeneration = generation,
+                planFingerprint = requestPoint.planFingerprint
             )
 
             if (!BackgroundScanManager.isCurrentOwner(applicationContext, workerId, generation)) {
@@ -621,6 +622,8 @@ object BackgroundScanManager {
     internal var lifecycleStoreProvider: (Context) -> ScanLifecycleStore = { ScanLifecycleStore(it) }
     internal var resumeStoreProvider: (Context) -> ScanResumeStore = { ScanResumeStore(it) }
     internal var resultStoreProvider: (Context) -> BackgroundScanResultStore = { BackgroundScanResultStore(it) }
+    internal var typedFrontierStoreProvider: (Context, String) -> TypedSeedFrontierStore =
+        { context, requestId -> TypedSeedFrontierStore(context, requestId) }
     internal var profileCheckpointClearer: (Context, String) -> Boolean = ::clearRequestRecoveryState
     internal var profileCheckpointAllClearer: (Context) -> Boolean = ::clearAllRecoveryState
     internal var resumeStateAllClearer: (Context) -> Boolean = { ScanResumeStore(it).clear() }
@@ -640,6 +643,7 @@ object BackgroundScanManager {
         lifecycleStoreProvider = { ScanLifecycleStore(it) }
         resumeStoreProvider = { ScanResumeStore(it) }
         resultStoreProvider = { BackgroundScanResultStore(it) }
+        typedFrontierStoreProvider = { context, requestId -> TypedSeedFrontierStore(context, requestId) }
         profileCheckpointClearer = ::clearRequestRecoveryState
         profileCheckpointAllClearer = ::clearAllRecoveryState
         resumeStateAllClearer = { ScanResumeStore(it).clear() }
@@ -1250,15 +1254,17 @@ object BackgroundScanManager {
     private fun clearRequestRecoveryState(context: Context, requestId: String): Boolean {
         val profilesCleared = ProfileScanCheckpointStore.clearRequest(context, requestId)
         val frontierCleared = PivotFrontierStore.clearRequest(context, requestId)
+        val typedFrontierCleared = TypedSeedFrontierStore.clearRequest(context, requestId)
         val payloadsCleared = PublicDiscoveryPayloadStore.clearRequest(context, requestId)
-        return profilesCleared && frontierCleared && payloadsCleared
+        return profilesCleared && frontierCleared && typedFrontierCleared && payloadsCleared
     }
 
     private fun clearAllRecoveryState(context: Context): Boolean {
         val profilesCleared = ProfileScanCheckpointStore.clearAll(context)
         val frontiersCleared = PivotFrontierStore.clearAll(context)
+        val typedFrontiersCleared = TypedSeedFrontierStore.clearAll(context)
         val payloadsCleared = PublicDiscoveryPayloadStore.clearAll(context)
-        return profilesCleared && frontiersCleared && payloadsCleared
+        return profilesCleared && frontiersCleared && typedFrontiersCleared && payloadsCleared
     }
 
     fun hasActiveMarker(context: Context): Boolean = synchronized(LIFECYCLE_LOCK) {
@@ -1394,6 +1400,135 @@ object BackgroundScanManager {
             return@synchronized ResumeCheckpointWriteState.StaleOwner
         }
         resumeStoreProvider(appContext).bindCheckpointOwner(requestId, workerId)
+    }
+
+    /**
+     * Loads the general typed frontier only for the exact lifecycle owner and
+     * generation.  A paused generation may rotate its WorkManager owner on
+     * resume; in that case the encrypted frontier is rebound under this same
+     * lifecycle lock before it is returned.  Callers never access the store
+     * directly, which keeps lifecycle and frontier compare-and-swap checks in
+     * one boundary.
+     */
+    internal fun loadTypedFrontierIfOwner(
+        context: Context,
+        workerId: String,
+        generation: String,
+        requestId: String,
+        config: TypedSeedFrontierConfig,
+        planFingerprint: String
+    ): TypedSeedFrontierLoadResult = synchronized(LIFECYCLE_LOCK) {
+        if (!ProviderPlanFingerprint.isValid(planFingerprint)) {
+            return@synchronized TypedSeedFrontierLoadResult.Unavailable
+        }
+        val appContext = context.applicationContext
+        val lifecycle = (lifecycleStoreProvider(appContext).read()
+            as? ScanLifecycleReadResult.Available)?.record
+            ?: return@synchronized TypedSeedFrontierLoadResult.StaleOwner
+        if (lifecycle.ownerId != workerId ||
+            lifecycle.generation != generation ||
+            lifecycle.requestId != requestId ||
+            lifecycle.phase !in setOf(ScanLifecyclePhase.Running, ScanLifecyclePhase.Pausing)
+        ) {
+            return@synchronized TypedSeedFrontierLoadResult.StaleOwner
+        }
+        val store = runCatching { typedFrontierStoreProvider(appContext, requestId) }
+            .getOrElse { return@synchronized TypedSeedFrontierLoadResult.Unavailable }
+        when (val loaded = store.loadDetailed(config, workerId, generation, planFingerprint)) {
+            is TypedSeedFrontierLoadResult.Available,
+            TypedSeedFrontierLoadResult.Missing,
+            TypedSeedFrontierLoadResult.Unavailable -> loaded
+            TypedSeedFrontierLoadResult.StaleOwner -> {
+                // Owner rotation is allowed only after the lifecycle check
+                // above. The store authenticates the previous owner and
+                // generation before re-encrypting its payload.
+                when (store.rebindOwner(workerId, generation, planFingerprint = planFingerprint)) {
+                    TypedSeedFrontierWriteResult.Saved ->
+                        store.loadDetailed(config, workerId, generation, planFingerprint)
+                    TypedSeedFrontierWriteResult.Missing -> TypedSeedFrontierLoadResult.Missing
+                    TypedSeedFrontierWriteResult.StaleOwner -> TypedSeedFrontierLoadResult.StaleOwner
+                    TypedSeedFrontierWriteResult.Tombstoned,
+                    TypedSeedFrontierWriteResult.Invalid,
+                    TypedSeedFrontierWriteResult.StorageFailure -> TypedSeedFrontierLoadResult.Unavailable
+                }
+            }
+        }
+    }
+
+    /** Explicit owner rebind seam used by pause/resume recovery tests/callers. */
+    internal fun rebindTypedFrontierIfOwner(
+        context: Context,
+        workerId: String,
+        generation: String,
+        requestId: String,
+        planFingerprint: String
+    ): TypedSeedFrontierWriteResult = synchronized(LIFECYCLE_LOCK) {
+        if (!ProviderPlanFingerprint.isValid(planFingerprint)) {
+            return@synchronized TypedSeedFrontierWriteResult.Invalid
+        }
+        val appContext = context.applicationContext
+        val lifecycle = (lifecycleStoreProvider(appContext).read()
+            as? ScanLifecycleReadResult.Available)
+            ?.record
+            ?: return@synchronized TypedSeedFrontierWriteResult.StaleOwner
+        if (lifecycle.ownerId != workerId ||
+            lifecycle.generation != generation ||
+            lifecycle.requestId != requestId ||
+            lifecycle.phase !in setOf(ScanLifecyclePhase.Running, ScanLifecyclePhase.Pausing)
+        ) {
+            return@synchronized TypedSeedFrontierWriteResult.StaleOwner
+        }
+        runCatching {
+            typedFrontierStoreProvider(appContext, requestId)
+                .rebindOwner(workerId, generation, planFingerprint = planFingerprint)
+        }.getOrElse { TypedSeedFrontierWriteResult.StorageFailure }
+    }
+
+    /** Saves typed frontier state only while the same owner/generation is active. */
+    internal fun saveTypedFrontierIfOwner(
+        context: Context,
+        workerId: String,
+        generation: String,
+        requestId: String,
+        frontier: TypedSeedFrontier,
+        planFingerprint: String
+    ): TypedSeedFrontierWriteResult = synchronized(LIFECYCLE_LOCK) {
+        if (!ProviderPlanFingerprint.isValid(planFingerprint)) {
+            return@synchronized TypedSeedFrontierWriteResult.Invalid
+        }
+        val appContext = context.applicationContext
+        val lifecycle = (lifecycleStoreProvider(appContext).read()
+            as? ScanLifecycleReadResult.Available)
+            ?.record
+            ?: return@synchronized TypedSeedFrontierWriteResult.StaleOwner
+        if (lifecycle.ownerId != workerId ||
+            lifecycle.generation != generation ||
+            lifecycle.requestId != requestId ||
+            lifecycle.phase !in setOf(ScanLifecyclePhase.Running, ScanLifecyclePhase.Pausing)
+        ) {
+            return@synchronized TypedSeedFrontierWriteResult.StaleOwner
+        }
+        runCatching {
+            typedFrontierStoreProvider(appContext, requestId)
+                .save(frontier, workerId, generation, planFingerprint)
+        }.getOrElse { TypedSeedFrontierWriteResult.StorageFailure }
+    }
+
+    /** Tombstone one request's typed frontier after exact lifecycle cleanup. */
+    internal fun clearTypedFrontier(
+        context: Context,
+        requestId: String
+    ): Boolean = synchronized(LIFECYCLE_LOCK) {
+        runCatching {
+            TypedSeedFrontierStore.clearRequest(context.applicationContext, requestId)
+        }.getOrDefault(false)
+    }
+
+    /** Tombstone all typed frontier files during an explicit global purge. */
+    internal fun clearAllTypedFrontiers(context: Context): Boolean = synchronized(LIFECYCLE_LOCK) {
+        runCatching {
+            TypedSeedFrontierStore.clearAll(context.applicationContext)
+        }.getOrDefault(false)
     }
 
     /**

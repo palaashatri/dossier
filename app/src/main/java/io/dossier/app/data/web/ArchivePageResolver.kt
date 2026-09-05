@@ -2,9 +2,13 @@ package io.dossier.app.data.web
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
@@ -30,6 +34,7 @@ import java.util.concurrent.TimeUnit
  * official API, so Dossier uses only its public newest-snapshot route and returns
  * Unavailable if that route changes or presents a challenge.
  */
+@OptIn(InternalCoroutinesApi::class)
 internal class ArchivePageResolver(
     private val client: OkHttpClient = defaultClient()
 ) {
@@ -91,7 +96,7 @@ internal class ArchivePageResolver(
         else -> Result.NotFound
     }
 
-    private fun queryWaybackAvailability(originalUrl: String): Result {
+    private suspend fun queryWaybackAvailability(originalUrl: String): Result {
         val availabilityUrl = AVAILABILITY_ENDPOINT.toHttpUrl().newBuilder()
             .addQueryParameter("url", originalUrl)
             .build()
@@ -101,8 +106,13 @@ internal class ArchivePageResolver(
             .header("Accept", "application/json")
             .build()
 
+        val call = client.newCall(request)
+        val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion(
+            onCancelling = true,
+            invokeImmediately = true
+        ) { call.cancel() }
         try {
-            client.newCall(request).execute().use { response ->
+            call.execute().use { response ->
                 if (!response.isSuccessful) {
                     return if (response.code == 404) Result.NotFound
                     else Result.Unavailable("Wayback availability returned HTTP ${response.code}")
@@ -114,13 +124,19 @@ internal class ArchivePageResolver(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
+            // OkHttp reports a cancelled call as IOException. Re-check the
+            // coroutine before returning an Unavailable result so a cancelled
+            // Wayback lookup cannot continue into the archive.today fallback.
+            currentCoroutineContext().ensureActive()
             return Result.Unavailable(
                 "Wayback availability lookup failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
             )
+        } finally {
+            cancellationHandle?.dispose()
         }
     }
 
-    private fun fetchWaybackCapture(originalUrl: String, capture: AvailabilityCapture): Result {
+    private suspend fun fetchWaybackCapture(originalUrl: String, capture: AvailabilityCapture): Result {
         val snapshotUrl = normalizeSnapshotUrl(capture.snapshotUrl)
             ?: return Result.Unavailable("Wayback returned an invalid snapshot URL")
         return fetchHtmlSnapshot(
@@ -132,7 +148,7 @@ internal class ArchivePageResolver(
         )
     }
 
-    private fun queryArchiveToday(originalUrl: String): Result {
+    private suspend fun queryArchiveToday(originalUrl: String): Result {
         val target = sanitizeArchiveTodayTarget(originalUrl)
             ?: return Result.Unavailable("archive.today received an invalid original URL")
         val lookupUrl = "$ARCHIVE_TODAY_NEWEST$target"
@@ -144,8 +160,13 @@ internal class ArchivePageResolver(
                 .build()
         }.getOrElse { return Result.Unavailable("archive.today lookup URL could not be built") }
 
+        val call = client.newCall(request)
+        val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion(
+            onCancelling = true,
+            invokeImmediately = true
+        ) { call.cancel() }
         try {
-            client.newCall(request).execute().use { response ->
+            call.execute().use { response ->
                 when {
                     response.code == 404 -> return Result.NotFound
                     response.code == 401 || response.code == 403 || response.code == 429 ->
@@ -188,13 +209,16 @@ internal class ArchivePageResolver(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
             return Result.Unavailable(
                 "archive.today lookup failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
             )
+        } finally {
+            cancellationHandle?.dispose()
         }
     }
 
-    private fun fetchHtmlSnapshot(
+    private suspend fun fetchHtmlSnapshot(
         provider: String,
         originalUrl: String,
         snapshotUrl: String,
@@ -207,8 +231,13 @@ internal class ArchivePageResolver(
             .header("Accept", "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.3")
             .build()
 
+        val call = client.newCall(request)
+        val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion(
+            onCancelling = true,
+            invokeImmediately = true
+        ) { call.cancel() }
         try {
-            client.newCall(request).execute().use { response ->
+            call.execute().use { response ->
                 if (!response.isSuccessful) {
                     return Result.Unavailable("$providerLabel snapshot returned HTTP ${response.code}")
                 }
@@ -248,9 +277,12 @@ internal class ArchivePageResolver(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
             return Result.Unavailable(
                 "$providerLabel snapshot fetch failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
             )
+        } finally {
+            cancellationHandle?.dispose()
         }
     }
 

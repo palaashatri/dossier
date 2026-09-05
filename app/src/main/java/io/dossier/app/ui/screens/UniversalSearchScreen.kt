@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -21,6 +23,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -47,6 +50,7 @@ import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.NeuralTheme
 
 /** The single launch entry for text and photo-based exposure searches. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun UniversalSearchScreen(onSearch: () -> Unit) {
     val focusManager = LocalFocusManager.current
@@ -56,6 +60,8 @@ fun UniversalSearchScreen(onSearch: () -> Unit) {
     var correctedType by rememberSaveable { mutableStateOf<String?>(null) }
     var correctedQuery by rememberSaveable { mutableStateOf<String?>(null) }
     var correctionMenuExpanded by rememberSaveable { mutableStateOf(false) }
+    var correctionMenuPending by rememberSaveable { mutableStateOf(false) }
+    val imeVisible = WindowInsets.isImeVisible
     val photoUri = photoUriString?.let(Uri::parse)
     val detectedSeed = UniversalSeedClassifier.classify(query, photoUriString)
     val ambiguousText = query.trim().isNotBlank() &&
@@ -72,6 +78,17 @@ fun UniversalSearchScreen(onSearch: () -> Unit) {
         }
     }
     val canSearch = effectiveSeed != null
+
+    // The correction control lives inside the scroll container. Wait until the
+    // IME has actually finished hiding before creating the anchored popup so
+    // its bounds are calculated against the restored viewport rather than the
+    // transient, resized viewport underneath the keyboard.
+    LaunchedEffect(correctionMenuPending, imeVisible) {
+        if (correctionMenuPending && !imeVisible) {
+            correctionMenuPending = false
+            correctionMenuExpanded = true
+        }
+    }
 
     fun submit() {
         val seed = effectiveSeed ?: return
@@ -162,7 +179,8 @@ fun UniversalSearchScreen(onSearch: () -> Unit) {
                             // the reduced window, leaving popup items untouchable.
                             focusManager.clearFocus()
                             keyboardController?.hide()
-                            correctionMenuExpanded = true
+                            correctionMenuExpanded = false
+                            correctionMenuPending = true
                         },
                         modifier = Modifier.semantics {
                             contentDescription = "Correct detected seed type"

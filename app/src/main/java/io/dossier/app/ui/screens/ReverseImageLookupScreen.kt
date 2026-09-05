@@ -472,6 +472,88 @@ private fun RenderLookupResult(
         }
     }
 
+    if (result.locationCandidates.isNotEmpty()) {
+        Spacer(Modifier.height(20.dp))
+        SectionHeader("Ranked location candidates")
+        result.locationCandidates.forEach { candidate ->
+            Card(
+                colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.88f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 9.dp)
+                    .border(
+                        1.dp,
+                        when (candidate.evidenceClass) {
+                            ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA,
+                            ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION -> NeuralTheme.Emerald.copy(alpha = 0.5f)
+                            ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING -> NeuralTheme.Crimson.copy(alpha = 0.5f)
+                            else -> NeuralTheme.Cyan.copy(alpha = 0.38f)
+                        },
+                        cardShape
+                    ),
+                shape = cardShape
+            ) {
+                Column(Modifier.padding(15.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            candidate.evidenceClass.name.replace("_", " "),
+                            color = NeuralTheme.Cyan,
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = 1.sp
+                        )
+                        Text(
+                            "${(candidate.confidence * 100).toInt()}%",
+                            color = NeuralTheme.TextSecondary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Text(
+                        candidate.value,
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                    if (candidate.reason.isNotBlank()) {
+                        Text(
+                            candidate.reason,
+                            color = NeuralTheme.TextSecondary,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+
+                    candidate.sourceUrls.firstOrNull { url ->
+                        url.startsWith("http://", ignoreCase = true) ||
+                            url.startsWith("https://", ignoreCase = true)
+                    }?.let { url ->
+                        val target = url
+                        Text(
+                            "View source →",
+                            color = NeuralTheme.Cyan,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            textDecoration = TextDecoration.Underline,
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .padding(top = 8.dp)
+                                .clickable(role = Role.Button) { onNavigateToBrowser(target) }
+                                .semantics { contentDescription = "Open candidate location source $target" }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+
     if (showGps) {
         Spacer(Modifier.height(18.dp))
         SectionHeader("EXIF GPS")

@@ -19,6 +19,7 @@ import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.security.MessageDigest
+import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -30,7 +31,9 @@ data class ProviderExecutionResult(
     val finalUrl: String?,
     val bodyText: String,
     val latencyMs: Long,
-    val attemptCount: Int
+    val attemptCount: Int,
+    /** Response media type captured before bounded text decoding. */
+    val contentType: String? = null
 )
 
 /** Only a directly classified public page may enter the optional renderer. */
@@ -45,9 +48,31 @@ class ProviderExecutionRuntime(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val nanoTime: () -> Long = System::nanoTime,
     private val diagnosticsRecorder: (String, ProviderOutcome, Long) -> Unit =
-        ProviderDiagnosticsRuntime::record
+        ProviderDiagnosticsRuntime::record,
+    /**
+     * Test seam for observing derived-client construction. Production callers
+     * leave this null so clients are built from the supplied base client.
+     */
+    private val callClientFactory: ((Long, Boolean) -> OkHttpClient)? = null
 ) {
     private val cooldowns = ConcurrentHashMap<String, Long>()
+
+    /**
+     * The request policy only overrides timeout values and redirect handling
+     * on the base client. Reuse immutable clients for matching combinations;
+     * keep the cache bounded because imported definitions may contain many
+     * distinct timeout values. The derived clients share the base client's
+     * dispatcher, connection pool, proxy, and TLS configuration through
+     * OkHttpClient.newBuilder().
+     */
+    private val callClients = object : LinkedHashMap<CallClientKey, OkHttpClient>(
+        CALL_CLIENT_CACHE_MAX_ENTRIES + 1,
+        0.75f,
+        true
+    ) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<CallClientKey, OkHttpClient>?): Boolean =
+            size > CALL_CLIENT_CACHE_MAX_ENTRIES
+    }
 
     fun setCooldown(providerId: String, durationMs: Long) {
         if (durationMs > 0L) {
@@ -99,7 +124,8 @@ class ProviderExecutionRuntime(
                 finalUrl = null,
                 bodyText = "",
                 latencyMs = latency,
-                attemptCount = 0
+                attemptCount = 0,
+                contentType = null
             )
         }
 
@@ -110,6 +136,7 @@ class ProviderExecutionRuntime(
         var finalStatusCode: Int? = null
         var finalUrl: String? = null
         var finalBody = ""
+        var finalContentType: String? = null
         var totalLatencyMs = 0L
         var completedAttempt = 0
 
@@ -122,6 +149,7 @@ class ProviderExecutionRuntime(
             finalStatusCode = null
             finalUrl = null
             finalBody = ""
+            finalContentType = null
 
             try {
                 scheduler.execute(safeSchedulingKey, policy.minimumIntervalMs) providerRequest@{
@@ -140,13 +168,8 @@ class ProviderExecutionRuntime(
                         .header("Accept-Language", "en-US,en;q=0.8")
                         .build()
 
-                    val callClient = client.newBuilder()
-                        .connectTimeout(minOf(policy.timeoutMs, 5_000L), TimeUnit.MILLISECONDS)
-                        .readTimeout(policy.timeoutMs, TimeUnit.MILLISECONDS)
-                        .callTimeout(policy.timeoutMs, TimeUnit.MILLISECONDS)
-                        .followRedirects(provider.existenceRules?.followRedirects != false)
-                        .followSslRedirects(provider.existenceRules?.followRedirects != false)
-                        .build()
+                    val followRedirects = provider.existenceRules?.followRedirects != false
+                    val callClient = callClientFor(policy.timeoutMs, followRedirects)
 
                     val call = callClient.newCall(request)
                     val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion(
@@ -159,6 +182,7 @@ class ProviderExecutionRuntime(
                         call.execute().use { response ->
                             finalStatusCode = response.code
                             finalUrl = response.request.url.toString()
+                            finalContentType = response.body?.contentType()?.toString()
                             val rawBody = readBoundedBody(response.body, cappedBodyChars)
                             finalBody = rawBody
                             val observation = ProviderResponseObservation(
@@ -265,7 +289,8 @@ class ProviderExecutionRuntime(
             finalUrl = finalUrl,
             bodyText = finalBody,
             latencyMs = totalLatencyMs,
-            attemptCount = completedAttempt
+            attemptCount = completedAttempt,
+            contentType = finalContentType
         )
     }
 
@@ -293,6 +318,23 @@ class ProviderExecutionRuntime(
         else -> ProviderOutcome.NetworkFailure
     }
 
+    private fun callClientFor(timeoutMs: Long, followRedirects: Boolean): OkHttpClient {
+        val key = CallClientKey(timeoutMs, followRedirects)
+        synchronized(callClients) {
+            callClients[key]?.let { return it }
+            val created = callClientFactory?.invoke(timeoutMs, followRedirects)
+                ?: client.newBuilder()
+                    .connectTimeout(minOf(timeoutMs, 5_000L), TimeUnit.MILLISECONDS)
+                    .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                    .callTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                    .followRedirects(followRedirects)
+                    .followSslRedirects(followRedirects)
+                    .build()
+            callClients[key] = created
+            return created
+        }
+    }
+
     private fun normalize(value: String): String {
         val normalized = value.trim().lowercase()
         return normalized.takeIf {
@@ -303,6 +345,8 @@ class ProviderExecutionRuntime(
     companion object {
         const val USER_AGENT = "Dossier/0.1 authorized-assessment"
         const val MAX_BODY_CHARS = 1_000_000
+        /** Maximum number of timeout/redirect client variants retained per runtime. */
+        const val CALL_CLIENT_CACHE_MAX_ENTRIES = 16
         private val providerIdPattern = Regex("^[a-z0-9]+(?:-[a-z0-9]+)*$")
         private val schedulingKeyPattern = Regex("^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
 
@@ -406,6 +450,13 @@ class ProviderExecutionRuntime(
             .readTimeout(5, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
+            .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+            .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
             .build()
     }
+
+    private data class CallClientKey(
+        val timeoutMs: Long,
+        val followRedirects: Boolean
+    )
 }

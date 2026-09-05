@@ -5,16 +5,23 @@ import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.toExposureLedger
+import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
+import io.dossier.app.domain.discovery.TypedSeedKind
+import io.dossier.app.domain.discovery.TypedSeedOrigin
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.place.MediaIntelligenceSession
 import io.dossier.app.domain.place.MediaIntelligenceSnapshot
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -202,6 +209,155 @@ class MediaEvidenceAdapterTest {
     }
 
     @Test
+    fun legacyLocationObservationsReceiveExplicitClassesWithoutChangingSourceStates() {
+        val result = sampleResult().copy(
+            gps = "12.345,67.890",
+            resolvedLocation = "Cafe Example, Example City",
+            labels = listOf(ReverseImageLookupResult.ImageLabel("Cafe", 0.81f)),
+            webEvidence = listOf(
+                ReverseImageLookupResult.WebEvidence(
+                    title = "Cafe directory",
+                    snippet = "A public image-search result",
+                    url = "https://directory.example.test/cafe",
+                    origin = ReverseImageLookupResult.WebEvidenceOrigin.ImageSearch
+                ),
+                ReverseImageLookupResult.WebEvidence(
+                    title = "Coordinate corroboration",
+                    snippet = "The EXIF point reverse-geocodes to Cafe Example.",
+                    url = "https://www.openstreetmap.org/?mlat=12.345&mlon=67.890",
+                    origin = ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration
+                )
+            )
+        )
+
+        val collection = result.toEvidenceCollection(
+            mediaSourceUri = "content://example/photo",
+            retrievedAtEpochMillis = 123L
+        )
+        val gps = collection.evidence.single { it.value == result.gps }
+        assertEquals(
+            ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA,
+            gps.locationEvidenceClass
+        )
+        assertEquals(EvidenceState.Observed, gps.state)
+        assertEquals("Embedded GPS metadata from the selected photo", gps.locationEvidenceReason)
+
+        val resolved = collection.evidence.single { it.value == result.resolvedLocation }
+        assertEquals(
+            ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION,
+            resolved.locationEvidenceClass
+        )
+        assertEquals(EvidenceState.Observed, resolved.state)
+
+        val imageSearch = collection.evidence.single {
+            it.sourceUrl == "https://directory.example.test/cafe"
+        }
+        assertEquals(
+            ReverseImageLookupResult.LocationEvidenceClass.LIKELY_LOCATION,
+            imageSearch.locationEvidenceClass
+        )
+        assertEquals(EvidenceState.Candidate, imageSearch.state)
+        assertEquals(ExposureSourceClassification.PUBLIC_WEB, imageSearch.sourceClassification)
+
+        val geoEvidence = collection.evidence.single {
+            it.kind == EvidenceKind.PublicSearchEvidence &&
+            it.sourceUrl?.startsWith("https://www.openstreetmap.org/") == true
+        }
+        assertEquals(ExposureSourceClassification.AUTHORIZED_API, geoEvidence.sourceClassification)
+
+        val localLabel = collection.evidence.single { it.value == "Cafe" }
+        assertNull(localLabel.locationEvidenceClass)
+        assertEquals(EvidenceReliability.LocalDerived, localLabel.reliability)
+        assertTrue(collection.evidence.none {
+            it.kind == EvidenceKind.Location && it.value == "Cafe"
+        })
+
+        val ledgerFacts = collection.toExposureLedger().facts
+        assertEquals(
+            ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA,
+            ledgerFacts.single { it.exactValue == result.gps }.locationEvidenceClass
+        )
+        assertEquals(
+            ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION,
+            ledgerFacts.single { it.exactValue == result.resolvedLocation }.locationEvidenceClass
+        )
+    }
+
+    @Test
+    fun explicitLocationCandidatesRetainReasonSupportingIdsAndConflictState() {
+        val candidates = listOf(
+            ReverseImageLookupResult.LocationCandidate(
+                value = "12.345,67.890",
+                evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA,
+                reason = "GPS coordinates embedded by the camera",
+                evidenceIds = listOf("gps-evidence"),
+                sourceUrls = listOf("content://example/photo")
+            ),
+            ReverseImageLookupResult.LocationCandidate(
+                value = "Cafe Example, Example City",
+                evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING,
+                reason = "Public page disagrees with the embedded coordinates",
+                evidenceIds = listOf("page-evidence"),
+                sourceUrls = listOf("https://pages.example.test/cafe"),
+                confidence = 0.2f
+            )
+        )
+        val collection = sampleResult().copy(locationCandidates = candidates)
+            .toEvidenceCollection(retrievedAtEpochMillis = 99L)
+
+        val exact = collection.evidence.single { it.value == candidates[0].value }
+        assertEquals(candidates[0].reason, exact.locationEvidenceReason)
+        assertEquals(candidates[0].evidenceIds, exact.supportingEvidenceIds)
+        assertEquals(EvidenceState.Observed, exact.state)
+
+        val conflict = collection.evidence.single { it.value == candidates[1].value }
+        assertEquals(
+            ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING,
+            conflict.locationEvidenceClass
+        )
+        assertEquals(EvidenceState.Conflicting, conflict.state)
+        assertEquals(candidates[1].reason, conflict.snippet)
+
+        val conflictFact = collection.toExposureLedger().facts.single {
+            it.exactValue == candidates[1].value
+        }
+        assertEquals(
+            ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING,
+            conflictFact.locationEvidenceClass
+        )
+        assertEquals(candidates[1].reason, conflictFact.locationEvidenceReason)
+        assertEquals(candidates[1].evidenceIds, conflictFact.supportingEvidenceIds)
+    }
+
+    @Test
+    fun locationCandidatesRoundTripAndLegacyResultsUseEmptyDefaults() {
+        val candidate = ReverseImageLookupResult.LocationCandidate(
+            value = "Example City",
+            evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.LIKELY_LOCATION,
+            reason = "A public source page mentions the place",
+            evidenceIds = listOf("source-evidence"),
+            sourceUrls = listOf("https://pages.example.test/city")
+        )
+        val result = sampleResult().copy(locationCandidates = listOf(candidate))
+        val json = Json { encodeDefaults = true; ignoreUnknownKeys = true }
+        val decoded = json.decodeFromString<ReverseImageLookupResult>(json.encodeToString(result))
+        assertEquals(listOf(candidate), decoded.locationCandidates)
+
+        val legacy = """{
+          "gps": null,
+          "extractedText": null,
+          "labels": [],
+          "faceDetected": false,
+          "faceWarning": null,
+          "resolvedLocation": null,
+          "mapsUrl": null,
+          "webEvidence": [],
+          "visualMatches": []
+        }"""
+        assertTrue(json.decodeFromString<ReverseImageLookupResult>(legacy).locationCandidates.isEmpty())
+    }
+
+    @Test
     fun candidateStatesAndPageRelationsRemainTruthful() {
         val page = "https://pages.example.test/observed"
         val indexed = candidateState("indexed", ReverseImageLookupResult.ImageCandidateState.Indexed)
@@ -255,6 +411,173 @@ class MediaEvidenceAdapterTest {
 
         val relation = collection.relationships.single { it.relation == "visual_match_observed" }
         assertTrue(relation.evidenceIds.contains("review-evidence"))
+    }
+
+    @Test
+    fun unknownOriginWebEvidenceCannotUpgradeLegacyResolvedLocation() {
+        val result = sampleResult().copy(
+            resolvedLocation = "Example City",
+            webEvidence = listOf(
+                ReverseImageLookupResult.WebEvidence(
+                    title = "Unclassified location result",
+                    snippet = "Provider origin was not recorded",
+                    url = "https://unknown.example.test/location",
+                    origin = ReverseImageLookupResult.WebEvidenceOrigin.Unknown
+                )
+            )
+        )
+
+        val location = result.toEvidenceCollection(
+            mediaSourceUri = "content://example/photo"
+        ).evidence.single { it.value == "Example City" }
+
+        assertEquals(
+            ReverseImageLookupResult.LocationEvidenceClass.VISUAL_GUESS,
+            location.locationEvidenceClass
+        )
+        assertEquals(EvidenceState.Candidate, location.state)
+        assertEquals(EvidenceReliability.LocalDerived, location.reliability)
+        assertEquals("content://example/photo", location.sourceUrl)
+    }
+
+    @Test
+    fun reverseImageSourcePagesBecomeObservedTypedUrlPivotsWithoutPromotingImages() {
+        val page = "https://pages.example.test/repost"
+        val image = "https://images.example.test/repost.jpg"
+        val candidate = ReverseImageLookupResult.ImageCandidateProvenance(
+            id = "candidate-page-pivot",
+            title = "Indexed repost",
+            imageUrl = image,
+            sourcePageUrl = page,
+            source = "fixture-index",
+            acquisitionQuery = "Jane Example",
+            state = ReverseImageLookupResult.ImageCandidateState.Indexed
+        )
+        val collection = sampleResult().copy(visualCandidates = listOf(candidate))
+            .toEvidenceCollection(
+                discoveryPath = listOf("seed:photo"),
+                retrievedAtEpochMillis = 17L
+            )
+
+        val imageEvidence = collection.evidence.single { it.value == image }
+        assertEquals(EvidenceState.Candidate, imageEvidence.state)
+
+        val pageEvidence = collection.evidence.single { it.value == page }
+        assertEquals(EvidenceKind.Url, pageEvidence.kind)
+        assertEquals(EvidenceState.Observed, pageEvidence.state)
+        assertEquals(EvidenceReliability.SearchEngineCandidate, pageEvidence.reliability)
+        assertEquals(ExposureSourceClassification.PUBLIC_WEB, pageEvidence.sourceClassification)
+        assertEquals(page, pageEvidence.sourceUrl)
+        assertEquals(17L, pageEvidence.observedAtEpochMillis)
+        assertTrue(pageEvidence.supportingEvidenceIds.contains(imageEvidence.id))
+
+        val typed = TypedSeedEvidenceAdapter.fromCollection(collection)
+        val pageSeed = typed.admittedSeeds.single { it.exactValue == page }
+        assertEquals(TypedSeedKind.Url, pageSeed.kind)
+        assertEquals(EvidenceState.Observed, pageSeed.evidenceState)
+        assertEquals(TypedSeedOrigin.Evidence, pageSeed.origin)
+        assertEquals(listOf(pageEvidence.id), pageSeed.evidenceIds)
+        assertTrue(typed.admittedSeeds.none { it.exactValue == image })
+    }
+
+    @Test
+    fun rawImageAndUnsupportedSourcePageUrlsDoNotBecomeFetchPivots() {
+        val rawImage = "https://images.example.test/raw.jpg"
+        val document = "https://pages.example.test/public-resume.pdf"
+        val archive = "https://web.archive.org/web/20240101000000/https://example.test/profile"
+        val rawImageCandidate = candidateState("raw", ReverseImageLookupResult.ImageCandidateState.Indexed)
+            .copy(sourcePageUrl = rawImage, imageUrl = rawImage)
+        val documentCandidate = candidateState("document", ReverseImageLookupResult.ImageCandidateState.Indexed)
+            .copy(sourcePageUrl = document)
+        val archiveCandidate = candidateState("archive", ReverseImageLookupResult.ImageCandidateState.Indexed)
+            .copy(sourcePageUrl = archive)
+        val unsafeCandidate = candidateState("unsafe", ReverseImageLookupResult.ImageCandidateState.Indexed)
+            .copy(sourcePageUrl = "http://127.0.0.1/private")
+
+        val collection = sampleResult().copy(
+            visualCandidates = listOf(
+                rawImageCandidate,
+                documentCandidate,
+                archiveCandidate,
+                unsafeCandidate
+            )
+        ).toEvidenceCollection()
+
+        assertTrue(collection.evidence.any {
+            it.value == rawImage && it.kind == EvidenceKind.PublicImageEvidence
+        })
+        assertTrue(collection.evidence.none { it.value == rawImage && it.kind != EvidenceKind.PublicImageEvidence })
+        assertEquals(EvidenceKind.Document, collection.evidence.single { it.value == document }.kind)
+        assertEquals(EvidenceKind.Archive, collection.evidence.single { it.value == archive }.kind)
+        assertEquals(
+            ExposureSourceClassification.PUBLIC_DOCUMENT,
+            collection.evidence.single { it.value == document }.sourceClassification
+        )
+        assertEquals(
+            ExposureSourceClassification.ARCHIVE,
+            collection.evidence.single { it.value == archive }.sourceClassification
+        )
+        assertTrue(collection.evidence.none { it.value == "http://127.0.0.1/private" })
+
+        val typed = TypedSeedEvidenceAdapter.fromCollection(collection)
+        assertTrue(typed.admittedSeeds.any { it.kind == TypedSeedKind.Document && it.exactValue == document })
+        assertTrue(typed.admittedSeeds.any { it.kind == TypedSeedKind.Archive && it.exactValue == archive })
+        assertTrue(typed.admittedSeeds.none { it.exactValue == rawImage })
+        assertTrue(typed.admittedSeeds.none { it.exactValue == "http://127.0.0.1/private" })
+    }
+
+    @Test
+    fun onlyExactAndCorroboratedLocationEvidenceEntersTypedFrontier() {
+        val candidates = listOf(
+            ReverseImageLookupResult.LocationCandidate(
+                value = "12.345,67.890",
+                evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA,
+                reason = "Embedded coordinates",
+                sourceUrls = listOf("content://example/photo")
+            ),
+            ReverseImageLookupResult.LocationCandidate(
+                value = "Cafe Example, Example City",
+                evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION,
+                reason = "Independent geocoder corroboration",
+                sourceUrls = listOf("https://geo.example.test/place")
+            ),
+            ReverseImageLookupResult.LocationCandidate(
+                value = "Example City",
+                evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.LIKELY_LOCATION,
+                reason = "Indexed image-search clue"
+            ),
+            ReverseImageLookupResult.LocationCandidate(
+                value = "Museum",
+                evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.VISUAL_GUESS,
+                reason = "On-device visual label"
+            ),
+            ReverseImageLookupResult.LocationCandidate(
+                value = "Other City",
+                evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING,
+                reason = "Conflicts with embedded coordinates"
+            )
+        )
+        val collection = sampleResult().copy(locationCandidates = candidates)
+            .toEvidenceCollection(mediaSourceUri = "content://example/photo")
+        val typed = TypedSeedEvidenceAdapter.fromCollection(collection)
+
+        val exact = typed.admittedSeeds.single { it.exactValue == "12.345,67.890" }
+        assertEquals(TypedSeedKind.Location, exact.kind)
+        assertEquals(EvidenceState.Observed, exact.evidenceState)
+        assertEquals(TypedSeedOrigin.LocalAnalysis, exact.origin)
+        assertEquals(
+            ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA,
+            exact.locationEvidenceClass
+        )
+        val corroborated = typed.admittedSeeds.single { it.exactValue == "Cafe Example, Example City" }
+        assertEquals(TypedSeedKind.Location, corroborated.kind)
+        assertEquals(EvidenceState.Observed, corroborated.evidenceState)
+        assertEquals(TypedSeedOrigin.Evidence, corroborated.origin)
+        assertEquals(
+            ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION,
+            corroborated.locationEvidenceClass
+        )
+        assertTrue(typed.admittedSeeds.none { it.exactValue in setOf("Example City", "Museum", "Other City") })
     }
 
     @Test
@@ -377,6 +700,7 @@ class MediaEvidenceAdapterTest {
         val evidence = collection.evidence.single { it.sourceUrl == unknown.url }
         assertEquals(EvidenceKind.PublicSearchEvidence, evidence.kind)
         assertEquals(EvidenceReliability.Unknown, evidence.reliability)
+        assertNull(evidence.locationEvidenceClass)
         assertEquals(
             ExposureSourceClassification.UNKNOWN_ORIGIN,
             collection.toExposureLedger().facts.single().sourceClassification

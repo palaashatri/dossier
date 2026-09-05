@@ -5,9 +5,18 @@ import io.dossier.app.domain.evidence.ExposureFactKind
 import io.dossier.app.domain.evidence.ExposureLedgerPolicy
 import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.util.UrlNormalizer
+import io.dossier.app.domain.model.ReverseImageLookupResult
 import kotlinx.serialization.Serializable
 import java.net.URI
 import java.util.Locale
+
+private fun ReverseImageLookupResult.LocationEvidenceClass.toTypedSeedEvidenceState(): EvidenceState = when (this) {
+    ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA,
+    ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION -> EvidenceState.Observed
+    ReverseImageLookupResult.LocationEvidenceClass.LIKELY_LOCATION,
+    ReverseImageLookupResult.LocationEvidenceClass.VISUAL_GUESS -> EvidenceState.Candidate
+    ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING -> EvidenceState.Conflicting
+}
 
 /** Typed values that may be admitted to the recursive discovery frontier. */
 @Serializable
@@ -21,7 +30,9 @@ enum class TypedSeedKind {
     Photo,
     Image,
     Username,
-    Name
+    Name,
+    /** A photo-derived place observation; retained for bounded diagnostics only. */
+    Location
 }
 
 /** Where an admitted value came from; this is separate from verification state. */
@@ -82,7 +93,9 @@ data class TypedSeed(
     val evidenceIds: List<String> = emptyList(),
     val sourceUrl: String? = null,
     val discoveryPath: List<String> = emptyList(),
-    val origin: TypedSeedOrigin = if (isVerified) TypedSeedOrigin.Evidence else TypedSeedOrigin.UserInput
+    val origin: TypedSeedOrigin = if (isVerified) TypedSeedOrigin.Evidence else TypedSeedOrigin.UserInput,
+    /** Explicit photo-location evidence class, when this is a Location seed. */
+    val locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass? = null
 ) {
     /** Naming aliases keep source/verification terminology explicit to callers. */
     val source: TypedSeedOrigin get() = origin
@@ -98,9 +111,21 @@ data class TypedSeed(
             "Candidate seeds must retain Candidate evidence state."
         }
         require(
+            kind != TypedSeedKind.Location ||
+                locationEvidenceClass == null ||
+                locationEvidenceClass.toTypedSeedEvidenceState() == evidenceState
+        ) {
+            "Location seed evidence class and state must agree."
+        }
+        require(
             origin !in setOf(TypedSeedOrigin.Import, TypedSeedOrigin.LocalAnalysis) ||
                 (evidenceState == EvidenceState.Verified &&
-                    sourceClassification == ExposureSourceClassification.LOCAL_IMPORT)
+                    sourceClassification == ExposureSourceClassification.LOCAL_IMPORT) ||
+                (kind == TypedSeedKind.Location &&
+                    origin == TypedSeedOrigin.LocalAnalysis &&
+                    evidenceState == EvidenceState.Observed &&
+                    sourceClassification == ExposureSourceClassification.LOCAL_IMPORT &&
+                    locationEvidenceClass == ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA)
         ) {
             "Import and local-analysis seeds must be verified LOCAL_IMPORT evidence."
         }
@@ -186,7 +211,8 @@ data class TypedSeedAdmissionConfig(
             TypedSeedKind.Photo to 2,
             TypedSeedKind.Image to 2,
             TypedSeedKind.Username to 5,
-            TypedSeedKind.Name to 5
+            TypedSeedKind.Name to 5,
+            TypedSeedKind.Location to 8
         )
     }
 }
@@ -254,11 +280,12 @@ class TypedSeedAdmissionModel(
         sourceClassification: ExposureSourceClassification = origin.defaultSourceClassification(),
         evidenceIds: List<String> = emptyList(),
         sourceUrl: String? = null,
-        discoveryPath: List<String> = emptyList()
+        discoveryPath: List<String> = emptyList(),
+        locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass? = null
     ): Boolean {
         if (depth !in 0..config.maxDepth) return false
         val normalized = normalize(kind, rawValue) ?: return false
-        if (!isSafe(origin, evidenceState, sourceClassification)) return false
+        if (!isSafe(kind, origin, evidenceState, sourceClassification, locationEvidenceClass)) return false
 
         val key = "${kind.name}:$normalized"
         if (!visited.add(key)) {
@@ -269,7 +296,8 @@ class TypedSeedAdmissionModel(
                 evidenceIds = evidenceIds,
                 sourceUrl = sourceUrl,
                 discoveryPath = discoveryPath,
-                origin = origin
+                origin = origin,
+                locationEvidenceClass = locationEvidenceClass
             )
             return false
         }
@@ -299,7 +327,8 @@ class TypedSeedAdmissionModel(
                 .filter(String::isNotBlank)
                 .distinct()
                 .take(TypedSeed.MAX_DISCOVERY_PATH_STEPS),
-            origin = origin
+            origin = origin,
+            locationEvidenceClass = locationEvidenceClass
         )
         queue.addLast(record)
         admitted += record
@@ -316,7 +345,8 @@ class TypedSeedAdmissionModel(
         evidenceIds: List<String>,
         sourceUrl: String?,
         discoveryPath: List<String>,
-        origin: TypedSeedOrigin
+        origin: TypedSeedOrigin,
+        locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass?
     ) {
         val index = admitted.indexOfFirst { "${it.kind.name}:${it.normalizedValue}" == key }
         if (index < 0) return
@@ -341,7 +371,11 @@ class TypedSeedAdmissionModel(
                 .filter(String::isNotBlank)
                 .distinct()
                 .take(TypedSeed.MAX_DISCOVERY_PATH_STEPS),
-            origin = if (existing.origin == TypedSeedOrigin.UserInput) existing.origin else origin
+            origin = if (existing.origin == TypedSeedOrigin.UserInput) existing.origin else origin,
+            locationEvidenceClass = strongerLocationEvidenceClass(
+                existing.locationEvidenceClass,
+                locationEvidenceClass
+            )
         )
         admitted[index] = merged
         val pendingIndex = queue.indexOfFirst { "${it.kind.name}:${it.normalizedValue}" == key }
@@ -365,9 +399,11 @@ class TypedSeedAdmissionModel(
     }
 
     private fun isSafe(
+        kind: TypedSeedKind,
         origin: TypedSeedOrigin,
         evidenceState: EvidenceState,
-        sourceClassification: ExposureSourceClassification
+        sourceClassification: ExposureSourceClassification,
+        locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass?
     ): Boolean {
         // Breach membership/derived rows are retained as evidence, but never
         // promoted into recursive pivots. They do not establish public
@@ -378,6 +414,16 @@ class TypedSeedAdmissionModel(
             return false
         }
         if (origin == TypedSeedOrigin.Import || origin == TypedSeedOrigin.LocalAnalysis) {
+            // Exact EXIF coordinates are trusted as a local observation, not
+            // as an identity assertion. Keep the observation in the typed
+            // frontier (where no public executor exists) without upgrading
+            // it to Verified.
+            if (kind == TypedSeedKind.Location &&
+                origin == TypedSeedOrigin.LocalAnalysis &&
+                evidenceState == EvidenceState.Observed &&
+                sourceClassification == ExposureSourceClassification.LOCAL_IMPORT &&
+                locationEvidenceClass == ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA
+            ) return true
             if (evidenceState != EvidenceState.Verified ||
                 sourceClassification != ExposureSourceClassification.LOCAL_IMPORT
             ) {
@@ -386,6 +432,33 @@ class TypedSeedAdmissionModel(
         }
         // Initial user values are authorized pivots even before a fetch verifies them.
         if (origin == TypedSeedOrigin.UserInput) return true
+        // A directly observed public URL/document/archive is a navigation
+        // pivot, not an identity assertion. It may be fetched by the bounded
+        // public-page executor, while stricter public-search expansion still
+        // requires Verified evidence. Exact PII and other values remain
+        // Verified-only below.
+        if (origin == TypedSeedOrigin.Evidence &&
+            evidenceState == EvidenceState.Observed &&
+            kind in setOf(
+                TypedSeedKind.Url,
+                TypedSeedKind.Domain,
+                TypedSeedKind.Document,
+                TypedSeedKind.Archive,
+                TypedSeedKind.Location
+            ) &&
+            sourceClassification in setOf(
+                ExposureSourceClassification.PUBLIC_WEB,
+                ExposureSourceClassification.PUBLIC_PROFILE,
+                ExposureSourceClassification.PUBLIC_DOCUMENT,
+                ExposureSourceClassification.PUBLIC_RECORD,
+                ExposureSourceClassification.ARCHIVE,
+                ExposureSourceClassification.AUTHORIZED_API
+            )
+        ) {
+            if (kind != TypedSeedKind.Location ||
+                locationEvidenceClass == ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION
+            ) return true
+        }
         if (evidenceState != EvidenceState.Verified) return false
         return when (origin) {
             TypedSeedOrigin.Evidence -> sourceClassification !in setOf(
@@ -416,6 +489,7 @@ class TypedSeedAdmissionModel(
             TypedSeedKind.Domain -> normalizeDomain(trimmed)
             TypedSeedKind.Photo,
             TypedSeedKind.Image -> normalizeMedia(trimmed)
+            TypedSeedKind.Location -> normalizeLocation(trimmed)
             TypedSeedKind.Username -> trimmed.removePrefix("@").lowercase(Locale.ROOT)
                 .takeIf { it.isNotBlank() && it.length <= 128 && it.none(Char::isWhitespace) }
             TypedSeedKind.Name -> trimmed.replace(Regex("\\s+"), " ").takeIf { it.length <= 240 }
@@ -483,6 +557,10 @@ class TypedSeedAdmissionModel(
         }
     }
 
+    private fun normalizeLocation(value: String): String? =
+        ExposureLedgerPolicy.normalizeValue(ExposureFactKind.Location, value)
+            .takeIf { it.isNotBlank() && it.length <= 512 }
+
     private fun containsUnsafeCharacters(value: String): Boolean = value.any { it.isISOControl() }
 
     private val PHONE_ALLOWED = Regex("\\+?[0-9\\s().-]+")
@@ -503,5 +581,26 @@ class TypedSeedAdmissionModel(
         TypedSeedOrigin.LocalAnalysis -> ExposureSourceClassification.LOCAL_IMPORT
         TypedSeedOrigin.Candidate,
         TypedSeedOrigin.Unknown -> ExposureSourceClassification.UNKNOWN_ORIGIN
+    }
+
+    private fun strongerLocationEvidenceClass(
+        first: ReverseImageLookupResult.LocationEvidenceClass?,
+        second: ReverseImageLookupResult.LocationEvidenceClass?
+    ): ReverseImageLookupResult.LocationEvidenceClass? {
+        if (first == null) return second
+        if (second == null) return first
+        val firstRank = locationEvidenceClassRank(first)
+        val secondRank = locationEvidenceClassRank(second)
+        return if (secondRank > firstRank) second else first
+    }
+
+    private fun locationEvidenceClassRank(
+        evidenceClass: ReverseImageLookupResult.LocationEvidenceClass
+    ): Int = when (evidenceClass) {
+        ReverseImageLookupResult.LocationEvidenceClass.VISUAL_GUESS -> 1
+        ReverseImageLookupResult.LocationEvidenceClass.LIKELY_LOCATION -> 2
+        ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION -> 3
+        ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA -> 4
+        ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING -> 5
     }
 }

@@ -6,6 +6,7 @@ import io.dossier.app.data.platform.resolveProfileUrl
 import io.dossier.app.data.web.PublicImageSearchService
 import io.dossier.app.data.web.DiscoveryHttpPolicy
 import io.dossier.app.data.web.PublicSearchDiscoveryService
+import io.dossier.app.data.web.TypedSeedPublicFetchExecutor
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ProviderExecutionRuntime
 import io.dossier.app.domain.discovery.ProviderPlanFingerprint
@@ -19,6 +20,7 @@ import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
 import io.dossier.app.domain.discovery.TypedSeedSafety
 import io.dossier.app.domain.discovery.TypedSeedKind
+import io.dossier.app.domain.discovery.TypedSeed
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceReliability
@@ -27,6 +29,7 @@ import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.toEvidence
+import io.dossier.app.domain.evidence.withResolvedRelationshipEvidence
 import io.dossier.app.domain.model.*
 import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.username.UsernameVariant
@@ -41,10 +44,13 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import android.content.Context
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.selects.select
@@ -53,7 +59,9 @@ import kotlinx.coroutines.selects.select
 class ProfileScanner(
     private val context: Context,
     private val piiExtractor: PiiExtractor,
-    private val variantGenerator: UsernameVariantGenerator
+    private val variantGenerator: UsernameVariantGenerator,
+    /** Injectable for deterministic frontier fixtures; production uses the shared runtime. */
+    private val typedSeedExecutorOverride: TypedSeedPublicFetchExecutor? = null
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -63,9 +71,22 @@ class ProfileScanner(
         .build()
 
     private val providerRuntime = ProviderExecutionRuntime(client)
+    /** Evidence emitted by the bounded typed URL/document/archive pass. */
+    private var typedSeedExecutionEvidence: EvidenceCollection = EvidenceCollection()
 
-    suspend fun scanIdentity(input: IdentityInput, deepResearch: Boolean = false, requestId: String? = null): List<ProfileScanResult> {
+    internal fun typedSeedExecutionEvidence(): EvidenceCollection = typedSeedExecutionEvidence
+
+    suspend fun scanIdentity(
+        input: IdentityInput,
+        deepResearch: Boolean = false,
+        requestId: String? = null,
+        checkpointOwnerId: String? = null,
+        checkpointGeneration: String? = null,
+        planFingerprint: String? = null,
+        mediaEvidence: EvidenceCollection = EvidenceCollection()
+    ): List<ProfileScanResult> {
         val scanId = ScanCoordinatorRuntime.claimProviderScanId()
+        typedSeedExecutionEvidence = EvidenceCollection()
         val results = mutableListOf<ProfileScanResult>()
 
         // Public search/image observations are resumable only for a durable
@@ -269,7 +290,7 @@ class ProfileScanner(
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (_: Throwable) {
+        } catch (_: Exception) {
             emptyList()
         } finally {
             // Persist admitted/rejected state even when a non-cancellation
@@ -277,6 +298,23 @@ class ProfileScanner(
             // the durable queue remains resumable on the next request.
             frontierStore?.save(pivotFrontier)
         }
+
+        // General typed frontier: every user/evidence seed is retained, while
+        // URL/document/archive pages are executed one bounded hop at a time.
+        // Newly verified links/PII are admitted back into the same queue, so a
+        // URL A -> URL B -> email/document/archive chain survives retries.
+        val typedSeedInputEvidence = (initialResults + pivotResults).toEvidenceCollection(input)
+            .merge(mediaEvidence)
+        typedSeedExecutionEvidence = runTypedSeedFrontier(
+            input = input,
+            deepResearch = deepResearch,
+            requestId = requestId,
+            checkpointOwnerId = checkpointOwnerId,
+            checkpointGeneration = checkpointGeneration,
+            planFingerprint = planFingerprint,
+            seedEvidence = typedSeedInputEvidence,
+            scanId = scanId
+        )
 
         // ---- Pass 3: public-search discovery. This broadens coverage beyond
         // deterministic username templates by querying public indexes for the
@@ -290,14 +328,20 @@ class ProfileScanner(
                 val confirmedUrls = verifiedResults
                     .map { PublicSearchDiscoveryService.canonicalUrlKey(it.candidate.url) }
                     .toSet()
-                val discovered = runPublicSearchPass(input, confirmedUrls, deepResearch, verifiedResults)
+                val discovered = runPublicSearchPass(
+                    input = input,
+                    alreadyConfirmedUrls = confirmedUrls,
+                    deepResearch = deepResearch,
+                    verifiedResults = verifiedResults,
+                    typedSeedEvidence = typedSeedInputEvidence.merge(typedSeedExecutionEvidence)
+                )
                 // Persist an empty list only after the pass completed normally;
                 // exceptions below remain a cache miss and retry honestly.
                 payloadStore?.save(ScanPayloadStage.PublicSearch, discovered)
                 discovered
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Throwable) {
+            } catch (_: Exception) {
                 emptyList()
             }
 
@@ -311,7 +355,7 @@ class ProfileScanner(
                 discovered
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Throwable) {
+            } catch (_: Exception) {
                 emptyList()
             }
 
@@ -567,6 +611,331 @@ class ProfileScanner(
     }
 
     /**
+     * Drains the canonical typed-seed frontier with a bounded rolling scheduler.
+     * A small number of network operations can overlap, while newly available
+     * queue slots are filled as soon as any operation completes.  Results are
+     * committed in launch order so evidence, admission, and durable snapshots
+     * are deterministic even when provider latency differs.
+     */
+    internal suspend fun runTypedSeedFrontier(
+        input: IdentityInput,
+        deepResearch: Boolean,
+        requestId: String?,
+        checkpointOwnerId: String?,
+        checkpointGeneration: String?,
+        planFingerprint: String?,
+        seedEvidence: EvidenceCollection,
+        scanId: ScanId
+    ): EvidenceCollection {
+        val durable = requestId != null &&
+            checkpointOwnerId != null &&
+            checkpointGeneration != null &&
+            BackgroundScanWorker.isCanonicalUuid(requestId) &&
+            BackgroundScanWorker.isCanonicalUuid(checkpointOwnerId) &&
+            BackgroundScanWorker.isCanonicalUuid(checkpointGeneration) &&
+            ProviderPlanFingerprint.isValid(planFingerprint)
+        val config = TypedSeedFrontierConfig(
+            maxDepth = if (deepResearch) {
+                TypedSeedFrontierConfig.DEFAULT_MAX_DEPTH
+            } else {
+                (TypedSeedFrontierConfig.DEFAULT_MAX_DEPTH - 1).coerceAtLeast(1)
+            },
+            maxTotalSeeds = if (deepResearch) {
+                TypedSeedFrontierConfig.DEFAULT_MAX_TOTAL_SEEDS
+            } else {
+                32
+            }
+        )
+        val localRequestId = requestId
+            ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
+            ?: EPHEMERAL_TYPED_FRONTIER_REQUEST_ID
+
+        // Durable workers receive the immutable plan commitment from the
+        // encrypted request record. Interactive scans do not persist a typed
+        // frontier and therefore do not need a plan binding.
+        if (requestId != null && checkpointOwnerId != null && checkpointGeneration != null && !durable) {
+            throw ScanExecutionException(ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE)
+        }
+
+        val frontier = if (durable) {
+            val loaded = BackgroundScanManager.loadTypedFrontierIfOwner(
+                context = context,
+                workerId = checkpointOwnerId!!,
+                generation = checkpointGeneration!!,
+                requestId = requestId!!,
+                config = config,
+                planFingerprint = planFingerprint!!
+            )
+            when (loaded) {
+                is TypedSeedFrontierLoadResult.Available -> loaded.frontier
+                TypedSeedFrontierLoadResult.Missing -> TypedSeedFrontier(
+                    requestId = localRequestId,
+                    config = config,
+                    ownerId = checkpointOwnerId,
+                    generation = checkpointGeneration,
+                    planFingerprint = planFingerprint
+                )
+                TypedSeedFrontierLoadResult.StaleOwner,
+                TypedSeedFrontierLoadResult.Unavailable ->
+                    throw ScanExecutionException(ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE)
+            }
+        } else {
+            TypedSeedFrontier(requestId = localRequestId, config = config)
+        }
+
+        // A recreated worker may have already completed some typed seeds. The
+        // encrypted frontier owns that canonical emitted collection; merge it
+        // back before deriving new pivots so resumed scans do not lose the
+        // exact evidence that was persisted before process death.
+        var cumulativeEvidence = seedEvidence.merge(frontier.evidence)
+        val admission = TypedSeedEvidenceAdapter.fromCollection(
+            collection = cumulativeEvidence,
+            input = input,
+            config = config.admissionConfig()
+        )
+        admission.admittedSeeds.forEach(frontier::offer)
+        if (durable) persistTypedFrontier(
+            frontier,
+            requestId!!,
+            checkpointOwnerId!!,
+            checkpointGeneration!!,
+            planFingerprint!!
+        )
+
+        // The initial profile pass already fetched and verified its profile URL.
+        // Mark only those exact source URLs complete; extracted navigation links
+        // are observations and still require their own bounded fetch.
+        admission.admittedSeeds.forEach { seed ->
+            if (alreadyFetchedByInitialProfile(seed, cumulativeEvidence)) {
+                frontier.complete(frontier.keyFor(seed))
+            }
+        }
+
+        val executor = typedSeedExecutorOverride
+            ?: TypedSeedPublicFetchExecutor(providerRuntime = providerRuntime)
+        data class RunningSeed(
+            val order: Int,
+            val key: String,
+            val deferred: Deferred<TypedSeedPublicFetchExecutor.Report>
+        )
+        data class CompletedSeed(
+            val order: Int,
+            val key: String,
+            val report: TypedSeedPublicFetchExecutor.Report
+        )
+
+        val running = LinkedHashMap<Int, RunningSeed>()
+        val completed = sortedMapOf<Int, CompletedSeed>()
+        var nextLaunchOrder = 0
+        var nextCommitOrder = 0
+        var parentCancelled = false
+        try {
+            coroutineScope {
+                suspend fun launchEligible() {
+                    while (running.size < TypedSeedPublicFetchExecutor.MAX_CONCURRENT_FETCHES) {
+                        currentCoroutineContext().ensureActive()
+                        val pending = frontier.pending(maxEntries = frontier.pendingCount)
+                            .firstOrNull { candidate -> running.values.none { it.key == candidate.key } }
+                            ?: break
+                        val started = frontier.begin(pending.key) ?: continue
+                        val order = nextLaunchOrder++
+                        val deferred = async(Dispatchers.IO, start = CoroutineStart.LAZY) {
+                            try {
+                                executor.executeDetailed(
+                                    seeds = listOf(started.seed),
+                                    input = input,
+                                    scanId = scanId
+                                )
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (error: Exception) {
+                                // A provider-specific executor failure is
+                                // isolated to this seed; siblings keep running.
+                                TypedSeedPublicFetchExecutor.Report(
+                                    collection = EvidenceCollection(),
+                                    executions = listOf(
+                                        TypedSeedPublicFetchExecutor.SeedExecution(
+                                            seed = started.seed,
+                                            state = TypedSeedPublicFetchExecutor.ExecutionState.Unavailable,
+                                            reason = error.message?.take(256)
+                                                ?: "Typed seed execution failed",
+                                            fetchAttempted = true
+                                        )
+                                    )
+                                )
+                            }
+                        }
+                        running[order] = RunningSeed(order, started.key, deferred)
+                        // Persist in-flight state before the request begins so
+                        // a process death can safely release/retry it.
+                        if (durable) {
+                            persistTypedFrontier(
+                                frontier,
+                                requestId!!,
+                                checkpointOwnerId!!,
+                                checkpointGeneration!!,
+                                planFingerprint!!
+                            )
+                        }
+                        deferred.start()
+                    }
+                }
+
+                suspend fun commitReady() {
+                    while (true) {
+                        val ready = completed.remove(nextCommitOrder) ?: break
+                        cumulativeEvidence = cumulativeEvidence.merge(ready.report.collection)
+                        // Persist the exact emitted collection alongside queue
+                        // state; recovery never loses completed evidence.
+                        frontier.mergeEvidence(ready.report.collection)
+                        val outcome = ready.report.executions.singleOrNull()
+                        if (outcome?.state == TypedSeedPublicFetchExecutor.ExecutionState.Verified) {
+                            frontier.complete(ready.key)
+                        } else {
+                            frontier.unavailable(
+                                ready.key,
+                                outcome?.reason ?: "Typed seed execution returned no verified result"
+                            )
+                        }
+
+                        // Newly verified exact values feed back into this same
+                        // bounded frontier.  Candidate/observed values remain
+                        // visible in the ledger but fail TypedSeedSafety.
+                        TypedSeedEvidenceAdapter.fromCollection(
+                            collection = cumulativeEvidence,
+                            input = input,
+                            config = config.admissionConfig()
+                        ).admittedSeeds.forEach(frontier::offer)
+                        nextCommitOrder++
+                        if (durable) {
+                            persistTypedFrontier(
+                                frontier,
+                                requestId!!,
+                                checkpointOwnerId!!,
+                                checkpointGeneration!!,
+                                planFingerprint!!
+                            )
+                        }
+                    }
+                }
+
+                launchEligible()
+                while (running.isNotEmpty()) {
+                    currentCoroutineContext().ensureActive()
+                    // Await whichever provider finishes first; this is the
+                    // rolling point that avoids fixed batch barriers.
+                    val finished = select<CompletedSeed> {
+                        running.values.forEach { active ->
+                            active.deferred.onAwait { report ->
+                                CompletedSeed(active.order, active.key, report)
+                            }
+                        }
+                    }
+                    running.remove(finished.order)
+                    completed[finished.order] = finished
+                    // Fill the freed slot immediately; commit any ready sequential
+                    // results, which may admit new pivots; then ensure those new
+                    // pivots are also launched before deciding to exit.
+                    launchEligible()
+                    commitReady()
+                    launchEligible()
+                }
+                commitReady()
+            }
+        } catch (cancelled: CancellationException) {
+            parentCancelled = true
+            running.values.forEach { active ->
+                active.deferred.cancel()
+                frontier.releaseInFlight(active.key)
+            }
+            if (durable) {
+                runCatching {
+                    persistTypedFrontier(
+                        frontier,
+                        requestId!!,
+                        checkpointOwnerId!!,
+                        checkpointGeneration!!,
+                        planFingerprint!!
+                    )
+                }
+            }
+            throw cancelled
+        } finally {
+            if (durable) {
+                if (parentCancelled) {
+                    // Do not replace the parent cancellation with a stale
+                    // owner/storage error while attempting a best-effort
+                    // release checkpoint.
+                    runCatching {
+                        persistTypedFrontier(
+                            frontier,
+                            requestId!!,
+                            checkpointOwnerId!!,
+                            checkpointGeneration!!,
+                            planFingerprint!!
+                        )
+                    }
+                } else {
+                    persistTypedFrontier(
+                        frontier,
+                        requestId!!,
+                        checkpointOwnerId!!,
+                        checkpointGeneration!!,
+                        planFingerprint!!
+                    )
+                }
+            }
+        }
+        return cumulativeEvidence
+    }
+
+    private fun alreadyFetchedByInitialProfile(
+        seed: TypedSeed,
+        evidence: EvidenceCollection
+    ): Boolean {
+        val requestedUrl = when (seed.kind) {
+            TypedSeedKind.Url,
+            TypedSeedKind.Document,
+            TypedSeedKind.Archive -> seed.normalizedValue
+            else -> return false
+        }
+        val requestedKey = PublicSearchDiscoveryService.canonicalUrlKey(requestedUrl)
+        return evidence.evidence.any { record ->
+            record.state == EvidenceState.Verified &&
+                record.kind in setOf(EvidenceKind.Profile, EvidenceKind.Url, EvidenceKind.Document, EvidenceKind.Archive) &&
+                record.sourceUrl?.let(PublicSearchDiscoveryService::canonicalUrlKey) == requestedKey
+        }
+    }
+
+    private fun persistTypedFrontier(
+        frontier: TypedSeedFrontier,
+        requestId: String,
+        ownerId: String,
+        generation: String,
+        planFingerprint: String
+    ) {
+        when (
+            val saved = BackgroundScanManager.saveTypedFrontierIfOwner(
+                context = context,
+                workerId = ownerId,
+                generation = generation,
+                requestId = requestId,
+                frontier = frontier,
+                planFingerprint = planFingerprint
+            )
+        ) {
+            TypedSeedFrontierWriteResult.Saved -> Unit
+            TypedSeedFrontierWriteResult.StaleOwner ->
+                throw ScanExecutionException(ScanLifecycleErrors.STALE_WORK_REQUEST)
+            TypedSeedFrontierWriteResult.Tombstoned,
+            TypedSeedFrontierWriteResult.Missing,
+            TypedSeedFrontierWriteResult.Invalid,
+            TypedSeedFrontierWriteResult.StorageFailure ->
+                throw ScanExecutionException(ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE)
+        }
+    }
+
+    /**
      * Public search pass for indexed evidence that template scans miss. Search
      * results are intentionally marked unverified because search engines prove a
      * page is indexed, not that the page belongs to the audited identity.
@@ -575,14 +944,15 @@ class ProfileScanner(
         input: IdentityInput,
         alreadyConfirmedUrls: Set<String>,
         deepResearch: Boolean,
-        verifiedResults: List<ProfileScanResult> = emptyList()
+        verifiedResults: List<ProfileScanResult> = emptyList(),
+        typedSeedEvidence: EvidenceCollection = EvidenceCollection()
     ): List<ProfileScanResult> {
         val service = PublicSearchDiscoveryService(context)
         // Canonical evidence is the sole source for recursive typed pivots.
         // User-supplied URL seeds remain authorized before verification; all
         // evidence-derived URL/domain/document/archive seeds are filtered by
         // the shared bounded safety predicate.
-        val canonicalEvidence = verifiedResults.toEvidenceCollection(input)
+        val canonicalEvidence = verifiedResults.toEvidenceCollection(input).merge(typedSeedEvidence)
         val typedSeeds = TypedSeedEvidenceAdapter
             .fromCollection(canonicalEvidence, input)
             .admittedSeeds
@@ -775,6 +1145,7 @@ class ProfileScanner(
     // Bounds total pivot candidates across hops so the pass can't run away.
     private val MAX_PIVOT_CANDIDATES = 30
     private val EPHEMERAL_FRONTIER_REQUEST_ID = "00000000-0000-4000-8000-000000000000"
+    private val EPHEMERAL_TYPED_FRONTIER_REQUEST_ID = "00000000-0000-4000-8000-000000000001"
     // Bounds the Deep Research website link-following per confirmed profile.
     private val MAX_WEBSITE_FOLLOWS = 5
     // Bounds the initial fan-out (name-variants × platforms) so a long name with
@@ -1042,7 +1413,7 @@ class ProfileScanner(
                         }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
-                    } catch (t: Throwable) {
+                    } catch (t: Exception) {
                         WebViewScraper.Result.Failed("Renderer error: ${t.localizedMessage}")
                     }
 
@@ -1366,7 +1737,7 @@ class ProfileScanner(
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (t: Throwable) {
+        } catch (t: Exception) {
             WebViewScraper.Result.Failed("Renderer error: ${t.localizedMessage}")
         }
 
@@ -1988,7 +2359,7 @@ class ProfileScanner(
         return results.toEvidenceCollection(
             input,
             retrievedAtEpochMillis = System.currentTimeMillis()
-        )
+        ).merge(typedSeedExecutionEvidence())
     }
 
     /**
@@ -2403,6 +2774,17 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
         fun emitLinkEvidence(rawLink: String) {
             val kind = classifyProfileLink(rawLink)
             val isArchive = kind == EvidenceKind.Archive
+            // The link was observed in the response body/fields of this
+            // directly verified profile.  Publication by that profile is the
+            // verified observation; the target site's identity is not being
+            // inferred or merged here.  Candidate/unverified profiles remain
+            // Observed/Candidate below and therefore cannot become typed pivots.
+            val explicitlyAttributed = verifiedProfile
+            val linkState = when {
+                explicitlyAttributed -> EvidenceState.Verified
+                result.exists -> EvidenceState.Observed
+                else -> EvidenceState.Candidate
+            }
             val ev = Evidence(
                 id = stableProfileEvidenceId(kind.name.lowercase(Locale.ROOT), url, rawLink),
                 kind = kind,
@@ -2414,11 +2796,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 risk = RiskLevel.Low,
                 providerId = result.providerId ?: result.candidate.providerId,
                 retrievedAtEpochMillis = retrievedAtEpochMillis,
-                state = when {
-                    verifiedProfile -> EvidenceState.Verified
-                    result.exists -> EvidenceState.Observed
-                    else -> EvidenceState.Candidate
-                },
+                state = linkState,
                 reliability = if (verifiedProfile) {
                     EvidenceReliability.DirectPublicProfile
                 } else {
@@ -2445,11 +2823,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                         risk = RiskLevel.Low,
                         providerId = result.providerId ?: result.candidate.providerId,
                         retrievedAtEpochMillis = retrievedAtEpochMillis,
-                        state = when {
-                            verifiedProfile -> EvidenceState.Verified
-                            result.exists -> EvidenceState.Observed
-                            else -> EvidenceState.Candidate
-                        },
+                        state = linkState,
                         reliability = if (verifiedProfile) {
                             EvidenceReliability.DirectPublicProfile
                         } else {
@@ -2485,7 +2859,11 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 } else {
                     record
                 }
-                if (directlyObservedOnProfile && finding.type in setOf(FindingType.Email, FindingType.Phone)) {
+                if (
+                    directlyObservedOnProfile &&
+                    finding.type in setOf(FindingType.Email, FindingType.Phone) &&
+                    finding.attribution == FindingAttribution.ExactSelfSupplied
+                ) {
                     withPivotMetadata.copy(
                         state = EvidenceState.Verified,
                         reliability = EvidenceReliability.DirectPublicProfile
@@ -2569,6 +2947,12 @@ private fun publicSearchPivotDescription(
         "public search pivot (${metadata.joinToString("; ")})"
     }
 }
+
+/** Merges a bounded typed-seed collection into the canonical scanner evidence. */
+private fun EvidenceCollection.merge(other: EvidenceCollection): EvidenceCollection = EvidenceCollection(
+    evidence = (evidence + other.evidence).distinctBy(Evidence::id),
+    relationships = EvidenceRelationshipPolicy.normalize(relationships + other.relationships)
+).withResolvedRelationshipEvidence()
 
 /** Maximum extracted text links retained for one profile observation. */
 internal const val MAX_TEXT_LINKS_PER_PROFILE = 64

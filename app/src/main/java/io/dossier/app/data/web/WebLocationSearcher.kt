@@ -24,6 +24,8 @@ class WebLocationSearcher(private val context: Context) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
+        .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+        .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
         .build()
 
     data class Result(
@@ -99,7 +101,7 @@ class WebLocationSearcher(private val context: Context) {
         // can't run away. Each fetch is individually try/caught.
         if (deepResearch && evidence.isNotEmpty()) {
             evidence
-                .filter { it.url.startsWith("http") }
+                .filter { DiscoveryHttpPolicy.isSafePublicHttpUrl(it.url) }
                 .take(2)
                 .forEach { ev ->
                     try {
@@ -206,9 +208,9 @@ class WebLocationSearcher(private val context: Context) {
                     .maxByOrNull { it.value }?.key
             }
 
-            // No place-like phrase found — return the query itself so the maps link
-            // at least points somewhere useful.
-            return query
+            // No place-like phrase found — do not fabricate a location from the
+            // raw query text unless there is an explicit source-backed observation.
+            return null
         }
 
         private fun urlEncode(s: String): String =

@@ -266,6 +266,73 @@ class ProviderExecutionRuntimeTest {
     }
 
     @Test
+    fun identicalTimeoutAndRedirectPoliciesReuseOneDerivedClient() = runBlocking {
+        val createdClients = AtomicInteger(0)
+        val client = createMockClient { request ->
+            mockResponse(request, 200, "<html><body>profile</body></html>")
+        }
+        val runtime = ProviderExecutionRuntime(
+            client = client,
+            callClientFactory = { _, _ ->
+                createdClients.incrementAndGet()
+                client.newBuilder().build()
+            }
+        )
+        val provider = sampleProvider.copy(
+            requestPolicy = sampleProvider.requestPolicy.copy(retryBudget = 0)
+        )
+
+        runtime.execute(provider, "https://test.example.com/reused-first")
+        runtime.execute(provider, "https://test.example.com/reused-second")
+        assertEquals("same policy should share a derived client", 1, createdClients.get())
+
+        val noRedirectProvider = provider.copy(
+            existenceRules = provider.existenceRules?.copy(followRedirects = false)
+        )
+        runtime.execute(noRedirectProvider, "https://test.example.com/no-redirect")
+        assertEquals("redirect policy must remain part of the cache key", 2, createdClients.get())
+    }
+
+    @Test
+    fun derivedClientCacheEvictsOldPoliciesButRetainsRecentOnes() = runBlocking {
+        val createdClients = AtomicInteger(0)
+        val client = createMockClient { request ->
+            mockResponse(request, 200, "<html><body>profile</body></html>")
+        }
+        val runtime = ProviderExecutionRuntime(
+            client = client,
+            callClientFactory = { _, _ ->
+                createdClients.incrementAndGet()
+                client.newBuilder().build()
+            }
+        )
+        val basePolicy = sampleProvider.requestPolicy.copy(retryBudget = 0)
+
+        suspend fun executeWithTimeout(timeoutMs: Long) {
+            runtime.execute(
+                provider = sampleProvider.copy(
+                    requestPolicy = basePolicy.copy(timeoutMs = timeoutMs)
+                ),
+                url = "https://test.example.com/cache-$timeoutMs"
+            )
+        }
+
+        val cacheLimit = ProviderExecutionRuntime.CALL_CLIENT_CACHE_MAX_ENTRIES
+        repeat(cacheLimit + 1) { index ->
+            executeWithTimeout(500L + index)
+        }
+        assertEquals(cacheLimit + 1, createdClients.get())
+
+        // The oldest entry was evicted, so revisiting it builds one replacement.
+        executeWithTimeout(500L)
+        assertEquals(cacheLimit + 2, createdClients.get())
+
+        // The newest entry remains cached after the replacement insertion.
+        executeWithTimeout(500L + cacheLimit)
+        assertEquals(cacheLimit + 2, createdClients.get())
+    }
+
+    @Test
     fun exhaustiveRetriesProduceCleanUnavailableStateWithoutExceptionLeak() = runBlocking {
         val attempts = AtomicInteger(0)
         val outcomes = mutableListOf<ProviderOutcome>()
@@ -668,5 +735,15 @@ class ProviderExecutionRuntimeTest {
         val snapshot = ScanCoordinatorRuntime.snapshot.value
         assertEquals(0, snapshot.completedProviderCount)
         assertEquals(0, snapshot.unavailableProviderCount)
+    }
+
+    @Test
+    fun defaultClientIsHardenedWithPublicPolicies() {
+        val client = ProviderExecutionRuntime.defaultClient()
+        assertEquals(io.dossier.app.data.web.DiscoveryHttpPolicy.PUBLIC_DNS, client.dns)
+        assertTrue(
+            "Default client must include PUBLIC_URL_INTERCEPTOR",
+            client.networkInterceptors.contains(io.dossier.app.data.web.DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
+        )
     }
 }

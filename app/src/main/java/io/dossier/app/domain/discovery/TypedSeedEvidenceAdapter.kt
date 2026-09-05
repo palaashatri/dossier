@@ -1,6 +1,7 @@
 package io.dossier.app.domain.discovery
 
 import io.dossier.app.data.web.DiscoveryHttpPolicy
+import io.dossier.app.data.web.TypedSeedPublicFetchExecutor
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceKind
@@ -76,7 +77,14 @@ object TypedSeedEvidenceAdapter {
             }
             seedInput.profileUrls.forEach {
                 model.offer(
-                    kind = TypedSeedKind.Url,
+                    // A user may start directly from a historical snapshot.
+                    // Keep that seed historical so the executor does not
+                    // route it through the original-URL availability lookup.
+                    kind = if (TypedSeedPublicFetchExecutor.classifyArchiveSnapshot(it) != null) {
+                        TypedSeedKind.Archive
+                    } else {
+                        TypedSeedKind.Url
+                    },
                     rawValue = it,
                     depth = 0,
                     origin = TypedSeedOrigin.UserInput,
@@ -97,17 +105,21 @@ object TypedSeedEvidenceAdapter {
         evidence.forEach { record ->
             val kind = record.toTypedSeedKind() ?: return@forEach
             val origin = record.origin()
-            val source = record.sourceClassification()
+            val source = record.effectiveSourceClassification()
             model.offer(
                 kind = kind,
                 rawValue = record.value,
-                depth = (record.discoveryPath.size + 1).coerceAtLeast(1),
+                // The path is the canonical serialized hop sequence. Keep
+                // its depth exactly: an initial record with no path is depth
+                // zero, while each appended hop advances one bounded level.
+                depth = record.discoveryPath.size,
                 origin = origin,
                 evidenceState = record.state,
                 sourceClassification = source,
                 evidenceIds = listOf(record.id),
                 sourceUrl = record.sourceUrl,
-                discoveryPath = record.discoveryPath
+                discoveryPath = record.discoveryPath,
+                locationEvidenceClass = record.locationEvidenceClass
             )
         }
         return model
@@ -140,6 +152,7 @@ object TypedSeedEvidenceAdapter {
         EvidenceKind.Image,
         EvidenceKind.PublicImageEvidence -> TypedSeedKind.Image
         EvidenceKind.Username -> TypedSeedKind.Username
+        EvidenceKind.Location -> TypedSeedKind.Location
         else -> null
     }
 
@@ -151,7 +164,14 @@ object TypedSeedEvidenceAdapter {
         else -> TypedSeedOrigin.Evidence
     }
 
-    private fun Evidence.sourceClassification(): ExposureSourceClassification = when (reliability) {
+    /**
+     * Preserve an explicitly classified source while retaining compatibility
+     * with older evidence records that only populated reliability.
+     */
+    private fun Evidence.effectiveSourceClassification(): ExposureSourceClassification =
+        sourceClassification.takeUnless {
+            it == ExposureSourceClassification.UNKNOWN_ORIGIN
+        } ?: when (reliability) {
         EvidenceReliability.AuthoritativeApi -> ExposureSourceClassification.AUTHORIZED_API
         EvidenceReliability.DirectPublicProfile -> ExposureSourceClassification.PUBLIC_PROFILE
         EvidenceReliability.DirectPersonalWebsite -> ExposureSourceClassification.PUBLIC_WEB
@@ -170,11 +190,14 @@ object TypedSeedEvidenceAdapter {
  * the same verification, origin, source, and bounded-value checks.
  */
 object TypedSeedSafety {
-    val publicSearchKinds: Set<TypedSeedKind> = setOf(
+    val publicFetchKinds: Set<TypedSeedKind> = setOf(
         TypedSeedKind.Url,
         TypedSeedKind.Domain,
         TypedSeedKind.Document,
         TypedSeedKind.Archive,
+    )
+
+    val publicSearchKinds: Set<TypedSeedKind> = publicFetchKinds + setOf(
         TypedSeedKind.Email,
         TypedSeedKind.Phone
     )
@@ -188,8 +211,84 @@ object TypedSeedSafety {
         ExposureSourceClassification.AUTHORIZED_API
     )
 
+    /**
+     * Admission for a bounded public-page fetch. Observed URL-like evidence
+     * is sufficient to follow a navigation link because fetching it does not
+     * assert that the target belongs to the audited subject. PII and public
+     * search pivots remain Verified-only in [isSafePublicSearchSeed].
+     */
+    fun isSafePublicFetchSeed(seed: TypedSeed): Boolean {
+        if (seed.kind !in publicFetchKinds) return false
+        if (!isStructurallySafe(seed)) return false
+        if (!isSafePublicSearchValue(seed)) return false
+
+        val userInput = seed.origin == TypedSeedOrigin.UserInput &&
+            seed.evidenceState in setOf(EvidenceState.Observed, EvidenceState.Verified)
+        val observedPublicEvidence = seed.origin == TypedSeedOrigin.Evidence &&
+            seed.evidenceState in setOf(EvidenceState.Observed, EvidenceState.Verified) &&
+            seed.evidenceIds.isNotEmpty() &&
+            seed.sourceUrl?.let(::isSafeEvidenceSourceUrl) == true &&
+            seed.sourceClassification in publicEvidenceSources
+        if (!userInput && !observedPublicEvidence) return false
+
+        return TypedSeedAdmissionModel(
+            TypedSeedAdmissionConfig(
+                maxDepth = TypedSeedAdmissionConfig.MAX_ALLOWED_DEPTH,
+                maxTotalSeeds = 1,
+                perKindBudgets = mapOf(seed.kind to 1)
+            )
+        ).offer(
+            kind = seed.kind,
+            rawValue = seed.exactValue,
+            depth = seed.depth,
+            origin = seed.origin,
+            evidenceState = seed.evidenceState,
+            sourceClassification = seed.sourceClassification,
+            evidenceIds = seed.evidenceIds,
+            sourceUrl = seed.sourceUrl,
+            discoveryPath = seed.discoveryPath
+        )
+    }
+
     fun isSafePublicSearchSeed(seed: TypedSeed): Boolean {
         if (seed.kind !in publicSearchKinds) return false
+        if (!isStructurallySafe(seed)) return false
+        if (!isSafePublicSearchValue(seed)) return false
+
+        // User-provided values are authorized even before a public fetch has
+        // verified them. Evidence-derived values used for search expansion
+        // must be verified and public.
+        if (seed.origin == TypedSeedOrigin.UserInput) {
+            if (seed.evidenceState !in setOf(EvidenceState.Observed, EvidenceState.Verified)) return false
+        } else if (seed.origin != TypedSeedOrigin.Evidence ||
+            seed.evidenceState != EvidenceState.Verified ||
+            seed.evidenceIds.isEmpty() ||
+            seed.sourceUrl?.let(::isSafeEvidenceSourceUrl) != true ||
+            seed.sourceClassification !in publicEvidenceSources
+        ) {
+            return false
+        }
+
+        return TypedSeedAdmissionModel(
+            TypedSeedAdmissionConfig(
+                maxDepth = TypedSeedAdmissionConfig.MAX_ALLOWED_DEPTH,
+                maxTotalSeeds = 1,
+                perKindBudgets = mapOf(seed.kind to 1)
+            )
+        ).offer(
+            kind = seed.kind,
+            rawValue = seed.exactValue,
+            depth = seed.depth,
+            origin = seed.origin,
+            evidenceState = seed.evidenceState,
+            sourceClassification = seed.sourceClassification,
+            evidenceIds = seed.evidenceIds,
+            sourceUrl = seed.sourceUrl,
+            discoveryPath = seed.discoveryPath
+        )
+    }
+
+    private fun isStructurallySafe(seed: TypedSeed): Boolean {
         if (seed.exactValue.isBlank() || seed.exactValue.length > TypedSeed.MAX_VALUE_CHARS) return false
         if (seed.value.isBlank() || seed.value.length > TypedSeed.MAX_VALUE_CHARS) return false
         if (seed.normalizedValue.isBlank() || seed.normalizedValue.length > TypedSeed.MAX_VALUE_CHARS) return false
@@ -212,39 +311,7 @@ object TypedSeedSafety {
         // URL-kind branch.
         if (!isSafePublicSearchValue(seed)) return false
 
-        // User-provided values are authorized even before a public fetch has
-        // verified them. Evidence-derived pivots must be verified and public.
-        if (seed.origin == TypedSeedOrigin.UserInput) {
-            if (seed.evidenceState !in setOf(EvidenceState.Observed, EvidenceState.Verified)) return false
-        } else if (seed.origin != TypedSeedOrigin.Evidence ||
-            seed.evidenceState != EvidenceState.Verified ||
-            seed.evidenceIds.isEmpty() ||
-            seed.sourceUrl?.let(::isSafeEvidenceSourceUrl) != true ||
-            seed.sourceClassification !in publicEvidenceSources
-        ) {
-            return false
-        }
-
-        // Reuse the canonical admission normalizers/structural validation;
-        // this also catches malformed URL, domain, and archive values.
-        val validator = TypedSeedAdmissionModel(
-            TypedSeedAdmissionConfig(
-                maxDepth = TypedSeedAdmissionConfig.MAX_ALLOWED_DEPTH,
-                maxTotalSeeds = 1,
-                perKindBudgets = mapOf(seed.kind to 1)
-            )
-        )
-        return validator.offer(
-            kind = seed.kind,
-            rawValue = seed.exactValue,
-            depth = seed.depth,
-            origin = seed.origin,
-            evidenceState = seed.evidenceState,
-            sourceClassification = seed.sourceClassification,
-            evidenceIds = seed.evidenceIds,
-            sourceUrl = seed.sourceUrl,
-            discoveryPath = seed.discoveryPath
-        )
+        return true
     }
 
     private fun isSafeEvidenceSourceUrl(raw: String): Boolean {

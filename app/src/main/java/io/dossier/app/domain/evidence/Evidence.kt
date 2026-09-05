@@ -1,11 +1,17 @@
 package io.dossier.app.domain.evidence
 
 import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.model.ReverseImageLookupResult
 import kotlinx.serialization.Serializable
 import java.security.MessageDigest
 import java.util.Locale
+
+/** Shared aliases for callers that model photo location evidence directly. */
+typealias LocationEvidenceClass = ReverseImageLookupResult.LocationEvidenceClass
+typealias LocationCandidate = ReverseImageLookupResult.LocationCandidate
 
 /**
  * Stable evidence state. This describes the observation itself, not whether an
@@ -59,6 +65,14 @@ data class Evidence(
     val observedAtEpochMillis: Long? = null,
     val state: EvidenceState = EvidenceState.Observed,
     val reliability: EvidenceReliability = EvidenceReliability.Unknown,
+    /**
+     * Explicit source taxonomy retained on the evidence record itself.
+     *
+     * Older producers only populated [reliability], so this field defaults to
+     * [ExposureSourceClassification.UNKNOWN_ORIGIN] and ledger adapters may
+     * derive a backwards-compatible value from reliability when it is absent.
+     */
+    val sourceClassification: ExposureSourceClassification = ExposureSourceClassification.UNKNOWN_ORIGIN,
     val contentHashSha256: String? = null,
     val parserVersion: String? = null,
     val historical: Boolean = false,
@@ -69,7 +83,26 @@ data class Evidence(
     /** Latest observation represented by a merged evidence record, when known. */
     val lastObservedAtEpochMillis: Long? = null,
     /** Alternate exact source strings retained when duplicate observations merge. */
-    val sourceUrls: List<String> = emptyList()
+    val sourceUrls: List<String> = emptyList(),
+    /**
+     * Explicit photo-location classification. Null keeps non-location and
+     * legacy records wire-compatible while location adapters migrate forward.
+     */
+    val locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass? = null,
+    /** Why this location candidate exists, retained beside its exact value. */
+    val locationEvidenceReason: String? = null,
+    /** Supporting evidence IDs supplied by the location candidate producer. */
+    val supportingEvidenceIds: List<String> = emptyList(),
+    /**
+     * Explicit identity attribution for the observed value.
+     *
+     * This is nullable for wire compatibility: records written before
+     * attribution became canonical have no value and continue to use the
+     * legacy state/reliability fallback in [toFinding]. An explicit
+     * [FindingAttribution.Unconfirmed] is retained as such rather than being
+     * replaced by an inferred attribution.
+     */
+    val attribution: FindingAttribution? = null
 ) {
     init {
         require(discoveryPath.size <= MAX_DISCOVERY_PATH_STEPS) {
@@ -78,11 +111,19 @@ data class Evidence(
         require(sourceUrls.size <= MAX_SOURCE_URLS) {
             "Evidence may retain at most $MAX_SOURCE_URLS source URLs."
         }
+        require(supportingEvidenceIds.size <= MAX_SUPPORTING_EVIDENCE_IDS) {
+            "Evidence may retain at most $MAX_SUPPORTING_EVIDENCE_IDS supporting evidence IDs."
+        }
+        require(locationEvidenceReason == null || locationEvidenceReason.length <= MAX_LOCATION_REASON_CHARS) {
+            "Location evidence reason exceeds the bounded limit."
+        }
     }
 
     companion object {
         const val MAX_DISCOVERY_PATH_STEPS = 64
         const val MAX_SOURCE_URLS = 64
+        const val MAX_SUPPORTING_EVIDENCE_IDS = 256
+        const val MAX_LOCATION_REASON_CHARS = 512
     }
 }
 
@@ -330,8 +371,25 @@ fun Evidence.toFinding(): Finding = Finding(
     evidenceSnippet = snippet,
     confidence = confidence,
     risk = risk,
-    remediation = signals.joinToString("; ")
+    remediation = signals.joinToString("; "),
+    attribution = attribution ?: inferredFindingAttribution()
 )
+
+/**
+ * Compatibility fallback for evidence records written before attribution was
+ * stored explicitly. New records must carry [Evidence.attribution] whenever a
+ * producer knows the identity relationship; state/reliability alone cannot
+ * distinguish an exact self-supplied value from a merely verified page.
+ */
+private fun Evidence.inferredFindingAttribution(): FindingAttribution = when {
+    state == EvidenceState.Verified && reliability == EvidenceReliability.UserSupplied ->
+        FindingAttribution.ExactSelfSupplied
+    state == EvidenceState.Verified -> FindingAttribution.Verified
+    state == EvidenceState.Probable -> FindingAttribution.Probable
+    state == EvidenceState.Candidate -> FindingAttribution.Candidate
+    state == EvidenceState.Conflicting -> FindingAttribution.Conflicting
+    else -> FindingAttribution.Unconfirmed
+}
 
 /**
  * Adapter for legacy findings. Metadata that the legacy Finding contract cannot
@@ -361,16 +419,21 @@ fun Finding.toEvidence(): Evidence = Evidence(
     confidence = confidence,
     risk = risk,
     signals = if (remediation.isBlank()) emptyList() else listOf(remediation),
-    state = when (type) {
-        FindingType.PlausibleProfileMatch,
-        FindingType.PublicSearchEvidence,
-        FindingType.PublicImageEvidence -> EvidenceState.Candidate
+    state = when {
+        attribution == FindingAttribution.ExactSelfSupplied -> EvidenceState.Verified
+        attribution == FindingAttribution.Verified -> EvidenceState.Verified
+        attribution == FindingAttribution.Probable -> EvidenceState.Probable
+        attribution == FindingAttribution.IndependentPageSignals -> EvidenceState.Probable
+        attribution == FindingAttribution.Candidate -> EvidenceState.Candidate
+        attribution == FindingAttribution.Conflicting -> EvidenceState.Conflicting
+        type in listOf(FindingType.PlausibleProfileMatch, FindingType.PublicSearchEvidence, FindingType.PublicImageEvidence) -> EvidenceState.Candidate
         else -> EvidenceState.Observed
     },
-    reliability = when (type) {
-        FindingType.PublicSearchEvidence,
-        FindingType.PublicImageEvidence -> EvidenceReliability.SearchEngineCandidate
-        FindingType.ImageConsistency -> EvidenceReliability.LocalDerived
+    reliability = when {
+        attribution == FindingAttribution.ExactSelfSupplied -> EvidenceReliability.UserSupplied
+        type in listOf(FindingType.PublicSearchEvidence, FindingType.PublicImageEvidence) -> EvidenceReliability.SearchEngineCandidate
+        type == FindingType.ImageConsistency -> EvidenceReliability.LocalDerived
         else -> EvidenceReliability.Unknown
-    }
+    },
+    attribution = attribution
 )

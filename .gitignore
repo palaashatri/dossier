@@ -6,6 +6,7 @@
 /.vscode/
 /.kotlin/
 /.worktrees/
+.superpowers/
 .DS_Store
 /build/
 /built-apk/

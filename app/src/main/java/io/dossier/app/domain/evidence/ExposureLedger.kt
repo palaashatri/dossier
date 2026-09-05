@@ -1,6 +1,8 @@
 package io.dossier.app.domain.evidence
 
 import io.dossier.app.domain.case.RemediationStatus
+import io.dossier.app.domain.model.FindingAttribution
+import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.util.UrlNormalizer
 import kotlinx.serialization.Serializable
 import java.net.URI
@@ -74,7 +76,18 @@ data class ExposureFact(
     val confidence: Float = 0.5f,
     val historical: Boolean = false,
     val discoveryPath: List<String> = emptyList(),
-    val remediationStatus: RemediationStatus = RemediationStatus.NotStarted
+    val remediationStatus: RemediationStatus = RemediationStatus.NotStarted,
+    /** Photo-location evidence class, when this fact came from media analysis. */
+    val locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass? = null,
+    /** Why the location candidate was emitted, retained for local inspection. */
+    val locationEvidenceReason: String? = null,
+    /** Supporting location evidence IDs retained without inventing proof. */
+    val supportingEvidenceIds: List<String> = emptyList(),
+    /**
+     * Explicit identity attribution carried from the canonical evidence
+     * record. Null means the source predates attribution metadata.
+     */
+    val attribution: FindingAttribution? = null
 ) {
     init {
         require(evidenceIds.size <= MAX_EVIDENCE_IDS_PER_FACT) {
@@ -85,6 +98,12 @@ data class ExposureFact(
         }
         require(confidence.isFinite() && confidence in 0f..1f) {
             "Exposure fact confidence must be finite and between 0 and 1."
+        }
+        require(supportingEvidenceIds.size <= MAX_SUPPORTING_EVIDENCE_IDS) {
+            "An exposure fact may retain at most $MAX_SUPPORTING_EVIDENCE_IDS supporting evidence IDs."
+        }
+        require(locationEvidenceReason == null || locationEvidenceReason.length <= MAX_LOCATION_REASON_CHARS) {
+            "Location evidence reason exceeds the bounded limit."
         }
     }
 
@@ -109,6 +128,8 @@ data class ExposureFact(
     companion object {
         const val MAX_EVIDENCE_IDS_PER_FACT = 256
         const val MAX_DISCOVERY_PATH_STEPS = 64
+        const val MAX_SUPPORTING_EVIDENCE_IDS = 256
+        const val MAX_LOCATION_REASON_CHARS = 512
     }
 }
 
@@ -142,6 +163,8 @@ object ExposureLedgerPolicy {
     const val MAX_FACTS = ExposureLedger.MAX_FACTS
     const val MAX_EVIDENCE_IDS_PER_FACT = ExposureFact.MAX_EVIDENCE_IDS_PER_FACT
     const val MAX_DISCOVERY_PATH_STEPS = ExposureFact.MAX_DISCOVERY_PATH_STEPS
+    const val MAX_SUPPORTING_EVIDENCE_IDS = ExposureFact.MAX_SUPPORTING_EVIDENCE_IDS
+    const val MAX_LOCATION_REASON_CHARS = ExposureFact.MAX_LOCATION_REASON_CHARS
 
     fun normalize(facts: List<ExposureFact>): List<ExposureFact> {
         if (facts.isEmpty()) return emptyList()
@@ -161,6 +184,47 @@ object ExposureLedgerPolicy {
             merged[key] = merged[key]?.let { merge(it, fact) } ?: fact
         }
         return merged.values.take(MAX_FACTS)
+    }
+
+    /**
+     * Hydrates a persisted ledger with metadata from the canonical evidence
+     * records that support it.
+     *
+     * The ledger was introduced before attribution and some of its facts may
+     * therefore contain only legacy fields.  Matching by an already persisted
+     * evidence ID is the only safe bridge: values and source URLs can be shared
+     * by unrelated observations and must not be used as a fuzzy join.  Evidence
+     * facts that are not referenced by the old ledger are appended as well so a
+     * stale partial ledger cannot hide exact exposure records on migration.
+     */
+    fun hydrateFromEvidence(
+        facts: List<ExposureFact>,
+        evidence: List<Evidence>
+    ): List<ExposureFact> {
+        val normalizedFacts = normalize(facts)
+        if (evidence.isEmpty()) return normalizedFacts
+
+        val evidenceFacts = evidence
+            .map(Evidence::toExposureFact)
+            .let(::normalize)
+        if (normalizedFacts.isEmpty()) return evidenceFacts
+
+        val evidenceById = evidenceFacts
+            .flatMap { fact -> fact.evidenceIds.map { id -> id to fact } }
+            .groupBy({ it.first }, { it.second })
+        val hydrated = normalizedFacts.map { fact ->
+            val linkedFacts = fact.evidenceIds
+                .flatMap { evidenceById[it].orEmpty() }
+                .distinct()
+            linkedFacts.fold(fact) { accumulator, linked ->
+                merge(accumulator, linked)
+            }
+        }
+        val linkedEvidenceIds = hydrated.flatMap { it.evidenceIds }.toSet()
+        val unlinked = evidenceFacts.filter { fact ->
+            fact.evidenceIds.none(linkedEvidenceIds::contains)
+        }
+        return normalize(hydrated + unlinked)
     }
 
     /** Common deterministic normalization while retaining the source string separately. */
@@ -198,6 +262,16 @@ object ExposureLedgerPolicy {
                 .map(EvidenceIdPolicy::migrate)
                 .distinct()
                 .take(MAX_EVIDENCE_IDS_PER_FACT),
+            locationEvidenceReason = fact.locationEvidenceReason
+                ?.trim()
+                ?.take(MAX_LOCATION_REASON_CHARS)
+                ?.takeIf(String::isNotBlank),
+            supportingEvidenceIds = fact.supportingEvidenceIds
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .map(EvidenceIdPolicy::migrate)
+                .distinct()
+                .take(MAX_SUPPORTING_EVIDENCE_IDS),
             discoveryPath = fact.discoveryPath
                 .map(String::trim)
                 .filter(String::isNotBlank)
@@ -218,7 +292,17 @@ object ExposureLedgerPolicy {
             lastObservedAtEpochMillis = lastObserved,
             verificationState = strongerState(first.verificationState, second.verificationState),
             confidence = maxOf(first.confidence, second.confidence),
+            attribution = strongerAttribution(first.attribution, second.attribution),
             discoveryPath = first.discoveryPath.ifEmpty { second.discoveryPath },
+            locationEvidenceClass = strongerLocationClass(
+                first.locationEvidenceClass,
+                second.locationEvidenceClass
+            ),
+            locationEvidenceReason = first.locationEvidenceReason
+                ?: second.locationEvidenceReason,
+            supportingEvidenceIds = (first.supportingEvidenceIds + second.supportingEvidenceIds)
+                .distinct()
+                .take(MAX_SUPPORTING_EVIDENCE_IDS),
             remediationStatus = if (first.remediationStatus == RemediationStatus.NotStarted) {
                 second.remediationStatus
             } else {
@@ -244,6 +328,33 @@ object ExposureLedgerPolicy {
         }
         val firstRank = STATE_RANK[first] ?: 0
         val secondRank = STATE_RANK[second] ?: 0
+        return if (secondRank > firstRank) second else first
+    }
+
+    private fun strongerLocationClass(
+        first: ReverseImageLookupResult.LocationEvidenceClass?,
+        second: ReverseImageLookupResult.LocationEvidenceClass?
+    ): ReverseImageLookupResult.LocationEvidenceClass? {
+        if (first == null) return second
+        if (second == null) return first
+        val firstRank = LOCATION_CLASS_RANK[first] ?: 0
+        val secondRank = LOCATION_CLASS_RANK[second] ?: 0
+        return if (secondRank > firstRank) second else first
+    }
+
+    private fun strongerAttribution(
+        first: FindingAttribution?,
+        second: FindingAttribution?
+    ): FindingAttribution? {
+        if (first == null) return second
+        if (second == null || first == second) return first
+        // Contradictions remain visible even when another observation has a
+        // stronger positive attribution; the ledger must not hide conflict.
+        if (first == FindingAttribution.Conflicting || second == FindingAttribution.Conflicting) {
+            return FindingAttribution.Conflicting
+        }
+        val firstRank = ATTRIBUTION_RANK[first] ?: 0
+        val secondRank = ATTRIBUTION_RANK[second] ?: 0
         return if (secondRank > firstRank) second else first
     }
 
@@ -291,6 +402,26 @@ object ExposureLedgerPolicy {
         EvidenceState.Conflicting to 4,
         EvidenceState.Verified to 5
     )
+
+    private val LOCATION_CLASS_RANK = mapOf(
+        ReverseImageLookupResult.LocationEvidenceClass.VISUAL_GUESS to 1,
+        ReverseImageLookupResult.LocationEvidenceClass.LIKELY_LOCATION to 2,
+        ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION to 3,
+        ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA to 4,
+        // Preserve disagreement even though it is not a stronger positive
+        // claim; callers need to see that observations conflict.
+        ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING to 5
+    )
+
+    private val ATTRIBUTION_RANK = mapOf(
+        FindingAttribution.Unconfirmed to 0,
+        FindingAttribution.Candidate to 1,
+        FindingAttribution.IndependentPageSignals to 2,
+        FindingAttribution.Probable to 3,
+        FindingAttribution.Verified to 4,
+        FindingAttribution.ExactSelfSupplied to 5,
+        FindingAttribution.Conflicting to 6
+    )
 }
 
 /** Converts one existing evidence record without inventing missing metadata. */
@@ -308,7 +439,12 @@ fun Evidence.toExposureFact(
         evidenceIds = listOfNotNull(
             EvidenceIdPolicy.migrate(id).takeIf(String::isNotBlank)
         ),
-        sourceClassification = reliability.toExposureSourceClassification(),
+        // New producers retain the product source taxonomy directly on the
+        // record. Legacy records leave it at UNKNOWN_ORIGIN and continue to
+        // derive the equivalent class from reliability for compatibility.
+        sourceClassification = sourceClassification.takeUnless {
+            it == ExposureSourceClassification.UNKNOWN_ORIGIN
+        } ?: reliability.toExposureSourceClassification(),
         sourceUrl = sourceUrl,
         providerId = providerId,
         firstObservedAtEpochMillis = firstObservedAtEpochMillis ?: observedAtEpochMillis,
@@ -317,7 +453,11 @@ fun Evidence.toExposureFact(
         confidence = confidence,
         historical = historical,
         discoveryPath = discoveryPath,
-        remediationStatus = RemediationStatus.NotStarted
+        remediationStatus = RemediationStatus.NotStarted,
+        attribution = attribution,
+        locationEvidenceClass = locationEvidenceClass,
+        locationEvidenceReason = locationEvidenceReason,
+        supportingEvidenceIds = supportingEvidenceIds
     )
 }
 

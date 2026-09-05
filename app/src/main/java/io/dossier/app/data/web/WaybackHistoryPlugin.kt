@@ -560,6 +560,8 @@ class WaybackHistoryPlugin(
             .followRedirects(true)
             .followSslRedirects(true)
             .retryOnConnectionFailure(true)
+            .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+            .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
             .build()
     }
 }
