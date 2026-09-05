@@ -11,7 +11,7 @@ The current branch is the product-contract discovery-v2 reset. Mission readiness
 Current source baseline:
 
 ```text
-437b50d (working-tree changes are intentionally uncommitted)
+6863fd8 (SSRF-hardened image URL policy; docs below record this verified head)
 ```
 
 The hardening history below is retained for context; the current source and validation record are listed above. `45520a1` added fail-closed frontier recovery for unreadable persisted pivot state and routed deep-research website traversal through the bounded declarative provider runtime with opaque host IDs, lifecycle events, redirect/auth/challenge classification, response limits and the existing six-page bound. `5f5ba8d` hardened calibration artifacts so configured contradiction weights cannot disable negative evidence.
@@ -29,20 +29,17 @@ Debug JVM unit tests                PASS — 900 tests / 145 result XML files / 
 Release JVM unit tests              PASS — 900 tests / 145 result XML files / 0 failures, errors, or skips
 uiTest JVM unit tests               PASS — 900 tests / 145 result XML files / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 115,712,440 bytes
-Debug APK SHA-256                   F9DE697A9FBC1C97965629DB2DD2FB05DD36B13D9B1A556403AD6FC2C73E3965
-uiTest APK assembly                 PASS — 243,243,401 bytes
-uiTest APK SHA-256                  02A45EE103BA821340EC2F04AA10293EBBD648C93E122578E55FB8A908526279
-Android-test APK                    PASS — 1,029,856 bytes
-Android-test APK SHA-256             60B7951307F23D1F87DF3AC330ED646597A39782BE0D529AD35755EEE09BA88D
+Debug APK assembly                  PASS — 115,761,592 bytes; SHA-256 `bdba1fa37f1c179e5421053f728ecaa4a6be91f916d10150557a3a1e1ef8a0c2`
+uiTest APK assembly                 PASS — 243,308,937 bytes; SHA-256 `8b85dde746b9836998600a3e0fedbaca7b89c3a58a394796e6ed155968f53bc2`
+Android-test APK                    PASS — 1,029,876 bytes; SHA-256 `8ffed11e1f0c184fcabbde4cced3193dab8d1f36f574fbf450f3ea808a64b5d2`
 Debug lint                          PASS — 0 errors / 69 warnings
 uiTest lint                         PASS — 0 errors / 73 warnings
 Connected uiTest suite              PASS — 57 tests / 0 failures on API 36 `dossier-api36` emulator
 ```
 
-The current debug APK was rebuilt at 115,712,440 bytes (SHA-256 `f9de697a9fbc1c97965629db2dd2fb05dd36b13d9b1a556403ad6fc2c73e3965`) and debug lint reported 0 errors and 69 warnings. The connected suite ran on `emulator-5554` (API 36). The Python hygiene audit passed (2 tests), the provider audit passed (78 authored providers, 716 pinned source records, 644 executable rules, 0 conversion errors), and `git diff --check` is clean.
+The current debug, uiTest, and Android-test APKs were rebuilt from `6863fd8`; their SHA-256 values are recorded above. Debug lint reported 0 errors and 69 warnings, and uiTest lint reported 0 errors and 73 warnings. The connected suite ran on `emulator-5554` (API 36). The Python hygiene audit passed (2 tests), the provider audit passed (78 authored providers, 716 pinned source records, 644 executable rules, 0 conversion errors), and `git diff --check` is clean.
 
-The connected suite covers the provider-health panel, WorkManager pause/resume, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, graph/export redaction, HUD status, reverse-video picker semantics, and the new universal-search seed-correction path. Fresh visual evidence from the installed uiTest APK is outside Git at `/tmp/dossier-qa-20260905-final4/`: universal search reset (`10-universal-search-reset.png`), local Name classification (`11-search-classified-name.png`), live scan progress (`12-scan-progress-live.png`), cancellation reset (`13-scan-cancelled-reset.png`), encrypted analysis restore (`02-analysis-restored.png`), report overview/evidence/timeline/connections/accessibility/actions (`04`–`09`-prefixed captures). Every final4 hierarchy XML identifies `package="io.dossier.app"`. The older `/tmp/dossier-qa-20260905-final3/04-scan-progress-live.png` is excluded because it captured Android Dialer. All fixture values use reserved `.test` domains. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
+The connected suite covers the provider-health panel, WorkManager pause/resume, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, graph/export redaction, HUD status, reverse-video picker semantics, and the universal-search seed-correction path. Fresh visual evidence from the installed uiTest APK is outside Git at `/tmp/dossier-qa-20260905-final6/`: consent, universal-search reset and local Name classification (`11`–`16`), live scan progress with nonzero counters (`17`–`18`), cancellation reset (`19`), encrypted analysis restore (`01`–`03`), report overview/evidence/timeline/tabs/actions/connections/accessibility (`04`–`10`), and Images/Breaches/Cases/Engines tabs (`20`–`23`). Every final6 hierarchy XML identifies `package="io.dossier.app"`. All fixture values and URLs use reserved `.test` domains. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
 
 This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
@@ -50,7 +47,7 @@ See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the
 
 ## Visual walkthrough
 
-The checked-in walkthrough captures are retained baseline images from the API 36 Medium Phone emulator. Fresh current-worktree captures are outside Git at `/tmp/dossier-qa-20260905-final4/`; the corrected scan capture is `12-scan-progress-live.png` (the earlier `/tmp/dossier-qa-20260905-final3/04-scan-progress-live.png` was a foreground-app capture of Android Dialer and is not evidence). Analysis, report, case and provider-progress states use deterministic **uiTest-only** fixtures; case data is written through the production encrypted stores and provider counters are emitted through the production coordinator callbacks. All identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish TalkBack, whole-product large-font, reduced-motion, adaptive-layout or physical-device acceptance.
+The checked-in walkthrough captures are retained baseline images from the API 36 Medium Phone emulator. Fresh current-head captures are outside Git at `/tmp/dossier-qa-20260905-final6/`; `18-scan-progress-live-counters.png` is the current live-scan proof. Analysis, report, case, tab, and provider-progress states use deterministic **uiTest-only** fixtures; case data is written through the production encrypted stores and provider counters are emitted through the production coordinator callbacks. All identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish TalkBack, whole-product large-font, reduced-motion, adaptive-layout or physical-device acceptance.
 
 | Consent and input validation | Scan configuration |
 |---|---|
