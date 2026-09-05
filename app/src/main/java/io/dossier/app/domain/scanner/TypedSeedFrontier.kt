@@ -1,6 +1,7 @@
 package io.dossier.app.domain.scanner
 
 import android.content.Context
+import io.dossier.app.domain.discovery.EXECUTABLE_TYPED_SEED_KINDS
 import io.dossier.app.domain.discovery.TypedSeed
 import io.dossier.app.domain.discovery.TypedSeedAdmissionConfig
 import io.dossier.app.domain.discovery.TypedSeedKind
@@ -25,19 +26,6 @@ import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
-
-/**
- * Typed seed execution is intentionally narrow in this tranche.  The
- * frontier still persists every admitted kind, but only these kinds have a
- * reviewed executor today.  Unsupported values remain visible as explicit
- * unavailable entries instead of silently disappearing from recovery state.
- */
-internal val EXECUTABLE_TYPED_SEED_KINDS: Set<TypedSeedKind> = setOf(
-    TypedSeedKind.Url,
-    TypedSeedKind.Domain,
-    TypedSeedKind.Document,
-    TypedSeedKind.Archive
-)
 
 /** Compatibility value for direct JVM store tests; production passes its plan hash. */
 internal const val TYPED_FRONTIER_DEFAULT_PLAN_FINGERPRINT =

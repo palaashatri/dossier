@@ -313,7 +313,7 @@ class TypedSeedAdmissionModelTest {
     }
 
     @Test
-    fun adapterCarriesEvidenceSourceStateAndPathWhileExecutionStaysUnavailable() {
+    fun adapterCarriesEvidenceSourceStateAndPathWhileUnsupportedExecutionStaysUnavailable() {
         val record = Evidence(
             id = "profile-email",
             kind = EvidenceKind.Email,
@@ -456,5 +456,36 @@ class TypedSeedAdmissionModelTest {
             sourceClassification = ExposureSourceClassification.USER_IMPORTED
         )
         assertTrue(TypedSeedSafety.isSafePublicSearchSeed(userSeed))
+    }
+
+    @Test
+    fun derivesExecutionAvailabilityFromSharedExecutableSet() {
+        val model = TypedSeedAdmissionModel()
+
+        // Executable kinds
+        assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Url))
+        assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Domain))
+        assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Document))
+        assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Archive))
+
+        // Unavailable kinds
+        assertEquals(TypedSeedExecutionAvailability.Unavailable, model.availabilityFor(TypedSeedKind.Email))
+        assertEquals(TypedSeedExecutionAvailability.Unavailable, model.availabilityFor(TypedSeedKind.Phone))
+        assertEquals(TypedSeedExecutionAvailability.Unavailable, model.availabilityFor(TypedSeedKind.Username))
+
+        assertTrue(model.isExecutionAvailable(TypedSeedKind.Url))
+        assertFalse(model.isExecutionAvailable(TypedSeedKind.Email))
+
+        // Without seeds, no execution is available
+        assertFalse(model.isExecutionAvailable)
+
+        // With an executable seed, it becomes available
+        model.offer(TypedSeedKind.Url, "https://example.test", 0)
+        assertTrue(model.isExecutionAvailable)
+
+        val snapshot = model.snapshot()
+        assertTrue(snapshot.isExecutionAvailable)
+        assertEquals(TypedSeedExecutionAvailability.Available, snapshot.executionAvailability[TypedSeedKind.Url])
+        assertEquals(TypedSeedExecutionAvailability.Unavailable, snapshot.executionAvailability[TypedSeedKind.Email])
     }
 }

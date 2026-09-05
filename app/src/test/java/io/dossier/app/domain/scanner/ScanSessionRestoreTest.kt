@@ -123,7 +123,7 @@ class ScanSessionRestoreTest {
         assertTrue(ScanSession.typedSeedAdmission.value.admittedSeeds.any {
             it.kind == TypedSeedKind.Username
         })
-        assertTrue(!ScanSession.typedSeedAdmission.value.isExecutionAvailable)
+        assertTrue(ScanSession.typedSeedAdmission.value.isExecutionAvailable)
         EvidenceRuntimeCache.replace(snapshot)
         val case = DossierCase(
             createdAt = "2026-08-24 12:00",

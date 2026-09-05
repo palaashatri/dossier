@@ -46,10 +46,19 @@ enum class TypedSeedOrigin {
     Unknown
 }
 
-/** Execution is intentionally unavailable until a reviewed per-kind executor exists. */
+/** Typed values that have a reviewed executor in the current scan tranche. */
+internal val EXECUTABLE_TYPED_SEED_KINDS: Set<TypedSeedKind> = setOf(
+    TypedSeedKind.Url,
+    TypedSeedKind.Domain,
+    TypedSeedKind.Document,
+    TypedSeedKind.Archive
+)
+
+/** Truthful execution availability for each admitted typed-seed kind. */
 @Serializable
 enum class TypedSeedExecutionAvailability {
-    Unavailable
+    Unavailable,
+    Available
 }
 
 /**
@@ -62,7 +71,13 @@ data class TypedSeedAdmissionSnapshot(
     val pendingCount: Int = 0,
     val admittedCount: Int = 0,
     val executionAvailability: Map<TypedSeedKind, TypedSeedExecutionAvailability> =
-        TypedSeedKind.entries.associateWith { TypedSeedExecutionAvailability.Unavailable }
+        TypedSeedKind.entries.associateWith {
+            if (it in EXECUTABLE_TYPED_SEED_KINDS) {
+                TypedSeedExecutionAvailability.Available
+            } else {
+                TypedSeedExecutionAvailability.Unavailable
+            }
+        }
 ) {
     init {
         require(seeds.size <= MAX_SEEDS) { "Too many typed seed snapshot records." }
@@ -72,7 +87,7 @@ data class TypedSeedAdmissionSnapshot(
 
     val admittedSeeds: List<TypedSeed> get() = seeds
     val isExecutionAvailable: Boolean
-        get() = executionAvailability.values.any { it != TypedSeedExecutionAvailability.Unavailable }
+        get() = admittedSeeds.any { executionAvailability[it.kind] == TypedSeedExecutionAvailability.Available }
 
     companion object {
         const val MAX_SEEDS = TypedSeedAdmissionConfig.MAX_ALLOWED_TOTAL_SEEDS
@@ -232,9 +247,12 @@ class TypedSeedAdmissionModel(
     val pendingCount: Int get() = queue.size
     val admittedCount: Int get() = admitted.size
     val admittedSeeds: List<TypedSeed> get() = admitted.toList()
-    val isExecutionAvailable: Boolean get() = false
+    val isExecutionAvailable: Boolean get() = admittedSeeds.any { isExecutionAvailable(it.kind) }
     val executionAvailability: Map<TypedSeedKind, TypedSeedExecutionAvailability> =
-        TypedSeedKind.entries.associateWith { TypedSeedExecutionAvailability.Unavailable }
+        TypedSeedKind.entries.associateWith {
+            if (it in EXECUTABLE_TYPED_SEED_KINDS) TypedSeedExecutionAvailability.Available
+            else TypedSeedExecutionAvailability.Unavailable
+        }
     val availability: Map<TypedSeedKind, TypedSeedExecutionAvailability>
         get() = executionAvailability
 
@@ -249,7 +267,7 @@ class TypedSeedAdmissionModel(
         executionAvailability.getValue(kind)
 
     fun isExecutionAvailable(kind: TypedSeedKind): Boolean =
-        availabilityFor(kind) != TypedSeedExecutionAvailability.Unavailable
+        availabilityFor(kind) == TypedSeedExecutionAvailability.Available
 
     /** Backward-compatible user-input overload. */
     fun offer(
