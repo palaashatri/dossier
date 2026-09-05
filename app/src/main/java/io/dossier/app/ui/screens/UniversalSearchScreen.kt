@@ -156,7 +156,14 @@ fun UniversalSearchScreen(onSearch: () -> Unit) {
             if (ambiguousText) {
                 Box {
                     TextButton(
-                        onClick = { correctionMenuExpanded = true },
+                        onClick = {
+                            // Close the IME before opening the anchored menu. With
+                            // adjustResize the correction control can sit below
+                            // the reduced window, leaving popup items untouchable.
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                            correctionMenuExpanded = true
+                        },
                         modifier = Modifier.semantics {
                             contentDescription = "Correct detected seed type"
                             stateDescription = "Using: ${effectiveSeed?.type?.name ?: "None"}"

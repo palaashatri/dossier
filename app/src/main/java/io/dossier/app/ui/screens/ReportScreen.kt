@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -27,6 +28,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -308,25 +310,32 @@ fun ReportScreen(
                 )
             }
 
-            ScrollableTabRow(
-                selectedTabIndex = selectedViewIndex,
-                containerColor = NeuralTheme.CardBackground,
-                contentColor = NeuralTheme.Cobalt,
-                edgePadding = 12.dp,
-                divider = { HorizontalDivider(color = NeuralTheme.BorderColor) }
-            ) {
-                ReportView.entries.forEachIndexed { index, view ->
-                    Tab(
-                        selected = selectedViewIndex == index,
-                        onClick = { selectedViewIndex = index },
-                        modifier = Modifier.heightIn(min = 48.dp),
-                        text = {
-                            Text(
-                                view.label,
-                                fontWeight = if (selectedViewIndex == index) FontWeight.SemiBold else FontWeight.Normal
-                            )
-                        }
-                    )
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                if (maxWidth >= 390.dp) {
+                    TabRow(
+                        selectedTabIndex = selectedViewIndex,
+                        containerColor = NeuralTheme.CardBackground,
+                        contentColor = NeuralTheme.Cobalt,
+                        divider = { HorizontalDivider(color = NeuralTheme.BorderColor) }
+                    ) {
+                        ReportTabItems(
+                            selectedIndex = selectedViewIndex,
+                            onSelected = { selectedViewIndex = it }
+                        )
+                    }
+                } else {
+                    ScrollableTabRow(
+                        selectedTabIndex = selectedViewIndex,
+                        containerColor = NeuralTheme.CardBackground,
+                        contentColor = NeuralTheme.Cobalt,
+                        edgePadding = 12.dp,
+                        divider = { HorizontalDivider(color = NeuralTheme.BorderColor) }
+                    ) {
+                        ReportTabItems(
+                            selectedIndex = selectedViewIndex,
+                            onSelected = { selectedViewIndex = it }
+                        )
+                    }
                 }
             }
 
@@ -433,6 +442,30 @@ fun ReportScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ReportTabItems(
+    selectedIndex: Int,
+    onSelected: (Int) -> Unit
+) {
+    ReportView.entries.forEachIndexed { index, view ->
+        Tab(
+            selected = selectedIndex == index,
+            onClick = { onSelected(index) },
+            modifier = Modifier.heightIn(min = 48.dp),
+            text = {
+                Text(
+                    view.label,
+                    fontSize = 12.sp,
+                    fontWeight = if (selectedIndex == index) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        )
     }
 }
 

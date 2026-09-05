@@ -33,6 +33,13 @@ internal object DiscoveryHttpPolicy {
         if (url.username.isNotEmpty() || url.password.isNotEmpty()) return false
 
         val host = url.host
+        val normalizedHost = host.trimEnd('.').lowercase()
+        if (normalizedHost == "localhost" || normalizedHost.endsWith(".localhost") ||
+            normalizedHost == "local" || normalizedHost.endsWith(".local") ||
+            (!normalizedHost.contains('.') && !normalizedHost.contains(':'))
+        ) {
+            return false
+        }
         if (host.contains(':')) {
             val literal = runCatching { InetAddress.getByName(host) }.getOrNull() ?: return false
             return isPublicAddress(literal)

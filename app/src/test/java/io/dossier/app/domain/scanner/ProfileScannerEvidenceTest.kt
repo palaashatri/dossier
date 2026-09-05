@@ -3,12 +3,14 @@ package io.dossier.app.domain.scanner
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.ExposureFactKind
 import io.dossier.app.domain.evidence.toExposureLedger
 import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
 import io.dossier.app.domain.discovery.TypedSeedKind
 import io.dossier.app.domain.graph.EntityGraphBuilder
 import io.dossier.app.domain.model.*
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -23,6 +25,7 @@ class ProfileScannerEvidenceTest {
         displayName: String? = username,
         bio: String? = null,
         links: List<String> = emptyList(),
+        extractedText: String = "",
         profileImageUrl: String? = null,
         findingSourceUrl: String? = null
     ) = ProfileScanResult(
@@ -40,7 +43,7 @@ class ProfileScannerEvidenceTest {
         bio = bio,
         profileImageUrl = profileImageUrl,
         links = links,
-        extractedText = "",
+        extractedText = extractedText,
         findings = listOf(
             Finding(
                 type = FindingType.Email,
@@ -363,5 +366,334 @@ class ProfileScannerEvidenceTest {
         assertTrue("Jane Verified" !in firstName.id)
         assertEquals("Jane Verified", firstName.value)
         assertEquals("https://github.com/janedoe", firstName.sourceUrl)
+    }
+
+    @Test
+    fun extractsTextOnlyDocumentArchiveAndProfileLinksWithPunctuationTrimming() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val results = listOf(
+            result(
+                username = "janedoe",
+                url = "https://profiles.example.test/janedoe",
+                exists = true,
+                verified = true,
+                links = emptyList(),
+                extractedText = """
+                    Documents: (https://documents.example.test/resume.pdf).
+                    Archive copy: [https://archive.today/web/2024/https://example.test].
+                    Personal site: <https://homepage.example.test/about>!
+                    See article: https://example.test/wiki/Title_(edition);
+                    Historical mirror: https://archive.ph/snap123,
+                """.trimIndent()
+            )
+        )
+
+        val collection = results.toEvidenceCollection(input)
+
+        val docEv = collection.evidence.single { it.kind == EvidenceKind.Document }
+        assertEquals("https://documents.example.test/resume.pdf", docEv.value)
+        assertEquals(EvidenceState.Verified, docEv.state)
+        assertEquals(EvidenceReliability.DirectPublicProfile, docEv.reliability)
+
+        val archiveEvs = collection.evidence.filter { it.kind == EvidenceKind.Archive }
+        assertEquals(2, archiveEvs.size)
+        assertTrue(archiveEvs.any { it.value == "https://archive.today/web/2024/https://example.test" })
+        assertTrue(archiveEvs.any { it.value == "https://archive.ph/snap123" })
+
+        val urlEvs = collection.evidence.filter { it.kind == EvidenceKind.Url }
+        assertEquals(2, urlEvs.size)
+        assertTrue(urlEvs.any { it.value == "https://homepage.example.test/about" })
+        assertTrue(urlEvs.any { it.value == "https://example.test/wiki/Title_(edition)" })
+
+        val linksToValues = collection.relationships
+            .filter { it.relation == "links_to" && it.fromValue == "https://profiles.example.test/janedoe" }
+            .map { it.toValue }
+            .toSet()
+        assertTrue(docEv.value in linksToValues)
+        assertTrue("https://archive.today/web/2024/https://example.test" in linksToValues)
+        assertTrue("https://homepage.example.test/about" in linksToValues)
+        assertTrue("https://example.test/wiki/Title_(edition)" in linksToValues)
+        assertTrue("https://archive.ph/snap123" in linksToValues)
+    }
+
+    @Test
+    fun textLinkEvidencePreservesExactValueSourceProvenanceAndConfidence() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val provenancePath = "seed:username -> candidate:profile -> verified"
+        val exactUrl = "https://documents.example.test/papers/v1.0/spec.pdf?download=true#section2"
+        val profileUrl = "https://profiles.example.test/janedoe"
+
+        val res = result(
+            username = "janedoe",
+            url = profileUrl,
+            exists = true,
+            verified = true,
+            provenance = provenancePath,
+            links = emptyList(),
+            extractedText = "Published paper: $exactUrl."
+        )
+        val collection1 = listOf(res).toEvidenceCollection(input)
+        val collection2 = listOf(res).toEvidenceCollection(input)
+
+        val doc1 = collection1.evidence.single { it.kind == EvidenceKind.Document }
+        val doc2 = collection2.evidence.single { it.kind == EvidenceKind.Document }
+
+        assertEquals(exactUrl, doc1.value)
+        assertEquals(profileUrl, doc1.sourceUrl)
+        assertEquals(listOf(provenancePath), doc1.discoveryPath)
+        assertEquals(0.9f, doc1.confidence, 0.001f)
+        assertEquals(EvidenceState.Verified, doc1.state)
+        assertEquals(EvidenceReliability.DirectPublicProfile, doc1.reliability)
+
+        assertEquals(doc1.id, doc2.id)
+        assertTrue(doc1.id.startsWith("profile:document:"))
+        assertFalse(doc1.id.contains("documents.example.test"))
+        assertFalse(doc1.id.contains("spec.pdf"))
+    }
+
+    @Test
+    fun unverifiedAndCandidateProfileTextLinksDoNotPromoteState() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val collection = listOf(
+            result(
+                username = "candidate_user",
+                url = "https://profiles.example.test/missing",
+                exists = false,
+                verified = false,
+                links = emptyList(),
+                extractedText = "Reference: https://documents.example.test/candidate.pdf."
+            ),
+            result(
+                username = "observed_user",
+                url = "https://profiles.example.test/unverified",
+                exists = true,
+                verified = false,
+                links = emptyList(),
+                extractedText = "Reference: https://documents.example.test/observed.pdf."
+            )
+        ).toEvidenceCollection(input)
+
+        val candidateDoc = collection.evidence.single { it.value == "https://documents.example.test/candidate.pdf" }
+        assertEquals(EvidenceState.Candidate, candidateDoc.state)
+        assertEquals(EvidenceReliability.SearchEngineCandidate, candidateDoc.reliability)
+
+        val observedDoc = collection.evidence.single { it.value == "https://documents.example.test/observed.pdf" }
+        assertEquals(EvidenceState.Observed, observedDoc.state)
+        assertEquals(EvidenceReliability.SearchEngineCandidate, observedDoc.reliability)
+    }
+
+    @Test
+    fun textLinksEmitDomainEvidenceWithConsistentTypingAndDeduplication() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val collection = listOf(
+            result(
+                username = "janedoe",
+                url = "https://profiles.example.test/janedoe",
+                exists = true,
+                verified = true,
+                links = emptyList(),
+                extractedText = """
+                    First: https://documents.example.test/doc1.pdf
+                    Second: https://documents.example.test/doc2.pdf
+                    Archive: https://archive.today/page123
+                """.trimIndent()
+            )
+        ).toEvidenceCollection(input)
+
+        val domainEvs = collection.evidence.filter { it.kind == EvidenceKind.Domain }
+        assertEquals(2, domainEvs.size)
+
+        val docDomain = domainEvs.single { it.value == "documents.example.test" }
+        assertEquals("https://profiles.example.test/janedoe", docDomain.sourceUrl)
+        assertEquals(EvidenceState.Verified, docDomain.state)
+        assertEquals(EvidenceReliability.DirectPublicProfile, docDomain.reliability)
+
+        val archiveDomain = domainEvs.single { it.value == "archive.today" }
+        assertEquals("https://profiles.example.test/janedoe", archiveDomain.sourceUrl)
+
+        val domainRelationships = collection.relationships.filter { it.relation == "links_to_domain" }
+        assertTrue(domainRelationships.any { it.toValue == "documents.example.test" && docDomain.id in it.evidenceIds })
+        assertTrue(domainRelationships.any { it.toValue == "archive.today" && archiveDomain.id in it.evidenceIds })
+    }
+
+    @Test
+    fun rejectsInvalidMalformedAndNonHttpSchemesInExtractedText() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val overlongUrl = "https://example.test/" + "a".repeat(5000)
+        val textWithDisallowedAndMalformed = """
+            Ignored schemes:
+            javascript:alert('xss')
+            javascript:https://malicious.example.test/xss
+            data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==
+            data:https://evil.example.test/payload
+            file:///etc/shadow
+            file:https://files.example.test/secret
+            content://media/external/images/media/1
+            content:https://content.example.test/data
+            ftp://files.example.test/manual.pdf
+            mailto:jane@example.test
+
+            Malformed HTTP URLs:
+            https://
+            http://
+            https:///just/a/path
+            https://example..test/doc.pdf
+            https://example.test:99999/doc.pdf
+            https://user:password@example.test/secret.pdf
+            https://example.test/doc\u0000.pdf
+            foohttps://example.test/doc.pdf
+            $overlongUrl
+
+            Valid URL:
+            https://valid.example.test/verified-report.pdf.
+        """.trimIndent()
+
+        val collection = listOf(
+            result(
+                username = "janedoe",
+                url = "https://profiles.example.test/janedoe",
+                exists = true,
+                verified = true,
+                links = emptyList(),
+                extractedText = textWithDisallowedAndMalformed
+            )
+        ).toEvidenceCollection(input)
+
+        val nonProfileEvidence = collection.evidence.filter {
+            it.kind in setOf(EvidenceKind.Document, EvidenceKind.Archive, EvidenceKind.Url)
+        }
+        assertEquals(1, nonProfileEvidence.size)
+        assertEquals("https://valid.example.test/verified-report.pdf", nonProfileEvidence.single().value)
+
+        val domains = collection.evidence.filter { it.kind == EvidenceKind.Domain }.map { it.value }
+        assertEquals(listOf("valid.example.test"), domains)
+    }
+
+    @Test
+    fun extractedUrlDedupKeepsCaseSensitivePathAndQueryValuesDistinct() {
+        val extracted = extractAbsoluteHttpUrlsFromText(
+            "https://example.test/Case.pdf?Download=True " +
+                "https://EXAMPLE.TEST/case.pdf?download=true " +
+                "HTTPS://EXAMPLE.TEST/Case.pdf?Download=True"
+        )
+
+        assertEquals(
+            listOf(
+                "https://example.test/Case.pdf?Download=True",
+                "https://EXAMPLE.TEST/case.pdf?download=true"
+            ),
+            extracted
+        )
+    }
+
+    @Test
+    fun textLinkExtractionDeduplicatesAgainstDirectLinksAndEnforcesBounds() {
+        val input = IdentityInput(fullName = "Jane Doe")
+
+        // 1. Deduplication against direct links and within text
+        val dedupResult = result(
+            username = "janedoe",
+            url = "https://profiles.example.test/janedoe",
+            exists = true,
+            verified = true,
+            links = listOf("https://example.test/direct.pdf"),
+            extractedText = """
+                Same as direct: https://example.test/direct.pdf
+                Same case insensitive scheme/host: HTTPS://EXAMPLE.TEST/direct.pdf
+                New link: https://example.test/from-text.pdf
+                Duplicate in text: https://example.test/from-text.pdf
+            """.trimIndent()
+        )
+        val dedupCollection = listOf(dedupResult).toEvidenceCollection(input)
+        val docValues = dedupCollection.evidence.filter { it.kind == EvidenceKind.Document }.map { it.value }
+        assertEquals(2, docValues.size)
+        assertTrue("https://example.test/direct.pdf" in docValues)
+        assertTrue("https://example.test/from-text.pdf" in docValues)
+
+        // 2. Per-profile bound
+        val overLimitUrls = (0 until (MAX_TEXT_LINKS_PER_PROFILE + 15))
+            .joinToString(" ") { "https://bounded.example.test/doc_$it.pdf" }
+        val boundedResult = result(
+            username = "janedoe",
+            url = "https://profiles.example.test/bounded",
+            exists = true,
+            verified = true,
+            links = emptyList(),
+            extractedText = overLimitUrls
+        )
+        val boundedCollection = listOf(boundedResult).toEvidenceCollection(input)
+        val boundedDocs = boundedCollection.evidence.filter { it.kind == EvidenceKind.Document }
+        assertEquals(MAX_TEXT_LINKS_PER_PROFILE, boundedDocs.size)
+
+        // 3. Total bound across profiles
+        val manyProfiles = (0 until 6).map { profileIdx ->
+            val profileUrls = (0 until 50)
+                .joinToString(" ") { "https://total-bounded.example.test/p${profileIdx}_doc_$it.pdf" }
+            result(
+                username = "user_$profileIdx",
+                url = "https://profiles.example.test/user_$profileIdx",
+                exists = true,
+                verified = true,
+                links = emptyList(),
+                extractedText = profileUrls
+            )
+        }
+        val totalCollection = manyProfiles.toEvidenceCollection(input)
+        val totalDocs = totalCollection.evidence.filter { it.kind == EvidenceKind.Document }
+        assertEquals(MAX_TOTAL_TEXT_LINKS, totalDocs.size)
+    }
+
+    @Test
+    fun typedSeedAdmissionAndLedgerSeeDocumentArchiveAndUrlEvidenceFromTextLinks() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val collection = listOf(
+            result(
+                username = "janedoe",
+                url = "https://profiles.example.test/janedoe",
+                exists = true,
+                verified = true,
+                links = emptyList(),
+                extractedText = """
+                    Resume: https://documents.example.test/cv.pdf
+                    Wayback: https://web.archive.org/web/20230101/https://example.test
+                    Blog: https://site.example.test/blog
+                """.trimIndent()
+            )
+        ).toEvidenceCollection(input)
+
+        val docEv = collection.evidence.single { it.kind == EvidenceKind.Document }
+        val archiveEv = collection.evidence.single { it.kind == EvidenceKind.Archive }
+        val urlEv = collection.evidence.single { it.kind == EvidenceKind.Url }
+        val domainEvs = collection.evidence.filter { it.kind == EvidenceKind.Domain }
+
+        // Typed seed admission
+        val typedModel = TypedSeedEvidenceAdapter.admit(collection.evidence, input)
+        assertTrue(typedModel.admittedSeeds.any {
+            it.kind == TypedSeedKind.Document && docEv.id in it.evidenceIds && it.exactValue == docEv.value
+        })
+        assertTrue(typedModel.admittedSeeds.any {
+            it.kind == TypedSeedKind.Archive && archiveEv.id in it.evidenceIds && it.exactValue == archiveEv.value
+        })
+        assertTrue(typedModel.admittedSeeds.any {
+            it.kind == TypedSeedKind.Url && urlEv.id in it.evidenceIds && it.exactValue == urlEv.value
+        })
+        assertTrue(typedModel.admittedSeeds.any {
+            it.kind == TypedSeedKind.Domain && domainEvs.any { d -> d.id in it.evidenceIds }
+        })
+
+        // Canonical Exposure Ledger
+        val ledger = collection.toExposureLedger()
+        assertTrue(ledger.facts.any {
+            it.kind == ExposureFactKind.Document && docEv.id in it.evidenceIds && it.exactValue == docEv.value
+        })
+        assertTrue(ledger.facts.any {
+            it.kind == ExposureFactKind.Archive && archiveEv.id in it.evidenceIds && it.exactValue == archiveEv.value
+        })
+        assertTrue(ledger.facts.any {
+            it.kind == ExposureFactKind.Website && urlEv.id in it.evidenceIds && it.exactValue == urlEv.value
+        })
+        assertTrue(ledger.facts.any {
+            it.kind == ExposureFactKind.Domain && domainEvs.any { d -> d.id in it.evidenceIds }
+        })
     }
 }

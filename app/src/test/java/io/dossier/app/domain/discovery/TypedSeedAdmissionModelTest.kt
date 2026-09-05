@@ -364,4 +364,47 @@ class TypedSeedAdmissionModelTest {
         assertEquals(listOf(record.id), archive.evidenceIds)
         assertEquals(ExposureSourceClassification.ARCHIVE, archive.sourceClassification)
     }
+
+    @Test
+    fun publicSearchSafetyRequiresVerifiedPublicEvidenceProvenance() {
+        fun seed(
+            source: ExposureSourceClassification,
+            evidenceIds: List<String> = listOf("ev-1"),
+            sourceUrl: String? = "https://profile.example.test/jane"
+        ) = TypedSeed(
+            kind = TypedSeedKind.Document,
+            value = "https://docs.example.test/resume.pdf",
+            exactValue = "https://docs.example.test/resume.pdf",
+            isVerified = true,
+            evidenceState = EvidenceState.Verified,
+            origin = TypedSeedOrigin.Evidence,
+            sourceClassification = source,
+            evidenceIds = evidenceIds,
+            sourceUrl = sourceUrl
+        )
+
+        assertTrue(TypedSeedSafety.isSafePublicSearchSeed(seed(ExposureSourceClassification.PUBLIC_DOCUMENT)))
+        assertFalse(
+            TypedSeedSafety.isSafePublicSearchSeed(
+                seed(ExposureSourceClassification.DATA_BROKER)
+            )
+        )
+        assertFalse(TypedSeedSafety.isSafePublicSearchSeed(seed(ExposureSourceClassification.PUBLIC_DOCUMENT, emptyList())))
+        assertFalse(TypedSeedSafety.isSafePublicSearchSeed(seed(ExposureSourceClassification.PUBLIC_DOCUMENT, sourceUrl = null)))
+        assertFalse(
+            TypedSeedSafety.isSafePublicSearchSeed(
+                seed(ExposureSourceClassification.PUBLIC_DOCUMENT, sourceUrl = "file:///tmp/evidence")
+            )
+        )
+
+        val userSeed = TypedSeed(
+            kind = TypedSeedKind.Url,
+            value = "https://example.test/profile",
+            exactValue = "https://example.test/profile",
+            evidenceState = EvidenceState.Observed,
+            origin = TypedSeedOrigin.UserInput,
+            sourceClassification = ExposureSourceClassification.USER_IMPORTED
+        )
+        assertTrue(TypedSeedSafety.isSafePublicSearchSeed(userSeed))
+    }
 }

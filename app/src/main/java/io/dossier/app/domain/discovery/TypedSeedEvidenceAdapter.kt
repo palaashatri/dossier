@@ -162,3 +162,85 @@ object TypedSeedEvidenceAdapter {
         EvidenceReliability.Unknown -> ExposureSourceClassification.UNKNOWN_ORIGIN
     }
 }
+
+/**
+ * Shared admission predicate for typed values that may become public-search
+ * pivots.  Keep this separate from query generation so every caller applies
+ * the same verification, origin, source, and bounded-value checks.
+ */
+object TypedSeedSafety {
+    val publicSearchKinds: Set<TypedSeedKind> = setOf(
+        TypedSeedKind.Url,
+        TypedSeedKind.Domain,
+        TypedSeedKind.Document,
+        TypedSeedKind.Archive
+    )
+
+    private val publicEvidenceSources = setOf(
+        ExposureSourceClassification.PUBLIC_WEB,
+        ExposureSourceClassification.PUBLIC_PROFILE,
+        ExposureSourceClassification.PUBLIC_DOCUMENT,
+        ExposureSourceClassification.PUBLIC_RECORD,
+        ExposureSourceClassification.ARCHIVE,
+        ExposureSourceClassification.AUTHORIZED_API
+    )
+
+    fun isSafePublicSearchSeed(seed: TypedSeed): Boolean {
+        if (seed.kind !in publicSearchKinds) return false
+        if (seed.exactValue.isBlank() || seed.exactValue.length > TypedSeed.MAX_VALUE_CHARS) return false
+        if (seed.value.isBlank() || seed.value.length > TypedSeed.MAX_VALUE_CHARS) return false
+        if (seed.normalizedValue.isBlank() || seed.normalizedValue.length > TypedSeed.MAX_VALUE_CHARS) return false
+        if (seed.exactValue.any(Char::isISOControl) || seed.value.any(Char::isISOControl)) return false
+        if (seed.depth !in 0..TypedSeedAdmissionConfig.MAX_ALLOWED_DEPTH) return false
+        if (seed.evidenceIds.size > TypedSeed.MAX_EVIDENCE_IDS ||
+            seed.discoveryPath.size > TypedSeed.MAX_DISCOVERY_PATH_STEPS ||
+            seed.evidenceIds.any { it.isBlank() || it.length > TypedSeed.MAX_VALUE_CHARS } ||
+            seed.discoveryPath.any { it.isBlank() || it.length > TypedSeed.MAX_VALUE_CHARS }
+        ) return false
+        if (seed.sourceUrl?.length?.let { it > TypedSeed.MAX_VALUE_CHARS } == true) return false
+
+        // User-provided values are authorized even before a public fetch has
+        // verified them. Evidence-derived pivots must be verified and public.
+        if (seed.origin == TypedSeedOrigin.UserInput) {
+            if (seed.evidenceState !in setOf(EvidenceState.Observed, EvidenceState.Verified)) return false
+        } else if (seed.origin != TypedSeedOrigin.Evidence ||
+            seed.evidenceState != EvidenceState.Verified ||
+            seed.evidenceIds.isEmpty() ||
+            seed.sourceUrl?.let(::isSafeEvidenceSourceUrl) != true ||
+            seed.sourceClassification !in publicEvidenceSources
+        ) {
+            return false
+        }
+
+        // Reuse the canonical admission normalizers/structural validation;
+        // this also catches malformed URL, domain, and archive values.
+        val validator = TypedSeedAdmissionModel(
+            TypedSeedAdmissionConfig(
+                maxDepth = TypedSeedAdmissionConfig.MAX_ALLOWED_DEPTH,
+                maxTotalSeeds = 1,
+                perKindBudgets = mapOf(seed.kind to 1)
+            )
+        )
+        return validator.offer(
+            kind = seed.kind,
+            rawValue = seed.exactValue,
+            depth = seed.depth,
+            origin = seed.origin,
+            evidenceState = seed.evidenceState,
+            sourceClassification = seed.sourceClassification,
+            evidenceIds = seed.evidenceIds,
+            sourceUrl = seed.sourceUrl,
+            discoveryPath = seed.discoveryPath
+        )
+    }
+
+    private fun isSafeEvidenceSourceUrl(raw: String): Boolean {
+        val value = raw.trim()
+        if (value.isBlank() || value.any(Char::isISOControl)) return false
+        val uri = runCatching { java.net.URI(value) }.getOrNull() ?: return false
+        return uri.scheme?.lowercase() in setOf("http", "https") &&
+            !uri.host.isNullOrBlank() &&
+            uri.rawUserInfo == null &&
+            uri.port in -1..65_535
+    }
+}

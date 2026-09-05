@@ -121,4 +121,85 @@ class PublicSearchDiscoveryServiceTest {
             deepQueries.any { it.contains("site:github.com") && it.contains("jane.doe@example.com") }
         )
     }
+
+    @Test
+    fun buildQueries_includesSafeTypedSeedsWithinLimits() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val safeSeeds = listOf(
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Url,
+                value = "https://safe.example.test/profile",
+                exactValue = "https://safe.example.test/profile",
+                isVerified = true,
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_PROFILE,
+                evidenceIds = listOf("ev1"),
+                sourceUrl = "https://profile.example.test/jane"
+            ),
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Domain,
+                value = "safe.example.test",
+                exactValue = "safe.example.test",
+                isVerified = true,
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_WEB,
+                evidenceIds = listOf("ev2"),
+                sourceUrl = "https://profile.example.test/jane"
+            )
+        )
+
+        val queries = PublicSearchDiscoveryService.buildSearchQueries(input, typedSeeds = safeSeeds)
+
+        assertTrue("Emits quoted URL", queries.contains("\"https://safe.example.test/profile\""))
+        assertTrue("Emits quoted domain", queries.contains("\"safe.example.test\""))
+        assertTrue("Emits site:domain for domains", queries.contains("site:safe.example.test"))
+    }
+
+    @Test
+    fun buildQueries_rejectsUnsafeTypedSeeds() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val unsafeSeeds = listOf(
+            // Unverified candidate
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Url,
+                value = "https://candidate.example.test",
+                exactValue = "https://candidate.example.test",
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Candidate,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Candidate,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_WEB
+            ),
+            // Breach index
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Domain,
+                value = "breach.example.test",
+                exactValue = "breach.example.test",
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Observed,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.BREACH_INDEX
+            ),
+            // Image (not in allowed kinds)
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Image,
+                value = "https://image.example.test/img.png",
+                exactValue = "https://image.example.test/img.png",
+                isVerified = true,
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_WEB
+            )
+        )
+
+        val queries = PublicSearchDiscoveryService.buildSearchQueries(input, typedSeeds = unsafeSeeds)
+
+        assertTrue(queries.none { it.contains("candidate.example.test") })
+        assertTrue(queries.none { it.contains("breach.example.test") })
+        assertTrue(queries.none { it.contains("image.example.test") })
+    }
 }

@@ -1,6 +1,7 @@
 package io.dossier.app.domain.model
 
 import io.dossier.app.domain.discovery.ProviderVerificationState
+import io.dossier.app.domain.discovery.TypedSeedKind
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -81,7 +82,11 @@ data class ProfileScanResult(
     val verificationStatus: String? = null,
     val provenance: String? = null,
     val providerId: String? = candidate.providerId,
-    val providerVerificationState: ProviderVerificationState? = null
+    val providerVerificationState: ProviderVerificationState? = null,
+    val pivotSeedKind: TypedSeedKind? = null,
+    val pivotExactValue: String? = null,
+    val pivotEvidenceIds: List<String> = emptyList(),
+    val pivotDiscoveryPath: List<String> = emptyList()
 )
 
 @Serializable

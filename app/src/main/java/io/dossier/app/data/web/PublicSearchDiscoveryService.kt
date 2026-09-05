@@ -7,6 +7,9 @@ import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ProfileScanResult
+import io.dossier.app.domain.discovery.TypedSeed
+import io.dossier.app.domain.discovery.TypedSeedKind
+import io.dossier.app.domain.discovery.TypedSeedSafety
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -41,6 +44,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
         .readTimeout(10, TimeUnit.SECONDS)
         .callTimeout(15, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
+        .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+        .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
         .build()
 
     private val pageVerifier = PublicPageVerifier()
@@ -57,7 +62,11 @@ class PublicSearchDiscoveryService(private val context: Context) {
         val score: Float = 0f,
         val providerCount: Int = 1,
         val directlyVerified: Boolean = false,
-        val verificationNote: String? = null
+        val verificationNote: String? = null,
+        val pivotSeedKind: io.dossier.app.domain.discovery.TypedSeedKind? = null,
+        val pivotExactValue: String? = null,
+        val pivotEvidenceIds: List<String> = emptyList(),
+        val pivotDiscoveryPath: List<String> = emptyList()
     )
 
     private data class SearchProvider(
@@ -74,11 +83,13 @@ class PublicSearchDiscoveryService(private val context: Context) {
     suspend fun discover(
         input: IdentityInput,
         deepResearch: Boolean = false,
-        verifiedResults: List<ProfileScanResult> = emptyList()
+        verifiedResults: List<ProfileScanResult> = emptyList(),
+        typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList()
     ): List<PublicSearchResult> =
         withContext(Dispatchers.IO) {
             val queryLimit = if (deepResearch) MAX_DEEP_QUERIES else MAX_DEFAULT_QUERIES
-            val queries = buildSearchQueries(input, deepResearch, verifiedResults).take(queryLimit)
+            val safeSeeds = typedSeeds.filter(TypedSeedSafety::isSafePublicSearchSeed)
+            val queries = buildSearchQueries(input, deepResearch, verifiedResults, safeSeeds).take(queryLimit)
             if (queries.isEmpty()) return@withContext emptyList()
 
             val effectiveInput = if (verifiedResults.isNotEmpty()) {
@@ -104,8 +115,24 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 }.awaitAll().flatten()
             }
 
-            val scored = mergeProviderEvidence(raw)
-                .map { it.copy(score = scoreResult(effectiveInput, it)) }
+            val pivotSeedMap = mutableMapOf<String, TypedSeed>()
+            safeSeeds.forEach { seed ->
+                pivotSeedMap.putIfAbsent(quote(seed.exactValue), seed)
+                if (seed.kind == TypedSeedKind.Domain) {
+                    pivotSeedMap.putIfAbsent("site:${seed.exactValue}", seed)
+                }
+            }
+
+            val scored = mergeProviderEvidence(raw.map { result ->
+                val seed = pivotSeedMap[result.query]
+                result.copy(
+                    pivotSeedKind = seed?.kind,
+                    pivotExactValue = seed?.exactValue,
+                    pivotEvidenceIds = seed?.evidenceIds ?: emptyList(),
+                    pivotDiscoveryPath = seed?.discoveryPath ?: emptyList()
+                )
+            })
+                .map { result -> result.copy(score = scoreResult(effectiveInput, result)) }
                 .filter { it.score >= MIN_INDEX_SCORE }
                 .sortedByDescending { it.score }
                 .take(MAX_PRE_VERIFICATION_RESULTS)
@@ -515,7 +542,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
         fun buildSearchQueries(
             input: IdentityInput,
             deepResearch: Boolean = false,
-            verifiedResults: List<ProfileScanResult> = emptyList()
+            verifiedResults: List<ProfileScanResult> = emptyList(),
+            typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList()
         ): List<String> {
             val queries = linkedSetOf<String>()
             val discovered = extractDiscoveredSearchTerms(input, verifiedResults)
@@ -537,6 +565,20 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 if (i < discovered.handles.size) queries += quote(discovered.handles[i])
                 if (i < discovered.emails.size) queries += quote(discovered.emails[i])
                 if (i < discovered.phones.size) queries += quote(discovered.phones[i])
+            }
+
+            // Phase 1b: Safe typed seeds (URLs, domains, documents, archives).
+            val safeSeeds = typedSeeds
+                .filter(TypedSeedSafety::isSafePublicSearchSeed)
+                .distinctBy { "${it.kind}:${it.normalizedValue}" }
+                .take(if (deepResearch) 8 else 4)
+
+            safeSeeds.forEach { seed ->
+                val quoted = quote(seed.exactValue)
+                queries += quoted
+                if (seed.kind == TypedSeedKind.Domain) {
+                    queries += "site:${seed.exactValue}"
+                }
             }
 
             // Phase 2: Original terms exact queries followed by richer site probes as budget permits.
@@ -741,6 +783,21 @@ class PublicSearchDiscoveryService(private val context: Context) {
             var score = 0.08f
             var directIdentitySignals = 0
 
+            // A verified URL/domain/document/archive pivot is itself a
+            // high-entropy identity signal. It must be able to produce a lead
+            // even when the indexed page omits the audited name, while the
+            // bounded score still leaves direct page verification authoritative.
+            when (result.pivotSeedKind) {
+                TypedSeedKind.Url,
+                TypedSeedKind.Domain,
+                TypedSeedKind.Document,
+                TypedSeedKind.Archive -> {
+                    score += 0.28f
+                    directIdentitySignals++
+                }
+                else -> Unit
+            }
+
             val name = input.fullName.trim()
             if (name.isNotBlank() && combined.contains(name.lowercase())) {
                 score += 0.30f
@@ -786,7 +843,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
             if (result.query.contains("site:", true)) score += 0.03f
             score += consensusBonus(result.providerCount)
             if (directIdentitySignals == 0) score -= 0.20f
-            return score.coerceIn(0f, 0.95f)
+            return score.takeIf { it.isFinite() }?.coerceIn(0f, 0.95f) ?: 0f
         }
 
         fun normalizeSearchUrl(rawHref: String): String? {
@@ -802,24 +859,52 @@ class PublicSearchDiscoveryService(private val context: Context) {
             if (!candidate.startsWith("http://", true) && !candidate.startsWith("https://", true)) return null
             val withoutFragment = candidate.substringBefore('#')
             val uri = runCatching { URI(withoutFragment) }.getOrNull() ?: return null
-            if (uri.host.isNullOrBlank()) return null
+            if (uri.scheme?.equals("http", true) != true && uri.scheme?.equals("https", true) != true) return null
+            if (uri.host.isNullOrBlank() || uri.rawUserInfo != null || uri.port !in -1..65535) return null
+            // Reject an HTTP(S) token nested inside another URI scheme, such
+            // as javascript:https://..., instead of accepting its suffix.
+            val schemePrefix = withoutFragment.substringBefore("://", "")
+            if (schemePrefix.contains(':') || schemePrefix.any { it == ':' }) return null
+            if (!DiscoveryHttpPolicy.isSafePublicHttpUrl(withoutFragment)) return null
             return withoutFragment
         }
 
         fun canonicalUrlKey(url: String): String {
-            val parsed = url.toHttpUrlOrNull() ?: return url.trim().removeSuffix("/").lowercase()
+            val parsed = url.toHttpUrlOrNull() ?: return url.trim().removeSuffix("/")
             val builder = parsed.newBuilder().fragment(null)
             parsed.queryParameterNames
                 .filter { it.lowercase() in TRACKING_QUERY_PARAMS }
                 .forEach(builder::removeAllQueryParameters)
-            return builder.build().toString().removeSuffix("/").lowercase()
+            // HttpUrl canonicalizes scheme/host but intentionally preserves
+            // case-sensitive path, query values, and exact URL strings remain
+            // on the evidence record.
+            return builder.build().toString().removeSuffix("/")
         }
 
         private fun mergeProviderEvidence(results: List<PublicSearchResult>): List<PublicSearchResult> =
             results.groupBy { canonicalUrlKey(it.url) }.values.map { group ->
-                val best = group.maxByOrNull { it.title.length + it.snippet.length } ?: group.first()
+                val best = group.maxWithOrNull(
+                    compareBy<PublicSearchResult> { it.pivotSeedKind != null }
+                        .thenBy { it.title.length + it.snippet.length }
+                ) ?: group.first()
                 val sources = group.map { it.source }.distinct()
-                best.copy(source = sources.joinToString("+"), providerCount = sources.size)
+                val pivot = group.firstOrNull { it.pivotSeedKind != null }
+                best.copy(
+                    source = sources.joinToString("+"),
+                    providerCount = sources.size,
+                    pivotSeedKind = best.pivotSeedKind ?: pivot?.pivotSeedKind,
+                    pivotExactValue = best.pivotExactValue ?: pivot?.pivotExactValue,
+                    pivotEvidenceIds = if (best.pivotEvidenceIds.isNotEmpty()) {
+                        best.pivotEvidenceIds
+                    } else {
+                        pivot?.pivotEvidenceIds.orEmpty()
+                    },
+                    pivotDiscoveryPath = if (best.pivotDiscoveryPath.isNotEmpty()) {
+                        best.pivotDiscoveryPath
+                    } else {
+                        pivot?.pivotDiscoveryPath.orEmpty()
+                    }
+                )
             }
 
         private fun consensusBonus(providerCount: Int): Float =

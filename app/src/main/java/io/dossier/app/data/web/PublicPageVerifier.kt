@@ -333,6 +333,8 @@ internal class PublicPageVerifier(
             .followRedirects(true)
             .followSslRedirects(true)
             .retryOnConnectionFailure(true)
+            .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+            .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
             .build()
 
         private fun handleAppearsInPath(url: String, handle: String): Boolean {

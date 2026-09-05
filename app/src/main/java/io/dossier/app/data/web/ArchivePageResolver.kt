@@ -371,8 +371,9 @@ internal class ArchivePageResolver(
             val trimmed = raw.trim()
             if (!trimmed.startsWith("http://", true) && !trimmed.startsWith("https://", true)) return null
             val uri = runCatching { URI(trimmed) }.getOrNull() ?: return null
-            if (uri.host.isNullOrBlank()) return null
-            return trimmed.substringBefore('#')
+            if (uri.host.isNullOrBlank() || uri.rawUserInfo != null || uri.port !in -1..65_535) return null
+            val withoutFragment = trimmed.substringBefore('#')
+            return withoutFragment.takeIf(DiscoveryHttpPolicy::isSafePublicHttpUrl)
         }
 
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
@@ -382,6 +383,8 @@ internal class ArchivePageResolver(
             .followRedirects(true)
             .followSslRedirects(true)
             .retryOnConnectionFailure(true)
+            .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+            .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
             .build()
     }
 }

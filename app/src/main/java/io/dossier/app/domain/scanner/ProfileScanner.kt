@@ -4,6 +4,7 @@ import io.dossier.app.data.platform.PLATFORMS
 import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.data.platform.resolveProfileUrl
 import io.dossier.app.data.web.PublicImageSearchService
+import io.dossier.app.data.web.DiscoveryHttpPolicy
 import io.dossier.app.data.web.PublicSearchDiscoveryService
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
 import io.dossier.app.domain.discovery.ProviderExecutionRuntime
@@ -15,6 +16,9 @@ import io.dossier.app.domain.discovery.ProviderVerificationState
 import io.dossier.app.domain.discovery.ExtractionRules
 import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanId
+import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
+import io.dossier.app.domain.discovery.TypedSeedSafety
+import io.dossier.app.domain.discovery.TypedSeedKind
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceReliability
@@ -54,6 +58,8 @@ class ProfileScanner(
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
+        .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+        .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
         .build()
 
     private val providerRuntime = ProviderExecutionRuntime(client)
@@ -572,7 +578,16 @@ class ProfileScanner(
         verifiedResults: List<ProfileScanResult> = emptyList()
     ): List<ProfileScanResult> {
         val service = PublicSearchDiscoveryService(context)
-        val discovered = service.discover(input, deepResearch, verifiedResults)
+        // Canonical evidence is the sole source for recursive typed pivots.
+        // User-supplied URL seeds remain authorized before verification; all
+        // evidence-derived URL/domain/document/archive seeds are filtered by
+        // the shared bounded safety predicate.
+        val canonicalEvidence = verifiedResults.toEvidenceCollection(input)
+        val typedSeeds = TypedSeedEvidenceAdapter
+            .fromCollection(canonicalEvidence, input)
+            .admittedSeeds
+            .filter(TypedSeedSafety::isSafePublicSearchSeed)
+        val discovered = service.discover(input, deepResearch, verifiedResults, typedSeeds)
         if (discovered.isEmpty()) return emptyList()
 
         return discovered
@@ -668,7 +683,11 @@ class ProfileScanner(
             } else {
                 "Indexed public-search evidence — review manually"
             },
-            provenance = "public search via ${searchResult.source}"
+            provenance = "public search via ${searchResult.source}",
+            pivotSeedKind = searchResult.pivotSeedKind,
+            pivotExactValue = searchResult.pivotExactValue,
+            pivotEvidenceIds = searchResult.pivotEvidenceIds,
+            pivotDiscoveryPath = searchResult.pivotDiscoveryPath
         )
     }
 
@@ -2188,11 +2207,56 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
     val evidence = mutableListOf<Evidence>()
     val relationships = mutableListOf<EvidenceRelationship>()
 
-    forEach { result ->
+    // Prioritize verified profiles when applying the global text-link bound;
+    // indexed candidates must not crowd useful exact links out of the ledger.
+    val textLinksByResultIndex = mutableMapOf<Int, List<String>>()
+    var remainingTextLinks = MAX_TOTAL_TEXT_LINKS
+    withIndex()
+        .sortedWith(
+            compareByDescending<IndexedValue<ProfileScanResult>> { it.value.exists && it.value.verified }
+                .thenByDescending { it.value.exists }
+                .thenBy { it.index }
+        )
+        .forEach { indexed ->
+            if (remainingTextLinks <= 0) return@forEach
+            val directKeys = indexed.value.links
+                .asSequence()
+                .map(::profileLinkKey)
+                .toSet()
+            val selected = extractAbsoluteHttpUrlsFromText(indexed.value.extractedText)
+                .asSequence()
+                .filterNot { profileLinkKey(it) in directKeys }
+                .distinctBy(::profileLinkKey)
+                .take(MAX_TEXT_LINKS_PER_PROFILE)
+                .take(remainingTextLinks)
+                .toList()
+            textLinksByResultIndex[indexed.index] = selected
+            remainingTextLinks -= selected.size
+        }
+
+    forEachIndexed { resultIndex, result ->
         val url = result.candidate.url
         val conf = result.candidate.confidence.coerceIn(0f, 1f)
-        val path = if (!result.provenance.isNullOrBlank()) listOf(result.provenance) else emptyList()
+        val path = if (result.pivotDiscoveryPath.isNotEmpty()) {
+            result.pivotDiscoveryPath + url
+        } else if (!result.provenance.isNullOrBlank()) {
+            listOf(result.provenance)
+        } else {
+            emptyList()
+        }
         val verifiedProfile = result.exists && result.verified
+
+        if (result.pivotEvidenceIds.isNotEmpty() && result.pivotExactValue != null) {
+            relationships.add(
+                EvidenceRelationship(
+                    fromValue = url,
+                    toValue = result.pivotExactValue,
+                    relation = "derived_from",
+                    evidence = "public search pivot",
+                    evidenceIds = result.pivotEvidenceIds
+                )
+            )
+        }
 
         // Profile observation (native, not via the Finding adapter).
         val profileEvidence = Evidence(
@@ -2303,8 +2367,9 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
         }
 
         // Extracted Public Links as Evidence
-        result.links.filter { it.isNotBlank() }.forEach { rawLink ->
+        fun emitLinkEvidence(rawLink: String) {
             val kind = classifyProfileLink(rawLink)
+            val isArchive = kind == EvidenceKind.Archive
             val ev = Evidence(
                 id = stableProfileEvidenceId(kind.name.lowercase(Locale.ROOT), url, rawLink),
                 kind = kind,
@@ -2326,6 +2391,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 } else {
                     EvidenceReliability.SearchEngineCandidate
                 },
+                historical = isArchive,
                 discoveryPath = path
             )
             evidence.add(ev)
@@ -2354,12 +2420,19 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                         } else {
                             EvidenceReliability.SearchEngineCandidate
                         },
+                        historical = isArchive,
                         discoveryPath = path
                     )
                     evidence.add(domainEv)
                     relationships.add(EvidenceRelationship(fromValue = url, toValue = host, relation = "links_to_domain", evidence = "Profile Domain Link", evidenceIds = listOf(domainEv.id)))
                 }
         }
+        (result.links.asSequence() + textLinksByResultIndex[resultIndex].orEmpty().asSequence())
+            .filter { it.isNotBlank() }
+            .distinctBy(::profileLinkKey)
+            .forEach { rawLink ->
+                emitLinkEvidence(rawLink)
+            }
 
         // Each finding bridges losslessly; PII-on-profile is asserted explicitly.
         result.findings.forEach { finding ->
@@ -2428,6 +2501,100 @@ private fun classifyProfileLink(link: String): EvidenceKind {
     }
 }
 
+/** Maximum extracted text links retained for one profile observation. */
+internal const val MAX_TEXT_LINKS_PER_PROFILE = 64
+
+/** Maximum extracted text links retained across one evidence conversion. */
+internal const val MAX_TOTAL_TEXT_LINKS = 256
+
+private const val MAX_EXTRACTED_TEXT_URL_CHARS = 4_096
+
+private val ABSOLUTE_HTTP_URL_PATTERN = Regex("""(?i)(?<![A-Za-z0-9+._-])https?://[^\s<>\[\]{}"'`]+""")
+private val DISALLOWED_SCHEME_PREFIX = Regex("""(?i)^(?:javascript|data|file|mailto|content|ftp):""")
+
+/**
+ * Extracts only bounded, syntactically valid HTTP(S) URL tokens from already
+ * fetched text. The lexical prefix check prevents a disallowed URI such as
+ * `javascript:/*...*/https://...` from donating its HTTP-looking suffix.
+ */
+internal fun extractAbsoluteHttpUrlsFromText(text: String): List<String> {
+    if (text.isBlank()) return emptyList()
+    return ABSOLUTE_HTTP_URL_PATTERN.findAll(text)
+        .mapNotNull { match ->
+            val start = match.range.first
+            if (hasDisallowedSchemePrefix(text, start)) return@mapNotNull null
+            val candidate = trimUrlPunctuation(match.value)
+            if (isValidExtractedHttpUrl(candidate)) candidate else null
+        }
+        .distinctBy(::profileLinkKey)
+        .toList()
+}
+
+private fun hasDisallowedSchemePrefix(text: String, urlStart: Int): Boolean {
+    var tokenStart = urlStart
+    while (tokenStart > 0 && !text[tokenStart - 1].isWhitespace()) tokenStart--
+    val prefix = text.substring(tokenStart, urlStart)
+        .trimStart('(', '[', '{', '<', '"', '\'', '`')
+    return DISALLOWED_SCHEME_PREFIX.containsMatchIn(prefix)
+}
+
+private fun trimUrlPunctuation(raw: String): String {
+    var value = raw.trim()
+    while (value.isNotEmpty()) {
+        when (value.last()) {
+            '.', ',', ';', ':', '!', '\'', '"', '>', ']' -> value = value.dropLast(1)
+            ')' -> {
+                if (value.count { it == '(' } < value.count { it == ')' }) {
+                    value = value.dropLast(1)
+                } else {
+                    break
+                }
+            }
+            '}' -> {
+                if (value.count { it == '{' } < value.count { it == '}' }) {
+                    value = value.dropLast(1)
+                } else {
+                    break
+                }
+            }
+            else -> break
+        }
+    }
+    return value
+}
+
+private fun isValidExtractedHttpUrl(value: String): Boolean {
+    if (value.isBlank() || value.length > MAX_EXTRACTED_TEXT_URL_CHARS || value.any(Char::isISOControl)) {
+        return false
+    }
+    val uri = runCatching { URI(value) }.getOrNull() ?: return false
+    if (uri.scheme?.equals("http", ignoreCase = true) != true &&
+        uri.scheme?.equals("https", ignoreCase = true) != true
+    ) return false
+    val host = uri.host ?: return false
+    if (host.isBlank() || uri.rawUserInfo != null || uri.port !in -1..65_535) return false
+    if (host.startsWith('.') || host.endsWith('.') || host.contains("..")) return false
+    return DiscoveryHttpPolicy.isSafePublicHttpUrl(value)
+}
+
+/** Canonicalizes only scheme/host for evidence deduplication. */
+private fun profileLinkKey(raw: String): String {
+    val value = raw.trim()
+    val uri = runCatching { URI(value) }.getOrNull()
+    val scheme = uri?.scheme?.lowercase(Locale.ROOT)
+    val host = uri?.host?.lowercase(Locale.ROOT)
+    if (scheme != null && host != null && scheme in setOf("http", "https") && uri.rawUserInfo == null) {
+        return buildString {
+            append(scheme).append("://").append(host)
+            if (uri.port >= 0) append(':').append(uri.port)
+            append(uri.rawPath.orEmpty())
+            uri.rawQuery?.let { append('?').append(it) }
+            uri.rawFragment?.let { append('#').append(it) }
+        }
+    }
+    return value
+}
+
 private fun sameSourceUrl(first: String?, second: String): Boolean =
     first?.trim()?.equals(second.trim(), ignoreCase = true) == true
 
@@ -2438,9 +2605,12 @@ private val DOCUMENT_EXTENSION = Regex(
 
 private fun stableProfileEvidenceId(kind: String, profileUrl: String, exactValue: String): String {
     val canonical = listOf(kind, profileUrl, exactValue)
-        .joinToString("\u001f") { it.trim().replace(Regex("\\s+"), " ").lowercase(Locale.ROOT) }
+        .joinToString("\u001f") { stableProfileEvidencePart(it) }
     val digest = MessageDigest.getInstance("SHA-256")
         .digest(canonical.toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(Locale.ROOT, byte) }
     return "profile:$kind:${digest.take(32)}"
 }
+
+private fun stableProfileEvidencePart(value: String): String =
+    profileLinkKey(value).replace(Regex("\\s+"), " ")
