@@ -21,6 +21,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import java.net.Proxy
 import java.net.URI
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
@@ -62,6 +63,7 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
         .callTimeout(18, TimeUnit.SECONDS)
         .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
         .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
+        .proxy(Proxy.NO_PROXY)
         .followRedirects(true)
         .retryOnConnectionFailure(true)
         .build()

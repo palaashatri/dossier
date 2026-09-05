@@ -21,7 +21,12 @@ class PublicUrlPolicyTest {
             "http://[::1]/image.jpg",
             "http://[fd00::1]/image.jpg",
             "http://[::ffff:127.0.0.1]/image.jpg",
-            "http://2130706433/image.jpg"
+            "http://2130706433/image.jpg",
+            "http://0x7f000001/image.jpg",
+            "http://0177.0.0.1/image.jpg",
+            "http://[64:ff9b::c0a8:0101]/image.jpg",
+            "http://[2002:c0a8:0101::]/image.jpg",
+            "http://[2001:db8::1]/image.jpg"
         )
 
         blocked.forEach { url ->

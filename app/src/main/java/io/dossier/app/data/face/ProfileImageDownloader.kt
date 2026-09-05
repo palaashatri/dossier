@@ -7,6 +7,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.net.Proxy
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -22,6 +23,7 @@ class ProfileImageDownloader(context: Context) {
         .readTimeout(12, TimeUnit.SECONDS)
         .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
         .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
+        .proxy(Proxy.NO_PROXY)
         .followRedirects(true)
         .build()
 

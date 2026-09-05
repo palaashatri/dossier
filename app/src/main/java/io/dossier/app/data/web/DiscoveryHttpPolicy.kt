@@ -33,9 +33,12 @@ internal object DiscoveryHttpPolicy {
         if (url.username.isNotEmpty() || url.password.isNotEmpty()) return false
 
         val host = url.host
-        val looksLikeIpLiteral = host.contains(':') || host.all { it.isDigit() || it == '.' }
-        if (looksLikeIpLiteral) {
+        if (host.contains(':')) {
             val literal = runCatching { InetAddress.getByName(host) }.getOrNull() ?: return false
+            return isPublicAddress(literal)
+        }
+        if (isNumericIpv4Host(host)) {
+            val literal = parseCanonicalIpv4(host) ?: return false
             return isPublicAddress(literal)
         }
         return true
@@ -109,14 +112,65 @@ internal object DiscoveryHttpPolicy {
                 return isPublicAddress(ipv4)
             }
 
+            // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) carry an IPv4
+            // address in the IPv6 payload. Apply the IPv4 policy to it too.
+            if (isNat64(bytes)) {
+                val ipv4 = InetAddress.getByAddress(bytes.copyOfRange(12, 16))
+                return isPublicAddress(ipv4)
+            }
+            if (bytes[0].toInt() and 0xff == 0x20 &&
+                bytes[1].toInt() and 0xff == 0x02
+            ) {
+                val ipv4 = InetAddress.getByAddress(bytes.copyOfRange(2, 6))
+                return isPublicAddress(ipv4)
+            }
+
             // Unique-local IPv6 (fc00::/7) is private even though the JDK's
             // isSiteLocalAddress does not classify it as such.
             val first = bytes[0].toInt() and 0xff
             if (first and 0xfe == 0xfc) return false
-            return true
+            if (first and 0xe0 != 0x20) return false
+            return !isReservedIpv6(bytes)
         }
 
         return false
+    }
+
+    /** Reject ambiguous IPv4 spellings instead of letting platform DNS parse them differently. */
+    private fun isNumericIpv4Host(host: String): Boolean {
+        if (host.all { it.isDigit() || it == '.' }) return true
+        val parts = host.split('.')
+        return parts.any { it.startsWith("0x", ignoreCase = true) } &&
+            parts.all { it.startsWith("0x", ignoreCase = true) || it.all(Char::isDigit) }
+    }
+
+    private fun parseCanonicalIpv4(host: String): InetAddress? {
+        val parts = host.split('.')
+        if (parts.size != 4 || parts.any { it.length > 1 && it.startsWith('0') }) return null
+        val octets = parts.map { it.toIntOrNull()?.takeIf { value -> value in 0..255 } ?: return null }
+        return runCatching { InetAddress.getByAddress(octets.map(Int::toByte).toByteArray()) }.getOrNull()
+    }
+
+    private fun isNat64(bytes: ByteArray): Boolean =
+        bytes[0].toInt() and 0xff == 0 &&
+            bytes[1].toInt() and 0xff == 0x64 &&
+            bytes[2].toInt() and 0xff == 0xff &&
+            bytes[3].toInt() and 0xff == 0x9b &&
+            bytes.slice(4..11).all { it == 0.toByte() }
+
+    private fun isReservedIpv6(bytes: ByteArray): Boolean {
+        val first = bytes[0].toInt() and 0xff
+        val second = bytes[1].toInt() and 0xff
+        val third = bytes[2].toInt() and 0xff
+        val fourth = bytes[3].toInt() and 0xff
+        return (first == 0x20 && second == 0x01 && third == 0x00 && fourth == 0x00) ||
+            (first == 0x20 && second == 0x01 && third == 0x00 && fourth == 0x02 &&
+                bytes[4] == 0.toByte() && bytes[5] == 0.toByte()) ||
+            (first == 0x20 && second == 0x01 && third == 0x00 && fourth and 0xf0 == 0x10) ||
+            (first == 0x20 && second == 0x01 && third == 0x00 && fourth and 0xf0 == 0x20) ||
+            (first == 0x20 && second == 0x01 && third == 0x0d && fourth == 0xb8) ||
+            (first == 0x3f && second and 0xf0 == 0xf0) ||
+            (first == 0 && second == 1 && bytes.slice(2..7).all { it == 0.toByte() })
     }
 
     fun isTransientHttpStatus(code: Int): Boolean =
