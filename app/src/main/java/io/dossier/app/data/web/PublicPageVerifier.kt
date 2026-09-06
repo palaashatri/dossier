@@ -8,7 +8,22 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import java.net.URI
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+
+/** Bounded page material handed from direct verification to the typed frontier. */
+data class VerifiedPage(
+    val finalUrl: String,
+    val title: String,
+    val text: String,
+    val links: List<String> = emptyList(),
+    val contentHashSha256: String? = null,
+    val description: String = "",
+    val historical: Boolean = false,
+    val archiveProvider: String? = null,
+    val archiveOriginalUrl: String? = null,
+    val archiveTimestamp: String? = null
+)
 
 /**
  * Re-fetches indexed search results before Dossier gives them meaningful confidence.
@@ -37,7 +52,11 @@ internal class PublicPageVerifier(
             val snippet: String,
             val directScore: Float,
             val confidenceCeiling: Float,
-            val signals: List<String>
+            val signals: List<String>,
+            /** SHA-256 of the bounded fetched page content used for verification. */
+            val contentHashSha256: String? = null,
+            /** Bounded content already fetched by the verifier. */
+            val verifiedPage: VerifiedPage? = null
         ) : Outcome()
 
         data class Rejected(val reason: String) : Outcome()
@@ -98,6 +117,14 @@ internal class PublicPageVerifier(
                     ?.trim()
                     .orEmpty()
                 val text = document.body()?.text()?.trim().orEmpty().take(MAX_TEXT_CHARS)
+                val links = document.select("a[href]")
+                    .mapNotNull { element ->
+                        element.attr("abs:href")
+                            .trim()
+                            .takeIf(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+                    }
+                    .distinctBy(::canonical)
+                    .take(MAX_LINKS)
                 val directContent = listOf(title, description, text)
                     .filter { it.isNotBlank() }
                     .joinToString("\n")
@@ -126,13 +153,23 @@ internal class PublicPageVerifier(
                 }
 
                 val snippet = description.ifBlank { text.take(360) }.ifBlank { indexedSnippet }.take(360)
+                val contentHash = sha256(body)
                 Outcome.Verified(
                     finalUrl = finalUrl,
                     title = title.take(180),
                     snippet = snippet,
                     directScore = assessment.directScore,
                     confidenceCeiling = assessment.confidenceCeiling,
-                    signals = assessment.signals + "Independent attribution threshold satisfied"
+                    signals = assessment.signals + "Independent attribution threshold satisfied",
+                    contentHashSha256 = contentHash,
+                    verifiedPage = VerifiedPage(
+                        finalUrl = finalUrl,
+                        title = title.take(180),
+                        text = text,
+                        links = links,
+                        contentHashSha256 = contentHash,
+                        description = description.take(360)
+                    )
                 )
             }
         } catch (cancelled: CancellationException) {
@@ -164,6 +201,7 @@ internal class PublicPageVerifier(
                     .ifBlank { archive.text.take(300) }
                     .ifBlank { indexedSnippet }
                     .take(320)
+                val contentHash = sha256(archiveContent)
                 Outcome.Verified(
                     finalUrl = archive.snapshotUrl,
                     title = archive.title.ifBlank { indexedTitle }.take(180),
@@ -175,7 +213,20 @@ internal class PublicPageVerifier(
                         "Verified against ${archive.provider} capture dated $date",
                         "Original URL: ${archive.originalUrl}",
                         "Independent attribution threshold satisfied on archived content"
-                    ) + assessment.signals
+                    ) + assessment.signals,
+                    contentHashSha256 = contentHash,
+                    verifiedPage = VerifiedPage(
+                        finalUrl = archive.snapshotUrl,
+                        title = archive.title.ifBlank { indexedTitle }.take(180),
+                        text = archive.text.take(MAX_TEXT_CHARS),
+                        links = extractLinks(archive.text),
+                        contentHashSha256 = contentHash,
+                        description = archive.description.take(360),
+                        historical = true,
+                        archiveProvider = archive.provider,
+                        archiveOriginalUrl = archive.originalUrl,
+                        archiveTimestamp = archive.timestamp
+                    )
                 )
             }
         }
@@ -195,6 +246,8 @@ internal class PublicPageVerifier(
     companion object {
         private const val MAX_BODY_BYTES = 2_000_000L
         private const val MAX_TEXT_CHARS = 8_000
+        private const val MAX_LINKS = 64
+        private val URL_PATTERN = Regex("https?://[^\\s<>\\\"]+")
         private const val USER_AGENT =
             "Dossier/0.1 public-self-audit"
         private const val HISTORICAL_CONFIDENCE_CEILING = 0.78f
@@ -355,6 +408,17 @@ internal class PublicPageVerifier(
             val afterOk = end >= text.length || !text[end].isLetterOrDigit()
             return beforeOk && afterOk
         }
+
+        private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
+
+        private fun extractLinks(text: String): List<String> = URL_PATTERN.findAll(text)
+            .map { it.value.trimEnd('.', ',', ';', ':', '!', ')', ']', '}') }
+            .filter(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+            .distinctBy(::canonical)
+            .take(MAX_LINKS)
+            .toList()
 
         private fun canonical(raw: String): String {
             var value = raw.trim()

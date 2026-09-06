@@ -7,6 +7,7 @@ import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.model.FindingAttribution
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -313,7 +314,7 @@ class TypedSeedAdmissionModelTest {
     }
 
     @Test
-    fun adapterCarriesEvidenceSourceStateAndPathWhileUnsupportedExecutionStaysUnavailable() {
+    fun adapterCarriesEvidenceSourceStateAndPathWhileSearchExecutionIsAvailable() {
         val record = Evidence(
             id = "profile-email",
             kind = EvidenceKind.Email,
@@ -333,8 +334,8 @@ class TypedSeedAdmissionModelTest {
         assertEquals(record.sourceUrl, email.sourceUrl)
         assertEquals(EvidenceState.Verified, email.evidenceState)
         assertEquals(ExposureSourceClassification.PUBLIC_PROFILE, email.sourceClassification)
-        assertEquals(TypedSeedExecutionAvailability.Unavailable, model.availabilityFor(TypedSeedKind.Email))
-        assertFalse(model.isExecutionAvailable)
+        assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Email))
+        assertTrue(model.isExecutionAvailable)
     }
 
     @Test
@@ -399,6 +400,148 @@ class TypedSeedAdmissionModelTest {
     }
 
     @Test
+    fun adapterProjectsOnlyDirectlyVerifiedSearchUrlsAsNavigationPivots() {
+        val direct = Evidence(
+            id = "search-direct",
+            kind = EvidenceKind.PublicSearchEvidence,
+            value = "https://social.example.test/jane?ref=search#profile",
+            sourceUrl = "https://social.example.test/jane?ref=search#profile",
+            state = EvidenceState.Observed,
+            reliability = EvidenceReliability.SearchEngineCandidate,
+            sourceClassification = ExposureSourceClassification.PUBLIC_WEB,
+            contentHashSha256 = "hash-direct",
+            discoveryPath = listOf("seed@example.test", "search-results"),
+            attribution = FindingAttribution.Unconfirmed
+        )
+
+        val model = TypedSeedEvidenceAdapter.admit(listOf(direct))
+        val seed = model.admittedSeeds.single()
+
+        assertEquals(TypedSeedKind.Url, seed.kind)
+        assertEquals(direct.value, seed.exactValue)
+        assertEquals("https://social.example.test/jane?ref=search", seed.normalizedValue)
+        assertEquals(EvidenceState.Observed, seed.evidenceState)
+        assertEquals(TypedSeedOrigin.Evidence, seed.origin)
+        assertEquals(direct.sourceClassification, seed.sourceClassification)
+        assertEquals(listOf(direct.id), seed.evidenceIds)
+        assertEquals(direct.sourceUrl, seed.sourceUrl)
+        assertEquals(direct.discoveryPath, seed.discoveryPath)
+    }
+
+    @Test
+    fun adapterRejectsCandidateUnavailableMalformedAndNonUrlSearchObservations() {
+        fun record(
+            id: String,
+            value: String,
+            state: EvidenceState,
+            attribution: FindingAttribution? = FindingAttribution.Unconfirmed
+        ) = Evidence(
+            id = id,
+            kind = EvidenceKind.PublicSearchEvidence,
+            value = value,
+            sourceUrl = value.takeIf { it.startsWith("http") },
+            state = state,
+            reliability = EvidenceReliability.SearchEngineCandidate,
+            sourceClassification = ExposureSourceClassification.PUBLIC_WEB,
+            attribution = attribution
+        )
+
+        val model = TypedSeedEvidenceAdapter.admit(
+            listOf(
+                record(
+                    id = "candidate",
+                    value = "https://social.example.test/candidate",
+                    state = EvidenceState.Candidate,
+                    attribution = FindingAttribution.Candidate
+                ),
+                record(
+                    id = "unavailable",
+                    value = "https://social.example.test/unavailable",
+                    state = EvidenceState.Unavailable
+                ),
+                record(
+                    id = "malformed",
+                    value = "not-a-url",
+                    state = EvidenceState.Observed
+                ),
+                record(
+                    id = "unsafe",
+                    value = "http://127.0.0.1/private",
+                    state = EvidenceState.Observed
+                ),
+                Evidence(
+                    id = "missing-source",
+                    kind = EvidenceKind.PublicSearchEvidence,
+                    value = "https://social.example.test/missing-source",
+                    state = EvidenceState.Observed,
+                    reliability = EvidenceReliability.SearchEngineCandidate,
+                    sourceClassification = ExposureSourceClassification.PUBLIC_WEB,
+                    attribution = FindingAttribution.Unconfirmed
+                ),
+                Evidence(
+                    id = "unsafe-source",
+                    kind = EvidenceKind.PublicSearchEvidence,
+                    value = "https://social.example.test/unsafe-source",
+                    sourceUrl = "file:///tmp/fixture",
+                    state = EvidenceState.Observed,
+                    reliability = EvidenceReliability.SearchEngineCandidate,
+                    sourceClassification = ExposureSourceClassification.PUBLIC_WEB,
+                    attribution = FindingAttribution.Unconfirmed
+                ),
+                Evidence(
+                    id = "missing-attribution",
+                    kind = EvidenceKind.PublicSearchEvidence,
+                    value = "https://social.example.test/missing-attribution",
+                    sourceUrl = "https://social.example.test/missing-attribution",
+                    state = EvidenceState.Observed,
+                    reliability = EvidenceReliability.SearchEngineCandidate,
+                    sourceClassification = ExposureSourceClassification.PUBLIC_WEB
+                )
+            )
+        )
+
+        assertTrue(model.admittedSeeds.isEmpty())
+    }
+
+    @Test
+    fun adapterDoesNotPromoteImportedUserSuppliedEvidenceIntoSearchPivots() {
+        val imported = Evidence(
+            id = "imported-email",
+            kind = EvidenceKind.Email,
+            value = "imported@example.test",
+            sourceUrl = "https://import.example.test/record",
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.UserSupplied,
+            sourceClassification = ExposureSourceClassification.USER_IMPORTED
+        )
+
+        val model = TypedSeedEvidenceAdapter.admit(listOf(imported))
+
+        assertTrue(model.admittedSeeds.none { it.kind == TypedSeedKind.Email })
+    }
+
+    @Test
+    fun adapterRetainsFrontierDepthBoundForDirectSearchUrlPivot() {
+        val record = Evidence(
+            id = "deep-search",
+            kind = EvidenceKind.PublicSearchEvidence,
+            value = "https://social.example.test/deep",
+            sourceUrl = "https://social.example.test/deep",
+            state = EvidenceState.Observed,
+            reliability = EvidenceReliability.SearchEngineCandidate,
+            sourceClassification = ExposureSourceClassification.PUBLIC_WEB,
+            discoveryPath = listOf("hop-0", "hop-1", "hop-2")
+        )
+
+        val model = TypedSeedEvidenceAdapter.admit(
+            evidence = listOf(record),
+            config = TypedSeedAdmissionConfig(maxDepth = 2)
+        )
+
+        assertTrue(model.admittedSeeds.isEmpty())
+    }
+
+    @Test
     fun userProvidedArchiveSnapshotUrlIsAdmittedAsHistoricalArchiveSeed() {
         val snapshot = "https://web.archive.org/web/20240101000000id_/https://example.test/profile"
         val model = TypedSeedEvidenceAdapter.fromCollection(
@@ -459,6 +602,71 @@ class TypedSeedAdmissionModelTest {
     }
 
     @Test
+    fun publicSearchSafetyRejectsMalformedEmailAndPhoneValues() {
+        fun userSeed(kind: TypedSeedKind, value: String) = TypedSeed(
+            kind = kind,
+            value = value,
+            exactValue = value,
+            normalizedValue = value,
+            origin = TypedSeedOrigin.UserInput,
+            sourceClassification = ExposureSourceClassification.USER_IMPORTED,
+            evidenceState = EvidenceState.Observed
+        )
+
+        assertFalse(
+            TypedSeedSafety.isSafePublicSearchSeed(
+                userSeed(TypedSeedKind.Email, "not-an-email")
+            )
+        )
+        assertFalse(
+            TypedSeedSafety.isSafePublicSearchSeed(
+                userSeed(TypedSeedKind.Phone, "not-a-phone")
+            )
+        )
+    }
+
+    @Test
+    fun publicSearchSafetyRejectsOverBoundOrInconsistentNormalizedValues() {
+        fun userSeed(kind: TypedSeedKind, exactValue: String, normalizedValue: String) = TypedSeed(
+            kind = kind,
+            value = normalizedValue,
+            exactValue = exactValue,
+            normalizedValue = normalizedValue,
+            origin = TypedSeedOrigin.UserInput,
+            sourceClassification = ExposureSourceClassification.USER_IMPORTED,
+            evidenceState = EvidenceState.Observed
+        )
+
+        assertFalse(
+            TypedSeedSafety.isSafePublicSearchSeed(
+                userSeed(
+                    kind = TypedSeedKind.Email,
+                    exactValue = "valid@example.test",
+                    normalizedValue = "not-an-email"
+                )
+            )
+        )
+        assertFalse(
+            TypedSeedSafety.isSafePublicSearchSeed(
+                userSeed(
+                    kind = TypedSeedKind.Email,
+                    exactValue = "valid@example.test",
+                    normalizedValue = "a".repeat(255) + "@example.test"
+                )
+            )
+        )
+        assertFalse(
+            TypedSeedSafety.isSafePublicSearchSeed(
+                userSeed(
+                    kind = TypedSeedKind.Phone,
+                    exactValue = "15550100100",
+                    normalizedValue = "1".repeat(16)
+                )
+            )
+        )
+    }
+
+    @Test
     fun derivesExecutionAvailabilityFromSharedExecutableSet() {
         val model = TypedSeedAdmissionModel()
 
@@ -468,13 +676,13 @@ class TypedSeedAdmissionModelTest {
         assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Document))
         assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Archive))
 
-        // Unavailable kinds
-        assertEquals(TypedSeedExecutionAvailability.Unavailable, model.availabilityFor(TypedSeedKind.Email))
-        assertEquals(TypedSeedExecutionAvailability.Unavailable, model.availabilityFor(TypedSeedKind.Phone))
+        // Public-search kinds
+        assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Email))
+        assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Phone))
         assertEquals(TypedSeedExecutionAvailability.Unavailable, model.availabilityFor(TypedSeedKind.Username))
 
         assertTrue(model.isExecutionAvailable(TypedSeedKind.Url))
-        assertFalse(model.isExecutionAvailable(TypedSeedKind.Email))
+        assertTrue(model.isExecutionAvailable(TypedSeedKind.Email))
 
         // Without seeds, no execution is available
         assertFalse(model.isExecutionAvailable)
@@ -486,6 +694,6 @@ class TypedSeedAdmissionModelTest {
         val snapshot = model.snapshot()
         assertTrue(snapshot.isExecutionAvailable)
         assertEquals(TypedSeedExecutionAvailability.Available, snapshot.executionAvailability[TypedSeedKind.Url])
-        assertEquals(TypedSeedExecutionAvailability.Unavailable, snapshot.executionAvailability[TypedSeedKind.Email])
+        assertEquals(TypedSeedExecutionAvailability.Available, snapshot.executionAvailability[TypedSeedKind.Email])
     }
 }

@@ -712,7 +712,24 @@ class ProfileScanner(
         }
 
         val executor = typedSeedExecutorOverride
-            ?: TypedSeedPublicFetchExecutor(providerRuntime = providerRuntime)
+            ?: run {
+                // One service owns the HTTP client, cache, breaker, and browser
+                // semaphore for this frontier pass. Scope each request to the
+                // typed seed so broad name/input queries are not repeated once
+                // per frontier item.
+                val searchService = PublicSearchDiscoveryService(context)
+                TypedSeedPublicFetchExecutor(
+                    providerRuntime = providerRuntime,
+                    searchOutcomeSearcher = { seed, _, _ ->
+                        searchService.discoverOutcome(
+                            input = seedScopedInput(seed),
+                            deepResearch = deepResearch,
+                            verifiedResults = emptyList(),
+                            typedSeeds = listOf(seed)
+                        )
+                    }
+                )
+            }
         data class RunningSeed(
             val order: Int,
             val key: String,
@@ -729,6 +746,7 @@ class ProfileScanner(
         var nextLaunchOrder = 0
         var nextCommitOrder = 0
         var parentCancelled = false
+        var committingKey: String? = null
         try {
             coroutineScope {
                 suspend fun launchEligible() {
@@ -783,13 +801,18 @@ class ProfileScanner(
 
                 suspend fun commitReady() {
                     while (true) {
+                        currentCoroutineContext().ensureActive()
                         val ready = completed.remove(nextCommitOrder) ?: break
+                        committingKey = ready.key
+                        currentCoroutineContext().ensureActive()
                         cumulativeEvidence = cumulativeEvidence.merge(ready.report.collection)
                         // Persist the exact emitted collection alongside queue
                         // state; recovery never loses completed evidence.
                         frontier.mergeEvidence(ready.report.collection)
                         val outcome = ready.report.executions.singleOrNull()
-                        if (outcome?.state == TypedSeedPublicFetchExecutor.ExecutionState.Verified) {
+                        if (outcome?.state == TypedSeedPublicFetchExecutor.ExecutionState.Verified ||
+                            outcome?.state == TypedSeedPublicFetchExecutor.ExecutionState.Completed
+                        ) {
                             frontier.complete(ready.key)
                         } else {
                             frontier.unavailable(
@@ -816,6 +839,7 @@ class ProfileScanner(
                                 planFingerprint!!
                             )
                         }
+                        committingKey = null
                     }
                 }
 
@@ -848,6 +872,11 @@ class ProfileScanner(
                 active.deferred.cancel()
                 frontier.releaseInFlight(active.key)
             }
+            // A child can finish between select() and the parent cancellation
+            // and already be waiting in `completed` without having committed.
+            // Release those entries too so recovery retries them.
+            completed.values.forEach { ready -> frontier.releaseInFlight(ready.key) }
+            committingKey?.let(frontier::releaseInFlight)
             if (durable) {
                 runCatching {
                     persistTypedFrontier(
@@ -906,6 +935,17 @@ class ProfileScanner(
                 record.sourceUrl?.let(PublicSearchDiscoveryService::canonicalUrlKey) == requestedKey
         }
     }
+
+    /**
+     * Keep a typed-frontier search focused on its high-entropy seed. The
+     * shared service still owns provider/cache policy, but does not repeat the
+     * full name/profile query plan for every Email/Phone entry.
+     */
+    private fun seedScopedInput(seed: TypedSeed): IdentityInput = IdentityInput(
+        fullName = "",
+        emails = if (seed.kind == TypedSeedKind.Email) listOf(seed.exactValue) else emptyList(),
+        phones = if (seed.kind == TypedSeedKind.Phone) listOf(seed.exactValue) else emptyList()
+    )
 
     private fun persistTypedFrontier(
         frontier: TypedSeedFrontier,

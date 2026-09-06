@@ -348,7 +348,7 @@ class TypedSeedFrontierTest {
     }
 
     @Test
-    fun unsupportedHighEntropyEmailDoesNotCrowdOutActionableUrl() {
+    fun executableHighEntropyEmailDoesNotCrowdOutActionableUrl() {
         val frontier = TypedSeedFrontier(
             requestId = uuid(),
             config = TypedSeedFrontierConfig(
@@ -361,7 +361,7 @@ class TypedSeedFrontierTest {
         val url = userSeed(TypedSeedKind.Url, "https://actionable.example.test/profile")
 
         assertTrue(frontier.offer(email))
-        assertEquals(TypedSeedFrontierEntryState.Unavailable, frontier.entries.single().state)
+        assertEquals(TypedSeedFrontierEntryState.Pending, frontier.entries.single().state)
         assertTrue(frontier.offer(url))
 
         assertEquals(url.exactValue, frontier.entries.single().seed.exactValue)
@@ -392,20 +392,20 @@ class TypedSeedFrontierTest {
     }
 
     @Test
-    fun unsupportedKindIsPersistedAsUnavailableAndTombstoneBlocksLateSave() {
+    fun executableEmailIsPersistedAsPendingAndTombstoneBlocksLateSave() {
         val request = uuid()
         val owner = uuid()
         val generation = uuid()
         val store = store(request)
         val frontier = frontier(request, owner, generation)
         assertTrue(frontier.offer(userSeed(TypedSeedKind.Email, "person@example.test")))
-        assertEquals(TypedSeedFrontierEntryState.Unavailable, frontier.entries.single().state)
+        assertEquals(TypedSeedFrontierEntryState.Pending, frontier.entries.single().state)
         assertEquals(TypedSeedFrontierWriteResult.Saved, store.save(frontier, owner, generation, plan))
 
         val loaded = store.load(config, owner, generation, plan)
         assertTrue(loaded is TypedSeedFrontierLoadResult.Available)
         assertEquals(
-            TypedSeedFrontierEntryState.Unavailable,
+            TypedSeedFrontierEntryState.Pending,
             (loaded as TypedSeedFrontierLoadResult.Available).frontier.entries.single().state
         )
 

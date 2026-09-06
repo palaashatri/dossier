@@ -45,6 +45,7 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.format.ResolverStyle
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 private class TypedSeedUnavailableException(message: String) : RuntimeException(message)
@@ -74,7 +75,8 @@ private fun defaultArchiveSeedResolver(): TypedSeedPublicFetchExecutor.ArchiveSe
 }
 
 /**
- * A bounded executor for high-entropy URL-like typed seeds.
+ * A bounded executor for reviewed URL-like fetches and high-entropy
+ * Email/Phone public-search pivots.
  *
  * The canonical [EvidenceCollection] is the only output of record.  The
  * detailed report is deliberately disposable and exists to make per-seed
@@ -94,8 +96,23 @@ class TypedSeedPublicFetchExecutor(
         )
     },
     private val piiExtractor: PiiExtractor = PiiExtractor(),
-    private val nowMillis: () -> Long = System::currentTimeMillis
+    /** Legacy list seam retained for deterministic JVM fixtures/callers. */
+    private val searcher: PublicSearchSeam? = null,
+    private val nowMillis: () -> Long = System::currentTimeMillis,
+    /** Outcome seam used by production to distinguish provider failure from an empty result. */
+    private val searchOutcomeSearcher: PublicSearchOutcomeSeam? = null
 ) {
+
+    /**
+     * Page material produced by direct search verification. The map is scoped
+     * to this executor instance and bounded; it is not a second evidence store.
+     */
+    private val reusableVerifiedPages = ConcurrentHashMap<String, ReusableVerifiedPage>()
+
+    private data class ReusableVerifiedPage(
+        val page: VerifiedPage,
+        val providerId: String
+    )
 
     /** Injectable seam around the existing provider runtime for JVM fixtures. */
     fun interface PublicSeedFetcher {
@@ -110,6 +127,24 @@ class TypedSeedPublicFetchExecutor(
     /** Injectable archive seam; the default delegates to [ArchivePageResolver]. */
     fun interface ArchiveSeedResolver {
         suspend fun resolve(url: String): ArchiveSeedFetch?
+    }
+
+    /** Injectable search seam for Email/Phone seeds. */
+    fun interface PublicSearchSeam {
+        suspend fun search(
+            seed: TypedSeed,
+            input: IdentityInput,
+            scanId: ScanId
+        ): List<PublicSearchDiscoveryService.PublicSearchResult>
+    }
+
+    /** Explicit search outcome used by the durable frontier. */
+    fun interface PublicSearchOutcomeSeam {
+        suspend fun search(
+            seed: TypedSeed,
+            input: IdentityInput,
+            scanId: ScanId
+        ): PublicSearchDiscoveryService.SearchOutcome
     }
 
     /** Archive payload used by the executor; [html] is optional for test fixtures. */
@@ -134,6 +169,8 @@ class TypedSeedPublicFetchExecutor(
 
     enum class ExecutionState {
         Verified,
+        /** A valid search completed; its observations may still be candidates. */
+        Completed,
         Unavailable,
         Candidate,
         Skipped
@@ -155,7 +192,7 @@ class TypedSeedPublicFetchExecutor(
         val outcomes: List<SeedExecution> get() = executions
     }
 
-    /** Executes safe URL/domain/document/archive seeds and returns canonical evidence only. */
+    /** Executes safe URL-like fetches and Email/Phone searches into canonical evidence. */
     suspend fun execute(
         seeds: List<TypedSeed>,
         input: IdentityInput,
@@ -172,12 +209,7 @@ class TypedSeedPublicFetchExecutor(
         input: IdentityInput,
         scanId: ScanId
     ): Report = withContext(Dispatchers.IO) {
-        val eligibleKinds = setOf(
-            TypedSeedKind.Url,
-            TypedSeedKind.Domain,
-            TypedSeedKind.Document,
-            TypedSeedKind.Archive
-        )
+        val eligibleKinds = TypedSeedSafety.executableKinds
 
         val distinct = seeds.distinctBy(::seedKey)
         val bounded = distinct.take(MAX_SEEDS)
@@ -187,11 +219,10 @@ class TypedSeedPublicFetchExecutor(
         val overflow = distinct
             .drop(MAX_SEEDS)
             .map { skipped(it, "Seed was outside the bounded execution budget") }
-        val safe = bounded
-            .filter { it.kind in eligibleKinds && TypedSeedSafety.isSafePublicFetchSeed(it) }
-        val unsafe = bounded
-            .filterNot { it.kind in eligibleKinds && TypedSeedSafety.isSafePublicFetchSeed(it) }
-            .map { skipped(it) }
+        val safe = bounded.filter { seed ->
+            seed.kind in eligibleKinds && TypedSeedSafety.isSafeExecutableSeed(seed)
+        }
+        val unsafe = bounded.filterNot { it in safe }.map { skipped(it) }
 
         val semaphore = Semaphore(MAX_CONCURRENT_FETCHES)
         val fetched = supervisorScope {
@@ -231,6 +262,8 @@ class TypedSeedPublicFetchExecutor(
                 TypedSeedKind.Url,
                 TypedSeedKind.Domain,
                 TypedSeedKind.Document -> executePublic(seed, input, scanId)
+                TypedSeedKind.Email,
+                TypedSeedKind.Phone -> executeSearch(seed, input, scanId)
                 else -> skipped(seed)
             }
         } catch (cancelled: CancellationException) {
@@ -258,6 +291,14 @@ class TypedSeedPublicFetchExecutor(
             ?: return unavailable(seed, "Seed URL could not be normalized")
         if (!DiscoveryHttpPolicy.isSafePublicHttpUrl(requestedUrl)) {
             return unavailable(seed, "Seed URL is not a safe public HTTP(S) URL")
+        }
+
+        reusablePage(seed)?.let { (key, reusable) ->
+            try {
+                return replayVerifiedPage(seed, input, reusable)
+            } finally {
+                reusableVerifiedPages.remove(key, reusable)
+            }
         }
 
         val provider = ProviderExecutionRuntime.uncataloguedProfileDefinition(requestedUrl)
@@ -343,6 +384,13 @@ class TypedSeedPublicFetchExecutor(
         input: IdentityInput,
         scanId: ScanId
     ): SeedRun {
+        reusablePage(seed)?.let { (key, reusable) ->
+            try {
+                return replayVerifiedPage(seed, input, reusable)
+            } finally {
+                reusableVerifiedPages.remove(key, reusable)
+            }
+        }
         classifyArchiveSnapshot(seed.exactValue)?.let { direct ->
             return executeDirectArchiveSnapshot(seed, input, scanId, direct)
         }
@@ -350,6 +398,205 @@ class TypedSeedPublicFetchExecutor(
         val archive = archiveResolver.resolve(seed.exactValue)
             ?: return unavailable(seed, "No historical snapshot was available", fetchAttempted = true)
         return executeArchiveFetch(seed, input, archive)
+    }
+
+    private suspend fun executeSearch(
+        seed: TypedSeed,
+        input: IdentityInput,
+        scanId: ScanId
+    ): SeedRun {
+        currentCoroutineContext().ensureActive()
+        val outcome = when {
+            searchOutcomeSearcher != null -> searchOutcomeSearcher.search(seed, input, scanId)
+            searcher != null -> PublicSearchDiscoveryService.SearchOutcome.Success(
+                searcher.search(seed, input, scanId)
+            )
+            else -> return unavailable(seed, "Search adapter is not configured")
+        }
+        // A seam may complete after its caller was cancelled. Do not map any
+        // late response into canonical evidence in that case.
+        currentCoroutineContext().ensureActive()
+
+        if (outcome is PublicSearchDiscoveryService.SearchOutcome.Unavailable) {
+            return unavailable(
+                seed,
+                outcome.reason.take(MAX_REASON_CHARS).ifBlank { "Public search provider unavailable" },
+                fetchAttempted = true
+            )
+        }
+
+        val normalizedResults = (outcome as PublicSearchDiscoveryService.SearchOutcome.Success)
+            .results
+            .asSequence()
+            .mapNotNull(::sanitizeSearchResult)
+            .groupBy { PublicSearchDiscoveryService.canonicalUrlKey(it.url) }
+            .values
+            .mapNotNull { group ->
+                group.maxWithOrNull(
+                    compareBy<PublicSearchDiscoveryService.PublicSearchResult> { it.directlyVerified }
+                        .thenBy { it.score }
+                        .thenByDescending { it.providerCount }
+                )
+            }
+            .take(MAX_SEARCH_RESULTS)
+            .toList()
+
+        normalizedResults.forEach { result ->
+            if (result.directlyVerified) {
+                result.verifiedPage?.let { page ->
+                    rememberVerifiedPage(
+                        result.url,
+                        ReusableVerifiedPage(
+                            page = page,
+                            providerId = result.source.ifBlank { "public-search-verified" }
+                        )
+                    )
+                }
+            }
+        }
+
+        val retrievedAt = nowMillis()
+        val evidenceList = normalizedResults.map { result ->
+            currentCoroutineContext().ensureActive()
+            val path = searchDiscoveryPath(seed, result)
+            val sourceUrls = searchSourceUrls(seed, result)
+            val supportingEvidenceIds = (seed.evidenceIds + result.pivotEvidenceIds)
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+                .take(Evidence.MAX_SUPPORTING_EVIDENCE_IDS)
+            Evidence(
+                id = evidenceId("search", seed, result.url, result.query),
+                kind = EvidenceKind.PublicSearchEvidence,
+                value = result.url,
+                sourceUrl = result.url,
+                snippet = result.snippet.takeIf { it.isNotBlank() },
+                confidence = result.score.coerceIn(0f, 1f),
+                risk = RiskLevel.Medium,
+                signals = searchSignals(seed, result),
+                providerId = result.source,
+                retrievedAtEpochMillis = retrievedAt,
+                state = if (result.directlyVerified) {
+                    EvidenceState.Observed
+                } else {
+                    EvidenceState.Candidate
+                },
+                reliability = if (result.verifiedPage?.historical == true) {
+                    EvidenceReliability.ArchiveSnapshot
+                } else {
+                    EvidenceReliability.SearchEngineCandidate
+                },
+                sourceClassification = if (result.verifiedPage?.historical == true) {
+                    ExposureSourceClassification.ARCHIVE
+                } else {
+                    ExposureSourceClassification.PUBLIC_WEB
+                },
+                contentHashSha256 = result.contentHashSha256,
+                parserVersion = PARSER_VERSION,
+                discoveryPath = path,
+                sourceUrls = sourceUrls,
+                supportingEvidenceIds = supportingEvidenceIds,
+                attribution = FindingAttribution.Unconfirmed,
+                historical = result.verifiedPage?.historical == true
+            )
+        }
+        currentCoroutineContext().ensureActive()
+
+        return SeedRun(
+            execution = SeedExecution(
+                seed = seed,
+                state = ExecutionState.Completed,
+                fetchAttempted = true,
+                evidenceIds = evidenceList.map(Evidence::id).distinct().take(MAX_EVIDENCE_IDS)
+            ),
+            evidence = evidenceList,
+            relationships = evidenceList.map { evidence ->
+                EvidenceRelationship(
+                    fromValue = seed.exactValue,
+                    toValue = evidence.value,
+                    relation = "indexed_result",
+                    evidence = "Public search index observation; ownership unconfirmed",
+                    evidenceIds = listOf(evidence.id)
+                )
+            },
+            path = discoveryPath(seed, "search-results")
+        )
+    }
+
+    /**
+     * Replays a page that PublicPageVerifier already fetched for a search
+     * result. Live pages use the same canonical parser/extractor path as a
+     * normal URL fetch; archive pages retain their historical classification.
+     */
+    private suspend fun replayVerifiedPage(
+        seed: TypedSeed,
+        input: IdentityInput,
+        reusable: ReusableVerifiedPage
+    ): SeedRun {
+        currentCoroutineContext().ensureActive()
+        val page = reusable.page
+        val sourceUrl = page.finalUrl.trim()
+        if (sourceUrl.length > MAX_SEARCH_URL_CHARS ||
+            !DiscoveryHttpPolicy.isSafePublicHttpUrl(sourceUrl)
+        ) {
+            return unavailable(seed, "Verified page returned an unsafe final URL")
+        }
+
+        if (page.historical) {
+            return executeArchiveFetch(
+                seed = seed,
+                input = input,
+                archive = ArchiveSeedFetch(
+                    provider = page.archiveProvider.orEmpty(),
+                    originalUrl = page.archiveOriginalUrl.orEmpty(),
+                    snapshotUrl = sourceUrl,
+                    timestamp = page.archiveTimestamp.orEmpty(),
+                    title = page.title,
+                    description = page.description,
+                    text = page.text
+                )
+            )
+        }
+
+        val sourceUrls = listOf(seed.exactValue, sourceUrl)
+            .map(String::trim)
+            .filter(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+            .distinctBy(::canonicalUrl)
+            .take(Evidence.MAX_SOURCE_URLS)
+        return verifiedRun(
+            seed = seed,
+            sourceUrl = sourceUrl,
+            text = page.text,
+            title = page.title,
+            links = page.links,
+            input = input,
+            providerId = reusable.providerId,
+            reliability = EvidenceReliability.DirectPersonalWebsite,
+            sourceClassification = sourceClassification(seed),
+            historical = false,
+            observedAtEpochMillis = null,
+            parserVersion = PARSER_VERSION,
+            html = null,
+            contentHashSha256 = page.contentHashSha256,
+            sourceUrls = sourceUrls,
+            discoveryPathExtra = listOf(seed.exactValue)
+        )
+    }
+
+    private fun rememberVerifiedPage(url: String, reusable: ReusableVerifiedPage) {
+        val key = canonicalUrl(url)
+        if (!DiscoveryHttpPolicy.isSafePublicHttpUrl(url)) return
+        reusableVerifiedPages[key] = reusable
+        while (reusableVerifiedPages.size > MAX_REUSABLE_VERIFIED_PAGES) {
+            val eldest = reusableVerifiedPages.keys.firstOrNull() ?: break
+            reusableVerifiedPages.remove(eldest)
+        }
+    }
+
+    private fun reusablePage(seed: TypedSeed): Pair<String, ReusableVerifiedPage>? {
+        val requestedUrl = requestUrl(seed) ?: return null
+        val key = canonicalUrl(requestedUrl)
+        return reusableVerifiedPages[key]?.let { key to it }
     }
 
     /** Executes an already archived URL directly; it is not an original URL lookup. */
@@ -553,6 +800,7 @@ class TypedSeedPublicFetchExecutor(
         observedAtEpochMillis: Long?,
         parserVersion: String,
         html: String?,
+        contentHashSha256: String? = null,
         archiveDescription: String? = null,
         sourceUrls: List<String> = listOf(seed.exactValue),
         discoveryPathExtra: List<String> = emptyList()
@@ -581,7 +829,7 @@ class TypedSeedPublicFetchExecutor(
             state = EvidenceState.Verified,
             reliability = reliability,
             sourceClassification = sourceClassification,
-            contentHashSha256 = sha256(text),
+            contentHashSha256 = contentHashSha256 ?: sha256(text),
             parserVersion = parserVersion,
             historical = historical,
             discoveryPath = path,
@@ -881,15 +1129,183 @@ class TypedSeedPublicFetchExecutor(
         )
     }
 
+    private fun sanitizeSearchResult(
+        result: PublicSearchDiscoveryService.PublicSearchResult
+    ): PublicSearchDiscoveryService.PublicSearchResult? {
+        val url = result.url.trim()
+        if (url.length > MAX_SEARCH_URL_CHARS ||
+            !DiscoveryHttpPolicy.isSafePublicHttpUrl(url)
+        ) return null
+        if (result.query.isBlank() || result.source.isBlank() || !result.score.isFinite()) return null
+
+        val title = result.title.trim().take(MAX_SEARCH_TITLE_CHARS)
+        val snippet = result.snippet.trim().take(MAX_SEARCH_SNIPPET_CHARS)
+        if (title.isBlank() && snippet.isBlank()) return null
+        val verifiedPage = result.verifiedPage?.let(::sanitizeVerifiedPage)
+
+        val pivotSourceUrl = result.pivotSourceUrl
+            ?.trim()
+            ?.takeIf { it.length <= MAX_SEARCH_URL_CHARS }
+            ?.takeIf(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+        val pivotPath = result.pivotDiscoveryPath
+            .asSequence()
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .map { it.take(MAX_SEARCH_PATH_COMPONENT_CHARS) }
+            .take(Evidence.MAX_DISCOVERY_PATH_STEPS)
+            .toList()
+        val pivotEvidenceIds = result.pivotEvidenceIds
+            .asSequence()
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .map { it.take(TypedSeed.MAX_VALUE_CHARS) }
+            .take(TypedSeed.MAX_EVIDENCE_IDS)
+            .toList()
+
+        return result.copy(
+            title = title,
+            snippet = snippet,
+            url = url,
+            query = result.query.trim().take(MAX_SEARCH_QUERY_CHARS),
+            source = result.source.trim().take(MAX_SEARCH_PROVIDER_CHARS),
+            score = result.score.coerceIn(0f, 1f),
+            providerCount = result.providerCount.coerceIn(1, MAX_SEARCH_PROVIDER_COUNT),
+            verificationNote = result.verificationNote
+                ?.trim()
+                ?.take(MAX_SEARCH_VERIFICATION_CHARS)
+                ?.takeIf(String::isNotBlank),
+            pivotExactValue = result.pivotExactValue
+                ?.trim()
+                ?.take(TypedSeed.MAX_VALUE_CHARS)
+                ?.takeIf(String::isNotBlank),
+            pivotNormalizedValue = result.pivotNormalizedValue
+                ?.trim()
+                ?.take(TypedSeed.MAX_VALUE_CHARS)
+                ?.takeIf(String::isNotBlank),
+            pivotEvidenceIds = pivotEvidenceIds,
+            pivotDiscoveryPath = pivotPath,
+            pivotStage = result.pivotStage
+                ?.trim()
+                ?.take(MAX_SEARCH_PATH_COMPONENT_CHARS)
+                ?.takeIf(String::isNotBlank),
+            pivotSourceUrl = pivotSourceUrl,
+            contentHashSha256 = result.contentHashSha256
+                ?.trim()
+                ?.take(MAX_SEARCH_HASH_CHARS)
+                ?.takeIf(String::isNotBlank)
+                ?: verifiedPage?.contentHashSha256,
+            verifiedPage = verifiedPage
+        )
+    }
+
+    private fun sanitizeVerifiedPage(
+        page: VerifiedPage
+    ): VerifiedPage? {
+        val finalUrl = page.finalUrl.trim()
+        if (finalUrl.isBlank() || finalUrl.length > MAX_SEARCH_URL_CHARS ||
+            !DiscoveryHttpPolicy.isSafePublicHttpUrl(finalUrl)
+        ) return null
+        val archiveOriginalUrl = page.archiveOriginalUrl
+            ?.trim()
+            ?.takeIf { it.length <= MAX_SEARCH_URL_CHARS }
+            ?.takeIf(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+        val links = page.links
+            .asSequence()
+            .map(String::trim)
+            .filter { it.length <= MAX_SEARCH_URL_CHARS }
+            .filter(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+            .distinctBy(::canonicalUrl)
+            .take(MAX_LINKS)
+            .toList()
+        return page.copy(
+            finalUrl = finalUrl,
+            title = page.title.trim().take(MAX_SEARCH_TITLE_CHARS),
+            text = page.text.trim().take(RESPONSE_TEXT_CHARS),
+            links = links,
+            contentHashSha256 = page.contentHashSha256
+                ?.trim()
+                ?.take(MAX_SEARCH_HASH_CHARS)
+                ?.takeIf(String::isNotBlank),
+            description = page.description.trim().take(MAX_SEARCH_SNIPPET_CHARS),
+            archiveProvider = page.archiveProvider
+                ?.trim()
+                ?.take(MAX_SEARCH_PROVIDER_CHARS)
+                ?.takeIf(String::isNotBlank),
+            archiveOriginalUrl = archiveOriginalUrl,
+            archiveTimestamp = page.archiveTimestamp
+                ?.trim()
+                ?.take(MAX_ARCHIVE_TIMESTAMP_CHARS)
+                ?.takeIf(String::isNotBlank)
+        )
+    }
+
+    private fun searchDiscoveryPath(
+        seed: TypedSeed,
+        result: PublicSearchDiscoveryService.PublicSearchResult
+    ): List<String> = discoveryPath(
+        seed = seed,
+        terminal = "search-results",
+        extra = buildList {
+            addAll(result.pivotDiscoveryPath)
+            result.pivotStage?.let { add("stage:$it") }
+        }
+    )
+
+    private fun searchSourceUrls(
+        seed: TypedSeed,
+        result: PublicSearchDiscoveryService.PublicSearchResult
+    ): List<String> = listOfNotNull(
+        result.url,
+        seed.sourceUrl,
+        result.pivotSourceUrl,
+        result.verifiedPage?.archiveOriginalUrl
+    )
+        .map(String::trim)
+        .filter { it.length <= MAX_SEARCH_URL_CHARS }
+        .filter(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+        .distinctBy(::canonicalUrl)
+        .take(Evidence.MAX_SOURCE_URLS)
+
+    private fun searchSignals(
+        seed: TypedSeed,
+        result: PublicSearchDiscoveryService.PublicSearchResult
+    ): List<String> = buildList {
+        add("Public search result observation")
+        add("Query: ${result.query}")
+        add("Provider/source: ${result.source}")
+        add("Directly verified: ${result.directlyVerified}")
+        result.verificationNote?.let { add("Verification note: $it") }
+        result.pivotSeedKind?.let { add("Pivot seed kind: ${it.name}") }
+        result.pivotExactValue?.let { add("Pivot exact value: $it") }
+        result.pivotNormalizedValue?.let { add("Pivot normalized value: $it") }
+        if (result.pivotEvidenceIds.isNotEmpty()) {
+            add("Pivot evidence IDs: ${result.pivotEvidenceIds.joinToString(",")}")
+        }
+        result.pivotStage?.let { add("Pivot stage: $it") }
+        result.pivotSourceUrl?.let { add("Pivot source URL: $it") }
+        result.contentHashSha256?.let { add("Content hash: $it") }
+        add("Seed exact value: ${seed.exactValue}")
+        add("Seed normalized value: ${seed.normalizedValue}")
+        seed.sourceUrl?.let { add("Seed source URL: $it") }
+        if (seed.evidenceIds.isNotEmpty()) {
+            add("Seed evidence IDs: ${seed.evidenceIds.joinToString(",")}")
+        }
+    }
+        .map { it.take(MAX_SEARCH_SIGNAL_CHARS) }
+        .take(MAX_SEARCH_SIGNALS)
+
     private fun skipped(seed: TypedSeed, reasonOverride: String? = null): SeedRun {
         val reason = reasonOverride ?: when {
-            seed.kind !in setOf(
-                TypedSeedKind.Url,
-                TypedSeedKind.Domain,
-                TypedSeedKind.Document,
-                TypedSeedKind.Archive
-            ) -> "Seed kind is not executable by this bounded pass"
-            !TypedSeedSafety.isSafePublicFetchSeed(seed) -> "Seed failed safe public-fetch admission"
+            seed.kind !in TypedSeedSafety.executableKinds ->
+                "Seed kind is not executable by this bounded pass"
+            !TypedSeedSafety.isSafeExecutableSeed(seed) ->
+                if (seed.kind in TypedSeedSafety.publicSearchKinds &&
+                    seed.kind !in TypedSeedSafety.publicFetchKinds
+                ) {
+                    "Seed failed safe public-search admission"
+                } else {
+                    "Seed failed safe public-fetch admission"
+                }
             else -> "Seed was outside the bounded execution budget"
         }
         val state = if (seed.evidenceState == EvidenceState.Candidate) {
@@ -911,7 +1327,15 @@ class TypedSeedPublicFetchExecutor(
         providerId: String? = null,
         status: ProviderVerificationState? = null
     ): SeedRun {
-        val safeUrl = requestUrl(seed)?.takeIf(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+        val safeSourceUrls = listOfNotNull(
+            requestUrl(seed),
+            seed.sourceUrl
+        )
+            .map(String::trim)
+            .filter(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+            .distinctBy(::canonicalUrl)
+            .take(Evidence.MAX_SOURCE_URLS)
+        val safeUrl = safeSourceUrls.firstOrNull()
         val historical = seed.kind == TypedSeedKind.Archive
         val now = nowMillis()
         val record = Evidence(
@@ -929,11 +1353,21 @@ class TypedSeedPublicFetchExecutor(
             providerId = providerId,
             retrievedAtEpochMillis = now,
             state = EvidenceState.Unavailable,
-            reliability = if (historical) EvidenceReliability.ArchiveSnapshot else EvidenceReliability.DirectPersonalWebsite,
-            sourceClassification = sourceClassification(seed),
+            reliability = when {
+                historical -> EvidenceReliability.ArchiveSnapshot
+                seed.kind in setOf(TypedSeedKind.Email, TypedSeedKind.Phone) ->
+                    EvidenceReliability.SearchEngineCandidate
+                else -> EvidenceReliability.DirectPersonalWebsite
+            },
+            sourceClassification = when {
+                historical -> ExposureSourceClassification.ARCHIVE
+                seed.kind in setOf(TypedSeedKind.Email, TypedSeedKind.Phone) ->
+                    ExposureSourceClassification.PUBLIC_WEB
+                else -> sourceClassification(seed)
+            },
             historical = historical,
-            discoveryPath = discoveryPath(seed, safeUrl ?: seed.exactValue),
-            sourceUrls = listOf(seed.exactValue).distinct().take(Evidence.MAX_SOURCE_URLS)
+            discoveryPath = discoveryPath(seed, "unavailable", safeSourceUrls),
+            sourceUrls = safeSourceUrls
         )
         return SeedRun(
             execution = SeedExecution(
@@ -1209,6 +1643,20 @@ class TypedSeedPublicFetchExecutor(
         const val RESPONSE_TEXT_CHARS = 24_000
         const val MAX_LINKS = 64
         const val MAX_EVIDENCE_IDS = 256
+        const val MAX_SEARCH_RESULTS = 34
+        private const val MAX_SEARCH_URL_CHARS = 4_096
+        private const val MAX_SEARCH_TITLE_CHARS = 240
+        private const val MAX_SEARCH_SNIPPET_CHARS = 512
+        private const val MAX_SEARCH_QUERY_CHARS = 1_024
+        private const val MAX_SEARCH_PROVIDER_CHARS = 128
+        private const val MAX_SEARCH_VERIFICATION_CHARS = 512
+        private const val MAX_SEARCH_PATH_COMPONENT_CHARS = 256
+        private const val MAX_SEARCH_SIGNAL_CHARS = 1_024
+        private const val MAX_SEARCH_SIGNALS = 32
+        private const val MAX_SEARCH_HASH_CHARS = 128
+        private const val MAX_SEARCH_PROVIDER_COUNT = 16
+        private const val MAX_ARCHIVE_TIMESTAMP_CHARS = 32
+        private const val MAX_REUSABLE_VERIFIED_PAGES = MAX_SEARCH_RESULTS
         private const val MAX_TITLE_CHARS = 240
         private const val MAX_REASON_CHARS = 256
         private const val PARSER_VERSION = "typed-seed-public-v1"

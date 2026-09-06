@@ -46,13 +46,23 @@ enum class TypedSeedOrigin {
     Unknown
 }
 
-/** Typed values that have a reviewed executor in the current scan tranche. */
-internal val EXECUTABLE_TYPED_SEED_KINDS: Set<TypedSeedKind> = setOf(
+/** Typed values that can be followed by the bounded public-page executor. */
+internal val PUBLIC_FETCH_TYPED_SEED_KINDS: Set<TypedSeedKind> = setOf(
     TypedSeedKind.Url,
     TypedSeedKind.Domain,
     TypedSeedKind.Document,
     TypedSeedKind.Archive
 )
+
+/** High-entropy values that can be sent to the bounded public-search executor. */
+internal val PUBLIC_SEARCH_TYPED_SEED_KINDS: Set<TypedSeedKind> = setOf(
+    TypedSeedKind.Email,
+    TypedSeedKind.Phone
+)
+
+/** Typed values that have a reviewed executor in the current scan tranche. */
+internal val EXECUTABLE_TYPED_SEED_KINDS: Set<TypedSeedKind> =
+    PUBLIC_FETCH_TYPED_SEED_KINDS + PUBLIC_SEARCH_TYPED_SEED_KINDS
 
 /** Truthful execution availability for each admitted typed-seed kind. */
 @Serializable
@@ -513,6 +523,10 @@ class TypedSeedAdmissionModel(
             TypedSeedKind.Name -> trimmed.replace(Regex("\\s+"), " ").takeIf { it.length <= 240 }
         }
     }
+
+    /** Exposes the canonical normalizer to shared safety checks. */
+    internal fun normalizeForSafety(kind: TypedSeedKind, rawValue: String): String? =
+        normalize(kind, rawValue)
 
     private fun normalizeEmail(value: String): String? {
         if (value.length > 254 || value.count { it == '@' } != 1) return null

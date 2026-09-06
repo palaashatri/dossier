@@ -1,11 +1,19 @@
 package io.dossier.app
 
 import io.dossier.app.data.web.PublicSearchDiscoveryService
+import io.dossier.app.data.web.PublicPageVerifier
 import io.dossier.app.domain.model.IdentityInput
+import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.security.MessageDigest
 
 class PublicSearchDiscoveryServiceTest {
 
@@ -51,6 +59,41 @@ class PublicSearchDiscoveryServiceTest {
         assertEquals(1, results.size)
         assertEquals("https://github.com/janedoe", results.first().url)
         assertTrue(results.first().snippet.contains("privacy tools"))
+        assertEquals(sha256(html), results.first().contentHashSha256)
+    }
+
+    @Test
+    fun publicPageVerifierRetainsFetchedBodyHash() = runBlocking {
+        val url = "https://profile.example.test/jane"
+        val body = "<html><body>Jane Example public profile</body></html>"
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val outcome = PublicPageVerifier(client).verify(
+            input = IdentityInput(fullName = "Jane Example", profileUrls = listOf(url)),
+            url = url,
+            indexedTitle = "Jane Example",
+            indexedSnippet = "public profile"
+        )
+
+        assertTrue(outcome is PublicPageVerifier.Outcome.Verified)
+        assertEquals(
+            sha256(body),
+            (outcome as PublicPageVerifier.Outcome.Verified).contentHashSha256
+        )
+        val page = (outcome as PublicPageVerifier.Outcome.Verified).verifiedPage
+        assertNotNull(page)
+        assertEquals(sha256(body), page?.contentHashSha256)
+        assertTrue(page?.text.orEmpty().contains("Jane Example"))
     }
 
     @Test
@@ -358,4 +401,8 @@ class PublicSearchDiscoveryServiceTest {
         assertEquals("user@example.test", best.pivotExactValue)
         assertEquals(listOf("ev1"), best.pivotEvidenceIds)
     }
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte) }
 }

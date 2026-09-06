@@ -550,8 +550,14 @@ internal class TypedSeedFrontier internal constructor(
     private fun unavailableReason(seed: TypedSeed): String? = when {
         seed.kind !in EXECUTABLE_TYPED_SEED_KINDS ->
             "No reviewed executor is available for typed seed kind ${seed.kind.name}."
-        !TypedSeedSafety.isSafePublicFetchSeed(seed) ->
-            "Seed failed safe public-fetch admission and was retained without execution."
+        !TypedSeedSafety.isSafeExecutableSeed(seed) ->
+            if (seed.kind in TypedSeedSafety.publicSearchKinds &&
+                seed.kind !in TypedSeedSafety.publicFetchKinds
+            ) {
+                "Seed failed safe public-search admission and was retained without execution."
+            } else {
+                "Seed failed safe public-fetch admission and was retained without execution."
+            }
         else -> null
     }
 
@@ -589,9 +595,9 @@ internal class TypedSeedFrontier internal constructor(
     }
 
     private fun pendingPriority(seed: TypedSeed): Int = when {
-        // Only kinds with a reviewed public-page executor receive the top
-        // slots. This keeps an unsupported Email/Phone record from blocking
-        // an actionable URL, document, or archive discovered later.
+        // Reviewed executor kinds receive the top slots. Navigation fetches
+        // stay ahead of Email/Phone searches so a high-entropy search cannot
+        // delay a directly actionable URL, document, or archive.
         seed.kind in EXECUTABLE_NAVIGATION_KINDS && seed.evidenceState == EvidenceState.Verified -> 0
         seed.kind in EXECUTABLE_NAVIGATION_KINDS -> 1
         seed.kind == TypedSeedKind.Domain -> 2

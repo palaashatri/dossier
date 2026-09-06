@@ -8,11 +8,13 @@ import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.ExposureSourceClassification
+import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.IdentityInput
 
 /**
  * Production bridge from canonical evidence to the typed admission queue.
- * The reviewed URL/domain/document/archive executor consumes admitted seeds;
+ * The reviewed URL/domain/document/archive and Email/Phone executors consume
+ * admitted seeds;
  * this adapter only records safe, provenance-carrying pivots and does not
  * perform execution itself.
  */
@@ -132,14 +134,42 @@ object TypedSeedEvidenceAdapter {
         config: TypedSeedAdmissionConfig = TypedSeedAdmissionConfig()
     ): TypedSeedAdmissionModel = admit(evidence, input, config)
 
-    private fun Evidence.toTypedSeedKind(): TypedSeedKind? =
-        if (kind == EvidenceKind.PublicSearchEvidence &&
-            reliability == EvidenceReliability.ArchiveSnapshot
-        ) {
+    private fun Evidence.toTypedSeedKind(): TypedSeedKind? = when {
+        // Search results are intentionally not identity assertions.  The
+        // typed frontier may nevertheless follow a result page when the
+        // search adapter directly re-fetched and verified that URL.  Task 6
+        // encodes that outcome as an Observed SearchEngineCandidate with
+        // explicit unconfirmed attribution; candidates and unavailable
+        // observations therefore remain evidence-only.
+        kind == EvidenceKind.PublicSearchEvidence && isDirectlyVerifiedSearchUrl() ->
+            TypedSeedKind.Url
+        kind == EvidenceKind.PublicSearchEvidence &&
+            reliability == EvidenceReliability.ArchiveSnapshot ->
             TypedSeedKind.Archive
-        } else {
-            kind.toTypedSeedKind()
-        }
+        else -> kind.toTypedSeedKind()
+    }
+
+    private fun Evidence.isDirectlyVerifiedSearchUrl(): Boolean {
+        if (state != EvidenceState.Observed ||
+            reliability != EvidenceReliability.SearchEngineCandidate ||
+            attribution != FindingAttribution.Unconfirmed ||
+            id.isBlank() ||
+            sourceUrl?.let(TypedSeedSafety::isSafeEvidenceSourceUrl) != true
+        ) return false
+
+        // A search result URL is a navigation pivot only when the target is a
+        // safe public HTTP(S) URL.  The source URL is checked again by the
+        // shared typed-seed safety predicate when the seed is admitted; this
+        // check keeps malformed search observations out of the adapter path.
+        return effectiveSourceClassification() in setOf(
+            ExposureSourceClassification.PUBLIC_WEB,
+            ExposureSourceClassification.PUBLIC_PROFILE,
+            ExposureSourceClassification.PUBLIC_DOCUMENT,
+            ExposureSourceClassification.PUBLIC_RECORD,
+            ExposureSourceClassification.ARCHIVE,
+            ExposureSourceClassification.AUTHORIZED_API
+        ) && DiscoveryHttpPolicy.isSafePublicHttpUrl(value)
+    }
 
     private fun EvidenceKind.toTypedSeedKind(): TypedSeedKind? = when (this) {
         EvidenceKind.Email -> TypedSeedKind.Email
@@ -158,7 +188,10 @@ object TypedSeedEvidenceAdapter {
     }
 
     private fun Evidence.origin(): TypedSeedOrigin = when {
-        reliability == EvidenceReliability.UserSupplied -> TypedSeedOrigin.UserInput
+        // Launch values are added from IdentityInput above as UserInput. A
+        // UserSupplied evidence record, however, may be a local/imported row;
+        // never let that record inherit launch authorization for recursion.
+        reliability == EvidenceReliability.UserSupplied -> TypedSeedOrigin.Import
         state == EvidenceState.Candidate -> TypedSeedOrigin.Candidate
         reliability == EvidenceReliability.LocalDerived -> TypedSeedOrigin.LocalAnalysis
         state == EvidenceState.Rejected || state == EvidenceState.Unavailable -> TypedSeedOrigin.Unknown
@@ -191,13 +224,15 @@ object TypedSeedEvidenceAdapter {
  * the same verification, origin, source, and bounded-value checks.
  */
 object TypedSeedSafety {
-    /** The reviewed public-fetch executor's supported seed kinds. */
-    val publicFetchKinds: Set<TypedSeedKind> = EXECUTABLE_TYPED_SEED_KINDS
+    /** The reviewed public-page fetcher's URL-family seed kinds. */
+    val publicFetchKinds: Set<TypedSeedKind> = PUBLIC_FETCH_TYPED_SEED_KINDS
 
-    val publicSearchKinds: Set<TypedSeedKind> = publicFetchKinds + setOf(
-        TypedSeedKind.Email,
-        TypedSeedKind.Phone
-    )
+    /** Seed kinds safe to include in a public-search query plan. */
+    val publicSearchKinds: Set<TypedSeedKind> =
+        publicFetchKinds + PUBLIC_SEARCH_TYPED_SEED_KINDS
+
+    /** Every seed kind with a reviewed executor in the current scan tranche. */
+    val executableKinds: Set<TypedSeedKind> = publicSearchKinds
 
     private val publicEvidenceSources = setOf(
         ExposureSourceClassification.PUBLIC_WEB,
@@ -250,6 +285,9 @@ object TypedSeedSafety {
     fun isSafePublicSearchSeed(seed: TypedSeed): Boolean {
         if (seed.kind !in publicSearchKinds) return false
         if (!isStructurallySafe(seed)) return false
+        if (seed.kind in PUBLIC_SEARCH_TYPED_SEED_KINDS &&
+            !hasCanonicalNormalizedValue(seed)
+        ) return false
         if (!isSafePublicSearchValue(seed)) return false
 
         // User-provided values are authorized even before a public fetch has
@@ -285,6 +323,21 @@ object TypedSeedSafety {
         )
     }
 
+    /** Applies the executor-specific safety policy for a typed seed. */
+    fun isSafeExecutableSeed(seed: TypedSeed): Boolean = when {
+        seed.kind in publicFetchKinds -> isSafePublicFetchSeed(seed)
+        seed.kind in PUBLIC_SEARCH_TYPED_SEED_KINDS -> isSafePublicSearchSeed(seed)
+        else -> false
+    }
+
+    private fun hasCanonicalNormalizedValue(seed: TypedSeed): Boolean {
+        val normalizer = TypedSeedAdmissionModel()
+        val exactNormalized = normalizer.normalizeForSafety(seed.kind, seed.exactValue)
+        val storedNormalized = normalizer.normalizeForSafety(seed.kind, seed.normalizedValue)
+        return exactNormalized == seed.normalizedValue &&
+            storedNormalized == seed.normalizedValue
+    }
+
     private fun isStructurallySafe(seed: TypedSeed): Boolean {
         if (seed.exactValue.isBlank() || seed.exactValue.length > TypedSeed.MAX_VALUE_CHARS) return false
         if (seed.value.isBlank() || seed.value.length > TypedSeed.MAX_VALUE_CHARS) return false
@@ -311,7 +364,7 @@ object TypedSeedSafety {
         return true
     }
 
-    private fun isSafeEvidenceSourceUrl(raw: String): Boolean {
+    internal fun isSafeEvidenceSourceUrl(raw: String): Boolean {
         val value = raw.trim()
         if (value.isBlank() || value.any(Char::isISOControl)) return false
         if (value.startsWith("javascript:", ignoreCase = true)) return false

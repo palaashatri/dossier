@@ -11,10 +11,13 @@ import io.dossier.app.domain.discovery.TypedSeed
 import io.dossier.app.domain.discovery.TypedSeedKind
 import io.dossier.app.domain.discovery.TypedSeedSafety
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -24,6 +27,7 @@ import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.security.MessageDigest
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.Locale
@@ -72,8 +76,18 @@ class PublicSearchDiscoveryService(private val context: Context) {
         /** Normalized value of the typed pivot used by the query. */
         val pivotNormalizedValue: String? = null,
         /** Source URL from which the typed pivot was derived. */
-        val pivotSourceUrl: String? = null
+        val pivotSourceUrl: String? = null,
+        /** Optional content hash supplied by a reviewed result producer. */
+        val contentHashSha256: String? = null,
+        /** Ephemeral page material already fetched by direct verification. */
+        val verifiedPage: VerifiedPage? = null
     )
+
+    /** Distinguishes a healthy empty search from provider-wide unavailability. */
+    sealed interface SearchOutcome {
+        data class Success(val results: List<PublicSearchResult>) : SearchOutcome
+        data class Unavailable(val reason: String) : SearchOutcome
+    }
 
     private data class SearchProvider(
         val name: String,
@@ -91,12 +105,29 @@ class PublicSearchDiscoveryService(private val context: Context) {
         deepResearch: Boolean = false,
         verifiedResults: List<ProfileScanResult> = emptyList(),
         typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList()
-    ): List<PublicSearchResult> =
+    ): List<PublicSearchResult> = when (
+        val outcome = discoverOutcome(input, deepResearch, verifiedResults, typedSeeds)
+    ) {
+        is SearchOutcome.Success -> outcome.results
+        is SearchOutcome.Unavailable -> emptyList()
+    }
+
+    /**
+     * Runs the same bounded search as [discover] while retaining the provider
+     * health distinction needed by the typed frontier. Existing callers that
+     * only consume a list should continue using [discover].
+     */
+    suspend fun discoverOutcome(
+        input: IdentityInput,
+        deepResearch: Boolean = false,
+        verifiedResults: List<ProfileScanResult> = emptyList(),
+        typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList()
+    ): SearchOutcome =
         withContext(Dispatchers.IO) {
             val queryLimit = if (deepResearch) MAX_DEEP_QUERIES else MAX_DEFAULT_QUERIES
             val safeSeeds = typedSeeds.filter(TypedSeedSafety::isSafePublicSearchSeed)
             val plan = buildSearchQueryPlan(input, deepResearch, verifiedResults, safeSeeds).take(queryLimit)
-            if (plan.isEmpty()) return@withContext emptyList()
+            if (plan.isEmpty()) return@withContext SearchOutcome.Success(emptyList())
 
             val effectiveInput = if (verifiedResults.isNotEmpty()) {
                 expandIdentityInput(input, verifiedResults)
@@ -106,30 +137,45 @@ class PublicSearchDiscoveryService(private val context: Context) {
 
             val providers = defaultProviders()
             val querySemaphore = Semaphore(MAX_PARALLEL_SEARCH_QUERIES)
-            val raw = coroutineScope {
+            val batches = coroutineScope {
                 plan.mapIndexed { index, entry ->
                     async(Dispatchers.IO) {
                         querySemaphore.withPermit {
-                            val results = searchWithFailover(
+                            searchWithFailover(
                                 query = entry.query,
                                 providers = providers,
                                 startIndex = index % providers.size,
                                 deepResearch = deepResearch
-                            )
-                            results.map {
-                                it.copy(
-                                    pivotSeedKind = entry.pivotSeedKind,
-                                    pivotExactValue = entry.pivotExactValue,
-                                    pivotNormalizedValue = entry.pivotNormalizedValue,
-                                    pivotEvidenceIds = entry.pivotEvidenceIds,
-                                    pivotDiscoveryPath = entry.pivotDiscoveryPath,
-                                    pivotStage = entry.stage,
-                                    pivotSourceUrl = entry.pivotSourceUrl
+                            ).let { batch ->
+                                SearchBatch(
+                                    attemptedProviders = batch.attemptedProviders,
+                                    healthyProviders = batch.healthyProviders,
+                                    results = batch.results.map {
+                                        it.copy(
+                                            pivotSeedKind = entry.pivotSeedKind,
+                                            pivotExactValue = entry.pivotExactValue,
+                                            pivotNormalizedValue = entry.pivotNormalizedValue,
+                                            pivotEvidenceIds = entry.pivotEvidenceIds,
+                                            pivotDiscoveryPath = entry.pivotDiscoveryPath,
+                                            pivotStage = entry.stage,
+                                            pivotSourceUrl = entry.pivotSourceUrl
+                                        )
+                                    }
                                 )
                             }
                         }
                     }
-                }.awaitAll().flatten()
+                }.awaitAll()
+            }
+
+            currentCoroutineContext().ensureActive()
+            val raw = batches.flatMap(SearchBatch::results)
+            val attemptedProviders = batches.sumOf(SearchBatch::attemptedProviders)
+            val healthyProviders = batches.sumOf(SearchBatch::healthyProviders)
+            if (attemptedProviders == 0 || healthyProviders == 0) {
+                return@withContext SearchOutcome.Unavailable(
+                    "No public search provider was reachable"
+                )
             }
 
             val scored = mergeProviderEvidence(raw)
@@ -144,7 +190,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 .toSet()
             val verifySemaphore = Semaphore(MAX_PARALLEL_DIRECT_VERIFICATIONS)
 
-            coroutineScope {
+            val verified = coroutineScope {
                 scored.map { result ->
                     async(Dispatchers.IO) {
                         if (canonicalUrlKey(result.url) !in verificationKeys) {
@@ -173,7 +219,10 @@ class PublicSearchDiscoveryService(private val context: Context) {
                                         url = verification.finalUrl,
                                         score = blended,
                                         directlyVerified = true,
-                                        verificationNote = verification.signals.joinToString("; ")
+                                        contentHashSha256 = verification.contentHashSha256
+                                            ?: result.contentHashSha256,
+                                        verificationNote = verification.signals.joinToString("; "),
+                                        verifiedPage = verification.verifiedPage
                                     )
                                 }
                                 is PublicPageVerifier.Outcome.Rejected -> null
@@ -186,6 +235,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     }
                 }.awaitAll().filterNotNull()
             }
+            currentCoroutineContext().ensureActive()
+            val results = verified
                 .filter { it.score >= MIN_PUBLIC_SEARCH_SCORE }
                 .distinctBy { canonicalUrlKey(it.url) }
                 .sortedWith(
@@ -195,17 +246,25 @@ class PublicSearchDiscoveryService(private val context: Context) {
                         .thenBy { it.title }
                 )
                 .take(MAX_PUBLIC_SEARCH_RESULTS)
+            SearchOutcome.Success(results)
         }
+
+    private data class SearchBatch(
+        val attemptedProviders: Int,
+        val healthyProviders: Int,
+        val results: List<PublicSearchResult>
+    )
 
     private suspend fun searchWithFailover(
         query: String,
         providers: List<SearchProvider>,
         startIndex: Int,
         deepResearch: Boolean
-    ): List<PublicSearchResult> {
+    ): ProviderSearchBatch {
         val ordered = providers.indices.map { providers[(startIndex + it) % providers.size] }
         val merged = mutableListOf<PublicSearchResult>()
         var attemptedProviders = 0
+        var healthyProviders = 0
         val highSignal = isHighSignalQuery(query)
         val providerBudget = when {
             deepResearch && highSignal -> 5
@@ -218,7 +277,9 @@ class PublicSearchDiscoveryService(private val context: Context) {
             if (attemptedProviders >= providerBudget) break
             if (!breaker.canAttempt(provider.name)) continue
             attemptedProviders++
-            merged += fetchProviderResults(provider, query)
+            val response = fetchProviderResults(provider, query)
+            if (response.healthy) healthyProviders++
+            merged += response.results
             val uniqueCount = merged.distinctBy { canonicalUrlKey(it.url) }.size
             val independentSources = merged.map { it.source }.distinct().size
 
@@ -230,18 +291,35 @@ class PublicSearchDiscoveryService(private val context: Context) {
             }
         }
 
-        return merged
-            .distinctBy { "${it.source}|${canonicalUrlKey(it.url)}" }
-            .take(MAX_RESULTS_PER_QUERY * providerBudget)
+        return ProviderSearchBatch(
+            attemptedProviders = attemptedProviders,
+            healthyProviders = healthyProviders,
+            results = merged
+                .distinctBy { "${it.source}|${canonicalUrlKey(it.url)}" }
+                .take(MAX_RESULTS_PER_QUERY * providerBudget)
+        )
     }
+
+    private data class ProviderSearchBatch(
+        val attemptedProviders: Int,
+        val healthyProviders: Int,
+        val results: List<PublicSearchResult>
+    )
+
+    private data class ProviderFetchResult(
+        val results: List<PublicSearchResult>,
+        val healthy: Boolean
+    )
 
     private suspend fun fetchProviderResults(
         provider: SearchProvider,
         query: String
-    ): List<PublicSearchResult> {
+    ): ProviderFetchResult {
         val cacheKey = "${provider.name}|$query"
         cache[cacheKey]?.let { cached ->
-            if (System.currentTimeMillis() - cached.savedAtMillis <= CACHE_TTL_MS) return cached.results
+            if (System.currentTimeMillis() - cached.savedAtMillis <= CACHE_TTL_MS) {
+                return ProviderFetchResult(cached.results, healthy = true)
+            }
             cache.remove(cacheKey, cached)
         }
 
@@ -270,7 +348,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
                             if (parsed.isNotEmpty() || looksLikeNoResults(lastHtml)) {
                                 breaker.recordSuccess(provider.name)
                                 cache[cacheKey] = CachedResults(System.currentTimeMillis(), parsed)
-                                return parsed
+                                return ProviderFetchResult(parsed, healthy = true)
                             }
                         }
                         DiscoveryHttpPolicy.isTransientHttpStatus(response.code) -> {
@@ -282,6 +360,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     }
                 }
                 if (blocked) break
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 if (attempt < MAX_HTTP_ATTEMPTS - 1) {
                     delay(DiscoveryHttpPolicy.retryDelayMillis(attempt, null))
@@ -301,7 +381,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
             if (rendered.isNotEmpty()) {
                 breaker.recordSuccess(provider.name)
                 cache[cacheKey] = CachedResults(System.currentTimeMillis(), rendered)
-                return rendered
+                return ProviderFetchResult(rendered, healthy = true)
             }
         }
 
@@ -311,7 +391,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
         } else {
             breaker.recordFailure(provider.name)
         }
-        return emptyList()
+        return ProviderFetchResult(emptyList(), healthy = providerHealthy)
     }
 
     private fun defaultProviders(): List<SearchProvider> = listOf(
@@ -699,7 +779,11 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 source.contains("qwant", true) -> parseQwant(root, source, query)
                 else -> parseGeneric(root, source, query)
             }
-            return results.distinctBy { canonicalUrlKey(it.url) }.take(12)
+            val contentHash = sha256(html)
+            return results
+                .distinctBy { canonicalUrlKey(it.url) }
+                .take(12)
+                .map { it.copy(contentHashSha256 = contentHash) }
         }
 
         private fun parseDuckDuckGo(root: Element, source: String, query: String) =
@@ -944,7 +1028,13 @@ class PublicSearchDiscoveryService(private val context: Context) {
                         pivot?.pivotDiscoveryPath.orEmpty()
                     },
                     pivotStage = best.pivotStage ?: pivot?.pivotStage,
-                    pivotSourceUrl = best.pivotSourceUrl ?: pivot?.pivotSourceUrl
+                    pivotSourceUrl = best.pivotSourceUrl ?: pivot?.pivotSourceUrl,
+                    contentHashSha256 = best.contentHashSha256
+                        ?: pivot?.contentHashSha256
+                        ?: group.firstNotNullOfOrNull { it.contentHashSha256 },
+                    verifiedPage = best.verifiedPage
+                        ?: pivot?.verifiedPage
+                        ?: group.firstNotNullOfOrNull { it.verifiedPage }
                 )
             }
 
@@ -996,6 +1086,11 @@ class PublicSearchDiscoveryService(private val context: Context) {
         }
 
         private fun userAgentFor(attempt: Int): String = USER_AGENTS[attempt % USER_AGENTS.size]
+
+        private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
+
         private fun quote(term: String): String {
             val cleaned = term.replace("\"", " ").trim()
             return if (cleaned.contains('@')) {

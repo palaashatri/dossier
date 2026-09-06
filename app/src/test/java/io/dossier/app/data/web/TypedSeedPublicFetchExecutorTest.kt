@@ -17,6 +17,7 @@ import io.dossier.app.domain.evidence.toFinding
 import io.dossier.app.domain.evidence.toExposureLedger
 import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.data.web.PublicSearchDiscoveryService.PublicSearchResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -24,6 +25,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import java.util.concurrent.atomic.AtomicInteger
 
 class TypedSeedPublicFetchExecutorTest {
@@ -501,6 +504,250 @@ class TypedSeedPublicFetchExecutorTest {
         assertTrue(report.evidence.all { it.discoveryPath.size <= Evidence.MAX_DISCOVERY_PATH_STEPS })
     }
 
+    @Test
+    fun emailAndPhoneSeedsExecuteViaSearchSeamAndReturnTerminalCompletedState() = runBlocking {
+        val email = evidenceSeed(TypedSeedKind.Email, "target@example.test")
+        val executor = TypedSeedPublicFetchExecutor(
+            searcher = { seed, _, _ ->
+                listOf(
+                    PublicSearchResult(
+                        title = "Target Profile",
+                        snippet = "Email target@example.test",
+                        url = "https://social.example.test/target",
+                        query = seed.exactValue,
+                        source = "Fixture Search",
+                        score = 0.9f
+                    )
+                )
+            }
+        )
+
+        val report = executor.executeDetailed(listOf(email), input, scanId)
+
+        assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Completed, report.executions.single().state)
+        assertTrue(report.evidence.any { it.kind == io.dossier.app.domain.evidence.EvidenceKind.PublicSearchEvidence && it.value == "https://social.example.test/target" })
+        assertTrue(report.evidence.all { it.state == EvidenceState.Candidate })
+        assertTrue(report.evidence.all { it.attribution == FindingAttribution.Unconfirmed })
+    }
+
+    @Test
+    fun candidateOrImportedSearchSeedsAreRejectedBeforeFetch() = runBlocking {
+        val candidateEmail = TypedSeed(
+            kind = TypedSeedKind.Email,
+            value = "candidate@example.test",
+            exactValue = "candidate@example.test",
+            normalizedValue = "candidate@example.test",
+            origin = TypedSeedOrigin.Candidate,
+            evidenceState = EvidenceState.Candidate,
+            sourceClassification = ExposureSourceClassification.UNKNOWN_ORIGIN
+        )
+        var calls = 0
+        val executor = TypedSeedPublicFetchExecutor(
+            searcher = { _, _, _ ->
+                calls++
+                emptyList()
+            }
+        )
+
+        val report = executor.executeDetailed(listOf(candidateEmail), input, scanId)
+
+        assertEquals(0, calls)
+        assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Candidate, report.executions.single().state)
+    }
+
+    @Test
+    fun searchSeamFailureYieldsUnavailableWithoutCancellingSiblings() = runBlocking {
+        val failedEmail = evidenceSeed(TypedSeedKind.Email, "failed@example.test")
+        val healthyPhone = evidenceSeed(TypedSeedKind.Phone, "15550100200")
+        val executor = TypedSeedPublicFetchExecutor(
+            searcher = { seed, _, _ ->
+                if (seed.kind == TypedSeedKind.Email) {
+                    throw IllegalStateException("Search fixture failure")
+                }
+                emptyList()
+            }
+        )
+
+        val report = executor.executeDetailed(listOf(failedEmail, healthyPhone), input, scanId)
+
+        assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Unavailable, report.executions.first { it.seed == failedEmail }.state)
+        assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Completed, report.executions.first { it.seed == healthyPhone }.state)
+    }
+
+    @Test
+    fun emptySearchResultYieldsCompletedTerminalState() = runBlocking {
+        val phone = evidenceSeed(TypedSeedKind.Phone, "15550100300")
+        val executor = TypedSeedPublicFetchExecutor(searcher = { _, _, _ -> emptyList() })
+
+        val report = executor.executeDetailed(listOf(phone), input, scanId)
+
+        assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Completed, report.executions.single().state)
+        assertTrue(report.evidence.isEmpty())
+    }
+
+    @Test
+    fun explicitUnavailableSearchOutcomeRemainsInspectableAndTerminalFailure() = runBlocking {
+        val email = evidenceSeed(TypedSeedKind.Email, "down@example.test")
+        val executor = TypedSeedPublicFetchExecutor(
+            searchOutcomeSearcher = { _, _, _ ->
+                io.dossier.app.data.web.PublicSearchDiscoveryService.SearchOutcome.Unavailable(
+                    "fixture provider unavailable"
+                )
+            }
+        )
+
+        val report = executor.executeDetailed(listOf(email), input, scanId)
+
+        assertEquals(
+            TypedSeedPublicFetchExecutor.ExecutionState.Unavailable,
+            report.executions.single().state
+        )
+        assertTrue(report.executions.single().reason.orEmpty().contains("fixture provider"))
+        assertTrue(report.evidence.single().state == EvidenceState.Unavailable)
+    }
+
+    @Test
+    fun unavailableSearchPreservesSafeSeedSourceWithoutTreatingExactValueAsUrl() = runBlocking {
+        val seed = TypedSeed(
+            kind = TypedSeedKind.Email,
+            value = "down@example.test",
+            exactValue = "down@example.test",
+            normalizedValue = "down@example.test",
+            isVerified = true,
+            origin = TypedSeedOrigin.Evidence,
+            sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+            evidenceState = EvidenceState.Verified,
+            evidenceIds = listOf("profile-email"),
+            sourceUrl = "https://profile.example.test/source"
+        )
+        val executor = TypedSeedPublicFetchExecutor(
+            searchOutcomeSearcher = { _, _, _ ->
+                PublicSearchDiscoveryService.SearchOutcome.Unavailable("fixture unavailable")
+            }
+        )
+
+        val record = executor.executeDetailed(listOf(seed), input, scanId).evidence.single()
+
+        assertEquals(seed.sourceUrl, record.sourceUrl)
+        assertEquals(listOf(seed.sourceUrl), record.sourceUrls)
+        assertTrue(record.discoveryPath.contains(seed.sourceUrl))
+        assertFalse(seed.exactValue in record.sourceUrls)
+        assertTrue(record.sourceUrls.all(DiscoveryHttpPolicy::isSafePublicHttpUrl))
+    }
+
+    @Test
+    fun searchResultsAreValidatedDeduplicatedAndRetainBoundedProvenance() = runBlocking {
+        val seed = TypedSeed(
+            kind = TypedSeedKind.Email,
+            value = "target@example.test",
+            exactValue = " Target@EXAMPLE.TEST ",
+            normalizedValue = "target@example.test",
+            isVerified = true,
+            origin = TypedSeedOrigin.Evidence,
+            sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+            evidenceState = EvidenceState.Verified,
+            evidenceIds = listOf("seed-evidence"),
+            sourceUrl = "https://profile.example.test/source",
+            discoveryPath = listOf("https://profile.example.test/source")
+        )
+        val long = "x".repeat(10_000)
+        val duplicate = PublicSearchResult(
+            title = "short",
+            snippet = "duplicate",
+            url = "https://social.example.test/profile?utm_source=fixture",
+            query = "\"target@example.test\"",
+            source = "Fixture A",
+            score = 0.4f
+        )
+        val best = PublicSearchResult(
+            title = long,
+            snippet = long,
+            url = "https://social.example.test/profile?utm_medium=fixture#fragment",
+            query = long,
+            source = "Fixture B",
+            score = 0.9f,
+            providerCount = 99,
+            directlyVerified = true,
+            verificationNote = long,
+            pivotSeedKind = TypedSeedKind.Email,
+            pivotExactValue = long,
+            pivotNormalizedValue = "target@example.test",
+            pivotEvidenceIds = listOf("pivot-evidence", " "),
+            pivotDiscoveryPath = listOf(long, "https://pivot.example.test/source"),
+            pivotStage = long,
+            pivotSourceUrl = "https://pivot.example.test/source",
+            contentHashSha256 = "hash-value"
+        )
+        val executor = TypedSeedPublicFetchExecutor(
+            searcher = { _, _, _ ->
+                listOf(
+                    duplicate,
+                    best,
+                    best.copy(url = "http://127.0.0.1/private"),
+                    best.copy(score = Float.NaN),
+                    best.copy(score = Float.POSITIVE_INFINITY),
+                    best.copy(query = "", source = "Fixture C", url = "https://other.example.test/valid")
+                )
+            }
+        )
+
+        val report = executor.executeDetailed(listOf(seed), input, scanId)
+        val evidence = report.evidence.single()
+
+        assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Completed, report.executions.single().state)
+        assertEquals("https://social.example.test/profile?utm_medium=fixture#fragment", evidence.value)
+        assertEquals(EvidenceState.Observed, evidence.state)
+        assertEquals(FindingAttribution.Unconfirmed, evidence.attribution)
+        assertEquals(listOf("seed-evidence", "pivot-evidence"), evidence.supportingEvidenceIds)
+        assertEquals("hash-value", evidence.contentHashSha256)
+        assertTrue(evidence.sourceUrls.isNotEmpty())
+        assertTrue(evidence.sourceUrls.none { it.contains("@") || it.any(Char::isDigit) && !it.contains("://") })
+        assertTrue(evidence.sourceUrls.all { DiscoveryHttpPolicy.isSafePublicHttpUrl(it) })
+        assertTrue(evidence.discoveryPath.size <= Evidence.MAX_DISCOVERY_PATH_STEPS)
+        assertTrue(evidence.signals.all { it.length <= 1_024 })
+        assertTrue(evidence.signals.any { it.contains("Query:") })
+        assertTrue(evidence.signals.any { it.contains("Seed exact value:") })
+        assertEquals(" Target@EXAMPLE.TEST ", report.executions.single().seed.exactValue)
+        assertEquals("target@example.test", report.executions.single().seed.normalizedValue)
+    }
+
+    @Test
+    fun parentCancellationDoesNotEmitLateSearchEvidence() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val email = evidenceSeed(TypedSeedKind.Email, "cancel@example.test")
+        val executor = TypedSeedPublicFetchExecutor(
+            searchOutcomeSearcher = { _, _, _ ->
+                started.complete(Unit)
+                release.await()
+                PublicSearchDiscoveryService.SearchOutcome.Success(
+                    listOf(
+                        PublicSearchResult(
+                            title = "late",
+                            snippet = "late",
+                            url = "https://late.example.test/profile",
+                            query = "\"cancel@example.test\"",
+                            source = "Fixture",
+                            score = 0.9f
+                        )
+                    )
+                )
+            }
+        )
+        val job = async { executor.executeDetailed(listOf(email), input, scanId) }
+
+        started.await()
+        job.cancel()
+        release.complete(Unit)
+
+        try {
+            job.await()
+            throw AssertionError("cancelled search must not return a report")
+        } catch (_: CancellationException) {
+            assertTrue(job.isCancelled)
+        }
+    }
+
     private fun userSeed(kind: TypedSeedKind, value: String): TypedSeed = TypedSeed(
         kind = kind,
         value = when (kind) {
@@ -515,6 +762,19 @@ class TypedSeedPublicFetchExecutorTest {
         origin = TypedSeedOrigin.UserInput,
         sourceClassification = ExposureSourceClassification.USER_IMPORTED,
         evidenceState = EvidenceState.Observed
+    )
+
+    private fun evidenceSeed(kind: TypedSeedKind, value: String): TypedSeed = TypedSeed(
+        kind = kind,
+        value = value,
+        exactValue = value,
+        normalizedValue = value,
+        isVerified = true,
+        origin = TypedSeedOrigin.Evidence,
+        sourceClassification = ExposureSourceClassification.PUBLIC_WEB,
+        evidenceState = EvidenceState.Verified,
+        evidenceIds = listOf("seed-id-1"),
+        sourceUrl = "https://source.example.test/page"
     )
 
     private fun executor(
