@@ -14,6 +14,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.navigation.compose.rememberNavController
+import io.dossier.app.domain.scanner.ScanLifecycleStartup
 import io.dossier.app.ui.navigation.DossierNavHost
 import io.dossier.app.ui.theme.DossierTheme
 import io.dossier.app.ui.theme.NeuralTheme
@@ -22,6 +23,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        ScanLifecycleStartup.start(applicationContext)
         setContent {
             val darkTheme = isSystemInDarkTheme()
             DossierTheme(darkTheme = darkTheme) {

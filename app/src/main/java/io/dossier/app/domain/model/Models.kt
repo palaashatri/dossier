@@ -1,5 +1,7 @@
 package io.dossier.app.domain.model
 
+import io.dossier.app.domain.discovery.ProviderVerificationState
+import io.dossier.app.domain.discovery.TypedSeedKind
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -13,7 +15,7 @@ data class IdentityInput(
     val usernames: List<String> = emptyList(),
     val primaryUsername: String? = null,
     val profileUrls: List<String> = emptyList(),
-    val selfieUri: String? = null // Local URI (file://)
+    val selfieUri: String? = null
 )
 
 @Serializable
@@ -24,8 +26,32 @@ data class Finding(
     val evidenceSnippet: String?,
     val confidence: Float,
     val risk: RiskLevel,
-    val remediation: String
+    val remediation: String,
+    /**
+     * Structured attribution supplied by the extractor, never inferred from
+     * page-controlled snippet text.  The default keeps older serialized
+     * findings backward-compatible while callers migrate incrementally.
+     */
+    val attribution: FindingAttribution = FindingAttribution.Unconfirmed
 )
+
+@Serializable
+enum class FindingAttribution {
+    /** The value exactly matches a signal the user supplied for this audit. */
+    ExactSelfSupplied,
+    /** The page has independent identity signals, but not this exact value. */
+    IndependentPageSignals,
+    /** The value was observed without enough attribution to associate it. */
+    Unconfirmed,
+    /** Explicitly verified via source context or explicit cryptographic proof. */
+    Verified,
+    /** Strong but not conclusive connection. */
+    Probable,
+    /** A search result or unverified correlation that needs review. */
+    Candidate,
+    /** Evidence that contradicts other verified facts. */
+    Conflicting
+}
 
 enum class FindingType {
     Email,
@@ -51,7 +77,8 @@ data class UsernameCandidate(
     val platform: Platform,
     val url: String,
     val matchType: UsernameMatchType,
-    val confidence: Float
+    val confidence: Float,
+    val providerId: String? = null
 )
 
 enum class UsernameMatchType {
@@ -75,24 +102,118 @@ data class ProfileScanResult(
     val extractedText: String,
     val findings: List<Finding>,
     val confidenceSignals: List<String>,
-    // True only when existence and attribution were confirmed by a direct page
-    // fetch/render. Public search hits can still be surfaced with verified=false
-    // so the user can review plausible candidates without treating them as proof.
     val verified: Boolean = false,
-    // Human-readable explanation of how existence was decided, e.g.
-    // "✓ Verified in-browser", "HTTP 404 — not found",
-    // "Unverifiable — challenge page", "Offline".
     val verificationStatus: String? = null,
-    // For pivot-discovered profiles: which confirmed profile surfaced this one
-    // (e.g. "discovered via GitHub profile"). Null for directly-sourced candidates.
-    val provenance: String? = null
+    val provenance: String? = null,
+    val providerId: String? = candidate.providerId,
+    val providerVerificationState: ProviderVerificationState? = null,
+    val pivotSeedKind: TypedSeedKind? = null,
+    val pivotExactValue: String? = null,
+    val pivotEvidenceIds: List<String> = emptyList(),
+    val pivotDiscoveryPath: List<String> = emptyList(),
+    /** Query-plan stage that produced this public-search candidate. */
+    val pivotStage: String? = null,
+    /** Normalized form of the typed pivot used to build the query. */
+    val pivotNormalizedValue: String? = null,
+    /** Public source URL from which the typed pivot was derived. */
+    val pivotSourceUrl: String? = null
 )
+
+@Serializable
+enum class FaceComparisonBackend {
+    /** No comparison backend produced a score (for example, a missing face). */
+    NotRun,
+    /** The pinned local YuNet detector + SFace recognizer pipeline. */
+    YuNetSFace,
+    /** An imported or bundled ONNX/TFLite embedding model. */
+    ImportedEmbeddingModel,
+    /** The dependency-free local appearance descriptor fallback. */
+    AppearanceDescriptor,
+    /** Legacy payloads that predate structured face provenance. */
+    Unknown
+}
+
+@Serializable
+enum class FaceComparisonCalibrationState {
+    /** An identity-disjoint, consented calibration artifact was active. */
+    Measured,
+    /** A shipped/reference operating policy was active; benchmark claims are absent. */
+    ReferencePolicy,
+    /** A user/imported calibration artifact was present without Dossier guarantees. */
+    ImportedArtifact,
+    /** No calibration matched the active model. */
+    Unavailable,
+    /** The selected backend does not use a threshold calibration. */
+    NotApplicable,
+    /** Legacy payloads that predate structured face provenance. */
+    Unknown
+}
+
+@Serializable
+data class FaceComparisonQuality(
+    val accepted: Boolean,
+    val reason: String,
+    val detectorScore: Float? = null,
+    val faceWidth: Float? = null,
+    val faceHeight: Float? = null,
+    val eyeDistance: Float? = null,
+    val rollDegrees: Float? = null,
+    val brightness: Float? = null,
+    val sharpness: Float? = null
+) {
+    init {
+        require(reason.length <= MAX_REASON_CHARS) {
+            "Face quality reason exceeds the bounded provenance limit."
+        }
+    }
+
+    private companion object {
+        const val MAX_REASON_CHARS = 256
+    }
+}
+
+@Serializable
+data class FaceComparisonProvenance(
+    val backend: FaceComparisonBackend = FaceComparisonBackend.Unknown,
+    val calibration: FaceComparisonCalibrationState = FaceComparisonCalibrationState.Unknown,
+    val modelSource: String? = null,
+    val modelHashes: List<String> = emptyList(),
+    val pipelineVersion: String? = null,
+    val selfieQuality: FaceComparisonQuality? = null,
+    val profileQuality: FaceComparisonQuality? = null
+) {
+    init {
+        require(modelHashes.size <= MAX_MODEL_HASHES) {
+            "Face provenance may retain at most $MAX_MODEL_HASHES model hashes."
+        }
+        require(modelHashes.all { it.matches(MODEL_HASH_PATTERN) }) {
+            "Face provenance model hashes must be SHA-256 values."
+        }
+        require(modelSource == null || modelSource.length <= MAX_TEXT_CHARS) {
+            "Face provenance model source exceeds the bounded limit."
+        }
+        require(pipelineVersion == null || pipelineVersion.length <= MAX_TEXT_CHARS) {
+            "Face provenance pipeline version exceeds the bounded limit."
+        }
+    }
+
+    private companion object {
+        const val MAX_MODEL_HASHES = 2
+        const val MAX_TEXT_CHARS = 160
+        val MODEL_HASH_PATTERN = Regex("[a-fA-F0-9]{64}")
+    }
+}
 
 @Serializable
 data class FaceConsistencyMatch(
     val profileUrl: String,
     val similarityScore: Float,
-    val warning: String = "Profile image appears visually similar — confirm account ownership"
+    val warning: String = "Profile image appears visually similar — confirm account ownership",
+    /**
+     * Structured backend/calibration/quality provenance kept beside the score.
+     * The score remains supporting visual evidence and never proves identity.
+     */
+    val provenance: FaceComparisonProvenance = FaceComparisonProvenance()
 )
 
 enum class Platform {
@@ -122,9 +243,10 @@ enum class Platform {
 
 data class PlatformProfileTemplate(
     val platform: Platform,
-    val urlPattern: String, // e.g., "https://github.com/{username}"
+    val urlPattern: String,
     val requiresLoginUsually: Boolean,
-    val shouldFetchByDefault: Boolean
+    val shouldFetchByDefault: Boolean,
+    val providerId: String? = null
 )
 
 @Serializable
@@ -137,14 +259,6 @@ data class PlaceScanResult(
     val detectedLandmarks: List<String> = emptyList()
 )
 
-/**
- * Reverse Image Lookup result.
- *
- * Location signals come from EXIF, OCR, labels, and public-web clue search. In
- * addition, Dossier can download public candidate images and perform local
- * whole-image near-duplicate matching using perceptual fingerprints. The query
- * image never leaves the device and no facial identification is performed.
- */
 @Serializable
 data class ReverseImageLookupResult(
     val gps: String?,
@@ -156,13 +270,200 @@ data class ReverseImageLookupResult(
     val mapsUrl: String?,
     val webEvidence: List<WebEvidence>,
     val visualMatches: List<VisualMatch> = emptyList(),
-    val visualSearchNote: String? = null
+    val visualCandidates: List<ImageCandidateProvenance> = emptyList(),
+    val visualClusters: List<ImageCluster> = emptyList(),
+    val visualSearchNote: String? = null,
+    /**
+     * Ranked location observations with an explicit evidence class.
+     *
+     * This field is appended with an empty default so results written before
+     * location classification was introduced continue to decode unchanged.
+     */
+    val locationCandidates: List<LocationCandidate> = emptyList()
 ) {
+    /** Alias for clients that call the projection location evidence. */
+    val locationEvidence: List<LocationCandidate>
+        get() = locationCandidates
+
     @Serializable
     data class ImageLabel(val text: String, val confidence: Float)
 
+    /**
+     * Evidence strength for a photo-location observation.
+     *
+     * These are deliberately not identity assertions. In particular,
+     * [VISUAL_GUESS] is a visual clue and [CONFLICTING] records disagreement
+     * between observations rather than hiding it behind one resolved value.
+     */
     @Serializable
-    data class WebEvidence(val title: String, val snippet: String, val url: String)
+    enum class LocationEvidenceClass {
+        EXACT_METADATA,
+        CORROBORATED_LOCATION,
+        LIKELY_LOCATION,
+        VISUAL_GUESS,
+        CONFLICTING;
+
+        fun defaultConfidence(): Float = when (this) {
+            EXACT_METADATA -> 1f
+            CORROBORATED_LOCATION -> 0.9f
+            LIKELY_LOCATION -> 0.6f
+            VISUAL_GUESS -> 0.3f
+            CONFLICTING -> 0f
+        }
+    }
+
+    /**
+     * One bounded location candidate and the evidence that caused it to be
+     * emitted. [value] retains the exact observed location string; callers can
+     * normalize it separately when they need a stable key.
+     */
+    @Serializable
+    data class LocationCandidate(
+        val value: String,
+        val evidenceClass: LocationEvidenceClass,
+        val reason: String = "",
+        val evidenceIds: List<String> = emptyList(),
+        val sourceUrls: List<String> = emptyList(),
+        val confidence: Float = evidenceClass.defaultConfidence(),
+        val observedAtEpochMillis: Long? = null
+    ) {
+        init {
+            require(value.isNotBlank()) {
+                "Location candidate value must not be blank."
+            }
+            require(value.length <= MAX_VALUE_CHARS) {
+                "Location candidate value exceeds the bounded limit."
+            }
+            require(reason.length <= MAX_REASON_CHARS) {
+                "Location candidate reason exceeds the bounded limit."
+            }
+            require(evidenceIds.size <= MAX_EVIDENCE_IDS) {
+                "Location candidate has too many evidence IDs."
+            }
+            require(sourceUrls.size <= MAX_SOURCE_URLS) {
+                "Location candidate has too many source URLs."
+            }
+            require(confidence.isFinite() && confidence in 0f..1f) {
+                "Location candidate confidence must be finite and between 0 and 1."
+            }
+        }
+
+        /** Semantic aliases keep the candidate readable at call sites. */
+        val location: String
+            get() = value
+        val why: String
+            get() = reason
+        val classification: LocationEvidenceClass
+            get() = evidenceClass
+        val locationEvidenceClass: LocationEvidenceClass
+            get() = evidenceClass
+        val evidence: List<String>
+            get() = evidenceIds
+        val supportingEvidenceIds: List<String>
+            get() = evidenceIds
+        val sourceUrl: String?
+            get() = sourceUrls.firstOrNull()
+
+        companion object {
+            const val MAX_VALUE_CHARS = 512
+            const val MAX_REASON_CHARS = 512
+            const val MAX_EVIDENCE_IDS = 256
+            const val MAX_SOURCE_URLS = 64
+        }
+    }
+
+    /**
+     * Origin of a web observation. Keeping this beside the observation avoids
+     * guessing whether a result came from EXIF corroboration or an image/search
+     * index when it is projected into the canonical evidence ledger.
+     */
+    @Serializable
+    enum class WebEvidenceOrigin {
+        Unknown,
+        ImageSearch,
+        GeoCorroboration
+    }
+
+    @Serializable
+    data class WebEvidence(
+        val title: String,
+        val snippet: String,
+        val url: String,
+        val origin: WebEvidenceOrigin = WebEvidenceOrigin.Unknown
+    )
+
+    @Serializable
+    enum class ImageCandidateState {
+        Indexed,
+        DownloadUnavailable,
+        DecodeFailed,
+        ComparedNoMatch,
+        Matched
+    }
+
+    @Serializable
+    enum class ImageClusterType {
+        ExactContent,
+        PerceptualNearDuplicate
+    }
+
+    /**
+     * The provenance basis for an explicit image-to-account association.
+     *
+     * Neither basis is a person-identity assertion. VerifiedProfile means the
+     * candidate was observed on an account page whose account node was already
+     * directly verified. UserReviewed records an explicit operator review.
+     */
+    @Serializable
+    enum class ImageAccountLinkageBasis {
+        VerifiedProfile,
+        UserReviewed
+    }
+
+    @Serializable
+    data class ImageAccountLinkage(
+        val accountUrl: String,
+        val basis: ImageAccountLinkageBasis,
+        /** Evidence IDs supporting the account/page association, when available. */
+        val evidenceIds: List<String> = emptyList(),
+        /** Explicit review/association time; this is not an image capture time. */
+        val linkedAtEpochMillis: Long? = null
+    )
+
+    @Serializable
+    data class ImageCandidateProvenance(
+        val id: String,
+        val title: String,
+        val imageUrl: String,
+        val sourcePageUrl: String,
+        val source: String,
+        val acquisitionQuery: String,
+        val comparedImageUrl: String? = null,
+        val retrievedAtEpochMillis: Long? = null,
+        val contentSha256: String? = null,
+        val width: Int? = null,
+        val height: Int? = null,
+        val averageHashHex: String? = null,
+        val differenceHashHex: String? = null,
+        val perceptualHashHex: String? = null,
+        val comparisonScore: Float? = null,
+        val exactBytes: Boolean = false,
+        val state: ImageCandidateState = ImageCandidateState.Indexed,
+        val clusterId: String? = null,
+        /**
+         * Explicit account associations are kept separate from visual scores.
+         * A visual match or cluster never populates this list automatically.
+         */
+        val accountLinkages: List<ImageAccountLinkage> = emptyList()
+    )
+
+    @Serializable
+    data class ImageCluster(
+        val id: String,
+        val type: ImageClusterType,
+        val representativeCandidateId: String,
+        val memberCandidateIds: List<String>
+    )
 
     @Serializable
     data class VisualMatch(
@@ -172,15 +473,17 @@ data class ReverseImageLookupResult(
         val source: String,
         val similarity: Float,
         val matchType: String,
-        val evidence: String
+        val evidence: String,
+        val candidateId: String? = null,
+        val clusterId: String? = null
     )
 }
 
-/**
- * Result of a Reverse Video Lookup. Video bytes stay local: the app samples a
- * small number of frames, extracts OCR/scene labels on-device, and searches only
- * those text clues. Faces are safety-gated exactly like still images.
- */
+/** Top-level aliases for callers that do not use the nested result namespace. */
+typealias LocationEvidenceClass = ReverseImageLookupResult.LocationEvidenceClass
+typealias LocationCandidate = ReverseImageLookupResult.LocationCandidate
+typealias LocationEvidenceCandidate = ReverseImageLookupResult.LocationCandidate
+
 @Serializable
 data class ReverseVideoLookupResult(
     val durationMs: Long?,
@@ -203,8 +506,9 @@ data class ReverseVideoLookupResult(
     )
 }
 
-// ---- Entity graph (dossier fusion) ------------------------------------------
+// ---- Identity graph v2 migration -------------------------------------------
 
+/** Stable legacy storage/rendering type. Do not expand destructively. */
 @Serializable
 enum class EntityType {
     Person,
@@ -219,13 +523,114 @@ enum class EntityType {
     Website
 }
 
+/** Full semantic node taxonomy required by the v2 graph. */
+@Serializable
+enum class GraphEntityKind {
+    Subject,
+    Account,
+    Username,
+    DisplayName,
+    Email,
+    Phone,
+    Domain,
+    URL,
+    Image,
+    Organization,
+    Location,
+    Occupation,
+    Document,
+    ArchiveSnapshot,
+    Breach,
+    Website,
+    EvidenceArtifact
+}
+
+fun EntityType.toGraphEntityKind(): GraphEntityKind = when (this) {
+    EntityType.Person -> GraphEntityKind.Subject
+    EntityType.Username -> GraphEntityKind.Username
+    EntityType.Email -> GraphEntityKind.Email
+    EntityType.Phone -> GraphEntityKind.Phone
+    EntityType.Profile -> GraphEntityKind.Account
+    EntityType.Organization -> GraphEntityKind.Organization
+    EntityType.Location -> GraphEntityKind.Location
+    EntityType.Image -> GraphEntityKind.Image
+    EntityType.Breach -> GraphEntityKind.Breach
+    EntityType.Website -> GraphEntityKind.Website
+}
+
+@Serializable
+enum class GraphNodeState {
+    Confirmed,
+    High,
+    Medium,
+    Low,
+    Unresolved,
+    Conflicting
+}
+
+@Serializable
+enum class RelationshipType {
+    HAS_USERNAME,
+    HAS_EMAIL,
+    HAS_PHONE,
+    USES_ACCOUNT,
+    USES_AVATAR,
+    LINKS_TO,
+    MENTIONS,
+    OWNS_DOMAIN,
+    AFFILIATED_WITH,
+    LOCATED_IN,
+    APPEARED_IN_BREACH,
+    ARCHIVED_AS,
+    SAME_IMAGE_AS,
+    SIMILAR_IMAGE_TO,
+    VISUALLY_SIMILAR_TO,
+    REDIRECTS_TO,
+    CLAIMS_IDENTITY,
+    CROSS_LINKS_ACCOUNT,
+    DERIVED_FROM,
+    OTHER;
+
+    companion object {
+        fun fromLegacy(value: String): RelationshipType = when (value.lowercase()) {
+            "has_email" -> HAS_EMAIL
+            "has_phone" -> HAS_PHONE
+            "uses_username", "username_on_profile" -> HAS_USERNAME
+            "has_profile", "owns_profile", "possible_profile", "candidate_profile", "related_profile" -> USES_ACCOUNT
+            "affiliated_with" -> AFFILIATED_WITH
+            "associated_with_location" -> LOCATED_IN
+            "linked_website", "links_to" -> LINKS_TO
+            "mentions" -> MENTIONS
+            "related_image", "image_of_profile", "uses_avatar" -> USES_AVATAR
+            "owns_domain" -> OWNS_DOMAIN
+            "located_in" -> LOCATED_IN
+            "archived_as" -> ARCHIVED_AS
+            "same_image_as", "same_image_content" -> SAME_IMAGE_AS
+            "similar_image_to", "perceptual_near_duplicate" -> SIMILAR_IMAGE_TO
+            "face_similar_to", "visually_similar_to" -> VISUALLY_SIMILAR_TO
+            "redirects_to" -> REDIRECTS_TO
+            "claims_identity" -> CLAIMS_IDENTITY
+            "cross_links_account" -> CROSS_LINKS_ACCOUNT
+            "derived_from" -> DERIVED_FROM
+            "exposed_in", "has_breach_exposure" -> APPEARED_IN_BREACH
+            else -> OTHER
+        }
+    }
+}
+
 @Serializable
 data class DossierEntity(
     val id: String,
     val type: EntityType,
     val label: String,
     val confidence: Float = 0.5f,
-    val sourceUrls: List<String> = emptyList()
+    val sourceUrls: List<String> = emptyList(),
+    val kind: GraphEntityKind = type.toGraphEntityKind(),
+    val state: GraphNodeState = GraphNodeState.Unresolved,
+    val evidenceIds: List<String> = emptyList(),
+    val historical: Boolean = false,
+    val firstObservedAtEpochMillis: Long? = null,
+    val lastObservedAtEpochMillis: Long? = null
 )
 
 @Serializable
@@ -233,19 +638,44 @@ data class DossierEdge(
     val fromId: String,
     val toId: String,
     val relation: String,
-    val evidence: String? = null
+    val evidence: String? = null,
+    val relationType: RelationshipType = RelationshipType.fromLegacy(relation),
+    val evidenceIds: List<String> = emptyList(),
+    val contradictingEvidenceIds: List<String> = emptyList(),
+    val confidence: Float? = null,
+    val historical: Boolean = false
 )
 
 @Serializable
 data class EntityGraph(
     val entities: List<DossierEntity> = emptyList(),
-    val edges: List<DossierEdge> = emptyList()
-)
+    val edges: List<DossierEdge> = emptyList(),
+    val schemaVersion: Int = 2
+) {
+    fun entity(id: String): DossierEntity? = entities.firstOrNull { it.id == id }
+    fun outgoing(id: String): List<DossierEdge> = edges.filter { it.fromId == id }
+    fun incoming(id: String): List<DossierEdge> = edges.filter { it.toId == id }
+    fun relationshipsFor(id: String): List<DossierEdge> = edges.filter { it.fromId == id || it.toId == id }
+    /** Returns edges whose positive or contradicting provenance cites [evidenceId]. */
+    fun edgesWithEvidence(evidenceId: String): List<DossierEdge> = edges.filter {
+        evidenceId in it.evidenceIds || evidenceId in it.contradictingEvidenceIds
+    }
+    /** Returns nodes whose persisted provenance cites [evidenceId]. */
+    fun entitiesWithEvidence(evidenceId: String): List<DossierEntity> = entities.filter {
+        evidenceId in it.evidenceIds
+    }
+    fun historicalEntities(): List<DossierEntity> = entities.filter(DossierEntity::historical)
+    fun conflictingEntities(): List<DossierEntity> = entities.filter { it.state == GraphNodeState.Conflicting }
+}
 
 @Serializable
 data class BreachDigest(
     val email: String,
     val breachCount: Int,
     val sources: List<String> = emptyList(),
-    val note: String? = null
+    val note: String? = null,
+    /** Provider breach names/labels, kept separate from ordinary public hits. */
+    val breachSources: List<String> = emptyList(),
+    /** Ordinary public-web source URLs returned by the exposure search. */
+    val publicEvidenceUrls: List<String> = emptyList()
 )

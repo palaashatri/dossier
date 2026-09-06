@@ -1,0 +1,4 @@
+# Vendored WhatsMyName artifacts are byte-pinned by the maintenance audit.
+# Do not allow Git line-ending conversion to mutate their checked-out bytes.
+app/src/main/assets/providers/whatsmyname/wmn-data.json -text
+app/src/main/assets/providers/whatsmyname/LICENSE.md -text

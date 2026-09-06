@@ -15,6 +15,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -181,7 +186,9 @@ fun ModelsScreen() {
                 fontSize = 24.sp,
                 lineHeight = 30.sp,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)
+                modifier = Modifier
+                    .padding(top = 6.dp, bottom = 6.dp)
+                    .semantics { heading() }
             )
             Text(
                 text = "All inference runs locally. ML Kit Vision is always available; optional LLM engines work only on supported devices.",
@@ -330,7 +337,8 @@ fun ModelsScreen() {
                                     },
                                     border = androidx.compose.foundation.BorderStroke(1.dp, NeuralTheme.Crimson.copy(alpha = 0.6f)),
                                     shape = RoundedCornerShape(10.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier.heightIn(min = 48.dp)
                                 ) {
                                     Text("Clear", color = NeuralTheme.Crimson, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                 }
@@ -351,7 +359,8 @@ fun ModelsScreen() {
                                     },
                                     border = androidx.compose.foundation.BorderStroke(1.dp, NeuralTheme.BorderColor),
                                     shape = RoundedCornerShape(10.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier.heightIn(min = 48.dp)
                                 ) {
                                     Text("Import", color = NeuralTheme.Cyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                 }
@@ -371,7 +380,8 @@ fun ModelsScreen() {
                                     ),
                                     shape = RoundedCornerShape(10.dp),
                                     border = androidx.compose.foundation.BorderStroke(1.dp, NeuralTheme.BorderColor),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier.heightIn(min = 48.dp)
                                 ) {
                                     Text("Fetch", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                 }
@@ -381,6 +391,11 @@ fun ModelsScreen() {
                                 RadioButton(
                                     selected = isSelected,
                                     onClick = { ScanSession.selectedModel.value = modelType },
+                                    modifier = Modifier.semantics {
+                                        this.selected = isSelected
+                                        stateDescription = if (isSelected) "Selected" else "Not selected"
+                                        contentDescription = "Use ${modelType.displayName} as the active AI engine"
+                                    },
                                     colors = RadioButtonDefaults.colors(
                                         selectedColor = NeuralTheme.Cyan,
                                         unselectedColor = NeuralTheme.TextSecondary
@@ -453,7 +468,16 @@ fun ModelsScreen() {
                 color = NeuralTheme.TextPrimary,
                 fontSize = 22.sp,
                 fontWeight = FontWeight.ExtraBold,
-                modifier = Modifier.padding(top = 4.dp, bottom = 10.dp)
+                modifier = Modifier
+                    .padding(top = 4.dp, bottom = 10.dp)
+                    .semantics { heading() }
+            )
+            Text(
+                text = "Remote analysis is denied by default. Enable a provider below only when you explicitly permit redacted evidence metadata to leave this device; names, values, URLs, graph labels, correction notes, and remediation text stay local.",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                modifier = Modifier.padding(bottom = 12.dp)
             )
 
             providerConfigs.forEachIndexed { index, config ->
@@ -553,6 +577,9 @@ private fun AiCoreStatusCard(
                 modifier = Modifier
                     .clip(RoundedCornerShape(999.dp))
                     .background(statusColor.copy(alpha = 0.16f))
+                    .semantics {
+                        stateDescription = if (checking) "Checking" else resolvedStatus?.label ?: "Unknown"
+                    }
                     .padding(horizontal = 10.dp, vertical = 5.dp)
             ) {
                 Text(
@@ -642,6 +669,9 @@ private fun FaceEmbeddingModelCard(
                     .background(
                         if (isReady) NeuralTheme.Cyan.copy(alpha = 0.16f) else NeuralTheme.BorderColor.copy(alpha = 0.35f)
                     )
+                    .semantics {
+                        stateDescription = if (!isReady) "Missing" else if (usingBundled) "Bundled model" else "Custom model"
+                    }
                     .padding(horizontal = 10.dp, vertical = 5.dp)
             ) {
                 Text(
@@ -767,6 +797,10 @@ private fun ProviderConfigCard(
             Switch(
                 checked = config.enabled,
                 onCheckedChange = { onConfigChange(config.copy(enabled = it)) },
+                modifier = Modifier.semantics {
+                    contentDescription = "Enable ${config.provider.displayName} provider"
+                    stateDescription = if (config.enabled) "Enabled" else "Disabled"
+                },
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = NeuralTheme.Cyan,
                     checkedTrackColor = NeuralTheme.Cobalt.copy(alpha = 0.45f),
@@ -793,7 +827,11 @@ private fun ProviderConfigCard(
                 onClick = onMoveUp,
                 enabled = canMoveUp,
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                modifier = Modifier.height(32.dp),
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .semantics {
+                        contentDescription = "Increase priority for ${config.provider.displayName}"
+                    },
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan)
             ) {
                 Text("Up", fontSize = 11.sp)
@@ -802,7 +840,11 @@ private fun ProviderConfigCard(
                 onClick = onMoveDown,
                 enabled = canMoveDown,
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                modifier = Modifier.height(32.dp),
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .semantics {
+                        contentDescription = "Decrease priority for ${config.provider.displayName}"
+                    },
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan)
             ) {
                 Text("Down", fontSize = 11.sp)
@@ -879,7 +921,13 @@ private fun ProviderModelChooser(
             onClick = onRefresh,
             enabled = !isRefreshing,
             colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.Cyan),
-            modifier = Modifier.weight(1f)
+            modifier = Modifier
+                .weight(1f)
+                .heightIn(min = 48.dp)
+                .semantics {
+                    contentDescription = "Refresh models for ${currentModel.ifBlank { "provider" }}"
+                    stateDescription = if (isRefreshing) "Refreshing models" else "Ready"
+                }
         ) {
             Text(
                 text = if (isRefreshing) "Refreshing..." else "Refresh models",
@@ -893,7 +941,13 @@ private fun ProviderModelChooser(
                 onClick = { expanded = true },
                 enabled = choices.isNotEmpty(),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = NeuralTheme.TextPrimary),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .semantics {
+                        contentDescription = "Choose remote model"
+                        stateDescription = "Selected model: ${currentModel.ifBlank { "none" }}"
+                    }
             ) {
                 Text(
                     text = "Choose model",

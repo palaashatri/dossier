@@ -27,13 +27,21 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.scanner.BackgroundScanManager
+import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.theme.NeuralTheme
 
 private enum class HubTab(val label: String) {
@@ -56,13 +64,18 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
         ?.route
 
     LaunchedEffect(currentDossierRoute) {
-        if (currentDossierRoute in listOf("identity", "username_discovery", "scan", "report")) {
+        if (currentDossierRoute in listOf(
+                "universal_search",
+                "identity",
+                "username_discovery",
+                "scan",
+                "analysis",
+                "report"
+            )) {
             selectedTab = HubTab.DOSSIER
         }
     }
 
-    // Bottom-navigation destinations behave as top-level destinations. Back from
-    // a utility tab returns to the dossier instead of unexpectedly closing the app.
     BackHandler(enabled = selectedTab != HubTab.DOSSIER) {
         selectedTab = HubTab.DOSSIER
     }
@@ -86,8 +99,6 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
-            // Leaving the scan route disposes ScanScreen and previously caused a
-            // completed or in-flight scan to restart when the user returned.
             if (!scanInForeground) {
                 NavigationBar(containerColor = NeuralTheme.CardBackground) {
                     HubTab.entries.forEach { tab ->
@@ -104,13 +115,30 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
                                         HubTab.CASES -> Icons.Default.DateRange
                                         HubTab.MODELS -> Icons.Default.Settings
                                     },
-                                    contentDescription = tab.label
+                                    // NavigationBarItem exposes the visible label as its
+                                    // accessible name. Keeping the decorative icon silent
+                                    // avoids duplicate announcements (especially when the
+                                    // compact high-font-scale label differs from tab.label).
+                                    contentDescription = null
                                 )
                             },
                             label = {
+                                val fontScale = androidx.compose.ui.platform.LocalDensity.current.fontScale
+                                val isHighFont = fontScale >= 1.5f
+                                val labelText = if (isHighFont) {
+                                    when (tab) {
+                                        HubTab.DOSSIER -> "Audit"
+                                        HubTab.IMAGE_LOOKUP -> "Media"
+                                        HubTab.BREACH -> "Breach"
+                                        HubTab.CASES -> "Cases"
+                                        HubTab.MODELS -> "Tools"
+                                    }
+                                } else {
+                                    tab.label
+                                }
                                 Text(
-                                    tab.label,
-                                    fontSize = 11.sp,
+                                    labelText,
+                                    fontSize = if (isHighFont) 10.sp else 11.sp,
                                     maxLines = 1,
                                     softWrap = false,
                                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
@@ -148,7 +176,7 @@ fun MainHubScreen(onNavigateToBrowser: (String) -> Unit) {
                     HubTab.BREACH -> BreachCheckScreen(
                         onNavigateToBrowser = onNavigateToBrowser
                     )
-                    HubTab.CASES -> CaseComparisonScreen()
+                    HubTab.CASES -> CaseComparisonScreen(onNavigateToBrowser = onNavigateToBrowser)
                     HubTab.MODELS -> ModelsScreen()
                 }
             }
@@ -161,7 +189,84 @@ private fun DossierNavGraph(
     navController: NavHostController,
     onNavigateToBrowser: (String) -> Unit
 ) {
-    NavHost(navController = navController, startDestination = "identity") {
+    val context = LocalContext.current
+    var initialRoute by remember(context) { mutableStateOf<String?>(null) }
+    val restoredRoute = navController
+        .currentBackStackEntryAsState()
+        .value
+        ?.destination
+        ?.route
+    var restoredAnalysisRedirected by remember { mutableStateOf(false) }
+    LaunchedEffect(context) {
+        val hasActiveMarker = BackgroundScanManager.hasActiveMarkerAsync(context)
+        val hasLatestResult = BackgroundScanManager.latestResultAsync(context) != null
+        initialRoute = if (hasActiveMarker || hasLatestResult) "analysis" else "universal_search"
+    }
+    LaunchedEffect(initialRoute, restoredRoute) {
+        // Activity recreation can restore an older identity destination even
+        // when durable scan state now points to Analysis, or restore a legacy
+        // setup route after the universal entry became the default. Check only
+        // the first restored destination so normal in-session navigation stays
+        // authoritative.
+        if (restoredAnalysisRedirected || initialRoute == null || restoredRoute == null) return@LaunchedEffect
+        restoredAnalysisRedirected = true
+        val targetRoute = when {
+            initialRoute == "analysis" && restoredRoute !in setOf("analysis", "report") -> "analysis"
+            initialRoute == "universal_search" && restoredRoute != "universal_search" -> "universal_search"
+            else -> null
+        }
+        if (targetRoute != null) {
+            navController.navigate(targetRoute) {
+                popUpTo(restoredRoute) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
+    if (initialRoute == null) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Text(
+                text = "Restoring local scan state…",
+                color = NeuralTheme.TextSecondary,
+                fontSize = 13.sp,
+                modifier = Modifier
+                    .padding(24.dp)
+                    .semantics {
+                        contentDescription = "Restoring local scan state. Please wait."
+                    }
+            )
+        }
+        return
+    }
+
+    fun returnToUniversalSearch() {
+        val currentDestinationRoute = navController.currentDestination?.route
+        navController.navigate("universal_search") {
+            // Pop only the current destination. Popping the nested NavHost
+            // graph itself leaves the controller with no active destination
+            // and can destroy the Activity before the search route is added.
+            currentDestinationRoute?.let { destinationRoute ->
+                popUpTo(destinationRoute) { inclusive = true }
+            }
+            launchSingleTop = true
+        }
+    }
+
+    NavHost(navController = navController, startDestination = initialRoute!!) {
+        composable("universal_search") {
+            // Search is the Dossier root. Keep system Back from popping the
+            // nested graph to an empty back stack after a reset.
+            BackHandler { }
+            UniversalSearchScreen(
+                onSearch = {
+                    navController.navigate("scan") {
+                        launchSingleTop = true
+                    }
+                }
+            )
+        }
+
+        // Legacy setup routes remain for saved navigation state compatibility,
+        // but the universal search is the only normal entry point.
         composable("identity") {
             IdentityScreen(onNext = { navController.navigate("username_discovery") })
         }
@@ -172,42 +277,57 @@ private fun DossierNavGraph(
             )
         }
         composable("scan") {
-            ScanScreen(
+            CoordinatedScanScreen(
                 onScanComplete = {
                     navController.navigate("report") {
                         popUpTo("scan") { inclusive = true }
                         launchSingleTop = true
                     }
                 },
-                onScanCancelled = {
-                    val returned = navController.popBackStack("username_discovery", inclusive = false)
-                    if (!returned) {
-                        navController.navigate("identity") {
-                            popUpTo("identity") { inclusive = false }
-                            launchSingleTop = true
-                        }
-                    }
-                },
-                onInvalidInput = {
-                    navController.navigate("identity") {
-                        popUpTo("identity") { inclusive = false }
+                onScanFailed = {
+                    navController.navigate("analysis") {
+                        popUpTo("scan") { inclusive = true }
                         launchSingleTop = true
                     }
+                },
+                onScanBackgrounded = {
+                    navController.navigate("analysis") {
+                        popUpTo("scan") { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
+                onScanCancelled = {
+                    returnToUniversalSearch()
+                },
+                onInvalidInput = {
+                    returnToUniversalSearch()
+                }
+            )
+        }
+        composable("analysis") {
+            AnalysisScreen(
+                onOpenReport = {
+                    navController.navigate("report") {
+                        popUpTo("analysis") { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
+                onBackToSetup = {
+                    returnToUniversalSearch()
                 }
             )
         }
         composable("report") {
             ReportScreen(
                 onReset = {
-                    navController.navigate("identity") {
-                        popUpTo("identity") { inclusive = true }
-                    }
+                    returnToUniversalSearch()
                 },
                 onNavigateToBrowser = onNavigateToBrowser,
                 onDeepResearch = {
-                    io.dossier.app.domain.scanner.ScanSession.setDeepResearch(true)
+                    DiscoveryScanPreferences.setMode(ScanMode.Deep)
+                    ScanSession.setDeepResearch(true)
                     navController.navigate("scan") {
-                        popUpTo("scan") { inclusive = true }
+                        popUpTo("report") { inclusive = true }
                     }
                 }
             )

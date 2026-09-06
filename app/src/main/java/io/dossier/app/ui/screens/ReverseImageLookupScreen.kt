@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -26,8 +27,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,22 +41,50 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.dossier.app.domain.case.UserCorrection
+import io.dossier.app.domain.case.UserCorrectionDecision
+import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceRuntimeCache
+import io.dossier.app.domain.evidence.persistedLinkedProfileEvidenceId
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.ReverseVideoLookupResult
 import io.dossier.app.domain.place.ReverseImageLookupService
 import io.dossier.app.domain.place.ReverseVideoLookupService
+import io.dossier.app.domain.place.MediaIntelligenceSession
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.CircularWavyProgressIndicator
 import io.dossier.app.ui.components.GeminiSpark
 import io.dossier.app.ui.theme.NeuralTheme
+import java.time.Instant
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * Guards Compose-visible media state when an older lookup completes after a
+ * newer image/video request. The persistence layer has its own binding token;
+ * this generation protects the transient selection, result, error, and
+ * progress state rendered by this screen.
+ */
+internal class ReverseMediaLookupRequestGate {
+    private val generation = AtomicLong(0L)
+
+    fun begin(): Long = generation.incrementAndGet()
+
+    fun isCurrent(token: Long): Boolean = generation.get() == token
+}
 
 /**
  * Reverse media lookup with on-device OCR/location analysis and genuine whole-image
@@ -64,6 +96,13 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val cardShape = io.dossier.app.ui.theme.DossierCardShape
+    val evidenceCollection by EvidenceRuntimeCache.collection.collectAsState()
+    val draftCorrections by ScanSession.userCorrections.collectAsState()
+    val draftCorrectionsByEvidence = remember(draftCorrections) {
+        draftCorrections
+            .filter { it.evidenceId != null }
+            .associateBy { it.evidenceId!! }
+    }
 
     var selectedImage by remember { mutableStateOf<Uri?>(null) }
     var selectedVideo by remember { mutableStateOf<Uri?>(null) }
@@ -71,45 +110,73 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
     var videoResult by remember { mutableStateOf<ReverseVideoLookupResult?>(null) }
     var analyzing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var correctionMessage by remember { mutableStateOf<String?>(null) }
+    val requestGate = remember { ReverseMediaLookupRequestGate() }
 
     fun analyzeImage(uri: Uri) {
+        val requestToken = requestGate.begin()
         selectedImage = uri
         selectedVideo = null
         imageResult = null
         videoResult = null
         error = null
+        correctionMessage = null
         analyzing = true
+        val bindingToken = ScanSession.currentInput.value?.let(MediaIntelligenceSession::bindTo)
+        if (bindingToken == null) {
+            MediaIntelligenceSession.clear()
+            error = "Start an authorized identity scan before attaching media evidence."
+            analyzing = false
+            return
+        }
         scope.launch {
             try {
-                imageResult = ReverseImageLookupService(context).lookup(
+                val result = ReverseImageLookupService(context).lookup(
                     uri,
-                    deepResearch = ScanSession.deepResearchEnabled.value
+                    deepResearch = ScanSession.deepResearchEnabled.value,
+                    bindingToken = bindingToken
                 )
+                if (requestGate.isCurrent(requestToken)) imageResult = result
             } catch (throwable: Throwable) {
-                error = "Lookup failed: ${throwable.localizedMessage ?: throwable.javaClass.simpleName}"
+                if (requestGate.isCurrent(requestToken)) {
+                    error = "Lookup failed: ${throwable.localizedMessage ?: throwable.javaClass.simpleName}"
+                }
             } finally {
-                analyzing = false
+                if (requestGate.isCurrent(requestToken)) analyzing = false
             }
         }
     }
 
     fun analyzeVideo(uri: Uri) {
+        val requestToken = requestGate.begin()
         selectedVideo = uri
         selectedImage = null
         imageResult = null
         videoResult = null
         error = null
+        correctionMessage = null
         analyzing = true
+        val bindingToken = ScanSession.currentInput.value?.let(MediaIntelligenceSession::bindTo)
+        if (bindingToken == null) {
+            MediaIntelligenceSession.clear()
+            error = "Start an authorized identity scan before attaching media evidence."
+            analyzing = false
+            return
+        }
         scope.launch {
             try {
-                videoResult = ReverseVideoLookupService(context).lookup(
+                val result = ReverseVideoLookupService(context).lookup(
                     uri,
-                    deepResearch = ScanSession.deepResearchEnabled.value
+                    deepResearch = ScanSession.deepResearchEnabled.value,
+                    bindingToken = bindingToken
                 )
+                if (requestGate.isCurrent(requestToken)) videoResult = result
             } catch (throwable: Throwable) {
-                error = "Video lookup failed: ${throwable.localizedMessage ?: throwable.javaClass.simpleName}"
+                if (requestGate.isCurrent(requestToken)) {
+                    error = "Video lookup failed: ${throwable.localizedMessage ?: throwable.javaClass.simpleName}"
+                }
             } finally {
-                analyzing = false
+                if (requestGate.isCurrent(requestToken)) analyzing = false
             }
         }
     }
@@ -145,7 +212,9 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
                 fontSize = 24.sp,
                 lineHeight = 30.sp,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)
+                modifier = Modifier
+                    .padding(top = 6.dp, bottom = 6.dp)
+                    .semantics { heading() }
             )
             Text(
                 "Extract EXIF, OCR, and scene clues; search several public image indexes; then compare downloaded candidates locally for exact copies, resizes, recompressions, screenshots, and modest crops.",
@@ -202,7 +271,28 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
 
             imageResult?.let {
                 Spacer(Modifier.height(20.dp))
-                RenderLookupResult(it, cardShape, onNavigateToBrowser)
+                RenderLookupResult(
+                    result = it,
+                    cardShape = cardShape,
+                    onNavigateToBrowser = onNavigateToBrowser,
+                    evidenceRecords = evidenceCollection.evidence,
+                    draftCorrections = draftCorrectionsByEvidence,
+                    draftCorrectionMessage = correctionMessage,
+                    onDraftCorrection = { evidenceId, decision ->
+                        val accepted = ScanSession.recordDraftCorrection(
+                            UserCorrection(
+                                evidenceId = evidenceId,
+                                decision = decision,
+                                createdAtUtc = Instant.now().toString()
+                            )
+                        )
+                        correctionMessage = if (accepted) {
+                            "Draft linked-profile decision applied locally. Use Actions → Save encrypted case to persist it."
+                        } else {
+                            "Draft correction limit reached; no change was applied."
+                        }
+                    }
+                )
             }
             videoResult?.let {
                 Spacer(Modifier.height(20.dp))
@@ -235,7 +325,11 @@ private fun RenderLookupResult(
     result: ReverseImageLookupResult,
     cardShape: RoundedCornerShape,
     onNavigateToBrowser: (String) -> Unit,
-    showGps: Boolean = true
+    showGps: Boolean = true,
+    evidenceRecords: List<Evidence> = emptyList(),
+    draftCorrections: Map<String, UserCorrection> = emptyMap(),
+    draftCorrectionMessage: String? = null,
+    onDraftCorrection: ((String, UserCorrectionDecision) -> Unit)? = null
 ) {
     if (result.faceDetected) {
         InfoCard(
@@ -307,6 +401,15 @@ private fun RenderLookupResult(
                         lineHeight = 15.sp,
                         modifier = Modifier.padding(top = 4.dp)
                     )
+                    match.clusterId?.let { clusterId ->
+                        Text(
+                            "Cluster ${clusterId.substringAfter(':').take(10)}",
+                            color = NeuralTheme.TextMuted,
+                            fontSize = 9.5.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(top = 3.dp)
+                        )
+                    }
                     val target = match.sourcePageUrl.takeIf { it.startsWith("http") } ?: match.imageUrl
                     Text(
                         "Open source page →",
@@ -314,11 +417,28 @@ private fun RenderLookupResult(
                         fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
                         textDecoration = TextDecoration.Underline,
-                        modifier = Modifier.padding(top = 7.dp).clickable { onNavigateToBrowser(target) }
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .padding(top = 7.dp)
+                            .clickable(role = Role.Button) { onNavigateToBrowser(target) }
+                            .semantics { contentDescription = "Open image match source $target" }
                     )
                 }
             }
         }
+    }
+
+    if (result.visualCandidates.isNotEmpty()) {
+        Spacer(Modifier.height(20.dp))
+        RenderVisualProvenance(
+            result = result,
+            cardShape = cardShape,
+            onNavigateToBrowser = onNavigateToBrowser,
+            evidenceRecords = evidenceRecords,
+            draftCorrections = draftCorrections,
+            draftCorrectionMessage = draftCorrectionMessage,
+            onDraftCorrection = onDraftCorrection
+        )
     }
 
     Spacer(Modifier.height(20.dp))
@@ -342,11 +462,97 @@ private fun RenderLookupResult(
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     textDecoration = TextDecoration.Underline,
-                    modifier = Modifier.padding(top = 8.dp).clickable { onNavigateToBrowser(url) }
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .padding(top = 8.dp)
+                        .clickable(role = Role.Button) { onNavigateToBrowser(url) }
+                        .semantics { contentDescription = "Open resolved location in Maps $url" }
                 )
             }
         }
     }
+
+    if (result.locationCandidates.isNotEmpty()) {
+        Spacer(Modifier.height(20.dp))
+        SectionHeader("Ranked location candidates")
+        result.locationCandidates.forEach { candidate ->
+            Card(
+                colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.88f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 9.dp)
+                    .border(
+                        1.dp,
+                        when (candidate.evidenceClass) {
+                            ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA,
+                            ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION -> NeuralTheme.Emerald.copy(alpha = 0.5f)
+                            ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING -> NeuralTheme.Crimson.copy(alpha = 0.5f)
+                            else -> NeuralTheme.Cyan.copy(alpha = 0.38f)
+                        },
+                        cardShape
+                    ),
+                shape = cardShape
+            ) {
+                Column(Modifier.padding(15.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            candidate.evidenceClass.name.replace("_", " "),
+                            color = NeuralTheme.Cyan,
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = 1.sp
+                        )
+                        Text(
+                            "${(candidate.confidence * 100).toInt()}%",
+                            color = NeuralTheme.TextSecondary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Text(
+                        candidate.value,
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                    if (candidate.reason.isNotBlank()) {
+                        Text(
+                            candidate.reason,
+                            color = NeuralTheme.TextSecondary,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+
+                    candidate.sourceUrls.firstOrNull { url ->
+                        url.startsWith("http://", ignoreCase = true) ||
+                            url.startsWith("https://", ignoreCase = true)
+                    }?.let { url ->
+                        val target = url
+                        Text(
+                            "View source →",
+                            color = NeuralTheme.Cyan,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            textDecoration = TextDecoration.Underline,
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .padding(top = 8.dp)
+                                .clickable(role = Role.Button) { onNavigateToBrowser(target) }
+                                .semantics { contentDescription = "Open candidate location source $target" }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
 
     if (showGps) {
         Spacer(Modifier.height(18.dp))
@@ -401,7 +607,11 @@ private fun RenderLookupResult(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 9.5.sp,
                             textDecoration = TextDecoration.Underline,
-                            modifier = Modifier.padding(top = 5.dp).clickable { onNavigateToBrowser(evidence.url) }
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .padding(top = 5.dp)
+                                .clickable(role = Role.Button) { onNavigateToBrowser(evidence.url) }
+                                .semantics { contentDescription = "Open public location evidence ${evidence.title}" }
                         )
                     }
                 }
@@ -429,8 +639,269 @@ private fun RenderLookupResult(
             fontSize = 11.5.sp,
             fontWeight = FontWeight.Bold,
             textDecoration = TextDecoration.Underline,
-            modifier = Modifier.padding(vertical = 4.dp).clickable { onNavigateToBrowser(url) }
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .padding(vertical = 4.dp)
+                .clickable(role = Role.Button) { onNavigateToBrowser(url) }
+                .semantics { contentDescription = "Open external visual index $name" }
         )
+    }
+}
+
+@Composable
+internal fun RenderVisualProvenance(
+    result: ReverseImageLookupResult,
+    cardShape: RoundedCornerShape,
+    onNavigateToBrowser: (String) -> Unit,
+    evidenceRecords: List<Evidence> = emptyList(),
+    draftCorrections: Map<String, UserCorrection> = emptyMap(),
+    draftCorrectionMessage: String? = null,
+    onDraftCorrection: ((String, UserCorrectionDecision) -> Unit)? = null
+) {
+    var expanded by remember(result.visualCandidates) { mutableStateOf(false) }
+    val candidates = result.visualCandidates
+    val shown = if (expanded) candidates else candidates.take(PROVENANCE_PREVIEW_COUNT)
+    val stateCounts = candidates.groupingBy { it.state }.eachCount()
+
+    SectionHeader("Image candidate provenance")
+    Text(
+        text = buildString {
+            append("${candidates.size} public candidate(s) recorded")
+            append(" · ${stateCounts[ReverseImageLookupResult.ImageCandidateState.Matched] ?: 0} matched")
+            append(" · ${stateCounts[ReverseImageLookupResult.ImageCandidateState.ComparedNoMatch] ?: 0} compared/no match")
+            val unavailable = (stateCounts[ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable] ?: 0) +
+                (stateCounts[ReverseImageLookupResult.ImageCandidateState.DecodeFailed] ?: 0)
+            if (unavailable > 0) append(" · $unavailable unavailable")
+        },
+        color = NeuralTheme.TextSecondary,
+        fontSize = 11.5.sp,
+        lineHeight = 16.sp,
+        modifier = Modifier.padding(bottom = 8.dp)
+    )
+    Text(
+        "Candidate provenance describes where public images came from and how whole-image comparison behaved. Hash similarity indicates duplicate/repost content, not a person's identity.",
+        color = NeuralTheme.TextMuted,
+        fontSize = 10.5.sp,
+        lineHeight = 15.sp,
+        modifier = Modifier.padding(bottom = 9.dp)
+    )
+    draftCorrectionMessage?.let { message ->
+        InfoCard(message, NeuralTheme.Cobalt, cardShape)
+        Spacer(Modifier.height(8.dp))
+    }
+
+    if (result.visualClusters.isNotEmpty()) {
+        Text(
+            "Duplicate/repost clusters",
+            color = NeuralTheme.TextPrimary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 5.dp)
+        )
+        result.visualClusters.forEach { cluster ->
+            Text(
+                text = "• ${cluster.type.displayLabel()} · ${cluster.memberCandidateIds.size} public candidates · ${cluster.id.substringAfter(':').take(10)}",
+                color = if (cluster.type == ReverseImageLookupResult.ImageClusterType.ExactContent) NeuralTheme.Emerald else NeuralTheme.Cobalt,
+                fontSize = 10.5.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.padding(bottom = 3.dp)
+            )
+        }
+        Spacer(Modifier.height(7.dp))
+    }
+
+    shown.forEach { candidate ->
+        Card(
+            colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground.copy(alpha = 0.82f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 7.dp)
+                .border(1.dp, candidate.state.accent().copy(alpha = 0.30f), cardShape),
+            shape = cardShape
+        ) {
+            Column(Modifier.padding(13.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text(
+                        candidate.title,
+                        color = NeuralTheme.TextPrimary,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        candidate.state.displayLabel(),
+                        color = candidate.state.accent(),
+                        fontSize = 9.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+                Text(
+                    "${candidate.source} · query: ${candidate.acquisitionQuery}",
+                    color = NeuralTheme.TextSecondary,
+                    fontSize = 9.5.sp,
+                    lineHeight = 14.sp,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+                val technical = buildList {
+                    if (candidate.width != null && candidate.height != null) add("${candidate.width}×${candidate.height}")
+                    candidate.comparisonScore?.let { add("score ${(it * 100).toInt()}%") }
+                    candidate.contentSha256?.let { add("sha256 ${it.take(10)}…") }
+                    candidate.perceptualHashHex?.let { add("pHash ${it.take(10)}…") }
+                    candidate.clusterId?.let { add("cluster ${it.substringAfter(':').take(8)}") }
+                }
+                if (technical.isNotEmpty()) {
+                    Text(
+                        technical.joinToString(" · "),
+                        color = NeuralTheme.TextMuted,
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 13.sp,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+                if (candidate.sourcePageUrl.startsWith("http")) {
+                    Text(
+                        "Open candidate source →",
+                        color = NeuralTheme.Cyan,
+                        fontSize = 10.5.sp,
+                        textDecoration = TextDecoration.Underline,
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .padding(top = 5.dp)
+                            .clickable(role = Role.Button) {
+                                onNavigateToBrowser(candidate.sourcePageUrl)
+                            }
+                            .semantics {
+                                contentDescription = "Open public candidate source ${candidate.title}"
+                            }
+                    )
+                }
+                if (onDraftCorrection != null) {
+                    val evidenceId = candidate.persistedLinkedProfileEvidenceId(evidenceRecords)
+                    val currentCorrection = evidenceId?.let(draftCorrections::get)?.decision
+                    if (evidenceId != null) {
+                        Text(
+                            "This control applies only to the exact linked profile observation; it does not establish image ownership. Raw media and profile evidence remain retained until encrypted case save.",
+                            color = NeuralTheme.TextMuted,
+                            fontSize = 9.5.sp,
+                            lineHeight = 13.sp,
+                            modifier = Modifier.padding(top = 7.dp)
+                        )
+                        MediaDraftCorrectionRow(
+                            current = currentCorrection,
+                            onDecision = { decision -> onDraftCorrection(evidenceId, decision) }
+                        )
+                    } else {
+                        Text(
+                            "Correction unavailable: no unique persisted profile evidence record backs this account linkage.",
+                            color = NeuralTheme.TextMuted,
+                            fontSize = 9.5.sp,
+                            lineHeight = 13.sp,
+                            modifier = Modifier.padding(top = 7.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (candidates.size > PROVENANCE_PREVIEW_COUNT) {
+        TextButton(
+            onClick = { expanded = !expanded },
+            modifier = Modifier.semantics {
+                stateDescription = if (expanded) "Expanded" else "Collapsed"
+            }
+        ) {
+            Text(
+                if (expanded) "Show fewer candidates" else "Inspect all ${candidates.size} candidates",
+                color = NeuralTheme.Cyan
+            )
+        }
+    }
+}
+
+@Composable
+private fun MediaDraftCorrectionRow(
+    current: UserCorrectionDecision?,
+    onDecision: (UserCorrectionDecision) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Text(
+            "Draft linked-profile decision · not saved",
+            color = NeuralTheme.TextSecondary,
+            fontSize = 9.5.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            MediaDraftCorrectionButton(
+                label = "Confirm",
+                decision = UserCorrectionDecision.ThisIsMe,
+                selected = current == UserCorrectionDecision.ThisIsMe,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+            MediaDraftCorrectionButton(
+                label = "Reject",
+                decision = UserCorrectionDecision.ThisIsNotMe,
+                selected = current == UserCorrectionDecision.ThisIsNotMe,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            MediaDraftCorrectionButton(
+                label = "Unsure",
+                decision = UserCorrectionDecision.Unsure,
+                selected = current == UserCorrectionDecision.Unsure,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+            MediaDraftCorrectionButton(
+                label = "Ignore",
+                decision = UserCorrectionDecision.IgnoreEvidence,
+                selected = current == UserCorrectionDecision.IgnoreEvidence,
+                modifier = Modifier.weight(1f),
+                onClick = onDecision
+            )
+        }
+    }
+}
+
+@Composable
+private fun MediaDraftCorrectionButton(
+    label: String,
+    decision: UserCorrectionDecision,
+    selected: Boolean,
+    modifier: Modifier,
+    onClick: (UserCorrectionDecision) -> Unit
+) {
+    OutlinedButton(
+        onClick = { onClick(decision) },
+        modifier = modifier
+            .heightIn(min = 48.dp)
+            .semantics {
+                this.selected = selected
+                contentDescription = "$label linked profile evidence correction"
+                stateDescription = if (selected) "Selected" else "Not selected"
+            }
+    ) {
+        Text(label, fontSize = 10.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
     }
 }
 
@@ -454,13 +925,20 @@ private fun RenderVideoLookupResult(
 private fun VideoSourcePicker(label: String, selectedUri: Uri?, onClick: () -> Unit) {
     Column(Modifier.fillMaxWidth()) {
         Text(label, color = NeuralTheme.TextSecondary, fontSize = 11.sp, modifier = Modifier.padding(bottom = 8.dp))
+        val selectedVideoName = selectedUri?.path?.substringAfterLast('/')
+        val pickerDescription = selectedVideoName?.let {
+            "Selected video $it. Double tap to choose a different video."
+        } ?: "Select a video for analysis."
         Card(
             colors = CardDefaults.cardColors(containerColor = NeuralTheme.CardBackground),
-            modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(role = Role.Button, onClick = onClick)
+                .semantics { contentDescription = pickerDescription },
             shape = io.dossier.app.ui.theme.DossierCardShape
         ) {
             Text(
-                selectedUri?.path?.substringAfterLast('/') ?: "Select Video",
+                selectedVideoName ?: "Select Video",
                 color = if (selectedUri != null) NeuralTheme.Cobalt else NeuralTheme.TextSecondary,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -504,6 +982,28 @@ private fun ReverseVideoLookupResult.asImageResult(): ReverseImageLookupResult =
         webEvidence = webEvidence
     )
 
+private fun ReverseImageLookupResult.ImageCandidateState.displayLabel(): String = when (this) {
+    ReverseImageLookupResult.ImageCandidateState.Indexed -> "Indexed"
+    ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable -> "Unavailable"
+    ReverseImageLookupResult.ImageCandidateState.DecodeFailed -> "Decode failed"
+    ReverseImageLookupResult.ImageCandidateState.ComparedNoMatch -> "Compared"
+    ReverseImageLookupResult.ImageCandidateState.Matched -> "Matched"
+}
+
+@Composable
+private fun ReverseImageLookupResult.ImageCandidateState.accent(): Color = when (this) {
+    ReverseImageLookupResult.ImageCandidateState.Matched -> NeuralTheme.Emerald
+    ReverseImageLookupResult.ImageCandidateState.ComparedNoMatch -> NeuralTheme.Cobalt
+    ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable,
+    ReverseImageLookupResult.ImageCandidateState.DecodeFailed -> NeuralTheme.Amber
+    ReverseImageLookupResult.ImageCandidateState.Indexed -> NeuralTheme.TextMuted
+}
+
+private fun ReverseImageLookupResult.ImageClusterType.displayLabel(): String = when (this) {
+    ReverseImageLookupResult.ImageClusterType.ExactContent -> "Exact-content cluster"
+    ReverseImageLookupResult.ImageClusterType.PerceptualNearDuplicate -> "Perceptual repost cluster"
+}
+
 private fun formatDuration(durationMs: Long?): String {
     if (durationMs == null) return "unknown"
     val seconds = durationMs / 1_000L
@@ -516,6 +1016,9 @@ private fun SectionHeader(text: String) {
         text = text.uppercase(),
         marker = "»",
         blinkDot = true,
-        dotLevel = io.dossier.app.ui.components.HudLevel.INFO
+        dotLevel = io.dossier.app.ui.components.HudLevel.INFO,
+        modifier = Modifier.semantics { heading() }
     )
 }
+
+private const val PROVENANCE_PREVIEW_COUNT = 6

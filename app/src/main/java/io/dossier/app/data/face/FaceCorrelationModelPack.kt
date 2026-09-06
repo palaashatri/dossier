@@ -335,7 +335,7 @@ class FaceCorrelationModelPack(
         val EXPECTED_PACK_BYTES: Long = MODEL_SPECS.sumOf(ModelSpec::sizeBytes)
 
         private const val USER_AGENT =
-            "Dossier/0.1 authorized-on-device-face-correlation (+https://github.com/palaashatri/dossier)"
+            "Dossier/0.1 authorized-on-device-face-correlation"
         private const val DOWNLOAD_BUFFER_BYTES = 64 * 1024
         private const val PROGRESS_STEP_BYTES = 256 * 1024L
 

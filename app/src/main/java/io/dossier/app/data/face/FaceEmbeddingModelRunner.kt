@@ -26,6 +26,9 @@ class FaceEmbeddingModelRunner(private val modelFile: File) {
         fun cosineSimilarity(left: FloatArray, right: FloatArray): Float {
             require(left.isNotEmpty()) { "Left embedding is empty." }
             require(left.size == right.size) { "Embedding sizes differ: ${left.size} vs ${right.size}." }
+            // A corrupt model output must never become a similarity score. NaN or
+            // infinity would otherwise propagate into findings and persisted cases.
+            if (left.any { !it.isFinite() } || right.any { !it.isFinite() }) return 0f
             var dot = 0f
             var leftNorm = 0f
             var rightNorm = 0f
@@ -34,8 +37,10 @@ class FaceEmbeddingModelRunner(private val modelFile: File) {
                 leftNorm += left[index] * left[index]
                 rightNorm += right[index] * right[index]
             }
-            if (leftNorm == 0f || rightNorm == 0f) return 0f
-            return dot / (sqrt(leftNorm) * sqrt(rightNorm))
+            if (!dot.isFinite() || !leftNorm.isFinite() || !rightNorm.isFinite()) return 0f
+            if (leftNorm <= 0f || rightNorm <= 0f) return 0f
+            val score = dot / (sqrt(leftNorm) * sqrt(rightNorm))
+            return if (score.isFinite()) score.coerceIn(-1f, 1f) else 0f
         }
     }
 }

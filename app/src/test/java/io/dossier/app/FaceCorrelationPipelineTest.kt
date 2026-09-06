@@ -35,6 +35,26 @@ class FaceCorrelationPipelineTest {
     }
 
     @Test
+    fun legacyUnmeasuredArtifactRemainsExplicitlyUnmeasured() {
+        val parsed = FaceCorrelationCalibrationStore.parse(
+            """
+            {
+              "reviewThreshold": 0.36,
+              "highSimilarityThreshold": 0.55,
+              "sfaceSha256": "${FaceCorrelationModelPack.SFACE.sha256}",
+              "yunetSha256": "${FaceCorrelationModelPack.YUNET.sha256}",
+              "pipelineVersion": "${FaceCorrelationModelPack.PIPELINE_VERSION}",
+              "source": "legacy reference policy"
+            }
+            """.trimIndent()
+        )
+
+        assertFalse(parsed.measured)
+        assertFalse(parsed.identityDisjoint)
+        assertFalse(parsed.consentConfirmed)
+    }
+
+    @Test
     fun measuredCalibrationParsesAndBindsToExactPipeline() {
         val json = """
             {
@@ -49,6 +69,8 @@ class FaceCorrelationPipelineTest {
               "highFalseMatchRate": 0.0001,
               "reviewTrueMatchRate": 0.91,
               "highTrueMatchRate": 0.72,
+              "identityDisjoint": true,
+              "consentConfirmed": true,
               "source": "Identity-disjoint held-out Dossier evaluation"
             }
         """.trimIndent()
@@ -58,6 +80,8 @@ class FaceCorrelationPipelineTest {
         assertTrue(parsed.measured)
         assertEquals(8_000, parsed.positivePairCount)
         assertEquals(200_000, parsed.negativePairCount)
+        assertTrue(parsed.identityDisjoint)
+        assertTrue(parsed.consentConfirmed)
         assertEquals(FaceCorrelationDecision.MANUAL_REVIEW, parsed.decision(0.50f))
         assertEquals(FaceCorrelationDecision.HIGH_SIMILARITY, parsed.decision(0.70f))
         assertTrue(parsed.summary().contains("held-out pairs"))
@@ -114,6 +138,48 @@ class FaceCorrelationPipelineTest {
         highFalseMatchRate = highFalseMatchRate,
         reviewTrueMatchRate = 0.90f,
         highTrueMatchRate = 0.70f,
-        measured = true
+        measured = true,
+        identityDisjoint = true,
+        consentConfirmed = true
     )
+
+    @Test(expected = IllegalArgumentException::class)
+    fun measuredCalibrationRejectsMissingCorpusAttestations() {
+        FaceCorrelationThresholds(
+            reviewThreshold = 0.40f,
+            highSimilarityThreshold = 0.60f,
+            source = "test",
+            sfaceSha256 = FaceCorrelationModelPack.SFACE.sha256,
+            yunetSha256 = FaceCorrelationModelPack.YUNET.sha256,
+            pipelineVersion = FaceCorrelationModelPack.PIPELINE_VERSION,
+            positivePairCount = 500,
+            negativePairCount = 10_000,
+            reviewFalseMatchRate = 0.01f,
+            highFalseMatchRate = 0.001f,
+            reviewTrueMatchRate = 0.90f,
+            highTrueMatchRate = 0.70f,
+            measured = true
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun measuredCalibrationRejectsJsonWithoutCorpusAttestations() {
+        FaceCorrelationCalibrationStore.parse(
+            """
+            {
+              "reviewThreshold": 0.41,
+              "highSimilarityThreshold": 0.62,
+              "sfaceSha256": "${FaceCorrelationModelPack.SFACE.sha256}",
+              "yunetSha256": "${FaceCorrelationModelPack.YUNET.sha256}",
+              "pipelineVersion": "${FaceCorrelationModelPack.PIPELINE_VERSION}",
+              "positivePairCount": 500,
+              "negativePairCount": 10000,
+              "reviewFalseMatchRate": 0.01,
+              "highFalseMatchRate": 0.001,
+              "reviewTrueMatchRate": 0.91,
+              "highTrueMatchRate": 0.72
+            }
+            """.trimIndent()
+        )
+    }
 }

@@ -105,6 +105,7 @@ fun LottieTransitionOverlay(
 }
 
 fun transitionTagForRoute(route: String?): String? = when (route) {
+    "universal_search" -> LottieTags.SEARCH
     "identity" -> LottieTags.SEARCH
     "username_discovery" -> LottieTags.INVESTIGATE
     "scan" -> LottieTags.COMPUTE

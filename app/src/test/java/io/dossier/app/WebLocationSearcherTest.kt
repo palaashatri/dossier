@@ -65,7 +65,7 @@ class WebLocationSearcherTest {
     }
 
     @Test
-    fun resolveLocation_fallsBackToQueryWhenNoPlacePhrase() {
+    fun resolveLocation_doesNotFallBackToQueryWhenNoPlacePhrase() {
         val evidence = listOf(
             ReverseImageLookupResult.WebEvidence(
                 title = "results",
@@ -74,7 +74,7 @@ class WebLocationSearcherTest {
             )
         )
         val resolved = WebLocationSearcher.resolveLocationFromEvidence("some random query", evidence)
-        assertEquals("some random query", resolved)
+        assertEquals(null, resolved)
     }
 
     @Test

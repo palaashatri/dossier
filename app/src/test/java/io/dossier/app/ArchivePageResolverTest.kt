@@ -2,12 +2,25 @@ package io.dossier.app
 
 import io.dossier.app.data.web.ArchivePageResolver
 import io.dossier.app.data.web.PublicPageVerifier
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import okhttp3.Call
+import okhttp3.EventListener
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
+import java.io.IOException
 import java.io.ByteArrayInputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class ArchivePageResolverTest {
 
@@ -87,5 +100,50 @@ class ArchivePageResolverTest {
         assertNull(
             ArchivePageResolver.readBounded(ByteArrayInputStream(oversized), maxBytes = 64)
         )
+    }
+
+    @Test
+    fun cancellationDuringWaybackLookupDoesNotStartArchiveFallback() = runBlocking {
+        val callStarted = CountDownLatch(1)
+        val callCanceled = CountDownLatch(1)
+        var requestCount = 0
+        val client = OkHttpClient.Builder()
+            .eventListener(object : EventListener() {
+                override fun canceled(call: Call) {
+                    callCanceled.countDown()
+                }
+            })
+            .addInterceptor { chain ->
+                requestCount++
+                if (requestCount == 1) {
+                    callStarted.countDown()
+                    check(callCanceled.await(5, TimeUnit.SECONDS)) {
+                        "test interceptor did not observe OkHttp cancellation"
+                    }
+                    if (chain.call().isCanceled()) throw IOException("Canceled")
+                }
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(404)
+                    .message("Not Found")
+                    .body("".toResponseBody())
+                    .build()
+            }
+            .build()
+        val resolver = ArchivePageResolver(client)
+        val deferred = async(Dispatchers.IO) {
+            resolver.resolveExactUrl("https://example.test/path")
+        }
+
+        assertTrue(callStarted.await(3, TimeUnit.SECONDS))
+        deferred.cancel()
+        try {
+            deferred.await()
+            throw AssertionError("Cancellation must propagate from the resolver")
+        } catch (_: CancellationException) {
+            // Expected: cancelling the Wayback request must stop resolution.
+        }
+        assertEquals(1, requestCount)
     }
 }

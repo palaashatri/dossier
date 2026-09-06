@@ -58,7 +58,9 @@ import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.DeepResearchToggle
+import io.dossier.app.ui.components.ExternalOsintImportPicker
 import io.dossier.app.ui.components.ImageSourcePicker
+import io.dossier.app.ui.components.LegacyOsintImportPicker
 import io.dossier.app.ui.theme.DossierButtonShape
 import io.dossier.app.ui.theme.DossierCardShape
 import io.dossier.app.ui.theme.NeuralTheme
@@ -319,13 +321,15 @@ private fun StepOne(
             minLines = 2,
             maxLines = 4,
             singleLine = false,
-            supportingText = "One per line or separated by commas."
-        )
-        when {
-            invalidEmails.isNotEmpty() -> InlineError(
+            supportingText = if (invalidEmails.isEmpty()) {
+                "One per line or separated by commas."
+            } else {
                 "Check invalid email input: ${invalidEmails.take(2).joinToString(", ")}"
-            )
-            !hasIdentitySignal -> InlineError("Enter at least one identity signal to continue.")
+            },
+            isError = invalidEmails.isNotEmpty()
+        )
+        if (!hasIdentitySignal) {
+            InlineError("Enter at least one identity signal to continue.")
         }
     }
 }
@@ -403,7 +407,7 @@ private fun StepThree(
     Column {
         StepTitle(
             "3. Add direct sources",
-            "Specific links improve precision. A selfie is optional and never silently enables strong face correlation."
+            "Specific links and locally selected public-OSINT reports improve precision. Imports are discovery evidence only; Dossier still verifies surviving public sources independently."
         )
         CyberTextField(
             profileUrls,
@@ -428,6 +432,10 @@ private fun StepThree(
             singleLine = false,
             supportingText = "One per line or separated by commas."
         )
+        Spacer(modifier = Modifier.height(18.dp))
+        LegacyOsintImportPicker()
+        Spacer(modifier = Modifier.height(12.dp))
+        ExternalOsintImportPicker()
         Spacer(modifier = Modifier.height(18.dp))
         ImageSourcePicker(
             label = "Consented reference photo (optional)",
@@ -521,7 +529,8 @@ fun CyberTextField(
     minLines: Int = 1,
     maxLines: Int = 1,
     singleLine: Boolean = minLines == 1,
-    supportingText: String? = null
+    supportingText: String? = null,
+    isError: Boolean = false
 ) {
     OutlinedTextField(
         value = value,
@@ -534,6 +543,7 @@ fun CyberTextField(
         minLines = minLines,
         maxLines = maxLines,
         singleLine = singleLine,
+        isError = isError,
         colors = OutlinedTextFieldDefaults.colors(
             focusedContainerColor = NeuralTheme.CardBackground,
             unfocusedContainerColor = NeuralTheme.CardBackground,

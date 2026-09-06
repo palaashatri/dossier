@@ -20,4 +20,32 @@ class FaceEmbeddingModelRunnerTest {
         assertEquals(1f, same, 0.0001f)
         assertEquals(0f, orthogonal, 0.0001f)
     }
+
+    @Test
+    fun cosineSimilarityRejectsNonFiniteOrOverflowingEmbeddings() {
+        assertEquals(
+            0f,
+            FaceEmbeddingModelRunner.cosineSimilarity(
+                floatArrayOf(Float.NaN, 1f),
+                floatArrayOf(1f, 0f)
+            ),
+            0.0001f
+        )
+        assertEquals(
+            0f,
+            FaceEmbeddingModelRunner.cosineSimilarity(
+                floatArrayOf(Float.POSITIVE_INFINITY, 1f),
+                floatArrayOf(1f, 0f)
+            ),
+            0.0001f
+        )
+        assertEquals(
+            0f,
+            FaceEmbeddingModelRunner.cosineSimilarity(
+                floatArrayOf(Float.MAX_VALUE, Float.MAX_VALUE),
+                floatArrayOf(Float.MAX_VALUE, Float.MAX_VALUE)
+            ),
+            0.0001f
+        )
+    }
 }

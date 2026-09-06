@@ -48,20 +48,16 @@ class ProfileBelongingTest {
     )
 
     @Test
-    fun nameEmbeddingSlug_onVerifiedPage_isAccepted() {
-        // The candidate handle "janedoe" embeds BOTH full name parts (jane + doe),
-        // so such a handle uniquely derives from this person's name. A verified-existing
-        // page under it is a plausible match — even if the rendered text only shows the
-        // handle (e.g. a sparse GitHub/Reddit profile that doesn't surface the real name).
-        // This is what lets name-only scans find more than just the one platform that
-        // happens to render the display name in text.
+    fun nameEmbeddingSlug_withoutPageCorroboration_isRejected() {
+        // A name-derived handle is still only one discovery signal. A stranger can
+        // independently use the same slug, so the page must corroborate identity.
         val sparsePage = "janedoe has 12 repositories. Follow their work."
         val result = belongs(
             candidateUsername = "janedoe",
             candidateUrl = "https://github.com/janedoe",
             extractedText = sparsePage
         )
-        assertTrue("Name-embedding slug on a verified page should be accepted", result)
+        assertFalse("Name-embedding slug alone must remain a candidate", result)
     }
 
     @Test
@@ -91,15 +87,14 @@ class ProfileBelongingTest {
     }
 
     @Test
-    fun dotVariantNameEmbeddingSlug_isAccepted() {
-        // "jane.doe" also embeds both full name parts → plausible match.
+    fun dotVariantNameEmbeddingSlug_withoutCorroboration_isRejected() {
         val page = "@jane.doe — posts about ML and systems."
         val result = belongs(
             candidateUsername = "jane.doe",
             candidateUrl = "https://www.instagram.com/jane.doe/",
             extractedText = page
         )
-        assertTrue("Dot-variant name-embedding slug should be accepted", result)
+        assertFalse("Dot-variant slug alone must remain a candidate", result)
     }
 
     @Test
@@ -127,8 +122,7 @@ class ProfileBelongingTest {
     @Test
     fun pageMentionsOnlyFirstName_andHandleDoesNotEmbedLastName_isRejected() {
         // A single name part in the page is too weak — many unrelated people share a
-        // first name. And because this handle ("jane") does NOT embed the last name,
-        // it can't be attributed via the name-embedding rule either.
+        // first name, and a matching handle remains candidate evidence only.
         val page = "Hi, I'm Jane! Random blog about cooking and travel."
         val result = belongs(
             candidateUsername = "jane",
@@ -183,7 +177,7 @@ class ProfileBelongingTest {
     }
 
     @Test
-    fun exactPrimaryUsername_onExistingPage_isAccepted() {
+    fun exactPrimaryUsername_onExistingPage_isStillOnlyCandidateEvidence() {
         val inputWithHandle = IdentityInput(
             fullName = "Jane",
             primaryUsername = "samplecaster"
@@ -195,11 +189,11 @@ class ProfileBelongingTest {
             extractedText = page,
             input = inputWithHandle
         )
-        assertTrue("Exact primaryUsername match should attribute when page exists", result)
+        assertFalse("Exact username alone must not verify ownership", result)
     }
 
     @Test
-    fun exactUsernameInUsernamesList_isAccepted() {
+    fun exactUsernameInUsernamesList_isStillOnlyCandidateEvidence() {
         val inputWithHandle = IdentityInput(
             fullName = "",
             usernames = listOf("cool_hacker_42")
@@ -211,11 +205,11 @@ class ProfileBelongingTest {
             extractedText = page,
             input = inputWithHandle
         )
-        assertTrue("Exact match against input.usernames should attribute", result)
+        assertFalse("Exact username alone must not verify ownership", result)
     }
 
     @Test
-    fun singleWordName_withEmailSignal_andNameOnPage_isAccepted() {
+    fun singleWordName_withUnobservedEmailSignal_isRejected() {
         val weakWithEmail = IdentityInput(fullName = "Jane", emails = listOf("jane@example.com"))
         val page = "Jane's profile on GitHub with some repositories."
         val result = belongs(
@@ -224,6 +218,6 @@ class ProfileBelongingTest {
             extractedText = page,
             input = weakWithEmail
         )
-        assertTrue("Single-word name + email present may accept name-on-page", result)
+        assertFalse("An email supplied but absent from the page is not corroboration", result)
     }
 }

@@ -1,5 +1,6 @@
 package io.dossier.app.ui.components
 
+import android.provider.Settings
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -21,6 +23,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import io.dossier.app.ui.theme.NeuralTheme
 
 /**
@@ -45,13 +48,19 @@ fun CircularWavyProgressIndicator(
     speedMs: Int = 2000,
     @Suppress("UNUSED_PARAMETER") trackBrush: Brush = Brush.linearGradient(listOf(androidx.compose.ui.graphics.Color.Transparent, androidx.compose.ui.graphics.Color.Transparent))
 ) {
-    val transition = rememberInfiniteTransition(label = "spinner")
-    val angle by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(speedMs, easing = LinearEasing), RepeatMode.Restart),
-        label = "spinnerAngle"
-    )
+    val animationsEnabled = animationsEnabled()
+    val angle = if (progress == null && animationsEnabled) {
+        val transition = rememberInfiniteTransition(label = "spinner")
+        val animatedAngle by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(tween(speedMs, easing = LinearEasing), RepeatMode.Restart),
+            label = "spinnerAngle"
+        )
+        animatedAngle
+    } else {
+        0f
+    }
     val accent = NeuralTheme.Cobalt
     val track = NeuralTheme.BorderColor
     Canvas(modifier = modifier.size(size)) {
@@ -100,13 +109,19 @@ fun LinearWavyProgressIndicator(
     speedMs: Int = 1500,
     @Suppress("UNUSED_PARAMETER") trackBrush: Brush = Brush.linearGradient(listOf(androidx.compose.ui.graphics.Color.Transparent, androidx.compose.ui.graphics.Color.Transparent))
 ) {
-    val transition = rememberInfiniteTransition(label = "linearProg")
-    val sweep by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(speedMs, easing = EaseInOutSine), RepeatMode.Reverse),
-        label = "linearSweep"
-    )
+    val animationsEnabled = animationsEnabled()
+    val sweep = if (progress == null && animationsEnabled) {
+        val transition = rememberInfiniteTransition(label = "linearProg")
+        val animatedSweep by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(speedMs, easing = EaseInOutSine), RepeatMode.Reverse),
+            label = "linearSweep"
+        )
+        animatedSweep
+    } else {
+        0f
+    }
     val accent = NeuralTheme.Cobalt
     val track = NeuralTheme.BorderColor
     Canvas(modifier = modifier.height(height).fillMaxWidth()) {
@@ -116,7 +131,11 @@ fun LinearWavyProgressIndicator(
         drawLine(track.copy(alpha = 0.5f), Offset(0f, cy), Offset(w, cy), h, StrokeCap.Round)
         val (start, end) = if (progress == null) {
             val sw = w * 0.3f
-            ((w - sw) * sweep) to ((w - sw) * sweep + sw)
+            if (animationsEnabled) {
+                ((w - sw) * sweep) to ((w - sw) * sweep + sw)
+            } else {
+                ((w - sw) / 2f) to ((w + sw) / 2f)
+            }
         } else 0f to (w * progress.coerceIn(0f, 1f))
         if (end > start) drawLine(accent, Offset(start, cy), Offset(end, cy), h, StrokeCap.Round)
     }
@@ -137,13 +156,19 @@ fun SquigglyProgressIndicator(
     speedMs: Int = 2500,
     progress: Float? = null
 ) {
-    val transition = rememberInfiniteTransition(label = "ring")
-    val angle by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(speedMs, easing = LinearEasing), RepeatMode.Restart),
-        label = "ringAngle"
-    )
+    val animationsEnabled = animationsEnabled()
+    val angle = if (progress == null && animationsEnabled) {
+        val transition = rememberInfiniteTransition(label = "ring")
+        val animatedAngle by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(tween(speedMs, easing = LinearEasing), RepeatMode.Restart),
+            label = "ringAngle"
+        )
+        animatedAngle
+    } else {
+        0f
+    }
     val accent = NeuralTheme.Cobalt
     val track = NeuralTheme.BorderColor
     Canvas(modifier = modifier.size(size)) {
@@ -174,6 +199,19 @@ fun SquigglyProgressIndicator(
                 style = Stroke(width = sw, cap = StrokeCap.Round)
             )
         }
+    }
+}
+
+/** Respect Android's reduced-motion preference for decorative infinite loops. */
+@Composable
+private fun animationsEnabled(): Boolean {
+    val context = LocalContext.current
+    return remember(context) {
+        Settings.Global.getFloat(
+            context.contentResolver,
+            Settings.Global.ANIMATOR_DURATION_SCALE,
+            1f
+        ) > 0f
     }
 }
 

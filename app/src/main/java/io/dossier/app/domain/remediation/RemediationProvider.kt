@@ -1,8 +1,29 @@
 package io.dossier.app.domain.remediation
 
+import io.dossier.app.data.platform.ProviderCatalogV2
+import io.dossier.app.domain.discovery.ProviderDefinition
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.RiskLevel
+import java.net.URI
+
+enum class RemediationResourceState {
+    /** A reviewed provider-owned settings/privacy resource is available. */
+    ProviderSpecific,
+    /** The provider is known, but no reviewed action endpoint is registered. */
+    ManualActionRequired,
+    /** The source cannot be attributed to a reviewed provider resource. */
+    Unavailable
+}
+
+data class RemediationResource(
+    val state: RemediationResourceState,
+    val providerId: String? = null,
+    val providerName: String? = null,
+    val actionLabel: String? = null,
+    val actionUrl: String? = null,
+    val note: String
+)
 
 /**
  * Structured remediation (ROADMAP Milestone 11).
@@ -18,7 +39,11 @@ data class RemediationItem(
     val evidence: String,
     val risk: RiskLevel,
     val suggestedFix: String,
-    val estimatedImpact: String
+    val estimatedImpact: String,
+    val resource: RemediationResource = RemediationResource(
+        state = RemediationResourceState.Unavailable,
+        note = "No reviewed provider-specific remediation resource is available."
+    )
 )
 
 class RemediationProvider {
@@ -75,10 +100,68 @@ class RemediationProvider {
                 evidence = f.evidenceSnippet ?: f.value,
                 risk = f.risk,
                 suggestedFix = f.remediation.ifBlank { defaultFixFor(f) },
-                estimatedImpact = impactFor(f.risk)
+                estimatedImpact = impactFor(f.risk),
+                resource = resourceFor(f)
             )
         }
     }
+
+    /**
+     * Resolve only provider resources that are explicitly allowlisted below.
+     * Unknown hosts and known providers without a reviewed endpoint remain
+     * visible as manual/unavailable states; Dossier never invents an action URL.
+     */
+    internal fun resourceFor(finding: Finding): RemediationResource {
+        val sourceUrl = finding.sourceUrl
+            ?.trim()
+            ?.takeIf { it.startsWith("https://", ignoreCase = true) }
+        val provider = sourceUrl?.let(::providerForSource)
+        if (provider == null) {
+            return RemediationResource(
+                state = RemediationResourceState.Unavailable,
+                note = "No reviewed provider-specific remediation resource is available; review the source manually."
+            )
+        }
+
+        val reviewed = RemediationResourceCatalog.find(provider.id)
+        if (reviewed == null) {
+            return RemediationResource(
+                state = RemediationResourceState.ManualActionRequired,
+                providerId = provider.id,
+                providerName = provider.displayName,
+                actionLabel = "Open source for manual review",
+                actionUrl = sourceUrl,
+                note = "${provider.displayName} is a known provider, but Dossier has no reviewed privacy/deletion endpoint for it. Use the provider's own controls; completion is not asserted."
+            )
+        }
+
+        return RemediationResource(
+            state = RemediationResourceState.ProviderSpecific,
+            providerId = provider.id,
+            providerName = provider.displayName,
+            actionLabel = reviewed.actionLabel,
+            actionUrl = reviewed.actionUrl,
+            note = "Official ${provider.displayName} settings resource. ${reviewed.reviewNote}"
+        )
+    }
+
+    private fun providerForSource(sourceUrl: String): ProviderDefinition? = runCatching {
+        val sourceHost = URI(sourceUrl).host
+            ?.removePrefix("www.")
+            ?.lowercase()
+            ?.takeIf(String::isNotBlank)
+            ?: return@runCatching null
+        ProviderCatalogV2.definitions.firstOrNull { definition ->
+            val template = definition.profileUrlTemplate ?: return@firstOrNull false
+            val templateHost = URI(template.replace("{username}", "dossier-user"))
+                .host
+                ?.removePrefix("www.")
+                ?.lowercase()
+                ?: return@firstOrNull false
+            sourceHost == templateHost ||
+                (templateHost.startsWith("dossier-user.") && sourceHost.endsWith(templateHost.removePrefix("dossier-user")))
+        }
+    }.getOrNull()
 
     private fun problemFor(f: Finding): String = when (f.type) {
         FindingType.Email -> "Email address exposed publicly"

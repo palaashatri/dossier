@@ -1,6 +1,7 @@
 package io.dossier.app.domain.evidence
 
 import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.RiskLevel
 import org.junit.Assert.assertEquals
@@ -30,6 +31,38 @@ class EvidenceAdapterTest {
         assertEquals(0.9f, finding.confidence, 1e-6f)
         assertEquals(RiskLevel.High, finding.risk)
         assertEquals("same domain", finding.remediation)
+    }
+
+    @Test
+    fun explicitAttributionWinsOverStateAndReliabilityInference() {
+        val evidence = Evidence(
+            id = "ev:exact-self-supplied",
+            kind = EvidenceKind.Email,
+            value = "jane@example.test",
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.DirectPublicProfile,
+            attribution = FindingAttribution.ExactSelfSupplied
+        )
+
+        assertEquals(FindingAttribution.ExactSelfSupplied, evidence.toFinding().attribution)
+    }
+
+    @Test
+    fun allExplicitAttributionsRemainStableAcrossCanonicalAdapters() {
+        FindingAttribution.values().forEach { attribution ->
+            val finding = Finding(
+                type = FindingType.Email,
+                value = "value-${attribution.name}",
+                sourceUrl = "https://example.test/profile",
+                evidenceSnippet = "fixture",
+                confidence = 0.8f,
+                risk = RiskLevel.Medium,
+                remediation = "review",
+                attribution = attribution
+            )
+
+            assertEquals(attribution, finding.toEvidence().toFinding().attribution)
+        }
     }
 
     @Test

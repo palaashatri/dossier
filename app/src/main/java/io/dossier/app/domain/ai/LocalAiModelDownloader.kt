@@ -69,7 +69,7 @@ object LocalAiModelDownloader {
                 instanceFollowRedirects = true
                 setRequestProperty(
                     "User-Agent",
-                    "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0"
+                    "Dossier/0.1 public-exposure-audit"
                 )
             }
             val responseCode = connection.responseCode

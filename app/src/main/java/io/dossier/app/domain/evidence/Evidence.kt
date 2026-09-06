@@ -1,29 +1,55 @@
 package io.dossier.app.domain.evidence
 
 import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.FindingType
+import io.dossier.app.domain.model.FaceComparisonProvenance
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.model.ReverseImageLookupResult
 import kotlinx.serialization.Serializable
+import java.security.MessageDigest
+import java.util.Locale
+
+/** Shared aliases for callers that model photo location evidence directly. */
+typealias LocationEvidenceClass = ReverseImageLookupResult.LocationEvidenceClass
+typealias LocationCandidate = ReverseImageLookupResult.LocationCandidate
 
 /**
- * The universal language of Dossier (see ROADMAP: "Evidence is the universal
- * language"). A scanner never emits a Finding or a conclusion directly; it emits
- * [Evidence]. Findings, the entity graph, risk, and remediation are all derived
- * from Evidence downstream.
+ * Stable evidence state. This describes the observation itself, not whether an
+ * inferred identity relationship is ultimately accepted.
+ */
+@Serializable
+enum class EvidenceState {
+    Observed,
+    Verified,
+    Probable,
+    Candidate,
+    Conflicting,
+    Rejected,
+    Unavailable
+}
+
+/** Source-quality class used by deterministic analysis and UI explanation. */
+@Serializable
+enum class EvidenceReliability {
+    AuthoritativeApi,
+    DirectPublicProfile,
+    DirectPersonalWebsite,
+    ArchiveSnapshot,
+    SearchEngineCandidate,
+    ThirdPartyAggregation,
+    LocalDerived,
+    UserSupplied,
+    Unknown
+}
+
+/**
+ * The universal evidence record used across Dossier.
  *
- * This type is introduced in parallel with the legacy [Finding] type. The
- * [toFinding] / [Finding.toEvidence] adapters keep both representations
- * interchangeable so existing scanners and consumers keep working while new code
- * can target Evidence directly.
- *
- * @param id Stable identity for de-duplication and graph correlation.
- * @param kind What kind of observation this is (matches [FindingType]).
- * @param value The observed value (email, phone, username, URL, snippet...).
- * @param sourceUrl Where the evidence was observed, if any.
- * @param snippet Human-readable supporting text for explainability.
- * @param confidence 0..1 model/extraction confidence in the observation itself.
- * @param risk Inherent exposure risk of this evidence if it belongs to the subject.
- * @param signals Named reasons backing the observation (explainability per ROADMAP Principle 3).
+ * New provenance fields are optional/defaulted so existing scanners remain
+ * source-compatible while migrations populate richer metadata incrementally.
+ * Missing metadata is represented as missing; Dossier does not fabricate a
+ * retrieval time, provider, parser version, or hash merely to fill a schema.
  */
 @Serializable
 data class Evidence(
@@ -34,14 +60,94 @@ data class Evidence(
     val snippet: String? = null,
     val confidence: Float = 0.5f,
     val risk: RiskLevel = RiskLevel.Low,
-    val signals: List<String> = emptyList()
-)
+    val signals: List<String> = emptyList(),
+    val providerId: String? = null,
+    val retrievedAtEpochMillis: Long? = null,
+    val observedAtEpochMillis: Long? = null,
+    val state: EvidenceState = EvidenceState.Observed,
+    val reliability: EvidenceReliability = EvidenceReliability.Unknown,
+    /**
+     * Explicit source taxonomy retained on the evidence record itself.
+     *
+     * Older producers only populated [reliability], so this field defaults to
+     * [ExposureSourceClassification.UNKNOWN_ORIGIN] and ledger adapters may
+     * derive a backwards-compatible value from reliability when it is absent.
+     */
+    val sourceClassification: ExposureSourceClassification = ExposureSourceClassification.UNKNOWN_ORIGIN,
+    val contentHashSha256: String? = null,
+    val parserVersion: String? = null,
+    val historical: Boolean = false,
+    val attributeKind: HistoricalAttributeKind? = null,
+    val discoveryPath: List<String> = emptyList(),
+    /** Earliest observation represented by a merged evidence record, when known. */
+    val firstObservedAtEpochMillis: Long? = null,
+    /** Latest observation represented by a merged evidence record, when known. */
+    val lastObservedAtEpochMillis: Long? = null,
+    /** Alternate exact source strings retained when duplicate observations merge. */
+    val sourceUrls: List<String> = emptyList(),
+    /**
+     * Explicit photo-location classification. Null keeps non-location and
+     * legacy records wire-compatible while location adapters migrate forward.
+     */
+    val locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass? = null,
+    /** Why this location candidate exists, retained beside its exact value. */
+    val locationEvidenceReason: String? = null,
+    /** Supporting evidence IDs supplied by the location candidate producer. */
+    val supportingEvidenceIds: List<String> = emptyList(),
+    /**
+     * Explicit identity attribution for the observed value.
+     *
+     * This is nullable for wire compatibility: records written before
+     * attribution became canonical have no value and continue to use the
+     * legacy state/reliability fallback in [toFinding]. An explicit
+     * [FindingAttribution.Unconfirmed] is retained as such rather than being
+     * replaced by an inferred attribution.
+     */
+    val attribution: FindingAttribution? = null,
+    /** Structured provenance for local face-comparison observations. */
+    val faceComparisonProvenance: FaceComparisonProvenance? = null
+) {
+    init {
+        require(discoveryPath.size <= MAX_DISCOVERY_PATH_STEPS) {
+            "Evidence may retain at most $MAX_DISCOVERY_PATH_STEPS discovery steps."
+        }
+        require(sourceUrls.size <= MAX_SOURCE_URLS) {
+            "Evidence may retain at most $MAX_SOURCE_URLS source URLs."
+        }
+        require(supportingEvidenceIds.size <= MAX_SUPPORTING_EVIDENCE_IDS) {
+            "Evidence may retain at most $MAX_SUPPORTING_EVIDENCE_IDS supporting evidence IDs."
+        }
+        require(locationEvidenceReason == null || locationEvidenceReason.length <= MAX_LOCATION_REASON_CHARS) {
+            "Location evidence reason exceeds the bounded limit."
+        }
+    }
+
+    companion object {
+        const val MAX_DISCOVERY_PATH_STEPS = 64
+        const val MAX_SOURCE_URLS = 64
+        const val MAX_SUPPORTING_EVIDENCE_IDS = 256
+        const val MAX_LOCATION_REASON_CHARS = 512
+    }
+}
 
 /**
- * Discriminates evidence the same way [FindingType] does, so the two can be
- * mapped losslessly. Kept as a separate enum to avoid coupling Evidence to the
- * UI-facing Finding contract.
+ * Explicit semantic attribute kind for historical profile/snapshot metadata.
+ * Kept optional on [Evidence] so non-attribute evidence is unaffected.
  */
+@Serializable
+enum class HistoricalAttributeKind {
+    DisplayName,
+    Bio,
+    Username,
+    AvatarUrl,
+    ExternalLink,
+    Organization,
+    Location
+}
+
+/** Product-contract name for the stable evidence representation. */
+typealias EvidenceRecord = Evidence
+
 @Serializable
 enum class EvidenceKind {
     Email,
@@ -56,12 +162,20 @@ enum class EvidenceKind {
     PublicSearchEvidence,
     PublicImageEvidence,
     ImageConsistency,
-    SensitiveSnippet
+    SensitiveSnippet,
+    Url,
+    Document,
+    Archive,
+    Photo,
+    Image,
+    Domain,
+    /** Provider-derived breach membership; never an identity assertion. */
+    BreachMembership
 }
 
 /**
- * A scanner's output: a batch of evidence plus optional raw relationships it was
- * able to assert directly (e.g. "this username appears on this profile").
+ * A scanner's output: a batch of evidence plus relationships it can directly
+ * assert from the same public observation.
  */
 @Serializable
 data class EvidenceCollection(
@@ -70,18 +184,171 @@ data class EvidenceCollection(
 )
 
 /**
- * A relationship asserted directly by a scanner between two observed values,
- * before the correlation engine generalizes it. Used to seed the identity graph.
+ * Relationship asserted directly by a scanner before entity resolution
+ * generalizes it. Evidence text is retained for backward compatibility; newer
+ * producers should additionally keep the supporting Evidence IDs in their
+ * higher-level relationship model as that migration lands.
  */
 @Serializable
 data class EvidenceRelationship(
     val fromValue: String,
     val toValue: String,
     val relation: String,
-    val evidence: String? = null
+    val evidence: String? = null,
+    /**
+     * Stable evidence IDs that independently support this relationship.
+     *
+     * Older producers only supplied the free-form [evidence] description, so
+     * this remains optional for backwards compatibility. The graph builder
+     * resolves exact endpoint/source matches as a safe migration aid.
+     */
+    val evidenceIds: List<String> = emptyList()
 )
 
-/** Adapter: Evidence -> legacy Finding (lossless on the shared fields). */
+/**
+ * Canonicalizes persisted/runtime relationship assertions without resolving
+ * identity. Relationships with the same normalized endpoints and relation
+ * are one assertion; their independent evidence IDs are unioned in input
+ * order, bounded for safe persistence.
+ */
+object EvidenceRelationshipPolicy {
+    const val MAX_RELATIONSHIPS = 10_000
+    const val MAX_EVIDENCE_IDS_PER_RELATIONSHIP = 256
+
+    fun normalize(relationships: List<EvidenceRelationship>): List<EvidenceRelationship> {
+        if (relationships.isEmpty()) return emptyList()
+
+        val merged = LinkedHashMap<String, EvidenceRelationship>()
+        relationships.take(MAX_RELATIONSHIPS).forEach { relationship ->
+            val key = listOf(
+                relationship.fromValue.trim().lowercase(Locale.ROOT),
+                relationship.toValue.trim().lowercase(Locale.ROOT),
+                relationship.relation.trim().uppercase(Locale.ROOT)
+            ).joinToString("\u001f")
+            val evidenceIds = relationship.evidenceIds
+                .map { it.trim() }
+                .filter(String::isNotBlank)
+                .map(EvidenceIdPolicy::migrate)
+                .distinct()
+                .take(MAX_EVIDENCE_IDS_PER_RELATIONSHIP)
+            val previous = merged[key]
+            if (previous == null) {
+                merged[key] = relationship.copy(evidenceIds = evidenceIds)
+            } else {
+                val description = previous.evidence?.takeIf(String::isNotBlank)
+                    ?: relationship.evidence?.takeIf(String::isNotBlank)
+                merged[key] = previous.copy(
+                    evidence = description,
+                    evidenceIds = (previous.evidenceIds + evidenceIds)
+                        .map { it.trim() }
+                        .filter(String::isNotBlank)
+                        .map(EvidenceIdPolicy::migrate)
+                        .distinct()
+                        .take(MAX_EVIDENCE_IDS_PER_RELATIONSHIP)
+                )
+            }
+        }
+        return merged.values.toList()
+    }
+}
+
+/**
+ * Resolves relationship provenance without inventing evidence.
+ *
+ * A relationship may arrive from a legacy producer with only endpoint values
+ * and a human-readable description. When exactly one evidence record matches
+ * an endpoint, the record's value/source URL, or an evidence description that
+ * is itself an exact source/value, this attaches that existing ID. Ambiguous
+ * exact matches remain unresolved. No fuzzy matching, provider inference, or
+ * new evidence is created here.
+ */
+fun EvidenceCollection.withResolvedRelationshipEvidence(): EvidenceCollection {
+    if (relationships.isEmpty() || evidence.isEmpty()) return this
+
+    val resolvedRelationships = relationships.map { relationship ->
+        val exactKeys = listOf(
+            relationship.fromValue,
+            relationship.toValue,
+            relationship.evidence
+        ).map(::provenanceKey).filter(String::isNotBlank).distinct()
+
+        /*
+         * Resolve each exact key independently. A URL/value can legitimately
+         * occur on more than one evidence record (for example a profile record
+         * and an extracted attribute sharing a source URL); attaching every
+         * matching ID would silently turn an ambiguous legacy assertion into a
+         * broad graph claim. Keep such a key unresolved and preserve only IDs
+         * that the producer supplied explicitly. This is deliberately exact and
+         * read-only: it never creates an Evidence record or guesses a provider.
+         */
+        val inferredIds = exactKeys.asSequence()
+            .mapNotNull { exactKey ->
+                val matchingIds = evidence.asSequence()
+                    .filter { record ->
+                        provenanceKey(record.id) == exactKey ||
+                            provenanceKey(record.value) == exactKey ||
+                            provenanceKey(record.sourceUrl) == exactKey
+                    }
+                    .map(Evidence::id)
+                    .distinct()
+                    .toList()
+                matchingIds.singleOrNull()
+            }
+            .toList()
+
+        relationship.copy(
+            evidenceIds = (relationship.evidenceIds + inferredIds)
+                .map(EvidenceIdPolicy::migrate)
+                .distinct()
+        )
+    }
+    return copy(relationships = resolvedRelationships)
+}
+
+private fun provenanceKey(value: String?): String = value
+    ?.trim()
+    ?.replace(Regex("\\s+"), " ")
+    ?.lowercase(Locale.US)
+    .orEmpty()
+
+/**
+ * Evidence-ID policy.
+ *
+ * Legacy `Finding.toEvidence()` IDs embedded raw finding values and source URLs.
+ * That was useful while prototyping but is inappropriate for remote-AI citation,
+ * logs, diagnostics, or other metadata surfaces. Current IDs hash the complete
+ * legacy identifier so they remain deterministic while revealing no raw value.
+ *
+ * The transformation is deliberately defined from the old identifier string so
+ * encrypted-case migrations can convert a persisted v3 correction/edge ID without
+ * needing to reconstruct the original Finding object.
+ */
+object EvidenceIdPolicy {
+    private const val CURRENT_PREFIX = "ev2:"
+    private const val LEGACY_PREFIX = "ev:"
+
+    fun legacyFindingId(finding: Finding): String =
+        "$LEGACY_PREFIX${finding.type.name}:${finding.value}:${finding.sourceUrl ?: ""}"
+
+    fun findingId(finding: Finding): String = fromLegacyId(legacyFindingId(finding))
+
+    fun migrate(id: String): String = when {
+        id.startsWith(CURRENT_PREFIX) -> id
+        id.startsWith(LEGACY_PREFIX) -> fromLegacyId(id)
+        else -> id
+    }
+
+    fun isCurrentFindingId(id: String): Boolean = id.startsWith(CURRENT_PREFIX)
+
+    internal fun fromLegacyId(legacyId: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(legacyId.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        return "$CURRENT_PREFIX${digest.take(32)}"
+    }
+}
+
+/** Adapter: Evidence -> legacy Finding (lossless on shared legacy fields). */
 fun Evidence.toFinding(): Finding = Finding(
     type = when (kind) {
         EvidenceKind.Email -> FindingType.Email
@@ -97,18 +364,46 @@ fun Evidence.toFinding(): Finding = Finding(
         EvidenceKind.PublicImageEvidence -> FindingType.PublicImageEvidence
         EvidenceKind.ImageConsistency -> FindingType.ImageConsistency
         EvidenceKind.SensitiveSnippet -> FindingType.SensitiveSnippet
+        EvidenceKind.BreachMembership -> FindingType.SensitiveSnippet
+        EvidenceKind.Url -> FindingType.PublicSearchEvidence
+        EvidenceKind.Document -> FindingType.PublicSearchEvidence
+        EvidenceKind.Archive -> FindingType.PublicSearchEvidence
+        EvidenceKind.Domain -> FindingType.PublicSearchEvidence
+        EvidenceKind.Photo -> FindingType.PublicImageEvidence
+        EvidenceKind.Image -> FindingType.PublicImageEvidence
     },
     value = value,
     sourceUrl = sourceUrl,
     evidenceSnippet = snippet,
     confidence = confidence,
     risk = risk,
-    remediation = signals.joinToString("; ")
+    remediation = signals.joinToString("; "),
+    attribution = attribution ?: inferredFindingAttribution()
 )
 
-/** Adapter: legacy Finding -> Evidence (lossless on the shared fields). */
+/**
+ * Compatibility fallback for evidence records written before attribution was
+ * stored explicitly. New records must carry [Evidence.attribution] whenever a
+ * producer knows the identity relationship; state/reliability alone cannot
+ * distinguish an exact self-supplied value from a merely verified page.
+ */
+private fun Evidence.inferredFindingAttribution(): FindingAttribution = when {
+    state == EvidenceState.Verified && reliability == EvidenceReliability.UserSupplied ->
+        FindingAttribution.ExactSelfSupplied
+    state == EvidenceState.Verified -> FindingAttribution.Verified
+    state == EvidenceState.Probable -> FindingAttribution.Probable
+    state == EvidenceState.Candidate -> FindingAttribution.Candidate
+    state == EvidenceState.Conflicting -> FindingAttribution.Conflicting
+    else -> FindingAttribution.Unconfirmed
+}
+
+/**
+ * Adapter for legacy findings. Metadata that the legacy Finding contract cannot
+ * prove remains explicitly Unknown/null rather than being invented. In
+ * particular, numeric confidence is never promoted into a verification state.
+ */
 fun Finding.toEvidence(): Evidence = Evidence(
-    id = "ev:${type.name}:${value}:${sourceUrl ?: ""}",
+    id = EvidenceIdPolicy.findingId(this),
     kind = when (type) {
         FindingType.Email -> EvidenceKind.Email
         FindingType.Phone -> EvidenceKind.Phone
@@ -129,5 +424,22 @@ fun Finding.toEvidence(): Evidence = Evidence(
     snippet = evidenceSnippet,
     confidence = confidence,
     risk = risk,
-    signals = if (remediation.isBlank()) emptyList() else listOf(remediation)
+    signals = if (remediation.isBlank()) emptyList() else listOf(remediation),
+    state = when {
+        attribution == FindingAttribution.ExactSelfSupplied -> EvidenceState.Verified
+        attribution == FindingAttribution.Verified -> EvidenceState.Verified
+        attribution == FindingAttribution.Probable -> EvidenceState.Probable
+        attribution == FindingAttribution.IndependentPageSignals -> EvidenceState.Probable
+        attribution == FindingAttribution.Candidate -> EvidenceState.Candidate
+        attribution == FindingAttribution.Conflicting -> EvidenceState.Conflicting
+        type in listOf(FindingType.PlausibleProfileMatch, FindingType.PublicSearchEvidence, FindingType.PublicImageEvidence) -> EvidenceState.Candidate
+        else -> EvidenceState.Observed
+    },
+    reliability = when {
+        attribution == FindingAttribution.ExactSelfSupplied -> EvidenceReliability.UserSupplied
+        type in listOf(FindingType.PublicSearchEvidence, FindingType.PublicImageEvidence) -> EvidenceReliability.SearchEngineCandidate
+        type == FindingType.ImageConsistency -> EvidenceReliability.LocalDerived
+        else -> EvidenceReliability.Unknown
+    },
+    attribution = attribution
 )

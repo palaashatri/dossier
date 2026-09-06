@@ -2,12 +2,22 @@ package io.dossier.app.data.web
 
 import android.content.Context
 import io.dossier.app.data.platform.resolveProfileUrl
+import io.dossier.app.domain.discovery.ProviderVerificationState
+import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.ProfileScanResult
+import io.dossier.app.domain.discovery.TypedSeed
+import io.dossier.app.domain.discovery.TypedSeedKind
+import io.dossier.app.domain.discovery.TypedSeedSafety
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -17,8 +27,10 @@ import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.security.MessageDigest
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -36,6 +48,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
         .readTimeout(10, TimeUnit.SECONDS)
         .callTimeout(15, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
+        .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+        .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
         .build()
 
     private val pageVerifier = PublicPageVerifier()
@@ -52,8 +66,28 @@ class PublicSearchDiscoveryService(private val context: Context) {
         val score: Float = 0f,
         val providerCount: Int = 1,
         val directlyVerified: Boolean = false,
-        val verificationNote: String? = null
+        val verificationNote: String? = null,
+        val pivotSeedKind: io.dossier.app.domain.discovery.TypedSeedKind? = null,
+        val pivotExactValue: String? = null,
+        val pivotEvidenceIds: List<String> = emptyList(),
+        val pivotDiscoveryPath: List<String> = emptyList(),
+        /** Query-plan stage that produced this candidate, when applicable. */
+        val pivotStage: String? = null,
+        /** Normalized value of the typed pivot used by the query. */
+        val pivotNormalizedValue: String? = null,
+        /** Source URL from which the typed pivot was derived. */
+        val pivotSourceUrl: String? = null,
+        /** Optional content hash supplied by a reviewed result producer. */
+        val contentHashSha256: String? = null,
+        /** Ephemeral page material already fetched by direct verification. */
+        val verifiedPage: VerifiedPage? = null
     )
+
+    /** Distinguishes a healthy empty search from provider-wide unavailability. */
+    sealed interface SearchOutcome {
+        data class Success(val results: List<PublicSearchResult>) : SearchOutcome
+        data class Unavailable(val reason: String) : SearchOutcome
+    }
 
     private data class SearchProvider(
         val name: String,
@@ -66,31 +100,113 @@ class PublicSearchDiscoveryService(private val context: Context) {
         val results: List<PublicSearchResult>
     )
 
-    suspend fun discover(input: IdentityInput, deepResearch: Boolean = false): List<PublicSearchResult> =
+    suspend fun discover(
+        input: IdentityInput,
+        deepResearch: Boolean = false,
+        verifiedResults: List<ProfileScanResult> = emptyList(),
+        typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList(),
+        verificationInput: IdentityInput? = null
+    ): List<PublicSearchResult> = when (
+        val outcome = discoverOutcome(
+            input = input,
+            deepResearch = deepResearch,
+            verifiedResults = verifiedResults,
+            typedSeeds = typedSeeds,
+            verificationInput = verificationInput
+        )
+    ) {
+        is SearchOutcome.Success -> outcome.results
+        is SearchOutcome.Unavailable -> emptyList()
+    }
+
+    /**
+     * Runs the same bounded search as [discover] while retaining the provider
+     * health distinction needed by the typed frontier. Existing callers that
+     * only consume a list should continue using [discover].
+     */
+    suspend fun discoverOutcome(
+        input: IdentityInput,
+        deepResearch: Boolean = false,
+        verifiedResults: List<ProfileScanResult> = emptyList(),
+        typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList(),
+        /**
+         * Optional attribution context used only when re-checking result pages.
+         * The query plan remains scoped to [input], so a recursive typed pivot
+         * cannot accidentally repeat the full launch search.  Callers may pass
+         * the original authorized identity context to preserve the existing
+         * multi-signal verification rules.
+         */
+        verificationInput: IdentityInput? = null
+    ): SearchOutcome =
         withContext(Dispatchers.IO) {
             val queryLimit = if (deepResearch) MAX_DEEP_QUERIES else MAX_DEFAULT_QUERIES
-            val queries = buildSearchQueries(input, deepResearch).take(queryLimit)
-            if (queries.isEmpty()) return@withContext emptyList()
+            val safeSeeds = typedSeeds.filter(TypedSeedSafety::isSafePublicSearchSeed)
+            val plan = buildSearchQueryPlan(input, deepResearch, verifiedResults, safeSeeds).take(queryLimit)
+            if (plan.isEmpty()) return@withContext SearchOutcome.Success(emptyList())
+
+            val scoringInput = if (verifiedResults.isNotEmpty()) {
+                expandIdentityInput(input, verifiedResults)
+            } else {
+                input
+            }
+            // Keep the query plan scoped to the current typed pivot, but let
+            // page attribution see both the original authorized context and
+            // that pivot. Replacing the scoped input with the original input
+            // would drop a discovered Name/Username before verification.
+            val attributionInput = verificationInput?.let { authorized ->
+                mergeVerificationInput(authorized, scoringInput)
+            } ?: scoringInput
+            val effectiveVerificationInput = if (verifiedResults.isNotEmpty()) {
+                expandIdentityInput(attributionInput, verifiedResults)
+            } else {
+                attributionInput
+            }
 
             val providers = defaultProviders()
             val querySemaphore = Semaphore(MAX_PARALLEL_SEARCH_QUERIES)
-            val raw = coroutineScope {
-                queries.mapIndexed { index, query ->
+            val batches = coroutineScope {
+                plan.mapIndexed { index, entry ->
                     async(Dispatchers.IO) {
                         querySemaphore.withPermit {
                             searchWithFailover(
-                                query = query,
+                                query = entry.query,
                                 providers = providers,
                                 startIndex = index % providers.size,
                                 deepResearch = deepResearch
-                            )
+                            ).let { batch ->
+                                SearchBatch(
+                                    attemptedProviders = batch.attemptedProviders,
+                                    healthyProviders = batch.healthyProviders,
+                                    results = batch.results.map {
+                                        it.copy(
+                                            pivotSeedKind = entry.pivotSeedKind,
+                                            pivotExactValue = entry.pivotExactValue,
+                                            pivotNormalizedValue = entry.pivotNormalizedValue,
+                                            pivotEvidenceIds = entry.pivotEvidenceIds,
+                                            pivotDiscoveryPath = entry.pivotDiscoveryPath,
+                                            pivotStage = entry.stage,
+                                            pivotSourceUrl = entry.pivotSourceUrl
+                                        )
+                                    }
+                                )
+                            }
                         }
                     }
-                }.awaitAll().flatten()
+                }.awaitAll()
+            }
+
+            currentCoroutineContext().ensureActive()
+            val raw = batches.flatMap(SearchBatch::results)
+            val attemptedProviders = batches.sumOf(SearchBatch::attemptedProviders)
+            val healthyProviders = batches.sumOf(SearchBatch::healthyProviders)
+            if (attemptedProviders == 0 || healthyProviders == 0) {
+                return@withContext SearchOutcome.Unavailable(
+                    "No public search provider was reachable"
+                )
             }
 
             val scored = mergeProviderEvidence(raw)
-                .map { it.copy(score = scoreResult(input, it)) }
+                .map { result -> result.copy(score = scoreResult(scoringInput, result)) }
                 .filter { it.score >= MIN_INDEX_SCORE }
                 .sortedByDescending { it.score }
                 .take(MAX_PRE_VERIFICATION_RESULTS)
@@ -101,7 +217,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 .toSet()
             val verifySemaphore = Semaphore(MAX_PARALLEL_DIRECT_VERIFICATIONS)
 
-            coroutineScope {
+            val verified = coroutineScope {
                 scored.map { result ->
                     async(Dispatchers.IO) {
                         if (canonicalUrlKey(result.url) !in verificationKeys) {
@@ -113,7 +229,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
 
                         verifySemaphore.withPermit {
                             when (val verification = pageVerifier.verify(
-                                input = input,
+                                input = effectiveVerificationInput,
                                 url = result.url,
                                 indexedTitle = result.title,
                                 indexedSnippet = result.snippet
@@ -130,7 +246,10 @@ class PublicSearchDiscoveryService(private val context: Context) {
                                         url = verification.finalUrl,
                                         score = blended,
                                         directlyVerified = true,
-                                        verificationNote = verification.signals.joinToString("; ")
+                                        contentHashSha256 = verification.contentHashSha256
+                                            ?: result.contentHashSha256,
+                                        verificationNote = verification.signals.joinToString("; "),
+                                        verifiedPage = verification.verifiedPage
                                     )
                                 }
                                 is PublicPageVerifier.Outcome.Rejected -> null
@@ -143,6 +262,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     }
                 }.awaitAll().filterNotNull()
             }
+            currentCoroutineContext().ensureActive()
+            val results = verified
                 .filter { it.score >= MIN_PUBLIC_SEARCH_SCORE }
                 .distinctBy { canonicalUrlKey(it.url) }
                 .sortedWith(
@@ -152,17 +273,25 @@ class PublicSearchDiscoveryService(private val context: Context) {
                         .thenBy { it.title }
                 )
                 .take(MAX_PUBLIC_SEARCH_RESULTS)
+            SearchOutcome.Success(results)
         }
+
+    private data class SearchBatch(
+        val attemptedProviders: Int,
+        val healthyProviders: Int,
+        val results: List<PublicSearchResult>
+    )
 
     private suspend fun searchWithFailover(
         query: String,
         providers: List<SearchProvider>,
         startIndex: Int,
         deepResearch: Boolean
-    ): List<PublicSearchResult> {
+    ): ProviderSearchBatch {
         val ordered = providers.indices.map { providers[(startIndex + it) % providers.size] }
         val merged = mutableListOf<PublicSearchResult>()
         var attemptedProviders = 0
+        var healthyProviders = 0
         val highSignal = isHighSignalQuery(query)
         val providerBudget = when {
             deepResearch && highSignal -> 5
@@ -175,7 +304,9 @@ class PublicSearchDiscoveryService(private val context: Context) {
             if (attemptedProviders >= providerBudget) break
             if (!breaker.canAttempt(provider.name)) continue
             attemptedProviders++
-            merged += fetchProviderResults(provider, query)
+            val response = fetchProviderResults(provider, query)
+            if (response.healthy) healthyProviders++
+            merged += response.results
             val uniqueCount = merged.distinctBy { canonicalUrlKey(it.url) }.size
             val independentSources = merged.map { it.source }.distinct().size
 
@@ -187,18 +318,35 @@ class PublicSearchDiscoveryService(private val context: Context) {
             }
         }
 
-        return merged
-            .distinctBy { "${it.source}|${canonicalUrlKey(it.url)}" }
-            .take(MAX_RESULTS_PER_QUERY * providerBudget)
+        return ProviderSearchBatch(
+            attemptedProviders = attemptedProviders,
+            healthyProviders = healthyProviders,
+            results = merged
+                .distinctBy { "${it.source}|${canonicalUrlKey(it.url)}" }
+                .take(MAX_RESULTS_PER_QUERY * providerBudget)
+        )
     }
+
+    private data class ProviderSearchBatch(
+        val attemptedProviders: Int,
+        val healthyProviders: Int,
+        val results: List<PublicSearchResult>
+    )
+
+    private data class ProviderFetchResult(
+        val results: List<PublicSearchResult>,
+        val healthy: Boolean
+    )
 
     private suspend fun fetchProviderResults(
         provider: SearchProvider,
         query: String
-    ): List<PublicSearchResult> {
+    ): ProviderFetchResult {
         val cacheKey = "${provider.name}|$query"
         cache[cacheKey]?.let { cached ->
-            if (System.currentTimeMillis() - cached.savedAtMillis <= CACHE_TTL_MS) return cached.results
+            if (System.currentTimeMillis() - cached.savedAtMillis <= CACHE_TTL_MS) {
+                return ProviderFetchResult(cached.results, healthy = true)
+            }
             cache.remove(cacheKey, cached)
         }
 
@@ -227,7 +375,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
                             if (parsed.isNotEmpty() || looksLikeNoResults(lastHtml)) {
                                 breaker.recordSuccess(provider.name)
                                 cache[cacheKey] = CachedResults(System.currentTimeMillis(), parsed)
-                                return parsed
+                                return ProviderFetchResult(parsed, healthy = true)
                             }
                         }
                         DiscoveryHttpPolicy.isTransientHttpStatus(response.code) -> {
@@ -239,6 +387,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     }
                 }
                 if (blocked) break
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 if (attempt < MAX_HTTP_ATTEMPTS - 1) {
                     delay(DiscoveryHttpPolicy.retryDelayMillis(attempt, null))
@@ -258,7 +408,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
             if (rendered.isNotEmpty()) {
                 breaker.recordSuccess(provider.name)
                 cache[cacheKey] = CachedResults(System.currentTimeMillis(), rendered)
-                return rendered
+                return ProviderFetchResult(rendered, healthy = true)
             }
         }
 
@@ -268,7 +418,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
         } else {
             breaker.recordFailure(provider.name)
         }
-        return emptyList()
+        return ProviderFetchResult(emptyList(), healthy = providerHealthy)
     }
 
     private fun defaultProviders(): List<SearchProvider> = listOf(
@@ -306,9 +456,9 @@ class PublicSearchDiscoveryService(private val context: Context) {
         private const val MAX_PROVIDER_CONSENSUS_BONUS = 0.12f
 
         private val USER_AGENTS = listOf(
-            "Mozilla/5.0 (Linux; Android 14; SM-S931B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36",
-            "Mozilla/5.0 (Android 14; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0",
-            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Mobile Safari/537.36"
+            "Dossier/0.1 public-exposure-audit",
+            "Dossier/0.1 public-exposure-audit",
+            "Dossier/0.1 public-exposure-audit"
         )
 
         private val PROFILE_QUERY_SITES = listOf(
@@ -336,66 +486,313 @@ class PublicSearchDiscoveryService(private val context: Context) {
             "gclid", "fbclid", "msclkid", "ref", "ref_src", "ved", "source", "yclid"
         )
 
-        /** High-entropy identifiers are deliberately placed before broad name queries. */
-        fun buildSearchQueries(input: IdentityInput, deepResearch: Boolean = false): List<String> {
-            val queries = linkedSetOf<String>()
-            val name = input.fullName.trim()
-            val handles = buildHandleTerms(input)
-            val aliases = input.aliases.mapNotNull(::cleanTerm)
-            val emails = input.emails.mapNotNull(::cleanTerm)
-            val organizations = input.organizations.mapNotNull(::cleanTerm)
-            val locations = input.locations.mapNotNull(::cleanTerm)
+        data class DiscoveredSearchTerms(
+            val emails: List<String> = emptyList(),
+            val phones: List<String> = emptyList(),
+            val handles: List<String> = emptyList()
+        ) {
+            val isEmpty: Boolean get() = emails.isEmpty() && phones.isEmpty() && handles.isEmpty()
+            val totalCount: Int get() = emails.size + phones.size + handles.size
+        }
 
-            emails.take(if (deepResearch) 4 else 2).forEach { email ->
-                queries += quote(email)
-                val local = email.substringBefore('@').trim().removePrefix("+")
-                if (local.length >= 3) queries += quote(local)
-                queries += "${quote(email)} site:github.com"
-                if (deepResearch) {
-                    queries += "${quote(email)} site:pastebin.com"
-                    queries += "${quote(email)} site:gitlab.com"
+        const val MAX_EXPANDED_EMAILS = 4
+        const val MAX_EXPANDED_PHONES = 4
+        const val MAX_EXPANDED_HANDLES = 8
+        const val MAX_TOTAL_EXPANDED_TERMS = 16
+        const val MIN_FINDING_CONFIDENCE_FOR_EXPANSION = 0.80f
+
+        fun extractDiscoveredSearchTerms(
+            input: IdentityInput,
+            verifiedResults: List<ProfileScanResult>
+        ): DiscoveredSearchTerms {
+            if (verifiedResults.isEmpty()) return DiscoveredSearchTerms()
+
+            val existingEmails = input.emails
+                .mapNotNull(::cleanTerm)
+                .map { it.lowercase(Locale.ROOT) }
+                .toSet()
+
+            val existingPhones = input.phones
+                .map { value -> value.filter(Char::isDigit) }
+                .filter { it.length >= 8 }
+                .toSet()
+
+            val existingHandles = (listOfNotNull(input.primaryUsername) + input.usernames + input.aliases)
+                .mapNotNull(::cleanTerm)
+                .map { it.lowercase(Locale.ROOT) }
+                .toSet()
+
+            val acceptedEmails = mutableListOf<String>()
+            val acceptedPhones = mutableListOf<String>()
+            val acceptedHandles = mutableListOf<String>()
+
+            for (result in verifiedResults) {
+                if (acceptedEmails.size + acceptedPhones.size + acceptedHandles.size >= MAX_TOTAL_EXPANDED_TERMS) break
+                // Result must exist and be directly verified
+                if (!result.exists || !result.verified) continue
+
+                // Reject candidate / soft existence states
+                if (result.providerVerificationState != null &&
+                    result.providerVerificationState != ProviderVerificationState.Present
+                ) continue
+
+                // Candidate confidence must be finite and within 0..1
+                if (!result.candidate.confidence.isFinite() || result.candidate.confidence !in 0.0f..1.0f) continue
+
+                // Fail closed for verified-looking results whose status/provenance contains ambiguity markers
+                if (result.verificationStatus != null && isAmbiguousOrUnverifiedMetadata(result.verificationStatus)) continue
+                if (result.provenance != null && isAmbiguousOrUnverifiedMetadata(result.provenance)) continue
+
+                // Profile URL must be an absolute HTTP(S) URL
+                if (!isAbsoluteHttpUrl(result.candidate.url)) continue
+
+                // 1. Candidate username: Only result.exists && result.verified profiles may contribute candidate username
+                if (acceptedHandles.size < MAX_EXPANDED_HANDLES &&
+                    acceptedEmails.size + acceptedPhones.size + acceptedHandles.size < MAX_TOTAL_EXPANDED_TERMS
+                ) {
+                    val rawUsername = result.candidate.username
+                    val normalizedHandle = cleanTerm(rawUsername)
+                    if (normalizedHandle != null &&
+                        normalizedHandle.length in 2..40 &&
+                        !normalizedHandle.contains(Regex("\\s")) &&
+                        !isAmbiguousHandle(normalizedHandle)
+                    ) {
+                        val handleKey = normalizedHandle.lowercase(Locale.ROOT)
+                        if (handleKey !in existingHandles &&
+                            acceptedHandles.none { it.equals(normalizedHandle, ignoreCase = true) }
+                        ) {
+                            acceptedHandles += normalizedHandle
+                        }
+                    }
+                }
+
+                // 2. Email and Phone findings
+                val canonicalResultUrl = canonicalUrlKey(result.candidate.url)
+                for (finding in result.findings) {
+                    if (acceptedEmails.size + acceptedPhones.size + acceptedHandles.size >= MAX_TOTAL_EXPANDED_TERMS) break
+
+                    // Must be Email or Phone
+                    if (finding.type != FindingType.Email && finding.type != FindingType.Phone) continue
+
+                    // Confidence must be finite and within MIN_FINDING_CONFIDENCE_FOR_EXPANSION..1.0f
+                    if (!finding.confidence.isFinite() || finding.confidence !in MIN_FINDING_CONFIDENCE_FOR_EXPANSION..1.0f) continue
+
+                    // finding.sourceUrl must be an absolute HTTP(S) URL and canonicalize to exact verified profile URL
+                    val findingSourceUrl = finding.sourceUrl?.takeIf(String::isNotBlank) ?: continue
+                    if (!isAbsoluteHttpUrl(findingSourceUrl)) continue
+                    if (canonicalUrlKey(findingSourceUrl) != canonicalResultUrl) continue
+
+                    // Reject breach / import / ambiguous finding values or snippets
+                    if (isBreachImportOrAmbiguousFinding(finding)) continue
+
+                    when (finding.type) {
+                        FindingType.Email -> {
+                            if (acceptedEmails.size < MAX_EXPANDED_EMAILS) {
+                                val normalizedEmail = normalizeEmailValue(finding.value)
+                                if (normalizedEmail != null && !isAmbiguousEmail(normalizedEmail)) {
+                                    val emailKey = normalizedEmail.lowercase(Locale.ROOT)
+                                    if (emailKey !in existingEmails &&
+                                        acceptedEmails.none { it.equals(normalizedEmail, ignoreCase = true) }
+                                    ) {
+                                        acceptedEmails += normalizedEmail
+                                    }
+                                }
+                            }
+                        }
+                        FindingType.Phone -> {
+                            if (acceptedPhones.size < MAX_EXPANDED_PHONES) {
+                                val digits = finding.value.filter(Char::isDigit)
+                                if (digits.length in 8..15 && !isAmbiguousPhone(digits)) {
+                                    if (digits !in existingPhones && acceptedPhones.none { it == digits }) {
+                                        acceptedPhones += digits
+                                    }
+                                }
+                            }
+                        }
+                        else -> Unit
+                    }
                 }
             }
 
-            input.phones
+            return DiscoveredSearchTerms(
+                emails = acceptedEmails,
+                phones = acceptedPhones,
+                handles = acceptedHandles
+            )
+        }
+
+        fun expandIdentityInput(
+            input: IdentityInput,
+            verifiedResults: List<ProfileScanResult>
+        ): IdentityInput {
+            if (verifiedResults.isEmpty()) return input
+            val discovered = extractDiscoveredSearchTerms(input, verifiedResults)
+            if (discovered.isEmpty) return input
+
+            // Preserve every original IdentityInput list value and every other field exactly
+            // (including formatting, case, blanks, duplicates, and primaryUsername);
+            // only prepend newly discovered normalized terms.
+            return input.copy(
+                emails = discovered.emails + input.emails,
+                phones = discovered.phones + input.phones,
+                usernames = discovered.handles + input.usernames
+            )
+        }
+
+        /**
+         * High-entropy identifiers are deliberately placed before broad name queries.
+         * Uses a deterministic two-phase / round-robin ordering that emits at least one
+         * exact quoted query for every discovered term before any original-term query,
+         * ensuring the default 24-query cap cannot starve discovered handles when up to
+         * 4 emails, 4 phones, and 8 handles are discovered. Richer site probes are preserved
+         * as budget permits.
+         */
+        data class PublicSearchQueryPlanEntry(
+            val query: String,
+            val stage: String,
+            val pivotSeedKind: TypedSeedKind? = null,
+            val pivotExactValue: String? = null,
+            val pivotNormalizedValue: String? = null,
+            val pivotEvidenceIds: List<String> = emptyList(),
+            val pivotSourceUrl: String? = null,
+            val pivotDiscoveryPath: List<String> = emptyList()
+        )
+
+        fun buildSearchQueryPlan(
+            input: IdentityInput,
+            deepResearch: Boolean = false,
+            verifiedResults: List<ProfileScanResult> = emptyList(),
+            typedSeeds: List<TypedSeed> = emptyList()
+        ): List<PublicSearchQueryPlanEntry> {
+            val queries = linkedSetOf<String>()
+            val entries = mutableListOf<PublicSearchQueryPlanEntry>()
+            fun addQuery(query: String, stage: String, seed: TypedSeed? = null) {
+                if (queries.add(query)) {
+                    entries.add(
+                        PublicSearchQueryPlanEntry(
+                            query = query,
+                            stage = stage,
+                            pivotSeedKind = seed?.kind,
+                            pivotExactValue = seed?.exactValue,
+                            pivotNormalizedValue = seed?.normalizedValue,
+                            pivotEvidenceIds = seed?.evidenceIds.orEmpty(),
+                            pivotSourceUrl = seed?.sourceUrl,
+                            pivotDiscoveryPath = seed?.discoveryPath.orEmpty()
+                        )
+                    )
+                }
+            }
+
+            val discovered = extractDiscoveredSearchTerms(input, verifiedResults)
+            val name = input.fullName.trim()
+            val aliases = input.aliases.mapNotNull(::cleanTerm)
+            val originalEmails = input.emails.mapNotNull(::cleanTerm)
+            val originalPhones = input.phones
                 .map { value -> value.filter(Char::isDigit) }
                 .filter { it.length >= 8 }
                 .distinct()
-                .take(if (deepResearch) 3 else 2)
-                .forEach { digits ->
-                    queries += quote(digits)
-                    if (digits.length >= 10) queries += quote(digits.takeLast(10))
-                }
+            val organizations = input.organizations.mapNotNull(::cleanTerm)
+            val locations = input.locations.mapNotNull(::cleanTerm)
+            val originalHandles = buildHandleTerms(input)
 
-            handles.take(if (deepResearch) 8 else 5).forEach { handle ->
-                val quotedHandle = quote(handle)
-                queries += quotedHandle
-                RELIABLE_PROFILE_QUERY_SITES.forEach { site -> queries += "$quotedHandle site:$site" }
-                queries += "$quotedHandle github reddit gitlab dev.to bluesky youtube"
+            // Phase 1b: Safe typed seeds (Emails/Phones before original terms)
+            val safeSeeds = typedSeeds
+                .filter(TypedSeedSafety::isSafePublicSearchSeed)
+                .distinctBy { "${it.kind}:${it.normalizedValue}" }
+                .take(if (deepResearch) 8 else 4)
+
+            safeSeeds.filter { it.kind == TypedSeedKind.Email || it.kind == TypedSeedKind.Phone }.forEach { seed ->
+                addQuery(quote(seed.exactValue), "typed-seed-exact", seed)
+                if (seed.kind == TypedSeedKind.Phone && seed.normalizedValue != seed.exactValue) {
+                    addQuery(quote(seed.normalizedValue), "typed-seed-normalized", seed)
+                }
+            }
+
+            // Phase 1: Emit at least one exact quoted query for every discovered term before any original-term query.
+            val maxDiscovered = maxOf(discovered.handles.size, discovered.emails.size, discovered.phones.size)
+            for (i in 0 until maxDiscovered) {
+                if (i < discovered.handles.size) addQuery(quote(discovered.handles[i]), "discovered-handle")
+                if (i < discovered.emails.size) addQuery(quote(discovered.emails[i]), "discovered-email")
+                if (i < discovered.phones.size) addQuery(quote(discovered.phones[i]), "discovered-phone")
+            }
+
+            // Phase 1b: Other Safe typed seeds (URLs, domains, documents, archives).
+            safeSeeds.filter { it.kind != TypedSeedKind.Email && it.kind != TypedSeedKind.Phone }.forEach { seed ->
+                addQuery(quote(seed.exactValue), "typed-seed-exact", seed)
+                if (seed.kind == TypedSeedKind.Domain) {
+                    addQuery("site:${seed.exactValue}", "typed-seed-domain", seed)
+                }
+            }
+
+            // Phase 2: Original terms exact queries followed by richer site probes as budget permits.
+            originalHandles.forEach { addQuery(quote(it), "original-handle") }
+            originalEmails.forEach { addQuery(quote(it), "original-email") }
+            originalPhones.forEach { addQuery(quote(it), "original-phone") }
+
+            val allEmails = (discovered.emails + originalEmails)
+                .distinctBy { it.lowercase(Locale.ROOT) }
+                .take(discovered.emails.size + (if (deepResearch) 4 else 2))
+
+            allEmails.forEach { email ->
+                val local = email.substringBefore('@').trim().removePrefix("+")
+                if (local.length >= 3) addQuery(quote(local), "email-local-probe")
+                addQuery("${quote(email)} site:github.com", "email-site-probe")
+                if (deepResearch) {
+                    addQuery("${quote(email)} site:pastebin.com", "email-site-probe")
+                    addQuery("${quote(email)} site:gitlab.com", "email-site-probe")
+                }
+            }
+
+            val allPhones = (discovered.phones + originalPhones)
+                .distinct()
+                .take(discovered.phones.size + (if (deepResearch) 3 else 2))
+
+            allPhones.forEach { digits ->
+                if (digits.length >= 10) addQuery(quote(digits.takeLast(10)), "phone-partial-probe")
+            }
+
+            val allHandles = (discovered.handles + originalHandles)
+                .distinctBy { it.lowercase(Locale.ROOT) }
+                .take(discovered.handles.size + (if (deepResearch) 8 else 5))
+
+            RELIABLE_PROFILE_QUERY_SITES.forEach { site ->
+                allHandles.forEach { handle ->
+                    addQuery("${quote(handle)} site:$site", "handle-site-probe")
+                }
+            }
+            allHandles.forEach { handle ->
+                addQuery("${quote(handle)} github reddit gitlab dev.to bluesky youtube", "handle-broad-probe")
             }
 
             if (name.isNotBlank()) {
                 val quotedName = quote(name)
-                organizations.take(2).forEach { org -> queries += "$quotedName ${quote(org)}" }
-                locations.take(2).forEach { location -> queries += "$quotedName ${quote(location)}" }
-                handles.take(2).forEach { handle -> queries += "$quotedName ${quote(handle)}" }
-                queries += quotedName
-                queries += "$quotedName github linkedin x twitter reddit twitch instagram youtube"
-                PROFILE_QUERY_SITES.forEach { site -> queries += "$quotedName site:$site" }
-                PUBLIC_FORUM_QUERY_SITES.forEach { site -> queries += "$quotedName site:$site" }
+                organizations.take(2).forEach { org -> addQuery("$quotedName ${quote(org)}", "name-org") }
+                locations.take(2).forEach { location -> addQuery("$quotedName ${quote(location)}", "name-location") }
+                allHandles.take(2).forEach { handle -> addQuery("$quotedName ${quote(handle)}", "name-handle") }
+                addQuery(quotedName, "name-exact")
+                addQuery("$quotedName github linkedin x twitter reddit twitch instagram youtube", "name-broad-probe")
+                PROFILE_QUERY_SITES.forEach { site -> addQuery("$quotedName site:$site", "name-site-probe") }
+                PUBLIC_FORUM_QUERY_SITES.forEach { site -> addQuery("$quotedName site:$site", "name-site-probe") }
             }
 
             aliases.take(if (deepResearch) 6 else 3).forEach { alias ->
                 val quotedAlias = quote(alias)
-                queries += quotedAlias
-                queries += "$quotedAlias site:reddit.com"
+                addQuery(quotedAlias, "alias-exact")
+                addQuery("$quotedAlias site:reddit.com", "alias-site-probe")
                 if (deepResearch) {
-                    queries += "$quotedAlias site:4chan.org"
-                    queries += "$quotedAlias site:boards.4chan.org"
+                    addQuery("$quotedAlias site:4chan.org", "alias-site-probe")
+                    addQuery("$quotedAlias site:boards.4chan.org", "alias-site-probe")
                 }
             }
-            return queries.toList()
+            return entries.toList()
         }
+
+        fun buildSearchQueries(
+            input: IdentityInput,
+            deepResearch: Boolean = false,
+            verifiedResults: List<ProfileScanResult> = emptyList(),
+            typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList()
+        ): List<String> = buildSearchQueryPlan(input, deepResearch, verifiedResults, typedSeeds).map { it.query }
 
         fun parseSearchResults(source: String, query: String, html: String): List<PublicSearchResult> {
             if (html.isBlank() || DiscoveryHttpPolicy.looksBlocked(html)) return emptyList()
@@ -409,7 +806,11 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 source.contains("qwant", true) -> parseQwant(root, source, query)
                 else -> parseGeneric(root, source, query)
             }
-            return results.distinctBy { canonicalUrlKey(it.url) }.take(12)
+            val contentHash = sha256(html)
+            return results
+                .distinctBy { canonicalUrlKey(it.url) }
+                .take(12)
+                .map { it.copy(contentHashSha256 = contentHash) }
         }
 
         private fun parseDuckDuckGo(root: Element, source: String, query: String) =
@@ -531,6 +932,42 @@ class PublicSearchDiscoveryService(private val context: Context) {
             var score = 0.08f
             var directIdentitySignals = 0
 
+            // A verified URL/domain/document/archive pivot is itself a
+            // high-entropy identity signal. It must be able to produce a lead
+            // even when the indexed page omits the audited name, while the
+            // bounded score still leaves direct page verification authoritative.
+            when (result.pivotSeedKind) {
+                TypedSeedKind.Url,
+                TypedSeedKind.Domain,
+                TypedSeedKind.Document,
+                TypedSeedKind.Archive -> {
+                    score += 0.28f
+                    directIdentitySignals++
+                }
+                else -> Unit
+            }
+
+            // A typed Name/Username pivot is already admitted from explicit
+            // provenance. Let its bounded query produce a lead even when the
+            // index omits the original launch terms; direct page verification
+            // still decides whether attribution is strong enough.
+            val typedPivot = result.pivotExactValue?.trim()
+            if (typedPivot != null && typedPivot.isNotBlank() &&
+                result.query.contains(typedPivot, ignoreCase = true)
+            ) {
+                when (result.pivotSeedKind) {
+                    TypedSeedKind.Name -> {
+                        score += 0.18f
+                        directIdentitySignals++
+                    }
+                    TypedSeedKind.Username -> {
+                        score += 0.24f
+                        directIdentitySignals++
+                    }
+                    else -> Unit
+                }
+            }
+
             val name = input.fullName.trim()
             if (name.isNotBlank() && combined.contains(name.lowercase())) {
                 score += 0.30f
@@ -576,7 +1013,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
             if (result.query.contains("site:", true)) score += 0.03f
             score += consensusBonus(result.providerCount)
             if (directIdentitySignals == 0) score -= 0.20f
-            return score.coerceIn(0f, 0.95f)
+            return score.takeIf { it.isFinite() }?.coerceIn(0f, 0.95f) ?: 0f
         }
 
         fun normalizeSearchUrl(rawHref: String): String? {
@@ -592,25 +1029,94 @@ class PublicSearchDiscoveryService(private val context: Context) {
             if (!candidate.startsWith("http://", true) && !candidate.startsWith("https://", true)) return null
             val withoutFragment = candidate.substringBefore('#')
             val uri = runCatching { URI(withoutFragment) }.getOrNull() ?: return null
-            if (uri.host.isNullOrBlank()) return null
+            if (uri.scheme?.equals("http", true) != true && uri.scheme?.equals("https", true) != true) return null
+            if (uri.host.isNullOrBlank() || uri.rawUserInfo != null || uri.port !in -1..65535) return null
+            // Reject an HTTP(S) token nested inside another URI scheme, such
+            // as javascript:https://..., instead of accepting its suffix.
+            val schemePrefix = withoutFragment.substringBefore("://", "")
+            if (schemePrefix.contains(':') || schemePrefix.any { it == ':' }) return null
+            if (!DiscoveryHttpPolicy.isSafePublicHttpUrl(withoutFragment)) return null
             return withoutFragment
         }
 
         fun canonicalUrlKey(url: String): String {
-            val parsed = url.toHttpUrlOrNull() ?: return url.trim().removeSuffix("/").lowercase()
+            val parsed = url.toHttpUrlOrNull() ?: return url.trim().removeSuffix("/")
             val builder = parsed.newBuilder().fragment(null)
             parsed.queryParameterNames
                 .filter { it.lowercase() in TRACKING_QUERY_PARAMS }
                 .forEach(builder::removeAllQueryParameters)
-            return builder.build().toString().removeSuffix("/").lowercase()
+            // HttpUrl canonicalizes scheme/host but intentionally preserves
+            // case-sensitive path, query values, and exact URL strings remain
+            // on the evidence record.
+            return builder.build().toString().removeSuffix("/")
         }
 
         private fun mergeProviderEvidence(results: List<PublicSearchResult>): List<PublicSearchResult> =
             results.groupBy { canonicalUrlKey(it.url) }.values.map { group ->
-                val best = group.maxByOrNull { it.title.length + it.snippet.length } ?: group.first()
+                val best = group.maxWithOrNull(
+                    compareBy<PublicSearchResult> { it.pivotSeedKind != null }
+                        .thenBy { it.title.length + it.snippet.length }
+                ) ?: group.first()
                 val sources = group.map { it.source }.distinct()
-                best.copy(source = sources.joinToString("+"), providerCount = sources.size)
+                val pivot = group.firstOrNull { it.pivotSeedKind != null }
+                best.copy(
+                    source = sources.joinToString("+"),
+                    providerCount = sources.size,
+                    pivotSeedKind = best.pivotSeedKind ?: pivot?.pivotSeedKind,
+                    pivotExactValue = best.pivotExactValue ?: pivot?.pivotExactValue,
+                    pivotNormalizedValue = best.pivotNormalizedValue ?: pivot?.pivotNormalizedValue,
+                    pivotEvidenceIds = if (best.pivotEvidenceIds.isNotEmpty()) {
+                        best.pivotEvidenceIds
+                    } else {
+                        pivot?.pivotEvidenceIds.orEmpty()
+                    },
+                    pivotDiscoveryPath = if (best.pivotDiscoveryPath.isNotEmpty()) {
+                        best.pivotDiscoveryPath
+                    } else {
+                        pivot?.pivotDiscoveryPath.orEmpty()
+                    },
+                    pivotStage = best.pivotStage ?: pivot?.pivotStage,
+                    pivotSourceUrl = best.pivotSourceUrl ?: pivot?.pivotSourceUrl,
+                    contentHashSha256 = best.contentHashSha256
+                        ?: pivot?.contentHashSha256
+                        ?: group.firstNotNullOfOrNull { it.contentHashSha256 },
+                    verifiedPage = best.verifiedPage
+                        ?: pivot?.verifiedPage
+                        ?: group.firstNotNullOfOrNull { it.verifiedPage }
+                )
             }
+
+        /**
+         * Combines the original authorized signals with a query-scoped typed
+         * pivot for direct page attribution. The scoped input is deliberately
+         * not used to build the search plan; it is only an additional signal
+         * on the page that was reached through that pivot.
+         */
+        internal fun mergeVerificationInput(
+            authorized: IdentityInput,
+            scoped: IdentityInput
+        ): IdentityInput {
+            val effectiveFullName = authorized.fullName.ifBlank { scoped.fullName }
+            val scopedNameAlias = scoped.fullName.takeIf {
+                it.isNotBlank() && !sameIdentityText(it, effectiveFullName)
+            }
+            return authorized.copy(
+                fullName = effectiveFullName,
+                aliases = (authorized.aliases + scoped.aliases + scopedNameAlias.orEmpty()).distinct(),
+                emails = (authorized.emails + scoped.emails).distinct(),
+                phones = (authorized.phones + scoped.phones).distinct(),
+                locations = (authorized.locations + scoped.locations).distinct(),
+                organizations = (authorized.organizations + scoped.organizations).distinct(),
+                usernames = (authorized.usernames + scoped.usernames).distinct(),
+                primaryUsername = authorized.primaryUsername ?: scoped.primaryUsername,
+                profileUrls = (authorized.profileUrls + scoped.profileUrls).distinct(),
+                selfieUri = authorized.selfieUri ?: scoped.selfieUri
+            )
+        }
+
+        private fun sameIdentityText(first: String, second: String): Boolean =
+            first.trim().replace(Regex("\\s+"), " ")
+                .equals(second.trim().replace(Regex("\\s+"), " "), ignoreCase = true)
 
         private fun consensusBonus(providerCount: Int): Float =
             ((providerCount - 1).coerceAtLeast(0) * PROVIDER_CONSENSUS_BONUS)
@@ -651,8 +1157,28 @@ class PublicSearchDiscoveryService(private val context: Context) {
         private fun bingUrl(query: String): String =
             "https://www.bing.com/search?q=${urlEncode(query)}&count=10"
 
+        fun isAbsoluteHttpUrl(url: String?): Boolean {
+            if (url.isNullOrBlank()) return false
+            val parsed = url.trim().toHttpUrlOrNull() ?: return false
+            return (parsed.scheme.equals("http", ignoreCase = true) ||
+                parsed.scheme.equals("https", ignoreCase = true)) &&
+                parsed.host.isNotBlank()
+        }
+
         private fun userAgentFor(attempt: Int): String = USER_AGENTS[attempt % USER_AGENTS.size]
-        private fun quote(term: String): String = "\"${term.replace("\"", " ").trim().take(90)}\""
+
+        private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
+
+        private fun quote(term: String): String {
+            val cleaned = term.replace("\"", " ").trim()
+            return if (cleaned.contains('@')) {
+                "\"$cleaned\""
+            } else {
+                "\"${cleaned.take(90)}\""
+            }
+        }
         private fun cleanTerm(term: String): String? = term.trim().removePrefix("@").takeIf { it.isNotBlank() }
 
         private fun buildHandleTerms(input: IdentityInput): List<String> =
@@ -708,6 +1234,99 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 "boards.4chan.org", "medium.com", "dev.to", "gitlab.com",
                 "bsky.app", "mastodon.social", "news.ycombinator.com"
             ).any { host == it || host.endsWith(".$it") }
+        }
+
+        private val AMBIGUITY_MARKERS = listOf(
+            "candidate",
+            "possible account",
+            "not attributed",
+            "unknown origin",
+            "review only",
+            "review manually",
+            "unverified",
+            "un verified",
+            "unconfirmed",
+            "un confirmed",
+            "not found",
+            "notfound",
+            "soft",
+            "challenge",
+            "auth",
+            "unverifiable",
+            "offline",
+            "breach",
+            "leak",
+            "dump",
+            "compromised",
+            "stealer",
+            "pwned",
+            "import",
+            "third party",
+            "thirdparty",
+            "ambiguous"
+        )
+
+        private val AMBIGUITY_REGEX = Regex(
+            "\\b(?:${AMBIGUITY_MARKERS.joinToString("|") { it.replace(" ", "\\s+") }})\\b",
+            RegexOption.IGNORE_CASE
+        )
+
+        fun isAmbiguousOrUnverifiedMetadata(text: String): Boolean {
+            val normalized = text.lowercase(Locale.ROOT)
+                .replace('-', ' ')
+                .replace('_', ' ')
+            return AMBIGUITY_REGEX.containsMatchIn(normalized)
+        }
+
+        private fun isBreachImportOrAmbiguousFinding(finding: Finding): Boolean {
+            val text = "${finding.value} ${finding.evidenceSnippet.orEmpty()} ${finding.remediation}"
+            return isAmbiguousOrUnverifiedMetadata(text)
+        }
+
+        private fun isAmbiguousHandle(handle: String): Boolean {
+            val lower = handle.lowercase(Locale.ROOT)
+            return lower in AMBIGUOUS_HANDLE_VALUES || isAmbiguousOrUnverifiedMetadata(lower)
+        }
+
+        private val AMBIGUOUS_HANDLE_VALUES = setOf(
+            "unknown", "undefined", "null", "none", "anonymous", "n/a", "na",
+            "user", "profile", "admin", "root", "default"
+        )
+
+        private fun normalizeEmailValue(raw: String): String? {
+            val trimmed = raw.trim().removePrefix("@")
+            if (trimmed.length !in 5..254 || trimmed.count { it == '@' } != 1) return null
+            val local = trimmed.substringBefore('@').trim()
+            val domain = trimmed.substringAfter('@').trim()
+            if (local.isBlank() || domain.isBlank() || !domain.contains('.') ||
+                domain.startsWith('.') || domain.endsWith('.') || domain.contains("..") ||
+                trimmed.any(Char::isWhitespace)
+            ) return null
+            return trimmed.lowercase(Locale.ROOT)
+        }
+
+        private fun isAmbiguousEmail(email: String): Boolean {
+            val lower = email.lowercase(Locale.ROOT)
+            val local = lower.substringBefore('@')
+            val domain = lower.substringAfter('@')
+            if (GENERIC_EMAIL_PREFIXES.any { local == it || local.startsWith("$it+") }) return true
+            if (AMBIGUOUS_EMAIL_DOMAINS.any { domain == it }) return true
+            return isAmbiguousOrUnverifiedMetadata(lower)
+        }
+
+        private val GENERIC_EMAIL_PREFIXES = setOf(
+            "noreply", "no-reply", "donotreply", "do-not-reply",
+            "support", "info", "admin", "contact", "help", "postmaster"
+        )
+
+        private val AMBIGUOUS_EMAIL_DOMAINS = setOf(
+            "localhost", "invalid"
+        )
+
+        private fun isAmbiguousPhone(digits: String): Boolean {
+            if (digits.toSet().size <= 1) return true
+            if (digits in listOf("12345678", "123456789", "1234567890", "0123456789")) return true
+            return false
         }
     }
 }

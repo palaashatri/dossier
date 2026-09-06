@@ -7,11 +7,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Tests for [HandleExtractor] — the pivot-discovery core. These lock in the
- * behavior that lets the app find handles like "samplecaster" that don't derive
- * from a name, by reading self-disclosed links/mentions in confirmed profiles.
- */
+/** Tests for public-profile pivot extraction and admission. */
 class HandleExtractorTest {
 
     private fun extract(
@@ -23,8 +19,7 @@ class HandleExtractorTest {
     ) = HandleExtractor.extract(text, links, sourceUrl, scanned, sourceLabel)
 
     @Test
-    fun extractsTwitchHandleFromSelfDisclosedUrl() {
-        // The samplecaster case: a Twitch link mentioned in a confirmed profile.
+    fun extractsTwitchHandleFromExplicitPublicUrl() {
         val results = extract(
             text = "Hi, I'm Jane. Catch my streams at https://www.twitch.tv/samplecaster",
             links = listOf("https://www.twitch.tv/samplecaster")
@@ -33,7 +28,8 @@ class HandleExtractorTest {
         assertTrue("Should discover the Twitch handle", twitch != null)
         assertEquals("samplecaster", twitch!!.candidate.username)
         assertEquals("https://www.twitch.tv/samplecaster", twitch.candidate.url)
-        assertTrue("Provenance should cite the source profile", twitch.provenance.contains("GitHub"))
+        assertTrue(twitch.provenance.contains("GitHub"))
+        assertTrue(twitch.admissionExplanation.contains("cross-link", ignoreCase = true))
     }
 
     @Test
@@ -41,49 +37,51 @@ class HandleExtractorTest {
         val results = extract(
             text = "",
             links = listOf(
-                "https://www.reddit.com/user/sampleuser",
+                "https://www.reddit.com/user/sampleuser42",
                 "https://gitlab.com/jdoe",
                 "https://x.com/janedoe"
             )
         )
         val platforms = results.map { it.candidate.platform }
-        assertTrue("Reddit handle extracted", platforms.contains(Platform.Reddit))
-        assertTrue("GitLab handle extracted", platforms.contains(Platform.GitLab))
+        assertTrue(platforms.contains(Platform.Reddit))
+        assertTrue(platforms.contains(Platform.GitLab))
     }
 
     @Test
-    fun extractsAtMentionHandlesWithPlatformContext() {
-        // "also on twitch as samplecaster" phrase.
-        val results = extract(
-            text = "I stream games, also on twitch as samplecaster on weekends."
-        )
+    fun extractsPlatformMentionWhenHandleIsNotGeneric() {
+        val results = extract(text = "I stream games, also on twitch as samplecaster on weekends.")
         val twitch = results.firstOrNull { it.candidate.platform == Platform.Twitch }
-        assertTrue("Should catch bare handle via mention phrase", twitch != null)
+        assertTrue(twitch != null)
         assertEquals("samplecaster", twitch!!.candidate.username)
+        assertTrue(twitch.admissionExplanation.contains("mention", ignoreCase = true))
+    }
+
+    @Test
+    fun rejectsGenericHandleFromRecursiveMention() {
+        val results = extract(text = "For help see twitch: @support")
+        assertTrue("Generic handles must not recursively expand from one weak mention", results.isEmpty())
     }
 
     @Test
     fun extractsPlatformColonAtHandlePhrase() {
         val results = extract(
-            text = "Find me elsewhere — reddit: @sampleuser, instagram: @jane.doe"
+            text = "Find me elsewhere — reddit: @sampleuser42, instagram: @jane.doe"
         )
         val reddit = results.firstOrNull { it.candidate.platform == Platform.Reddit }
         val insta = results.firstOrNull { it.candidate.platform == Platform.Instagram }
-        assertTrue("Reddit via colon phrase", reddit != null)
-        assertTrue("Instagram via colon phrase", insta != null)
+        assertTrue(reddit != null)
+        assertTrue(insta != null)
     }
 
     @Test
     fun excludesSourceProfileSelfMention() {
-        // The audited profile is GitHub/janedoe — a self-link to it shouldn't
-        // re-surface as a new candidate.
         val results = extract(
             text = "My GitHub is https://github.com/janedoe and twitch https://www.twitch.tv/samplecaster",
             links = listOf("https://github.com/janedoe"),
             sourceUrl = "https://github.com/janedoe"
         )
         val github = results.firstOrNull { it.candidate.platform == Platform.GitHub }
-        assertFalse("Must not re-discover the source profile itself", github != null)
+        assertFalse(github != null)
     }
 
     @Test
@@ -93,7 +91,7 @@ class HandleExtractorTest {
             links = listOf("https://www.twitch.tv/samplecaster"),
             scanned = setOf("https://www.twitch.tv/samplecaster")
         )
-        assertTrue("Must not re-scan already-checked URLs", results.isEmpty())
+        assertTrue(results.isEmpty())
     }
 
     @Test
@@ -107,7 +105,7 @@ class HandleExtractorTest {
                 "https://www.reddit.com/search"
             )
         )
-        assertTrue("Home/login/directory/search URLs must be filtered out", results.isEmpty())
+        assertTrue(results.isEmpty())
     }
 
     @Test
@@ -116,9 +114,8 @@ class HandleExtractorTest {
             text = "Contact: jane@users.noreply.github.com",
             links = emptyList()
         )
-        // The noreply host fragment shouldn't become a handle.
         val github = results.firstOrNull { it.candidate.platform == Platform.GitHub }
-        assertFalse("Must not treat noreply.github.com as a handle", github != null)
+        assertFalse(github != null)
     }
 
     @Test
@@ -128,17 +125,18 @@ class HandleExtractorTest {
             links = listOf("https://www.twitch.tv/samplecaster")
         )
         val twitch = results.filter { it.candidate.platform == Platform.Twitch }
-        assertEquals("Should dedupe the same URL found in text and links", 1, twitch.size)
+        assertEquals(1, twitch.size)
     }
 
     @Test
-    fun provenanceRecordsSourcePlatformLabel() {
+    fun provenanceRecordsSourceAndAdmissionReason() {
         val results = extract(
             text = "https://www.twitch.tv/samplecaster",
             sourceUrl = "https://x.com/janedoe",
             sourceLabel = "X"
         )
         val twitch = results.first()
-        assertEquals("discovered via X profile", twitch.provenance)
+        assertTrue(twitch.provenance.startsWith("discovered via X profile"))
+        assertTrue(twitch.admissionExplanation.isNotBlank())
     }
 }

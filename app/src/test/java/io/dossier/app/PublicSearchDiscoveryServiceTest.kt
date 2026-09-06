@@ -1,11 +1,20 @@
 package io.dossier.app
 
 import io.dossier.app.data.web.PublicSearchDiscoveryService
+import io.dossier.app.data.web.PublicPageVerifier
 import io.dossier.app.domain.model.IdentityInput
+import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.security.MessageDigest
 
 class PublicSearchDiscoveryServiceTest {
 
@@ -51,6 +60,56 @@ class PublicSearchDiscoveryServiceTest {
         assertEquals(1, results.size)
         assertEquals("https://github.com/janedoe", results.first().url)
         assertTrue(results.first().snippet.contains("privacy tools"))
+        assertEquals(sha256(html), results.first().contentHashSha256)
+    }
+
+    @Test
+    fun publicPageVerifierRetainsFetchedBodyHash() = runBlocking {
+        val url = "https://profile.example.test/jane"
+        val body = "<html><body>Jane Example public profile</body></html>"
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val outcome = PublicPageVerifier(client).verify(
+            input = IdentityInput(fullName = "Jane Example", profileUrls = listOf(url)),
+            url = url,
+            indexedTitle = "Jane Example",
+            indexedSnippet = "public profile"
+        )
+
+        assertTrue(outcome is PublicPageVerifier.Outcome.Verified)
+        assertEquals(
+            sha256(body),
+            (outcome as PublicPageVerifier.Outcome.Verified).contentHashSha256
+        )
+        val page = (outcome as PublicPageVerifier.Outcome.Verified).verifiedPage
+        assertNotNull(page)
+        assertEquals(sha256(body), page?.contentHashSha256)
+        assertTrue(page?.text.orEmpty().contains("Jane Example"))
+    }
+
+    @Test
+    fun verificationInput_mergedWithScopedInput_acceptsDiscoveredSignalsThatOriginalRejects() {
+        val url = "https://profile.example.test/discovered_user"
+        val body = "Original User profile for discovered_user."
+        val authorized = IdentityInput(fullName = "Original User", usernames = listOf("original"))
+        val scoped = IdentityInput(fullName = "Original User", usernames = listOf("discovered_user"))
+
+        val merged = PublicSearchDiscoveryService.mergeVerificationInput(authorized, scoped)
+        val originalAssessment = PublicPageVerifier.assessIdentitySignals(authorized, url, body)
+        val mergedAssessment = PublicPageVerifier.assessIdentitySignals(merged, url, body)
+
+        assertFalse("Original context alone should reject missing signal", originalAssessment.verificationQualified)
+        assertTrue("Merged context should verify via discovered pivot", mergedAssessment.verificationQualified)
     }
 
     @Test
@@ -121,4 +180,418 @@ class PublicSearchDiscoveryServiceTest {
             deepQueries.any { it.contains("site:github.com") && it.contains("jane.doe@example.com") }
         )
     }
+
+    @Test
+    fun buildQueries_includesSafeTypedSeedsWithinLimits() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val safeSeeds = listOf(
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Url,
+                value = "https://safe.example.test/profile",
+                exactValue = "https://safe.example.test/profile",
+                isVerified = true,
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_PROFILE,
+                evidenceIds = listOf("ev1"),
+                sourceUrl = "https://profile.example.test/jane"
+            ),
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Domain,
+                value = "safe.example.test",
+                exactValue = "safe.example.test",
+                isVerified = true,
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_WEB,
+                evidenceIds = listOf("ev2"),
+                sourceUrl = "https://profile.example.test/jane"
+            )
+        )
+
+        val queries = PublicSearchDiscoveryService.buildSearchQueries(input, typedSeeds = safeSeeds)
+
+        assertTrue("Emits quoted URL", queries.contains("\"https://safe.example.test/profile\""))
+        assertTrue("Emits quoted domain", queries.contains("\"safe.example.test\""))
+        assertTrue("Emits site:domain for domains", queries.contains("site:safe.example.test"))
+    }
+
+    @Test
+    fun buildQueries_rejectsUnsafeTypedSeeds() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val unsafeSeeds = listOf(
+            // Unverified candidate
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Url,
+                value = "https://candidate.example.test",
+                exactValue = "https://candidate.example.test",
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Candidate,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Candidate,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_WEB
+            ),
+            // Breach index
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Domain,
+                value = "breach.example.test",
+                exactValue = "breach.example.test",
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Observed,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.BREACH_INDEX
+            ),
+            // Image (not in allowed kinds)
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Image,
+                value = "https://image.example.test/img.png",
+                exactValue = "https://image.example.test/img.png",
+                isVerified = true,
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_WEB
+            )
+        )
+
+        val queries = PublicSearchDiscoveryService.buildSearchQueries(input, typedSeeds = unsafeSeeds)
+
+        assertTrue(queries.none { it.contains("candidate.example.test") })
+        assertTrue(queries.none { it.contains("breach.example.test") })
+        assertTrue(queries.none { it.contains("image.example.test") })
+    }
+
+    @Test
+    fun buildSearchQueryPlan_includesSafeEmailAndPhoneSeedsBeforeOriginalTerms() {
+        val input = IdentityInput(fullName = "Jane Doe", emails = listOf("original@example.test"))
+        val safeSeeds = listOf(
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Email,
+                value = "safe@example.test",
+                exactValue = "safe@example.test",
+                normalizedValue = "safe@example.test",
+                isVerified = true,
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_PROFILE,
+                evidenceIds = listOf("ev-email"),
+                sourceUrl = "https://profile.example.test/jane"
+            ),
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Phone,
+                value = "15551234567",
+                exactValue = "+1 (555) 123-4567",
+                normalizedValue = "15551234567",
+                isVerified = true,
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.UserInput,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.USER_IMPORTED,
+                evidenceIds = emptyList()
+            )
+        )
+
+        val plan = PublicSearchDiscoveryService.buildSearchQueryPlan(input, typedSeeds = safeSeeds)
+        val queries = plan.map { it.query }
+
+        assertTrue("Emits quoted email", queries.contains("\"safe@example.test\""))
+        assertTrue("Emits quoted exact phone", queries.contains("\"+1 (555) 123-4567\""))
+        assertTrue("Emits quoted normalized phone", queries.contains("\"15551234567\""))
+
+        val emailIndex = queries.indexOf("\"safe@example.test\"")
+        val originalEmailIndex = queries.indexOf("\"original@example.test\"")
+        assertTrue("Safe seeds should appear before original term exact queries", emailIndex < originalEmailIndex)
+    }
+
+    @Test
+    fun buildSearchQueryPlan_prioritizesScopedNameAndUsernamePivotsBeforeOriginalTerms() {
+        fun verifiedSeed(kind: io.dossier.app.domain.discovery.TypedSeedKind, value: String) =
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = kind,
+                value = if (kind == io.dossier.app.domain.discovery.TypedSeedKind.Username) {
+                    value.removePrefix("@").lowercase()
+                } else {
+                    value
+                },
+                exactValue = value,
+                normalizedValue = if (kind == io.dossier.app.domain.discovery.TypedSeedKind.Username) {
+                    value.removePrefix("@").lowercase()
+                } else {
+                    value
+                },
+                isVerified = true,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_PROFILE,
+                evidenceIds = if (kind == io.dossier.app.domain.discovery.TypedSeedKind.Name) {
+                    listOf("name-ev-a", "name-ev-b")
+                } else {
+                    listOf("username-ev")
+                },
+                sourceUrl = "https://profile.example.test/source"
+            )
+
+        val plan = PublicSearchDiscoveryService.buildSearchQueryPlan(
+            input = IdentityInput(fullName = "Original Person", usernames = listOf("original_user")),
+            typedSeeds = listOf(
+                verifiedSeed(io.dossier.app.domain.discovery.TypedSeedKind.Name, "Jane Example"),
+                verifiedSeed(io.dossier.app.domain.discovery.TypedSeedKind.Username, "sample_user")
+            )
+        )
+        val queries = plan.map { it.query }
+
+        assertEquals("\"Jane Example\"", queries[0])
+        assertEquals("\"sample_user\"", queries[1])
+        assertEquals("typed-seed-exact", plan[0].stage)
+        assertEquals(io.dossier.app.domain.discovery.TypedSeedKind.Name, plan[0].pivotSeedKind)
+        assertEquals(io.dossier.app.domain.discovery.TypedSeedKind.Username, plan[1].pivotSeedKind)
+        assertTrue(queries.indexOf("\"Jane Example\"") < queries.indexOf("\"Original Person\""))
+        assertTrue(queries.indexOf("\"sample_user\"") < queries.indexOf("\"original_user\""))
+    }
+
+    @Test
+    fun recursiveVerificationContextRetainsOriginalAndScopedPivotSignals() {
+        val authorized = IdentityInput(fullName = "Original Person")
+        val scopedUsername = IdentityInput(
+            fullName = "",
+            usernames = listOf("sample_user")
+        )
+        val usernameUrl = "https://profiles.example.test/sample_user"
+        val usernamePage = "Original Person @sample_user"
+
+        val originalOnly = PublicPageVerifier.assessIdentitySignals(
+            authorized,
+            usernameUrl,
+            usernamePage
+        )
+        val merged = PublicPageVerifier.assessIdentitySignals(
+            PublicSearchDiscoveryService.mergeVerificationInput(authorized, scopedUsername),
+            usernameUrl,
+            usernamePage
+        )
+
+        assertTrue("Original context alone has no matching handle", !originalOnly.verificationQualified)
+        assertTrue("Merged context can attribute the scoped handle", merged.verificationQualified)
+
+        val nameAuthorized = IdentityInput(fullName = "")
+        val scopedName = IdentityInput(
+            fullName = "Jane Example",
+            organizations = listOf("Example Org")
+        )
+        val namePage = "Jane Example Example Org"
+        val nameMerged = PublicSearchDiscoveryService.mergeVerificationInput(nameAuthorized, scopedName)
+        val originalNameAssessment = PublicPageVerifier.assessIdentitySignals(
+            nameAuthorized,
+            usernameUrl,
+            namePage
+        )
+        val nameAssessment = PublicPageVerifier.assessIdentitySignals(nameMerged, usernameUrl, namePage)
+        assertTrue("Blank original context cannot attribute the scoped name", !originalNameAssessment.verificationQualified)
+        assertEquals("Scoped name fills an empty authorized name", "Jane Example", nameMerged.fullName)
+        assertFalse("The effective full name must not be duplicated as its own alias", nameMerged.aliases.contains("Jane Example"))
+        assertTrue("Merged name context retains an independent organization signal", nameAssessment.verificationQualified)
+
+        val nameOnlyMerged = PublicSearchDiscoveryService.mergeVerificationInput(
+            nameAuthorized,
+            IdentityInput(fullName = "Jane Example")
+        )
+        assertFalse(
+            "A scoped name alone is still insufficient attribution",
+            PublicPageVerifier.assessIdentitySignals(nameOnlyMerged, usernameUrl, "Jane Example")
+                .verificationQualified
+        )
+
+        val whitespaceMerged = PublicSearchDiscoveryService.mergeVerificationInput(
+            IdentityInput(fullName = "Jane Example"),
+            IdentityInput(fullName = "  jane   example  ")
+        )
+        assertFalse(
+            "Whitespace/case variants must not become a duplicate alias",
+            whitespaceMerged.aliases.any { it.trim().equals("jane example", ignoreCase = true) }
+        )
+    }
+
+    @Test
+    fun scopedNameAliasRequiresIndependentOrganizationOrLocationContext() {
+        val authorized = IdentityInput(fullName = "Original Person")
+        val scopedName = IdentityInput(fullName = "Jane Example")
+        val aliasOnly = PublicSearchDiscoveryService.mergeVerificationInput(authorized, scopedName)
+
+        assertFalse(
+            "A scoped name alias alone is still insufficient attribution",
+            PublicPageVerifier.assessIdentitySignals(
+                aliasOnly,
+                "https://profiles.example.test/jane",
+                "Jane Example"
+            ).verificationQualified
+        )
+
+        val withOrganization = PublicSearchDiscoveryService.mergeVerificationInput(
+            authorized,
+            scopedName.copy(organizations = listOf("Example Org"))
+        )
+        assertTrue(
+            "A scoped name alias plus an independent organization qualifies",
+            PublicPageVerifier.assessIdentitySignals(
+                withOrganization,
+                "https://profiles.example.test/jane",
+                "Jane Example Example Org"
+            ).verificationQualified
+        )
+
+        val withLocation = PublicSearchDiscoveryService.mergeVerificationInput(
+            authorized,
+            scopedName.copy(locations = listOf("Example City"))
+        )
+        assertTrue(
+            "A scoped name alias plus an independent location qualifies",
+            PublicPageVerifier.assessIdentitySignals(
+                withLocation,
+                "https://profiles.example.test/jane",
+                "Jane Example Example City"
+            ).verificationQualified
+        )
+    }
+
+    @Test
+    fun scoreResult_keepsNameAndUsernamePivotLeadsEligibleForVerification() {
+        val input = IdentityInput(fullName = "Original Person")
+        val usernameLead = PublicSearchDiscoveryService.PublicSearchResult(
+            title = "Profile result",
+            snippet = "",
+            url = "https://profiles.example.test/sample_user",
+            query = "\"sample_user\"",
+            source = "Test",
+            pivotSeedKind = io.dossier.app.domain.discovery.TypedSeedKind.Username,
+            pivotExactValue = "sample_user"
+        )
+        val nameLead = usernameLead.copy(
+            url = "https://documents.example.test/jane",
+            query = "\"Jane Example\"",
+            pivotSeedKind = io.dossier.app.domain.discovery.TypedSeedKind.Name,
+            pivotExactValue = "Jane Example"
+        )
+
+        assertTrue(PublicSearchDiscoveryService.scoreResult(input, usernameLead) >= 0.22f)
+        assertTrue(PublicSearchDiscoveryService.scoreResult(input, nameLead) >= 0.22f)
+    }
+
+    @Test
+    fun buildSearchQueryPlan_rejectsCandidateBreachImportOffSourceSeeds() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val unsafeSeeds = listOf(
+            // Unverified candidate Email
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Email,
+                value = "candidate@example.test",
+                exactValue = "candidate@example.test",
+                normalizedValue = "candidate@example.test",
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Candidate,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Candidate,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_WEB
+            ),
+            // Breach index Phone
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Phone,
+                value = "5550001111",
+                exactValue = "5550001111",
+                normalizedValue = "5550001111",
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Observed,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.BREACH_INDEX
+            ),
+            // Evidence Email with invalid sourceUrl
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Email,
+                value = "badurl@example.test",
+                exactValue = "badurl@example.test",
+                normalizedValue = "badurl@example.test",
+                isVerified = true,
+                depth = 1,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_WEB,
+                evidenceIds = listOf("ev"),
+                sourceUrl = "javascript:alert()"
+            )
+        )
+
+        val plan = PublicSearchDiscoveryService.buildSearchQueryPlan(input, typedSeeds = unsafeSeeds)
+        val queries = plan.map { it.query }
+
+        assertTrue(queries.none { it.contains("candidate@example.test") })
+        assertTrue(queries.none { it.contains("5550001111") })
+        assertTrue(queries.none { it.contains("badurl@example.test") })
+    }
+
+    @Test
+    fun buildSearchQueryPlan_preservesMetadataInEntries() {
+        val input = IdentityInput(fullName = "Jane Doe")
+        val safeSeeds = listOf(
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = io.dossier.app.domain.discovery.TypedSeedKind.Email,
+                value = "meta@example.test",
+                exactValue = "meta@example.test",
+                normalizedValue = "meta@example.test",
+                isVerified = true,
+                depth = 2,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_WEB,
+                evidenceIds = listOf("ev123"),
+                sourceUrl = "https://source.example.test",
+                discoveryPath = listOf("https://path.example.test")
+            )
+        )
+
+        val plan = PublicSearchDiscoveryService.buildSearchQueryPlan(input, typedSeeds = safeSeeds)
+        val entry = plan.find { it.query == "\"meta@example.test\"" }
+
+        assertNotNull(entry)
+        assertEquals("typed-seed-exact", entry?.stage)
+        assertEquals(io.dossier.app.domain.discovery.TypedSeedKind.Email, entry?.pivotSeedKind)
+        assertEquals("meta@example.test", entry?.pivotExactValue)
+        assertEquals("meta@example.test", entry?.pivotNormalizedValue)
+        assertEquals(listOf("ev123"), entry?.pivotEvidenceIds)
+        assertEquals("https://source.example.test", entry?.pivotSourceUrl)
+        assertEquals(listOf("https://path.example.test"), entry?.pivotDiscoveryPath)
+    }
+
+    @Test
+    fun mergeProviderEvidence_retainsTypedMetadataForDuplicateMerge() {
+        // We use Reflection to call the private method
+        val method = PublicSearchDiscoveryService.Companion::class.java.getDeclaredMethod("mergeProviderEvidence", List::class.java)
+        method.isAccessible = true
+
+        val r1 = PublicSearchDiscoveryService.PublicSearchResult(
+            title = "Result", snippet = "Snip", url = "https://example.test/profile", query = "query", source = "Google",
+            pivotSeedKind = io.dossier.app.domain.discovery.TypedSeedKind.Email,
+            pivotExactValue = "user@example.test",
+            pivotEvidenceIds = listOf("ev1")
+        )
+        val r2 = PublicSearchDiscoveryService.PublicSearchResult(
+            title = "Result better", snippet = "Snip better", url = "https://example.test/profile", query = "query", source = "Bing",
+            pivotSeedKind = null // No pivot metadata
+        )
+
+        @Suppress("UNCHECKED_CAST")
+        val merged = method.invoke(PublicSearchDiscoveryService.Companion, listOf(r1, r2)) as List<PublicSearchDiscoveryService.PublicSearchResult>
+
+        assertEquals(1, merged.size)
+        val best = merged.first()
+        assertEquals("Result", best.title) // r1 wins because it has pivotSeedKind != null
+        assertEquals("Google+Bing", best.source)
+        assertEquals(2, best.providerCount)
+        assertEquals(io.dossier.app.domain.discovery.TypedSeedKind.Email, best.pivotSeedKind)
+        assertEquals("user@example.test", best.pivotExactValue)
+        assertEquals(listOf("ev1"), best.pivotEvidenceIds)
+    }
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte) }
 }

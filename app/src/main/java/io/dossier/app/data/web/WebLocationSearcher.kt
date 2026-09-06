@@ -24,6 +24,8 @@ class WebLocationSearcher(private val context: Context) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
+        .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+        .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
         .build()
 
     data class Result(
@@ -46,7 +48,7 @@ class WebLocationSearcher(private val context: Context) {
         try {
             val request = Request.Builder()
                 .url("https://html.duckduckgo.com/html/?q=${urlEncode(query)}")
-                .header("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0")
+                .header("User-Agent", "Dossier/0.1 public-exposure-audit")
                 .build()
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
@@ -86,7 +88,8 @@ class WebLocationSearcher(private val context: Context) {
                         ReverseImageLookupResult.WebEvidence(
                             title = title.ifBlank { "Untitled result" },
                             snippet = snippet.take(200),
-                            url = link
+                            url = link,
+                            origin = ReverseImageLookupResult.WebEvidenceOrigin.ImageSearch
                         )
                     )
                 }
@@ -98,13 +101,13 @@ class WebLocationSearcher(private val context: Context) {
         // can't run away. Each fetch is individually try/caught.
         if (deepResearch && evidence.isNotEmpty()) {
             evidence
-                .filter { it.url.startsWith("http") }
+                .filter { DiscoveryHttpPolicy.isSafePublicHttpUrl(it.url) }
                 .take(2)
                 .forEach { ev ->
                     try {
                         val req = Request.Builder()
                             .url(ev.url)
-                            .header("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0")
+                            .header("User-Agent", "Dossier/0.1 public-exposure-audit")
                             .build()
                         client.newCall(req).execute().use { resp ->
                             if (resp.isSuccessful) {
@@ -205,9 +208,9 @@ class WebLocationSearcher(private val context: Context) {
                     .maxByOrNull { it.value }?.key
             }
 
-            // No place-like phrase found — return the query itself so the maps link
-            // at least points somewhere useful.
-            return query
+            // No place-like phrase found — do not fabricate a location from the
+            // raw query text unless there is an explicit source-backed observation.
+            return null
         }
 
         private fun urlEncode(s: String): String =
