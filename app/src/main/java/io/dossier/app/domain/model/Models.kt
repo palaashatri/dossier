@@ -673,5 +673,9 @@ data class BreachDigest(
     val email: String,
     val breachCount: Int,
     val sources: List<String> = emptyList(),
-    val note: String? = null
+    val note: String? = null,
+    /** Provider breach names/labels, kept separate from ordinary public hits. */
+    val breachSources: List<String> = emptyList(),
+    /** Ordinary public-web source URLs returned by the exposure search. */
+    val publicEvidenceUrls: List<String> = emptyList()
 )

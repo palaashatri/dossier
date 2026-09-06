@@ -3,6 +3,7 @@ package io.dossier.app.domain.evidence
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.FindingType
+import io.dossier.app.domain.model.FaceComparisonProvenance
 import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import kotlinx.serialization.Serializable
@@ -102,7 +103,9 @@ data class Evidence(
      * [FindingAttribution.Unconfirmed] is retained as such rather than being
      * replaced by an inferred attribution.
      */
-    val attribution: FindingAttribution? = null
+    val attribution: FindingAttribution? = null,
+    /** Structured provenance for local face-comparison observations. */
+    val faceComparisonProvenance: FaceComparisonProvenance? = null
 ) {
     init {
         require(discoveryPath.size <= MAX_DISCOVERY_PATH_STEPS) {
@@ -165,7 +168,9 @@ enum class EvidenceKind {
     Archive,
     Photo,
     Image,
-    Domain
+    Domain,
+    /** Provider-derived breach membership; never an identity assertion. */
+    BreachMembership
 }
 
 /**
@@ -359,6 +364,7 @@ fun Evidence.toFinding(): Finding = Finding(
         EvidenceKind.PublicImageEvidence -> FindingType.PublicImageEvidence
         EvidenceKind.ImageConsistency -> FindingType.ImageConsistency
         EvidenceKind.SensitiveSnippet -> FindingType.SensitiveSnippet
+        EvidenceKind.BreachMembership -> FindingType.SensitiveSnippet
         EvidenceKind.Url -> FindingType.PublicSearchEvidence
         EvidenceKind.Document -> FindingType.PublicSearchEvidence
         EvidenceKind.Archive -> FindingType.PublicSearchEvidence

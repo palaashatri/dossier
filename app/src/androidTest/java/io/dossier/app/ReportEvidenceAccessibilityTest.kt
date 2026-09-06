@@ -2,11 +2,15 @@ package io.dossier.app
 
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.dossier.app.domain.case.DossierCase
@@ -41,6 +45,34 @@ class ReportEvidenceAccessibilityTest {
     @After
     fun clearSession() {
         ScanSession.purgeSession(ApplicationProvider.getApplicationContext())
+    }
+
+    @Test
+    fun allReportTabsAreReachableAndReadable() {
+        ScanSession.restoreFromCase(
+            DossierCase(
+                createdAt = "2026-08-25 00:00",
+                subjectName = "Authorized subject",
+                input = IdentityInput(fullName = "Authorized subject")
+            )
+        )
+
+        composeRule.setContent {
+            DossierTheme(darkTheme = false) {
+                ReportScreen(
+                    onReset = {},
+                    onNavigateToBrowser = {}
+                )
+            }
+        }
+
+        val tabs = listOf("Overview", "Evidence", "Timeline", "Connections", "Actions")
+        tabs.forEach { tab ->
+            composeRule.onNode(hasText(tab) and hasClickAction())
+                .performScrollTo()
+                .assertIsDisplayed()
+                .performClick()
+        }
     }
 
     @Test
@@ -86,7 +118,7 @@ class ReportEvidenceAccessibilityTest {
             }
         }
 
-        composeRule.onNodeWithText("Evidence").performClick()
+        composeRule.onNode(hasText("Evidence") and hasClickAction()).performClick()
         val sourceDescription = "Open evidence source $source"
         val sourceNode = composeRule
             .onNodeWithContentDescription(sourceDescription)
@@ -129,7 +161,7 @@ class ReportEvidenceAccessibilityTest {
                 )
             }
         }
-        composeRule.onNodeWithText("Evidence").performClick()
+        composeRule.onNode(hasText("Evidence") and hasClickAction()).performClick()
 
         val reject = composeRule.onNodeWithContentDescription("Reject evidence correction")
         assertEquals(
@@ -205,7 +237,7 @@ class ReportEvidenceAccessibilityTest {
                 )
             }
         }
-        composeRule.onNodeWithText("Evidence").performClick()
+        composeRule.onNode(hasText("Evidence") and hasClickAction()).performClick()
 
         val profileSource = composeRule
             .onNodeWithContentDescription("Open profile $source")

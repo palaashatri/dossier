@@ -12,8 +12,9 @@ import io.dossier.app.domain.model.IdentityInput
 
 /**
  * Production bridge from canonical evidence to the typed admission queue.
- * Execution remains unavailable; this adapter only records safe, provenance-
- * carrying pivots for a future reviewed executor.
+ * The reviewed URL/domain/document/archive executor consumes admitted seeds;
+ * this adapter only records safe, provenance-carrying pivots and does not
+ * perform execution itself.
  */
 object TypedSeedEvidenceAdapter {
     /**
@@ -190,12 +191,8 @@ object TypedSeedEvidenceAdapter {
  * the same verification, origin, source, and bounded-value checks.
  */
 object TypedSeedSafety {
-    val publicFetchKinds: Set<TypedSeedKind> = setOf(
-        TypedSeedKind.Url,
-        TypedSeedKind.Domain,
-        TypedSeedKind.Document,
-        TypedSeedKind.Archive,
-    )
+    /** The reviewed public-fetch executor's supported seed kinds. */
+    val publicFetchKinds: Set<TypedSeedKind> = EXECUTABLE_TYPED_SEED_KINDS
 
     val publicSearchKinds: Set<TypedSeedKind> = publicFetchKinds + setOf(
         TypedSeedKind.Email,

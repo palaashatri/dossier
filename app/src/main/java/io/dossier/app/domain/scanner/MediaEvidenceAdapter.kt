@@ -706,6 +706,8 @@ private fun mergeEvidence(first: Evidence, second: Evidence): Evidence {
         attribution = strongerAttribution(first.attribution, second.attribution),
         contentHashSha256 = preferred.contentHashSha256 ?: other.contentHashSha256,
         parserVersion = preferred.parserVersion ?: other.parserVersion,
+        faceComparisonProvenance = preferred.faceComparisonProvenance
+            ?: other.faceComparisonProvenance,
         historical = first.historical && second.historical,
         attributeKind = preferred.attributeKind ?: other.attributeKind,
         locationEvidenceClass = strongerLocationEvidenceClass(

@@ -25,8 +25,8 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -308,14 +308,11 @@ fun ReportScreen(
                 )
             }
 
-            // Keep every report view reachable without ellipsizing a tab label
-            // on a phone-width layout. The selected tab is brought into view
-            // automatically while the row remains horizontally scrollable.
             ScrollableTabRow(
                 selectedTabIndex = selectedViewIndex,
                 containerColor = NeuralTheme.CardBackground,
                 contentColor = NeuralTheme.Cobalt,
-                edgePadding = 12.dp,
+                edgePadding = 0.dp,
                 divider = { HorizontalDivider(color = NeuralTheme.BorderColor) }
             ) {
                 ReportTabItems(
@@ -447,7 +444,7 @@ private fun ReportTabItems(
                     fontWeight = if (selectedIndex == index) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
                     softWrap = false,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Visible
                 )
             }
         )

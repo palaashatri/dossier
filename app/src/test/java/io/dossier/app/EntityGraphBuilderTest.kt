@@ -596,4 +596,68 @@ class EntityGraphBuilderTest {
             }
         )
     }
+
+    @Test
+    fun overridesLegacyFaceAndBreachProjectionsWithCanonicalEvidence() {
+        val input = IdentityInput(
+            fullName = "Jane Doe",
+            emails = listOf("jane@example.com")
+        )
+        val profileUrl = "https://example.test/jane"
+        val face = FaceConsistencyMatch(
+            profileUrl = profileUrl,
+            similarityScore = 0.88f,
+            warning = "High visual similarity"
+        )
+        val breach = BreachDigest(
+            email = "jane@example.com",
+            breachCount = 2,
+            sources = listOf("ExampleBreach"),
+            note = null
+        )
+        val faceEvidence = Evidence(
+            id = "canonical-face",
+            kind = EvidenceKind.ImageConsistency,
+            value = "Face match",
+            sourceUrl = profileUrl,
+            state = EvidenceState.Verified
+        )
+        val breachEvidence = Evidence(
+            id = "canonical-breach",
+            kind = EvidenceKind.BreachMembership,
+            value = "jane@example.com",
+            state = EvidenceState.Verified
+        )
+
+        val graph = EntityGraphBuilder.build(
+            input = input,
+            faceMatches = listOf(face),
+            breachDigests = listOf(breach),
+            evidence = listOf(faceEvidence, breachEvidence)
+        )
+
+        val subjectId = graph.entities.single { it.type == EntityType.Person }.id
+        val profileId = graph.entities.single { it.type == EntityType.Profile }.id
+        val imageId = graph.entities.single { it.type == EntityType.Image }.id
+        val emailId = graph.entities.single { it.type == EntityType.Email }.id
+        val breachId = graph.entities.single { it.type == EntityType.Breach }.id
+
+        val faceSimilarEdges = graph.edges.filter { it.fromId == subjectId && it.toId == imageId && it.relation == "face_similar_to" }
+        assertEquals(1, faceSimilarEdges.size)
+        assertTrue(faceSimilarEdges.single().evidenceIds.contains("canonical-face"))
+
+        val imageOfProfileEdges = graph.edges.filter { it.fromId == imageId && it.toId == profileId && it.relation == "image_of_profile" }
+        assertEquals(1, imageOfProfileEdges.size)
+        assertTrue(imageOfProfileEdges.single().evidenceIds.contains("canonical-face"))
+
+        val possibleProfileEdges = graph.edges.filter { it.fromId == subjectId && it.toId == profileId && it.relation == "possible_profile" }
+        assertTrue(possibleProfileEdges.isEmpty())
+
+        val exposedInEdges = graph.edges.filter { it.fromId == emailId && it.toId == breachId && it.relation == "exposed_in" }
+        assertEquals(1, exposedInEdges.size)
+        assertTrue(exposedInEdges.single().evidenceIds.contains("canonical-breach"))
+
+        val subjectBreachEdges = graph.edges.filter { it.fromId == subjectId && it.toId == breachId }
+        assertTrue(subjectBreachEdges.isEmpty())
+    }
 }

@@ -293,7 +293,12 @@ object ExposureLedgerPolicy {
             verificationState = strongerState(first.verificationState, second.verificationState),
             confidence = maxOf(first.confidence, second.confidence),
             attribution = strongerAttribution(first.attribution, second.attribution),
-            discoveryPath = first.discoveryPath.ifEmpty { second.discoveryPath },
+            // Keep every independent derivation in stable order: preserve the
+            // existing fact's path entries first, then append entries from the
+            // merged observation until the persisted bound is reached.
+            discoveryPath = (first.discoveryPath + second.discoveryPath)
+                .distinct()
+                .take(MAX_DISCOVERY_PATH_STEPS),
             locationEvidenceClass = strongerLocationClass(
                 first.locationEvidenceClass,
                 second.locationEvidenceClass
@@ -492,6 +497,7 @@ private fun EvidenceKind.toExposureFactKind(): ExposureFactKind = when (this) {
     EvidenceKind.PublicImageEvidence -> ExposureFactKind.PublicImageEvidence
     EvidenceKind.ImageConsistency -> ExposureFactKind.ImageConsistency
     EvidenceKind.SensitiveSnippet -> ExposureFactKind.SensitiveSnippet
+    EvidenceKind.BreachMembership -> ExposureFactKind.BreachMembership
     EvidenceKind.Url -> ExposureFactKind.Website
     EvidenceKind.Document -> ExposureFactKind.Document
     EvidenceKind.Archive -> ExposureFactKind.Archive

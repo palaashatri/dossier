@@ -739,6 +739,8 @@ object ScanSession {
                 mediaSourceUri = inputToUse.selfieUri,
                 mediaRetrievedAtEpochMillis = mediaRetrievedAtEpochMillis,
                 typedSeedCollection = typedSeedExecutionEvidence,
+                faceMatches = faceMatches,
+                breachDigests = digests,
                 excludeFindingKeysFromGeneratedEvidence = typedFindingKeys
             )
             val evidence = evidenceSnapshot.evidence
@@ -1269,16 +1271,22 @@ object ScanSession {
                 deepResearch = deepResearch
             )
             val digests = results.map { result ->
-                val sources = buildList {
-                    addAll(result.breaches.map { it.title.ifBlank { it.name } })
-                    addAll(result.publicEvidence.map { it.url }.filter { it.isNotBlank() })
-                }.distinct()
+                val breachSources = result.breaches
+                    .map { it.title.ifBlank { it.name }.trim() }
+                    .filter(String::isNotBlank)
+                    .distinct()
+                val publicEvidenceUrls = result.publicEvidence
+                    .map { it.url.trim() }
+                    .filter(String::isNotBlank)
+                    .distinct()
                 val breachCount = result.breaches.size
                 BreachDigest(
                     email = result.email,
                     breachCount = breachCount,
-                    sources = sources,
-                    note = safeBreachNote(result.error)
+                    sources = (breachSources + publicEvidenceUrls).distinct(),
+                    note = safeBreachNote(result.error),
+                    breachSources = breachSources,
+                    publicEvidenceUrls = publicEvidenceUrls
                 )
             }
             val checkpointResults = results.map { result ->
@@ -1677,7 +1685,11 @@ object ScanSession {
         email = email,
         breachCount = breachCount,
         sources = sources,
-        note = note
+        note = note,
+        breachSources = breachTitles.ifEmpty {
+            sources.filterNot { it in publicEvidenceUrls }
+        },
+        publicEvidenceUrls = publicEvidenceUrls
     )
 
     private fun findingsFromBreachResult(result: BreachStageCheckpointResult): List<Finding> =
@@ -1767,6 +1779,8 @@ object ScanSession {
         mediaSourceUri: String? = null,
         mediaRetrievedAtEpochMillis: Long? = null,
         typedSeedCollection: EvidenceCollection = EvidenceCollection(),
+        faceMatches: List<FaceConsistencyMatch> = emptyList(),
+        breachDigests: List<BreachDigest> = emptyList(),
         excludeFindingKeysFromGeneratedEvidence: Set<String> = emptySet()
     ): EvidenceCollection {
         val scannerEvidence = profileResults.toEvidenceCollection(input, retrievedAtEpochMillis)
@@ -1775,15 +1789,27 @@ object ScanSession {
             mediaSourceUri = mediaSourceUri,
             retrievedAtEpochMillis = mediaRetrievedAtEpochMillis
         )
+        val faceEvidence = faceMatches.toFaceEvidenceCollection(
+            retrievedAtEpochMillis = retrievedAtEpochMillis,
+            discoveryPath = mediaDiscoveryPath
+        )
+        val breachEvidence = breachDigests.toBreachEvidenceCollection(
+            retrievedAtEpochMillis = retrievedAtEpochMillis
+        )
+        val bridgedFindingKeys = faceFindingsFromMatches(faceMatches)
+            .map(::findingIdentityKey)
+            .toSet()
         val snapshot = EvidenceCollection(
             evidence = (
                 scannerEvidence.evidence +
                     pluginCollection.evidence +
+                    faceEvidence.evidence +
+                    breachEvidence.evidence +
                     buildEvidence(
                         input,
                         findings,
                         retrievedAtEpochMillis,
-                        excludeFindingKeys = excludeFindingKeysFromGeneratedEvidence
+                        excludeFindingKeys = excludeFindingKeysFromGeneratedEvidence + bridgedFindingKeys
                     ) +
                     mediaEvidence.evidence +
                     typedSeedCollection.evidence
@@ -1791,6 +1817,8 @@ object ScanSession {
                 relationships = EvidenceRelationshipPolicy.normalize(
                     scannerEvidence.relationships +
                         pluginCollection.relationships +
+                        faceEvidence.relationships +
+                        breachEvidence.relationships +
                         mediaEvidence.relationships +
                         typedSeedCollection.relationships
                 )

@@ -231,6 +231,56 @@ class ExposureLedgerTest {
     }
 
     @Test
+    fun ledgerMergeUnionsDistinctDiscoveryPathsInStableOrder() {
+        val first = ExposureFact(
+            exactValue = "jane@example.test",
+            normalizedValue = "jane@example.test",
+            kind = ExposureFactKind.Email,
+            sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+            sourceUrl = "https://example.test/profile",
+            evidenceIds = listOf("ev-first"),
+            discoveryPath = listOf("seed:name", "profile:url")
+        )
+        val second = first.copy(
+            evidenceIds = listOf("ev-second"),
+            discoveryPath = listOf("profile:url", "document:url", "contact:email")
+        )
+
+        val merged = ExposureLedgerPolicy.normalize(listOf(first, second)).single()
+
+        assertEquals(
+            listOf("seed:name", "profile:url", "document:url", "contact:email"),
+            merged.discoveryPath
+        )
+    }
+
+    @Test
+    fun ledgerMergeBoundsDiscoveryPathUnionAndTruncatesNewEntries() {
+        val firstPath = (1..63).map { "hop-$it" }
+        val first = ExposureFact(
+            exactValue = "jane@example.test",
+            normalizedValue = "jane@example.test",
+            kind = ExposureFactKind.Email,
+            sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+            sourceUrl = "https://example.test/profile",
+            evidenceIds = listOf("ev-first"),
+            discoveryPath = firstPath
+        )
+        val second = first.copy(
+            evidenceIds = listOf("ev-second"),
+            discoveryPath = listOf("hop-64", "hop-65", "hop-66", "hop-67")
+        )
+
+        val merged = ExposureLedgerPolicy.normalize(listOf(first, second)).single()
+
+        assertEquals(ExposureFact.MAX_DISCOVERY_PATH_STEPS, merged.discoveryPath.size)
+        assertEquals(firstPath + "hop-64", merged.discoveryPath)
+        assertTrue("hop-65" !in merged.discoveryPath)
+        assertTrue("hop-66" !in merged.discoveryPath)
+        assertTrue("hop-67" !in merged.discoveryPath)
+    }
+
+    @Test
     fun discoveryPathPropagatesFromEvidenceToExposureFact() {
         val path = listOf("seed:email", "profile:url")
         val evidence = Evidence(

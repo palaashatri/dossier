@@ -159,7 +159,7 @@ class DiscoveryBenchmarkTest {
     fun syntheticRun_distinguishesUnavailableExactValueAndReportsOperationalMetrics() {
         val case = SyntheticCase(
             name = "Unavailable source",
-            initialSeed = Fact("email", "jane@example.test"),
+            initialSeed = Fact("name", "Jane Example"),
             expectedFacts = listOf(Fact("email", "jane@example.test")),
             knownNegatives = listOf(Fact("phone", "+15550999"))
         )
@@ -193,12 +193,196 @@ class DiscoveryBenchmarkTest {
         assertEquals(1, metrics.truePositives)
         assertEquals(0, metrics.falsePositives)
         assertEquals(1, metrics.unresolvedCandidateCount)
+        assertEquals(0, metrics.candidateCount)
+        assertEquals(1, metrics.unavailableEventCount)
+        assertEquals(0, metrics.providerFailureEventCount)
         assertEquals(900L, metrics.timeToFirstHighValueExactIdentifierMs)
         assertEquals(1_200L, metrics.totalScanDurationMs)
-        assertEquals(2.0 / 3.0, metrics.providerFailureRate, 0.0001)
+        assertEquals(1.0 / 3.0, metrics.providerFailureRate, 0.0001)
         assertEquals(1.0 / 3.0, metrics.usefulFindingsPerRequest, 0.0001)
         assertEquals(2.0, metrics.usefulPivotsPerVerifiedFinding, 0.0001)
+        assertEquals(1, metrics.failedRequestCount)
+        assertEquals(2, metrics.usefulPivotCount)
         assertEquals(0.0, checkNotNull(metrics.falsePositiveRate), 0.0001)
+
+        val legacyShape = metrics.copy(
+            failedRequestCount = 0,
+            usefulPivotCount = 0
+        )
+        val legacyAggregate = DiscoveryBenchmark.aggregate(listOf(legacyShape))
+        assertEquals(metrics.providerFailureRate, legacyAggregate.providerFailureRate, 0.0001)
+        assertEquals(
+            metrics.usefulPivotsPerVerifiedFinding,
+            legacyAggregate.usefulPivotsPerVerifiedFinding,
+            0.0001
+        )
+    }
+
+    @Test
+    fun syntheticRun_withNoVerifiedFindingsReportsZeroPrecision() {
+        val case = SyntheticCase(
+            name = "No verified findings",
+            initialSeed = Fact("name", "Jane Example"),
+            expectedFacts = listOf(Fact("email", "jane@example.test"))
+        )
+
+        val metrics = DiscoveryBenchmark.evaluate(
+            case,
+            SyntheticRun(
+                events = listOf(
+                    DiscoveryEvent(
+                        elapsedTimeMs = 100,
+                        fact = Fact("email", null),
+                        status = EventStatus.UNAVAILABLE,
+                        requestCount = 1
+                    )
+                ),
+                totalRequestCount = 1
+            )
+        )
+
+        assertEquals(0, metrics.totalVerifiedFindingCount)
+        assertEquals(0.0, metrics.precision, 0.0001)
+        assertEquals(0.0, DiscoveryBenchmark.aggregate(listOf(metrics)).averagePrecision, 0.0001)
+    }
+
+    @Test
+    fun syntheticRun_excludesAttackerSeedFromRecoveryAndMilestones() {
+        val case = SyntheticCase(
+            name = "Attacker seed exclusion",
+            initialSeed = Fact("profile", "https://example.test/jane"),
+            // The manifest may repeat the seed; it must not become a scored
+            // exposure or inflate the known-exposure denominator.
+            expectedFacts = listOf(
+                // Public-fetch adapters may label the supplied profile URL as
+                // `url` rather than `profile`; both forms must be excluded.
+                Fact("url", "https://example.test/jane"),
+                Fact("email", "jane@example.test")
+            )
+        )
+
+        val metrics = DiscoveryBenchmark.evaluate(
+            case,
+            SyntheticRun(
+                events = listOf(
+                    DiscoveryEvent(
+                        elapsedTimeMs = 0,
+                        fact = Fact("profile", "https://example.test/jane"),
+                        status = EventStatus.VERIFIED,
+                        requestCount = 1,
+                        isIdentityAnchor = true,
+                        usefulPivotCount = 4
+                    ),
+                    DiscoveryEvent(
+                        elapsedTimeMs = 100,
+                        fact = Fact("email", "jane@example.test"),
+                        status = EventStatus.OBSERVED,
+                        requestCount = 1
+                    )
+                ),
+                totalRequestCount = 2
+            )
+        )
+
+        assertEquals(1, metrics.truePositives)
+        assertEquals(0, metrics.falsePositives)
+        assertEquals(0, metrics.falseNegatives)
+        assertEquals(0, metrics.unlabelledExtraCount)
+        assertEquals(0, metrics.totalVerifiedFindingCount)
+        assertEquals(1, metrics.totalObservedFindingCount)
+        assertEquals(100L, metrics.timeToFirstUsefulResultMs)
+        assertNull(metrics.timeToFirstVerifiedIdentityAnchorMs)
+        assertEquals(100L, metrics.timeToFirstHighValueExactIdentifierMs)
+        assertEquals(100L, metrics.timeTo50PercentRecallMs)
+        assertEquals(100L, metrics.timeTo80PercentRecallMs)
+        assertEquals(2, metrics.totalProviderRequestCount)
+        assertEquals(0, metrics.usefulPivotCount)
+    }
+
+    @Test
+    fun syntheticRun_observedExpectedContactsCountForExposureRecallOnly() {
+        val case = SyntheticCase(
+            name = "Observed contacts",
+            initialSeed = Fact("name", "Jane Example"),
+            expectedFacts = listOf(
+                Fact("email", "jane@example.test"),
+                Fact("phone", "+1 555 0100")
+            )
+        )
+
+        val metrics = DiscoveryBenchmark.evaluate(
+            case,
+            SyntheticRun(
+                events = listOf(
+                    DiscoveryEvent(
+                        elapsedTimeMs = 20,
+                        fact = Fact("email", "jane@example.test"),
+                        status = EventStatus.OBSERVED,
+                        usefulPivotCount = 4
+                    ),
+                    DiscoveryEvent(
+                        elapsedTimeMs = 40,
+                        fact = Fact("phone", "+1 555 0100"),
+                        status = EventStatus.OBSERVED,
+                        usefulPivotCount = 4
+                    )
+                )
+            )
+        )
+
+        assertEquals(2, metrics.truePositives)
+        assertEquals(2, metrics.observedExpectedCount)
+        assertEquals(0, metrics.verifiedExpectedCount)
+        assertEquals(1.0, metrics.exposureRecall, 0.0001)
+        assertEquals(0, metrics.totalVerifiedFindingCount)
+        assertEquals(2, metrics.totalObservedFindingCount)
+        assertNull(metrics.timeToFirstVerifiedIdentityAnchorMs)
+        assertEquals(20L, metrics.timeToFirstHighValueExactIdentifierMs)
+        assertEquals(20L, metrics.timeTo50PercentRecallMs)
+        assertEquals(40L, metrics.timeTo80PercentRecallMs)
+        assertEquals(0, metrics.usefulPivotCount)
+    }
+
+    @Test
+    fun syntheticRun_observedKnownNegativeIsNotVerifiedFalsePositive() {
+        val case = SyntheticCase(
+            name = "Observed known negative",
+            initialSeed = Fact("name", "Jane Example"),
+            expectedFacts = listOf(Fact("email", "jane@example.test")),
+            knownNegatives = listOf(Fact("email", "noise@example.test"))
+        )
+
+        val metrics = DiscoveryBenchmark.evaluate(
+            case,
+            SyntheticRun(
+                events = listOf(
+                    DiscoveryEvent(
+                        elapsedTimeMs = 10,
+                        fact = Fact("email", "noise@example.test"),
+                        status = EventStatus.OBSERVED
+                    ),
+                    DiscoveryEvent(
+                        elapsedTimeMs = 20,
+                        fact = Fact("email", "jane@example.test"),
+                        status = EventStatus.OBSERVED
+                    ),
+                    DiscoveryEvent(
+                        elapsedTimeMs = 30,
+                        fact = Fact("email", "noise@example.test"),
+                        status = EventStatus.CANDIDATE
+                    )
+                )
+            )
+        )
+
+        assertEquals(1, metrics.truePositives)
+        assertEquals(0, metrics.falsePositives)
+        assertEquals(1, metrics.observedKnownNegativeCount)
+        assertEquals(1, metrics.observedKnownNegativeEventCount)
+        assertEquals(0, metrics.verifiedKnownNegativeCount)
+        assertEquals(0.0, checkNotNull(metrics.falsePositiveRate), 0.0001)
+        assertEquals(1, metrics.candidateCount)
+        assertEquals(2, metrics.totalObservedFindingCount)
     }
 
     @Test
@@ -251,7 +435,7 @@ class DiscoveryBenchmarkTest {
         val fixtures = SyntheticDiscoveryBenchmarkFixtures.corpus()
         val discoverer = SyntheticDiscoveryBenchmarkFixtures.Discoverer(fixtures)
 
-        assertEquals(3, fixtures.size)
+        assertEquals(6, fixtures.size)
         val runs = fixtures.map { fixture ->
             val trace = discoverer.trace(fixture.case)
             assertEquals(trace, discoverer.trace(fixture.case))
@@ -260,13 +444,106 @@ class DiscoveryBenchmarkTest {
         }
 
         val aggregate = DiscoveryBenchmark.aggregate(runs)
-        assertEquals(3, aggregate.totalCases)
-        assertEquals(9, aggregate.truePositives)
-        assertEquals(1, aggregate.falsePositives)
+        assertEquals(6, aggregate.totalCases)
+        assertEquals(25, aggregate.truePositives)
+        assertEquals(3, aggregate.falsePositives)
         assertEquals(0, aggregate.falseNegatives)
-        assertEquals(28.0 / 30.0, aggregate.averagePrecision, 0.0001)
+        assertEquals(41.0 / 45.0, aggregate.averagePrecision, 0.0001)
         assertEquals(1.0, aggregate.averageRecall, 0.0001)
-        assertEquals(26.0 / 27.0, aggregate.averageF1, 0.0001)
+        assertEquals(565.0 / 594.0, aggregate.averageF1, 0.0001)
+        assertEquals(25, aggregate.knownExposedFacts)
+        assertEquals(25, aggregate.recoveredKnownExposedFacts)
+        assertEquals(25.0 / 28.0, aggregate.corpusPrecision, 0.0001)
+        assertEquals(1.0, aggregate.recallAtKnownExposure, 0.0001)
+        assertEquals(1.0, checkNotNull(aggregate.corpusFalsePositiveRate), 0.0001)
+        assertEquals(3, aggregate.knownNegativeFacts)
+        assertEquals(3, aggregate.observedKnownNegativeFacts)
+        assertEquals(85.0, checkNotNull(aggregate.averageTimeToFirstUsefulResultMs), 0.0001)
+        assertEquals(178.3333, checkNotNull(aggregate.averageTimeToFirstVerifiedIdentityAnchorMs), 0.001)
+        assertEquals(260.0, checkNotNull(aggregate.averageTimeToFirstHighValueExactIdentifierMs), 0.0001)
+        assertEquals(183.3333, checkNotNull(aggregate.averageTimeTo50PercentRecallMs), 0.001)
+        assertEquals(303.3333, checkNotNull(aggregate.averageTimeTo80PercentRecallMs), 0.001)
+        assertEquals(356.6667, checkNotNull(aggregate.averageTotalScanDurationMs), 0.001)
+        assertEquals(6, aggregate.timeToFirstUsefulResultCaseCount)
+        assertEquals(6, aggregate.timeToFirstVerifiedIdentityAnchorCaseCount)
+        assertEquals(4, aggregate.timeToFirstHighValueExactIdentifierCaseCount)
+        assertEquals(6, aggregate.timeTo50PercentRecallCaseCount)
+        assertEquals(6, aggregate.timeTo80PercentRecallCaseCount)
+        assertEquals(7, aggregate.unresolvedCandidateCount)
+        assertEquals(3, aggregate.candidateCount)
+        assertEquals(3, aggregate.unavailableEventCount)
+        assertEquals(1, aggregate.providerFailureEventCount)
+        assertEquals(1, aggregate.unlabelledExtraCount)
+        assertEquals(29, aggregate.totalVerifiedFindingCount)
+        assertEquals(24, aggregate.totalProviderRequestCount)
+        assertEquals(4, aggregate.totalFailedRequestCount)
+        assertEquals(23, aggregate.totalUsefulPivotCount)
+        assertEquals(1.0 / 6.0, aggregate.providerFailureRate, 0.0001)
+        assertEquals(29.0 / 24.0, aggregate.usefulFindingsPerRequest, 0.0001)
+        assertEquals(23.0 / 29.0, aggregate.usefulPivotsPerVerifiedFinding, 0.0001)
+        assertEquals(1.0 / 29.0, aggregate.unlabelledFindingRate, 0.0001)
+        assertEquals(25.0 / 28.0, aggregate.weightedPrecision, 0.0001)
+        assertEquals(1.0, aggregate.weightedRecall, 0.0001)
+    }
+
+    @Test
+    fun syntheticAggregate_emptyCorpusUsesNeutralCountsWithoutClaimingPrecision() {
+        val aggregate = DiscoveryBenchmark.aggregate(emptyList())
+
+        assertEquals(0, aggregate.totalCases)
+        assertEquals(0.0, aggregate.corpusPrecision, 0.0001)
+        assertEquals(0.0, aggregate.recallAtKnownExposure, 0.0001)
+        assertEquals(0.0, aggregate.unlabelledFindingRate, 0.0001)
+        assertNull(aggregate.corpusFalsePositiveRate)
+        assertNull(aggregate.averageTimeToFirstUsefulResultMs)
+    }
+
+    @Test
+    fun syntheticCase_rejectsExpectedAndKnownNegativeOverlapAfterNormalization() {
+        val thrown = runCatching {
+            SyntheticCase(
+                name = "overlap",
+                initialSeed = Fact("name", "Jane Example"),
+                expectedFacts = listOf(Fact("email", "jane@example.test")),
+                knownNegatives = listOf(Fact("email", "JANE@EXAMPLE.TEST"))
+            )
+        }.exceptionOrNull()
+
+        assertTrue(thrown is IllegalArgumentException)
+    }
+
+    @Test
+    fun syntheticCase_rejectsBlankInitialSeedKind() {
+        val thrown = runCatching {
+            SyntheticCase(
+                name = "blank kind",
+                initialSeed = Fact("   ", "Jane Example"),
+                expectedFacts = listOf(Fact("email", "jane@example.test"))
+            )
+        }.exceptionOrNull()
+
+        assertTrue(thrown is IllegalArgumentException)
+    }
+
+    @Test
+    fun syntheticCase_rejectsBlankOrNormalizationEmptyInitialSeedValue() {
+        val thrown1 = runCatching {
+            SyntheticCase(
+                name = "blank value",
+                initialSeed = Fact("name", "   "),
+                expectedFacts = listOf(Fact("email", "jane@example.test"))
+            )
+        }.exceptionOrNull()
+        assertTrue(thrown1 is IllegalArgumentException)
+
+        val thrown2 = runCatching {
+            SyntheticCase(
+                name = "normalization empty value",
+                initialSeed = Fact("phone", "not-a-number"),
+                expectedFacts = listOf(Fact("email", "jane@example.test"))
+            )
+        }.exceptionOrNull()
+        assertTrue(thrown2 is IllegalArgumentException)
     }
 
     @Test
@@ -282,11 +559,106 @@ class DiscoveryBenchmarkTest {
         assertEquals(2, nameMetrics.unresolvedCandidateCount)
         assertEquals(1, nameMetrics.unlabelledExtraCount)
         assertEquals(1, nameMetrics.falsePositives)
-        assertEquals(4, nameMetrics.truePositives)
+        assertEquals(5, nameMetrics.truePositives)
 
         val photoTrace = discoverer.trace(fixtures.first { it.id == "photo-ocr-location-source-page" }.case)
         assertTrue(photoTrace.traversed.any { it.event.status == EventStatus.CANDIDATE })
         assertTrue(photoTrace.traversed.any { it.event.status == EventStatus.UNAVAILABLE })
+    }
+
+    @Test
+    fun syntheticRun_handlesOverlappingProviderFailureCountsWithoutDoubleCounting() {
+        val case = SyntheticCase(
+            name = "Overlapping failures",
+            initialSeed = Fact("name", "Jane Example"),
+            expectedFacts = listOf(Fact("email", "jane@example.test"))
+        )
+
+        val metrics = DiscoveryBenchmark.evaluate(
+            case,
+            SyntheticRun(
+                events = listOf(
+                    DiscoveryEvent(
+                        elapsedTimeMs = 600,
+                        fact = Fact("email", null),
+                        status = EventStatus.PROVIDER_FAILURE,
+                        providerId = "FailingProvider",
+                        requestCount = 2
+                    ),
+                    DiscoveryEvent(
+                        elapsedTimeMs = 900,
+                        fact = Fact("email", "jane@example.test"),
+                        status = EventStatus.VERIFIED,
+                        providerId = "WorkingProvider",
+                        requestCount = 1,
+                        usefulPivotCount = 1
+                    )
+                ),
+                totalScanDurationMs = 1_000,
+                totalRequestCount = 3,
+                providerFailureCount = 2
+            )
+        )
+
+        assertEquals(2, metrics.failedRequestCount)
+        assertEquals(3, metrics.totalProviderRequestCount)
+        assertEquals(2.0 / 3.0, metrics.providerFailureRate, 0.0001)
+        assertEquals(1.0 / 3.0, metrics.usefulFindingsPerRequest, 0.0001)
+    }
+
+    @Test
+    fun syntheticRun_laterDuplicateAppliesMergePolicyWithoutDoubleCountingFinding() {
+        val case = SyntheticCase(
+            name = "Duplicate test",
+            initialSeed = Fact("name", "Jane"),
+            expectedFacts = listOf(Fact("profile", "https://example.test/jane"))
+        )
+
+        val metrics = DiscoveryBenchmark.evaluate(
+            case,
+            SyntheticRun(
+                events = listOf(
+                    // First event: basic finding, no anchor or pivots
+                    DiscoveryEvent(
+                        elapsedTimeMs = 500,
+                        fact = Fact("profile", "https://example.test/jane"),
+                        status = EventStatus.VERIFIED,
+                        isIdentityAnchor = false,
+                        usefulPivotCount = 0
+                    ),
+                    // Second event: duplicate fact, but adds identity anchor and 2 pivots
+                    DiscoveryEvent(
+                        elapsedTimeMs = 1500,
+                        fact = Fact("profile", "https://example.test/jane"),
+                        status = EventStatus.VERIFIED,
+                        isIdentityAnchor = true,
+                        usefulPivotCount = 2
+                    ),
+                    // Third event: another duplicate, just testing pivot max-logic
+                    DiscoveryEvent(
+                        elapsedTimeMs = 2500,
+                        fact = Fact("profile", "https://example.test/jane"),
+                        status = EventStatus.VERIFIED,
+                        isIdentityAnchor = true,
+                        usefulPivotCount = 1
+                    )
+                ),
+                totalScanDurationMs = 3000,
+                totalRequestCount = 3
+            )
+        )
+
+        // Finding counts aren't duplicated
+        assertEquals(1, metrics.truePositives)
+        assertEquals(0, metrics.falsePositives)
+        assertEquals(1, metrics.totalVerifiedFindingCount)
+
+        // Milestones
+        assertEquals(500L, metrics.timeToFirstUsefulResultMs)
+        assertEquals(1500L, metrics.timeToFirstVerifiedIdentityAnchorMs) // Picked up from the 2nd event
+
+        // Pivots
+        assertEquals(2, metrics.usefulPivotCount) // Max of 0, 2, and 1
     }
 
     private fun assertRequiredPath(
