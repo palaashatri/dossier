@@ -484,6 +484,9 @@ class TypedSeedPublicFetchExecutorTest {
         assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Unavailable, report.executions.first { it.seed == failed }.state)
         assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Verified, report.executions.first { it.seed == healthy }.state)
         assertTrue(report.evidence.any { it.sourceUrl == "https://healthy.example.test/page" && it.state == EvidenceState.Verified })
+        val failedEvidence = report.evidence.single { it.sourceUrl == "https://failed.example.test/page" }
+        assertEquals(EvidenceReliability.DirectPersonalWebsite, failedEvidence.reliability)
+        assertEquals(ExposureSourceClassification.PUBLIC_WEB, failedEvidence.sourceClassification)
     }
 
     @Test
@@ -583,6 +586,48 @@ class TypedSeedPublicFetchExecutorTest {
 
         assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Completed, report.executions.single().state)
         assertTrue(report.evidence.isEmpty())
+    }
+
+    @Test
+    fun nameAndUsernameSeedsUseTheBoundedSearchOutcomeSeam() = runBlocking {
+        val name = userSeed(TypedSeedKind.Name, "Jane Example")
+        val username = userSeed(TypedSeedKind.Username, "Sample_User")
+        val seenInputs = mutableMapOf<TypedSeedKind, IdentityInput>()
+        val executor = TypedSeedPublicFetchExecutor(
+            searchOutcomeSearcher = { seed, scopedInput, _ ->
+                seenInputs[seed.kind] = scopedInput
+                PublicSearchDiscoveryService.SearchOutcome.Success(
+                    listOf(
+                        PublicSearchResult(
+                            title = "${seed.exactValue} result",
+                            snippet = "Indexed public result",
+                            url = "https://search.example.test/${seed.kind.name.lowercase()}",
+                            query = "\"${seed.exactValue}\"",
+                            source = "Fixture",
+                            score = 0.8f
+                        )
+                    )
+                )
+            }
+        )
+
+        val nameReport = executor.executeDetailed(
+            seeds = listOf(name),
+            input = IdentityInput(fullName = "Jane Example"),
+            scanId = scanId
+        )
+        val usernameReport = executor.executeDetailed(
+            seeds = listOf(username),
+            input = IdentityInput(fullName = "", usernames = listOf("Sample_User")),
+            scanId = scanId
+        )
+
+        assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Completed, nameReport.executions.single().state)
+        assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Completed, usernameReport.executions.single().state)
+        assertEquals("Jane Example", seenInputs[TypedSeedKind.Name]?.fullName)
+        assertEquals(listOf("Sample_User"), seenInputs[TypedSeedKind.Username]?.usernames)
+        assertTrue(nameReport.evidence.any { it.value == "https://search.example.test/name" })
+        assertTrue(usernameReport.evidence.any { it.value == "https://search.example.test/username" })
     }
 
     @Test
@@ -752,11 +797,13 @@ class TypedSeedPublicFetchExecutorTest {
         kind = kind,
         value = when (kind) {
             TypedSeedKind.Domain -> value.lowercase().removeSuffix(".")
+            TypedSeedKind.Username -> value.removePrefix("@").lowercase()
             else -> value
         },
         exactValue = value,
         normalizedValue = when (kind) {
             TypedSeedKind.Domain -> value.lowercase().removeSuffix(".")
+            TypedSeedKind.Username -> value.removePrefix("@").lowercase()
             else -> value
         },
         origin = TypedSeedOrigin.UserInput,

@@ -7,6 +7,7 @@ import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.HistoricalAttributeKind
 import io.dossier.app.domain.model.FindingAttribution
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -78,6 +79,7 @@ class TypedSeedAdmissionModelTest {
             TypedSeedKind.Photo,
             TypedSeedKind.Image,
             TypedSeedKind.Username,
+            TypedSeedKind.Name,
             TypedSeedKind.Location
         )
         kinds.forEach { kind ->
@@ -336,6 +338,32 @@ class TypedSeedAdmissionModelTest {
         assertEquals(ExposureSourceClassification.PUBLIC_PROFILE, email.sourceClassification)
         assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Email))
         assertTrue(model.isExecutionAvailable)
+    }
+
+    @Test
+    fun adapterTreatsVerifiedDisplayNameAsNameSearchPivot() {
+        val record = Evidence(
+            id = "profile-display-name",
+            kind = EvidenceKind.Username,
+            value = "Jane Example",
+            sourceUrl = "https://profile.example.test/jane",
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.DirectPublicProfile,
+            sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+            attributeKind = HistoricalAttributeKind.DisplayName
+        )
+        val corroboratingRecord = record.copy(
+            id = "profile-display-name-corroborating",
+            sourceUrl = "https://second-profile.example.test/jane"
+        )
+
+        val model = TypedSeedEvidenceAdapter.admit(listOf(record, corroboratingRecord))
+        val name = model.admittedSeeds.single()
+
+        assertEquals(TypedSeedKind.Name, name.kind)
+        assertEquals(record.value, name.exactValue)
+        assertEquals(listOf(record.id, corroboratingRecord.id), name.evidenceIds)
+        assertTrue(TypedSeedSafety.isSafePublicSearchSeed(name))
     }
 
     @Test
@@ -602,6 +630,143 @@ class TypedSeedAdmissionModelTest {
     }
 
     @Test
+    fun publicSearchSafetyAllowsVerifiedPublicNameAndUsernameButRejectsWeakOrigins() {
+        fun verified(kind: TypedSeedKind, exact: String) = TypedSeed(
+            kind = kind,
+            value = if (kind == TypedSeedKind.Username) exact.lowercase() else exact,
+            exactValue = exact,
+            normalizedValue = if (kind == TypedSeedKind.Username) exact.lowercase() else exact,
+            isVerified = true,
+            evidenceState = EvidenceState.Verified,
+            origin = TypedSeedOrigin.Evidence,
+            sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+            evidenceIds = if (kind == TypedSeedKind.Name) {
+                listOf("evidence-$kind-a", "evidence-$kind-b")
+            } else {
+                listOf("evidence-$kind")
+            },
+            sourceUrl = "https://profile.example.test/source"
+        )
+
+        listOf(
+            verified(TypedSeedKind.Name, "Jane Example"),
+            verified(TypedSeedKind.Username, "sample_user")
+        ).forEach { seed ->
+            assertTrue(TypedSeedSafety.isSafePublicSearchSeed(seed))
+            assertTrue(TypedSeedSafety.isSafeExecutableSeed(seed))
+        }
+
+        val candidate = verified(TypedSeedKind.Username, "sample_user").copy(
+            isVerified = false,
+            evidenceState = EvidenceState.Candidate,
+            origin = TypedSeedOrigin.Candidate
+        )
+        assertFalse(TypedSeedSafety.isSafePublicSearchSeed(candidate))
+
+        val observed = verified(TypedSeedKind.Name, "Jane Example").copy(
+            isVerified = false,
+            evidenceState = EvidenceState.Observed
+        )
+        assertFalse(TypedSeedSafety.isSafePublicSearchSeed(observed))
+
+        val singleSourceName = verified(TypedSeedKind.Name, "Jane Example").copy(
+            evidenceIds = listOf("one-name-evidence")
+        )
+        assertFalse(TypedSeedSafety.isSafePublicSearchSeed(singleSourceName))
+
+        val duplicateEvidenceName = verified(TypedSeedKind.Name, "Jane Example").copy(
+            evidenceIds = listOf("same-name-evidence", "same-name-evidence")
+        )
+        assertFalse(
+            "Name corroboration requires distinct evidence IDs",
+            TypedSeedSafety.isSafePublicSearchSeed(duplicateEvidenceName)
+        )
+
+        val sameSourceName = verified(TypedSeedKind.Name, "Jane Example").copy(
+            evidenceIds = listOf("name-evidence-a", "name-evidence-b"),
+            sourceUrl = "https://profile.example.test/same-page"
+        )
+        assertTrue(
+            "TypedSeed cannot prove source-URL independence; preserve this known limitation",
+            TypedSeedSafety.isSafePublicSearchSeed(sameSourceName)
+        )
+
+        listOf("A B", "User Name").forEach { weakName ->
+            assertFalse(
+                "weak display name $weakName must not recursively expand",
+                TypedSeedSafety.isSafePublicSearchSeed(
+                    verified(TypedSeedKind.Name, weakName)
+                )
+            )
+        }
+
+        listOf("admin", "user", "unknown", "ab").forEach { weakHandle ->
+            assertFalse(
+                "weak handle $weakHandle must not recursively expand",
+                TypedSeedSafety.isSafePublicSearchSeed(
+                    verified(TypedSeedKind.Username, weakHandle)
+                )
+            )
+        }
+
+        val corroboratedCommonHandle = verified(TypedSeedKind.Username, "support").copy(
+            evidenceIds = listOf("handle-evidence-a", "handle-evidence-b")
+        )
+        assertFalse(
+            "TypedSeed has no confidence field, so common handles stay rejected",
+            TypedSeedSafety.isSafePublicSearchSeed(corroboratedCommonHandle)
+        )
+
+        assertFalse(
+            "placeholder-only handles must not recursively expand",
+            TypedSeedSafety.isSafePublicSearchSeed(
+                verified(TypedSeedKind.Username, "___")
+            )
+        )
+
+        val userProvidedName = TypedSeed(
+            kind = TypedSeedKind.Name,
+            value = "A",
+            exactValue = "A",
+            normalizedValue = "A",
+            evidenceState = EvidenceState.Observed,
+            origin = TypedSeedOrigin.UserInput,
+            sourceClassification = ExposureSourceClassification.USER_IMPORTED
+        )
+        assertTrue("user-provided names remain authorized launch seeds", TypedSeedSafety.isSafePublicSearchSeed(userProvidedName))
+
+        val userProvidedUsername = TypedSeed(
+            kind = TypedSeedKind.Username,
+            value = "ab",
+            exactValue = "ab",
+            normalizedValue = "ab",
+            evidenceState = EvidenceState.Observed,
+            origin = TypedSeedOrigin.UserInput,
+            sourceClassification = ExposureSourceClassification.USER_IMPORTED
+        )
+        assertTrue("user-provided handles remain authorized launch seeds", TypedSeedSafety.isSafePublicSearchSeed(userProvidedUsername))
+
+        val imported = TypedSeed(
+            kind = TypedSeedKind.Username,
+            value = "sample_user",
+            exactValue = "sample_user",
+            normalizedValue = "sample_user",
+            isVerified = true,
+            evidenceState = EvidenceState.Verified,
+            origin = TypedSeedOrigin.Import,
+            sourceClassification = ExposureSourceClassification.LOCAL_IMPORT
+        )
+        assertFalse(TypedSeedSafety.isSafePublicSearchSeed(imported))
+
+        val breach = verified(TypedSeedKind.Username, "sample_user").copy(
+            isVerified = false,
+            evidenceState = EvidenceState.Observed,
+            sourceClassification = ExposureSourceClassification.BREACH_INDEX
+        )
+        assertFalse(TypedSeedSafety.isSafePublicSearchSeed(breach))
+    }
+
+    @Test
     fun publicSearchSafetyRejectsMalformedEmailAndPhoneValues() {
         fun userSeed(kind: TypedSeedKind, value: String) = TypedSeed(
             kind = kind,
@@ -679,7 +844,8 @@ class TypedSeedAdmissionModelTest {
         // Public-search kinds
         assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Email))
         assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Phone))
-        assertEquals(TypedSeedExecutionAvailability.Unavailable, model.availabilityFor(TypedSeedKind.Username))
+        assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Username))
+        assertEquals(TypedSeedExecutionAvailability.Available, model.availabilityFor(TypedSeedKind.Name))
 
         assertTrue(model.isExecutionAvailable(TypedSeedKind.Url))
         assertTrue(model.isExecutionAvailable(TypedSeedKind.Email))

@@ -345,6 +345,13 @@ internal class PublicPageVerifier(
                 signals += "Known location appears on source page"
             }
 
+            // A recursive Name pivot may be carried as an alias when the
+            // authorized name differs. Treat that alias as an identity signal
+            // only with independent organization/location context; alias alone
+            // remains an unqualified lead.
+            val scopedNameWithContext = independentAliasMatch &&
+                (organizationMatch || locationMatch)
+
             val contextualCorroborators = listOf(
                 nameMatch,
                 independentAliasMatch,
@@ -357,6 +364,7 @@ internal class PublicPageVerifier(
                 exactEmailMatch || exactPhoneMatch -> true
                 handleInPath != null && contextualCorroborators >= 1 -> true
                 nameMatch && (independentAliasMatch || organizationMatch || locationMatch) -> true
+                scopedNameWithContext -> true
                 else -> false
             }
 
@@ -366,7 +374,8 @@ internal class PublicPageVerifier(
                 exactEmailMatch || exactPhoneMatch -> 0.97f
                 handleInPath != null && contextualCorroborators >= 2 -> 0.95f
                 handleInPath != null && contextualCorroborators == 1 -> 0.88f
-                nameMatch && (organizationMatch || locationMatch || independentAliasMatch) -> 0.82f
+                (nameMatch && (organizationMatch || locationMatch || independentAliasMatch)) ||
+                    scopedNameWithContext -> 0.82f
                 nameMatch -> 0.60f
                 handleInPath != null -> 0.58f
                 else -> 0.48f

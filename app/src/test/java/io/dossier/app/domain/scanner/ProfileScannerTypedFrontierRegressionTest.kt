@@ -10,6 +10,7 @@ import io.dossier.app.domain.discovery.ProviderExecutionResult
 import io.dossier.app.domain.discovery.ProviderResponseDecision
 import io.dossier.app.domain.discovery.ProviderVerificationState
 import io.dossier.app.domain.discovery.ScanId
+import io.dossier.app.domain.discovery.TypedSeed
 import io.dossier.app.domain.discovery.TypedSeedKind
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
@@ -52,6 +53,99 @@ class ProfileScannerTypedFrontierRegressionTest {
     fun tearDown() {
         BackgroundScanManager.resetSeams()
         root.deleteRecursively()
+    }
+
+    @Test
+    fun `user input name and username are not searched but discovered username is`() = runBlocking {
+        val context = FakeContext(root)
+        val searchedSeeds = mutableListOf<TypedSeed>()
+
+        val executor = TypedSeedPublicFetchExecutor(
+            searchOutcomeSearcher = { seed, scopedInput, _ ->
+                searchedSeeds.add(seed)
+                if (seed.exactValue == "discovered_user") {
+                    io.dossier.app.data.web.PublicSearchDiscoveryService.SearchOutcome.Success(
+                        listOf(
+                            io.dossier.app.data.web.PublicSearchDiscoveryService.PublicSearchResult(
+                                url = "https://example.test/discovered_user",
+                                title = "Discovered User",
+                                snippet = "Snippet",
+                                source = "TestProvider",
+                                directlyVerified = true,
+                                score = 1.0f,
+                                query = "discovered_user",
+                                pivotEvidenceIds = listOf("verified-username"),
+                                verifiedPage = VerifiedPage(
+                                    finalUrl = "https://example.test/discovered_user",
+                                    title = "Discovered User",
+                                    text = "Jane Example @discovered_user",
+                                    contentHashSha256 = "discovered-user-hash"
+                                )
+                            )
+                        )
+                    )
+                } else {
+                    io.dossier.app.data.web.PublicSearchDiscoveryService.SearchOutcome.Success(emptyList())
+                }
+            }
+        )
+
+        val scanner = ProfileScanner(
+            context = context,
+            piiExtractor = PiiExtractor(),
+            variantGenerator = UsernameVariantGenerator(),
+            typedSeedExecutorOverride = executor
+        )
+        val initialEvidence = EvidenceCollection(
+            evidence = listOf(
+                Evidence(
+                    id = "seed:username:input_user",
+                    kind = EvidenceKind.Username,
+                    value = "input_user",
+                    state = EvidenceState.Observed,
+                    confidence = 1.0f
+                ),
+                Evidence(
+                    id = "verified-username",
+                    kind = EvidenceKind.Username,
+                    value = "discovered_user",
+                    sourceUrl = "https://example.test/source",
+                    state = EvidenceState.Verified,
+                    sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+                    confidence = 1.0f
+                )
+            )
+        )
+
+        val output = scanner.runTypedSeedFrontier(
+            input = io.dossier.app.domain.model.IdentityInput(fullName = "Jane Example", usernames = listOf("input_user")),
+            deepResearch = false,
+            requestId = null,
+            checkpointOwnerId = null,
+            checkpointGeneration = null,
+            planFingerprint = null,
+            seedEvidence = initialEvidence,
+            scanId = ScanId("test-name-username")
+        )
+
+        assertEquals(1, searchedSeeds.size)
+        assertEquals("discovered_user", searchedSeeds[0].exactValue)
+        assertEquals(TypedSeedKind.Username, searchedSeeds[0].kind)
+
+        assertTrue(
+            output.evidence.any {
+                it.kind == EvidenceKind.PublicSearchEvidence &&
+                    it.value == "https://example.test/discovered_user" &&
+                    it.state == EvidenceState.Observed
+            }
+        )
+        assertTrue(
+            output.evidence.any {
+                it.kind == EvidenceKind.Url &&
+                    it.value == "https://example.test/discovered_user" &&
+                    it.state == EvidenceState.Verified
+            }
+        )
     }
 
     private class FakeContext(private val root: File) : ContextWrapper(null) {

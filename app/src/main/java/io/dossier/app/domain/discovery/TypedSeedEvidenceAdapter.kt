@@ -10,11 +10,12 @@ import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.IdentityInput
+import java.util.Locale
 
 /**
  * Production bridge from canonical evidence to the typed admission queue.
- * The reviewed URL/domain/document/archive and Email/Phone executors consume
- * admitted seeds;
+ * The reviewed URL/domain/document/archive executor and bounded
+ * Email/Phone/Name/Username public-search executors consume admitted seeds;
  * this adapter only records safe, provenance-carrying pivots and does not
  * perform execution itself.
  */
@@ -146,6 +147,9 @@ object TypedSeedEvidenceAdapter {
         kind == EvidenceKind.PublicSearchEvidence &&
             reliability == EvidenceReliability.ArchiveSnapshot ->
             TypedSeedKind.Archive
+        kind == EvidenceKind.Username &&
+            attributeKind == io.dossier.app.domain.evidence.HistoricalAttributeKind.DisplayName ->
+            TypedSeedKind.Name
         else -> kind.toTypedSeedKind()
     }
 
@@ -231,6 +235,9 @@ object TypedSeedSafety {
     val publicSearchKinds: Set<TypedSeedKind> =
         publicFetchKinds + PUBLIC_SEARCH_TYPED_SEED_KINDS
 
+    /** Search-only kinds, excluding URL-like navigation fetches. */
+    val publicSearchOnlyKinds: Set<TypedSeedKind> = PUBLIC_SEARCH_TYPED_SEED_KINDS
+
     /** Every seed kind with a reviewed executor in the current scan tranche. */
     val executableKinds: Set<TypedSeedKind> = publicSearchKinds
 
@@ -290,6 +297,15 @@ object TypedSeedSafety {
         ) return false
         if (!isSafePublicSearchValue(seed)) return false
 
+        // Initial Name/Username values are authorized by the user and are
+        // already covered by the legacy launch passes.  Discovered values
+        // must clear a stronger quality gate before they can fan out into
+        // broad public search, otherwise common display names and placeholder
+        // handles can multiply unrelated candidates.
+        if (seed.origin == TypedSeedOrigin.Evidence &&
+            !isSafeEvidenceSearchValue(seed)
+        ) return false
+
         // User-provided values are authorized even before a public fetch has
         // verified them. Evidence-derived values used for search expansion
         // must be verified and public.
@@ -336,6 +352,43 @@ object TypedSeedSafety {
         val storedNormalized = normalizer.normalizeForSafety(seed.kind, seed.normalizedValue)
         return exactNormalized == seed.normalizedValue &&
             storedNormalized == seed.normalizedValue
+    }
+
+    private fun isSafeEvidenceSearchValue(seed: TypedSeed): Boolean = when (seed.kind) {
+        TypedSeedKind.Name -> {
+            // A display name is a weak identity signal by itself. Require two
+            // distinct evidence IDs as a provenance minimum, but do not call
+            // that independent source corroboration: TypedSeed retains only
+            // one sourceUrl, so source-URL independence remains unrepresented.
+            val parts = seed.normalizedValue.trim()
+                .split(Regex("\\s+"))
+                .filter(String::isNotBlank)
+            val distinctEvidenceIds = seed.evidenceIds
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+            distinctEvidenceIds.size >= 2 &&
+                parts.size >= 2 &&
+                parts.all { part ->
+                    part.length >= 2 &&
+                        part.any(Char::isLetter) &&
+                        !PivotAdmissionPolicy.isCommonHandle(part)
+                }
+        }
+
+        TypedSeedKind.Username -> {
+            // PivotAdmissionPolicy can make a confidence/corroboration-based
+            // exception for a common handle. TypedSeed has no confidence and
+            // therefore rejects every evidence-derived common handle here,
+            // even with multiple evidence IDs; user-provided launch handles
+            // remain authorized and this gate does not weaken frontier safety.
+            val normalized = seed.normalizedValue.trim().removePrefix("@").lowercase(Locale.ROOT)
+            normalized.length >= MIN_RECURSIVE_USERNAME_LENGTH &&
+                normalized.any(Char::isLetterOrDigit) &&
+                !PivotAdmissionPolicy.isCommonHandle(normalized)
+        }
+
+        else -> true
     }
 
     private fun isStructurallySafe(seed: TypedSeed): Boolean {
@@ -389,4 +442,6 @@ object TypedSeedSafety {
 
         else -> true
     }
+
+    private const val MIN_RECURSIVE_USERNAME_LENGTH = 3
 }

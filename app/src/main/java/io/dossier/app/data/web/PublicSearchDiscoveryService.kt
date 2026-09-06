@@ -104,9 +104,16 @@ class PublicSearchDiscoveryService(private val context: Context) {
         input: IdentityInput,
         deepResearch: Boolean = false,
         verifiedResults: List<ProfileScanResult> = emptyList(),
-        typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList()
+        typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList(),
+        verificationInput: IdentityInput? = null
     ): List<PublicSearchResult> = when (
-        val outcome = discoverOutcome(input, deepResearch, verifiedResults, typedSeeds)
+        val outcome = discoverOutcome(
+            input = input,
+            deepResearch = deepResearch,
+            verifiedResults = verifiedResults,
+            typedSeeds = typedSeeds,
+            verificationInput = verificationInput
+        )
     ) {
         is SearchOutcome.Success -> outcome.results
         is SearchOutcome.Unavailable -> emptyList()
@@ -121,7 +128,15 @@ class PublicSearchDiscoveryService(private val context: Context) {
         input: IdentityInput,
         deepResearch: Boolean = false,
         verifiedResults: List<ProfileScanResult> = emptyList(),
-        typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList()
+        typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList(),
+        /**
+         * Optional attribution context used only when re-checking result pages.
+         * The query plan remains scoped to [input], so a recursive typed pivot
+         * cannot accidentally repeat the full launch search.  Callers may pass
+         * the original authorized identity context to preserve the existing
+         * multi-signal verification rules.
+         */
+        verificationInput: IdentityInput? = null
     ): SearchOutcome =
         withContext(Dispatchers.IO) {
             val queryLimit = if (deepResearch) MAX_DEEP_QUERIES else MAX_DEFAULT_QUERIES
@@ -129,10 +144,22 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val plan = buildSearchQueryPlan(input, deepResearch, verifiedResults, safeSeeds).take(queryLimit)
             if (plan.isEmpty()) return@withContext SearchOutcome.Success(emptyList())
 
-            val effectiveInput = if (verifiedResults.isNotEmpty()) {
+            val scoringInput = if (verifiedResults.isNotEmpty()) {
                 expandIdentityInput(input, verifiedResults)
             } else {
                 input
+            }
+            // Keep the query plan scoped to the current typed pivot, but let
+            // page attribution see both the original authorized context and
+            // that pivot. Replacing the scoped input with the original input
+            // would drop a discovered Name/Username before verification.
+            val attributionInput = verificationInput?.let { authorized ->
+                mergeVerificationInput(authorized, scoringInput)
+            } ?: scoringInput
+            val effectiveVerificationInput = if (verifiedResults.isNotEmpty()) {
+                expandIdentityInput(attributionInput, verifiedResults)
+            } else {
+                attributionInput
             }
 
             val providers = defaultProviders()
@@ -179,7 +206,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
             }
 
             val scored = mergeProviderEvidence(raw)
-                .map { result -> result.copy(score = scoreResult(effectiveInput, result)) }
+                .map { result -> result.copy(score = scoreResult(scoringInput, result)) }
                 .filter { it.score >= MIN_INDEX_SCORE }
                 .sortedByDescending { it.score }
                 .take(MAX_PRE_VERIFICATION_RESULTS)
@@ -202,7 +229,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
 
                         verifySemaphore.withPermit {
                             when (val verification = pageVerifier.verify(
-                                input = effectiveInput,
+                                input = effectiveVerificationInput,
                                 url = result.url,
                                 indexedTitle = result.title,
                                 indexedSnippet = result.snippet
@@ -920,6 +947,27 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 else -> Unit
             }
 
+            // A typed Name/Username pivot is already admitted from explicit
+            // provenance. Let its bounded query produce a lead even when the
+            // index omits the original launch terms; direct page verification
+            // still decides whether attribution is strong enough.
+            val typedPivot = result.pivotExactValue?.trim()
+            if (typedPivot != null && typedPivot.isNotBlank() &&
+                result.query.contains(typedPivot, ignoreCase = true)
+            ) {
+                when (result.pivotSeedKind) {
+                    TypedSeedKind.Name -> {
+                        score += 0.18f
+                        directIdentitySignals++
+                    }
+                    TypedSeedKind.Username -> {
+                        score += 0.24f
+                        directIdentitySignals++
+                    }
+                    else -> Unit
+                }
+            }
+
             val name = input.fullName.trim()
             if (name.isNotBlank() && combined.contains(name.lowercase())) {
                 score += 0.30f
@@ -1037,6 +1085,38 @@ class PublicSearchDiscoveryService(private val context: Context) {
                         ?: group.firstNotNullOfOrNull { it.verifiedPage }
                 )
             }
+
+        /**
+         * Combines the original authorized signals with a query-scoped typed
+         * pivot for direct page attribution. The scoped input is deliberately
+         * not used to build the search plan; it is only an additional signal
+         * on the page that was reached through that pivot.
+         */
+        internal fun mergeVerificationInput(
+            authorized: IdentityInput,
+            scoped: IdentityInput
+        ): IdentityInput {
+            val effectiveFullName = authorized.fullName.ifBlank { scoped.fullName }
+            val scopedNameAlias = scoped.fullName.takeIf {
+                it.isNotBlank() && !sameIdentityText(it, effectiveFullName)
+            }
+            return authorized.copy(
+                fullName = effectiveFullName,
+                aliases = (authorized.aliases + scoped.aliases + scopedNameAlias.orEmpty()).distinct(),
+                emails = (authorized.emails + scoped.emails).distinct(),
+                phones = (authorized.phones + scoped.phones).distinct(),
+                locations = (authorized.locations + scoped.locations).distinct(),
+                organizations = (authorized.organizations + scoped.organizations).distinct(),
+                usernames = (authorized.usernames + scoped.usernames).distinct(),
+                primaryUsername = authorized.primaryUsername ?: scoped.primaryUsername,
+                profileUrls = (authorized.profileUrls + scoped.profileUrls).distinct(),
+                selfieUri = authorized.selfieUri ?: scoped.selfieUri
+            )
+        }
+
+        private fun sameIdentityText(first: String, second: String): Boolean =
+            first.trim().replace(Regex("\\s+"), " ")
+                .equals(second.trim().replace(Regex("\\s+"), " "), ignoreCase = true)
 
         private fun consensusBonus(providerCount: Int): Float =
             ((providerCount - 1).coerceAtLeast(0) * PROVIDER_CONSENSUS_BONUS)

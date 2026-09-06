@@ -10,6 +10,7 @@ import okhttp3.Response
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -94,6 +95,21 @@ class PublicSearchDiscoveryServiceTest {
         assertNotNull(page)
         assertEquals(sha256(body), page?.contentHashSha256)
         assertTrue(page?.text.orEmpty().contains("Jane Example"))
+    }
+
+    @Test
+    fun verificationInput_mergedWithScopedInput_acceptsDiscoveredSignalsThatOriginalRejects() {
+        val url = "https://profile.example.test/discovered_user"
+        val body = "Original User profile for discovered_user."
+        val authorized = IdentityInput(fullName = "Original User", usernames = listOf("original"))
+        val scoped = IdentityInput(fullName = "Original User", usernames = listOf("discovered_user"))
+
+        val merged = PublicSearchDiscoveryService.mergeVerificationInput(authorized, scoped)
+        val originalAssessment = PublicPageVerifier.assessIdentitySignals(authorized, url, body)
+        val mergedAssessment = PublicPageVerifier.assessIdentitySignals(merged, url, body)
+
+        assertFalse("Original context alone should reject missing signal", originalAssessment.verificationQualified)
+        assertTrue("Merged context should verify via discovered pivot", mergedAssessment.verificationQualified)
     }
 
     @Test
@@ -287,6 +303,179 @@ class PublicSearchDiscoveryServiceTest {
         val emailIndex = queries.indexOf("\"safe@example.test\"")
         val originalEmailIndex = queries.indexOf("\"original@example.test\"")
         assertTrue("Safe seeds should appear before original term exact queries", emailIndex < originalEmailIndex)
+    }
+
+    @Test
+    fun buildSearchQueryPlan_prioritizesScopedNameAndUsernamePivotsBeforeOriginalTerms() {
+        fun verifiedSeed(kind: io.dossier.app.domain.discovery.TypedSeedKind, value: String) =
+            io.dossier.app.domain.discovery.TypedSeed(
+                kind = kind,
+                value = if (kind == io.dossier.app.domain.discovery.TypedSeedKind.Username) {
+                    value.removePrefix("@").lowercase()
+                } else {
+                    value
+                },
+                exactValue = value,
+                normalizedValue = if (kind == io.dossier.app.domain.discovery.TypedSeedKind.Username) {
+                    value.removePrefix("@").lowercase()
+                } else {
+                    value
+                },
+                isVerified = true,
+                evidenceState = io.dossier.app.domain.evidence.EvidenceState.Verified,
+                origin = io.dossier.app.domain.discovery.TypedSeedOrigin.Evidence,
+                sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.PUBLIC_PROFILE,
+                evidenceIds = if (kind == io.dossier.app.domain.discovery.TypedSeedKind.Name) {
+                    listOf("name-ev-a", "name-ev-b")
+                } else {
+                    listOf("username-ev")
+                },
+                sourceUrl = "https://profile.example.test/source"
+            )
+
+        val plan = PublicSearchDiscoveryService.buildSearchQueryPlan(
+            input = IdentityInput(fullName = "Original Person", usernames = listOf("original_user")),
+            typedSeeds = listOf(
+                verifiedSeed(io.dossier.app.domain.discovery.TypedSeedKind.Name, "Jane Example"),
+                verifiedSeed(io.dossier.app.domain.discovery.TypedSeedKind.Username, "sample_user")
+            )
+        )
+        val queries = plan.map { it.query }
+
+        assertEquals("\"Jane Example\"", queries[0])
+        assertEquals("\"sample_user\"", queries[1])
+        assertEquals("typed-seed-exact", plan[0].stage)
+        assertEquals(io.dossier.app.domain.discovery.TypedSeedKind.Name, plan[0].pivotSeedKind)
+        assertEquals(io.dossier.app.domain.discovery.TypedSeedKind.Username, plan[1].pivotSeedKind)
+        assertTrue(queries.indexOf("\"Jane Example\"") < queries.indexOf("\"Original Person\""))
+        assertTrue(queries.indexOf("\"sample_user\"") < queries.indexOf("\"original_user\""))
+    }
+
+    @Test
+    fun recursiveVerificationContextRetainsOriginalAndScopedPivotSignals() {
+        val authorized = IdentityInput(fullName = "Original Person")
+        val scopedUsername = IdentityInput(
+            fullName = "",
+            usernames = listOf("sample_user")
+        )
+        val usernameUrl = "https://profiles.example.test/sample_user"
+        val usernamePage = "Original Person @sample_user"
+
+        val originalOnly = PublicPageVerifier.assessIdentitySignals(
+            authorized,
+            usernameUrl,
+            usernamePage
+        )
+        val merged = PublicPageVerifier.assessIdentitySignals(
+            PublicSearchDiscoveryService.mergeVerificationInput(authorized, scopedUsername),
+            usernameUrl,
+            usernamePage
+        )
+
+        assertTrue("Original context alone has no matching handle", !originalOnly.verificationQualified)
+        assertTrue("Merged context can attribute the scoped handle", merged.verificationQualified)
+
+        val nameAuthorized = IdentityInput(fullName = "")
+        val scopedName = IdentityInput(
+            fullName = "Jane Example",
+            organizations = listOf("Example Org")
+        )
+        val namePage = "Jane Example Example Org"
+        val nameMerged = PublicSearchDiscoveryService.mergeVerificationInput(nameAuthorized, scopedName)
+        val originalNameAssessment = PublicPageVerifier.assessIdentitySignals(
+            nameAuthorized,
+            usernameUrl,
+            namePage
+        )
+        val nameAssessment = PublicPageVerifier.assessIdentitySignals(nameMerged, usernameUrl, namePage)
+        assertTrue("Blank original context cannot attribute the scoped name", !originalNameAssessment.verificationQualified)
+        assertEquals("Scoped name fills an empty authorized name", "Jane Example", nameMerged.fullName)
+        assertFalse("The effective full name must not be duplicated as its own alias", nameMerged.aliases.contains("Jane Example"))
+        assertTrue("Merged name context retains an independent organization signal", nameAssessment.verificationQualified)
+
+        val nameOnlyMerged = PublicSearchDiscoveryService.mergeVerificationInput(
+            nameAuthorized,
+            IdentityInput(fullName = "Jane Example")
+        )
+        assertFalse(
+            "A scoped name alone is still insufficient attribution",
+            PublicPageVerifier.assessIdentitySignals(nameOnlyMerged, usernameUrl, "Jane Example")
+                .verificationQualified
+        )
+
+        val whitespaceMerged = PublicSearchDiscoveryService.mergeVerificationInput(
+            IdentityInput(fullName = "Jane Example"),
+            IdentityInput(fullName = "  jane   example  ")
+        )
+        assertFalse(
+            "Whitespace/case variants must not become a duplicate alias",
+            whitespaceMerged.aliases.any { it.trim().equals("jane example", ignoreCase = true) }
+        )
+    }
+
+    @Test
+    fun scopedNameAliasRequiresIndependentOrganizationOrLocationContext() {
+        val authorized = IdentityInput(fullName = "Original Person")
+        val scopedName = IdentityInput(fullName = "Jane Example")
+        val aliasOnly = PublicSearchDiscoveryService.mergeVerificationInput(authorized, scopedName)
+
+        assertFalse(
+            "A scoped name alias alone is still insufficient attribution",
+            PublicPageVerifier.assessIdentitySignals(
+                aliasOnly,
+                "https://profiles.example.test/jane",
+                "Jane Example"
+            ).verificationQualified
+        )
+
+        val withOrganization = PublicSearchDiscoveryService.mergeVerificationInput(
+            authorized,
+            scopedName.copy(organizations = listOf("Example Org"))
+        )
+        assertTrue(
+            "A scoped name alias plus an independent organization qualifies",
+            PublicPageVerifier.assessIdentitySignals(
+                withOrganization,
+                "https://profiles.example.test/jane",
+                "Jane Example Example Org"
+            ).verificationQualified
+        )
+
+        val withLocation = PublicSearchDiscoveryService.mergeVerificationInput(
+            authorized,
+            scopedName.copy(locations = listOf("Example City"))
+        )
+        assertTrue(
+            "A scoped name alias plus an independent location qualifies",
+            PublicPageVerifier.assessIdentitySignals(
+                withLocation,
+                "https://profiles.example.test/jane",
+                "Jane Example Example City"
+            ).verificationQualified
+        )
+    }
+
+    @Test
+    fun scoreResult_keepsNameAndUsernamePivotLeadsEligibleForVerification() {
+        val input = IdentityInput(fullName = "Original Person")
+        val usernameLead = PublicSearchDiscoveryService.PublicSearchResult(
+            title = "Profile result",
+            snippet = "",
+            url = "https://profiles.example.test/sample_user",
+            query = "\"sample_user\"",
+            source = "Test",
+            pivotSeedKind = io.dossier.app.domain.discovery.TypedSeedKind.Username,
+            pivotExactValue = "sample_user"
+        )
+        val nameLead = usernameLead.copy(
+            url = "https://documents.example.test/jane",
+            query = "\"Jane Example\"",
+            pivotSeedKind = io.dossier.app.domain.discovery.TypedSeedKind.Name,
+            pivotExactValue = "Jane Example"
+        )
+
+        assertTrue(PublicSearchDiscoveryService.scoreResult(input, usernameLead) >= 0.22f)
+        assertTrue(PublicSearchDiscoveryService.scoreResult(input, nameLead) >= 0.22f)
     }
 
     @Test

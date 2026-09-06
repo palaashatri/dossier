@@ -54,10 +54,12 @@ internal val PUBLIC_FETCH_TYPED_SEED_KINDS: Set<TypedSeedKind> = setOf(
     TypedSeedKind.Archive
 )
 
-/** High-entropy values that can be sent to the bounded public-search executor. */
+/** Values that can be sent to the bounded public-search executor. */
 internal val PUBLIC_SEARCH_TYPED_SEED_KINDS: Set<TypedSeedKind> = setOf(
     TypedSeedKind.Email,
-    TypedSeedKind.Phone
+    TypedSeedKind.Phone,
+    TypedSeedKind.Name,
+    TypedSeedKind.Username
 )
 
 /** Typed values that have a reviewed executor in the current scan tranche. */

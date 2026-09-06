@@ -20,6 +20,7 @@ import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
 import io.dossier.app.domain.discovery.TypedSeedSafety
 import io.dossier.app.domain.discovery.TypedSeedKind
+import io.dossier.app.domain.discovery.TypedSeedOrigin
 import io.dossier.app.domain.discovery.TypedSeed
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
@@ -705,8 +706,14 @@ class ProfileScanner(
         // The initial profile pass already fetched and verified its profile URL.
         // Mark only those exact source URLs complete; extracted navigation links
         // are observations and still require their own bounded fetch.
+        // The initial ProfileScanner passes also already searched the user-input Name/Username.
         admission.admittedSeeds.forEach { seed ->
             if (alreadyFetchedByInitialProfile(seed, cumulativeEvidence)) {
+                frontier.complete(frontier.keyFor(seed))
+            } else if (
+                seed.kind in setOf(TypedSeedKind.Name, TypedSeedKind.Username) &&
+                seed.origin == TypedSeedOrigin.UserInput
+            ) {
                 frontier.complete(frontier.keyFor(seed))
             }
         }
@@ -715,8 +722,9 @@ class ProfileScanner(
             ?: run {
                 // One service owns the HTTP client, cache, breaker, and browser
                 // semaphore for this frontier pass. Scope each request to the
-                // typed seed so broad name/input queries are not repeated once
-                // per frontier item.
+                // typed seed so unrelated launch identity terms are not copied
+                // into every pivot; each admitted pivot still receives its own
+                // bounded query plan.
                 val searchService = PublicSearchDiscoveryService(context)
                 TypedSeedPublicFetchExecutor(
                     providerRuntime = providerRuntime,
@@ -725,7 +733,8 @@ class ProfileScanner(
                             input = seedScopedInput(seed),
                             deepResearch = deepResearch,
                             verifiedResults = emptyList(),
-                            typedSeeds = listOf(seed)
+                            typedSeeds = listOf(seed),
+                            verificationInput = input
                         )
                     }
                 )
@@ -939,10 +948,11 @@ class ProfileScanner(
     /**
      * Keep a typed-frontier search focused on its high-entropy seed. The
      * shared service still owns provider/cache policy, but does not repeat the
-     * full name/profile query plan for every Email/Phone entry.
+     * launch identity's full query plan for every typed frontier entry.
      */
     private fun seedScopedInput(seed: TypedSeed): IdentityInput = IdentityInput(
-        fullName = "",
+        fullName = if (seed.kind == TypedSeedKind.Name) seed.exactValue else "",
+        usernames = if (seed.kind == TypedSeedKind.Username) listOf(seed.exactValue) else emptyList(),
         emails = if (seed.kind == TypedSeedKind.Email) listOf(seed.exactValue) else emptyList(),
         phones = if (seed.kind == TypedSeedKind.Phone) listOf(seed.exactValue) else emptyList()
     )
@@ -997,7 +1007,16 @@ class ProfileScanner(
             .fromCollection(canonicalEvidence, input)
             .admittedSeeds
             .filter(TypedSeedSafety::isSafePublicSearchSeed)
-        val discovered = service.discover(input, deepResearch, verifiedResults, typedSeeds)
+        val discovered = service.discover(
+            input = input,
+            deepResearch = deepResearch,
+            verifiedResults = verifiedResults,
+            typedSeeds = typedSeeds,
+            // Keep page attribution anchored to the original authorized
+            // identity when a discovered Name/Username pivot is searched.
+            // The query plan remains scoped to each typed pivot.
+            verificationInput = input
+        )
         if (discovered.isEmpty()) return emptyList()
 
         return discovered

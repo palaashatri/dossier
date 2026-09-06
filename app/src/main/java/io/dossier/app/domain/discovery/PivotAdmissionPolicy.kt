@@ -1,6 +1,7 @@
 package io.dossier.app.domain.discovery
 
 import kotlinx.serialization.Serializable
+import java.util.Locale
 
 /**
  * Signal types that may enter the bounded recursive discovery path.
@@ -59,8 +60,18 @@ object PivotAdmissionPolicy {
     private val commonHandles = setOf(
         "admin", "administrator", "user", "username", "test", "demo",
         "support", "help", "contact", "info", "official", "team", "staff",
-        "news", "media", "root", "guest", "unknown", "account", "profile"
+        "news", "media", "root", "guest", "unknown", "account", "profile",
+        "undefined", "null", "none", "anonymous", "n/a", "na", "default"
     )
+
+    /**
+     * Normalizes a handle for common-value checks. The request-level policy
+     * may admit a common handle with at least two corroborating evidence
+     * records and confidence >= 0.75; [TypedSeedSafety] intentionally remains
+     * stricter because [TypedSeed] carries no confidence field.
+     */
+    internal fun isCommonHandle(value: String): Boolean =
+        value.trim().removePrefix("@").lowercase(Locale.ROOT) in commonHandles
 
     fun decide(request: PivotAdmissionRequest): PivotAdmissionDecision {
         if (request.alreadyVisited) {
@@ -74,11 +85,11 @@ object PivotAdmissionPolicy {
                 "Pivot depth exceeds the configured recursion limit (${request.maxDepth})"
             )
         }
-        val value = request.normalizedValue.trim().lowercase()
+        val value = request.normalizedValue.trim().lowercase(Locale.ROOT)
         if (value.length < 2) {
             return PivotAdmissionDecision.Reject("Signal is too short to be a useful identity pivot")
         }
-        if (request.signalType == PivotSignalType.CommonUsername || value in commonHandles) {
+        if (request.signalType == PivotSignalType.CommonUsername || isCommonHandle(value)) {
             return if (request.corroboratingEvidenceCount >= 2 && request.confidence >= 0.75f) {
                 PivotAdmissionDecision.Admit(
                     PivotConfidenceBand.Medium,
@@ -112,7 +123,7 @@ object PivotAdmissionPolicy {
             }
 
             PivotSignalType.ExplicitPlatformMention -> if (
-                request.confidence >= 0.60f && value !in commonHandles
+                request.confidence >= 0.60f && !isCommonHandle(value)
             ) {
                 PivotAdmissionDecision.Admit(
                     PivotConfidenceBand.Medium,

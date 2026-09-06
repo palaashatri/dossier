@@ -63,8 +63,8 @@ class PivotAdmissionPolicyTest {
         val corroborated = PivotAdmissionPolicy.decide(
             PivotAdmissionRequest(
                 signalType = PivotSignalType.CommonUsername,
-                normalizedValue = "support",
-                confidence = 0.8f,
+                normalizedValue = "@Support",
+                confidence = 0.75f,
                 depth = 1,
                 corroboratingEvidenceCount = 2
             )

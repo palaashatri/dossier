@@ -75,8 +75,8 @@ private fun defaultArchiveSeedResolver(): TypedSeedPublicFetchExecutor.ArchiveSe
 }
 
 /**
- * A bounded executor for reviewed URL-like fetches and high-entropy
- * Email/Phone public-search pivots.
+ * A bounded executor for reviewed URL-like fetches and bounded
+ * Email/Phone/Name/Username public-search pivots.
  *
  * The canonical [EvidenceCollection] is the only output of record.  The
  * detailed report is deliberately disposable and exists to make per-seed
@@ -129,7 +129,7 @@ class TypedSeedPublicFetchExecutor(
         suspend fun resolve(url: String): ArchiveSeedFetch?
     }
 
-    /** Injectable search seam for Email/Phone seeds. */
+    /** Injectable search seam for Email/Phone/Name/Username seeds. */
     fun interface PublicSearchSeam {
         suspend fun search(
             seed: TypedSeed,
@@ -192,7 +192,7 @@ class TypedSeedPublicFetchExecutor(
         val outcomes: List<SeedExecution> get() = executions
     }
 
-    /** Executes safe URL-like fetches and Email/Phone searches into canonical evidence. */
+    /** Executes safe URL-like fetches and Email/Phone/Name/Username searches into canonical evidence. */
     suspend fun execute(
         seeds: List<TypedSeed>,
         input: IdentityInput,
@@ -263,7 +263,9 @@ class TypedSeedPublicFetchExecutor(
                 TypedSeedKind.Domain,
                 TypedSeedKind.Document -> executePublic(seed, input, scanId)
                 TypedSeedKind.Email,
-                TypedSeedKind.Phone -> executeSearch(seed, input, scanId)
+                TypedSeedKind.Phone,
+                TypedSeedKind.Name,
+                TypedSeedKind.Username -> executeSearch(seed, input, scanId)
                 else -> skipped(seed)
             }
         } catch (cancelled: CancellationException) {
@@ -1355,13 +1357,13 @@ class TypedSeedPublicFetchExecutor(
             state = EvidenceState.Unavailable,
             reliability = when {
                 historical -> EvidenceReliability.ArchiveSnapshot
-                seed.kind in setOf(TypedSeedKind.Email, TypedSeedKind.Phone) ->
+                seed.kind in TypedSeedSafety.publicSearchOnlyKinds ->
                     EvidenceReliability.SearchEngineCandidate
                 else -> EvidenceReliability.DirectPersonalWebsite
             },
             sourceClassification = when {
                 historical -> ExposureSourceClassification.ARCHIVE
-                seed.kind in setOf(TypedSeedKind.Email, TypedSeedKind.Phone) ->
+                seed.kind in TypedSeedSafety.publicSearchOnlyKinds ->
                     ExposureSourceClassification.PUBLIC_WEB
                 else -> sourceClassification(seed)
             },
