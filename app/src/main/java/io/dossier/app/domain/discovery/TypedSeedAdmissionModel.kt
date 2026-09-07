@@ -59,7 +59,10 @@ internal val PUBLIC_SEARCH_TYPED_SEED_KINDS: Set<TypedSeedKind> = setOf(
     TypedSeedKind.Email,
     TypedSeedKind.Phone,
     TypedSeedKind.Name,
-    TypedSeedKind.Username
+    TypedSeedKind.Username,
+    // Location search is available only through the specialized
+    // context-scoped path; location-only queries are never admitted.
+    TypedSeedKind.Location
 )
 
 /** Typed values that have a reviewed executor in the current scan tranche. */
@@ -122,7 +125,11 @@ data class TypedSeed(
     val discoveryPath: List<String> = emptyList(),
     val origin: TypedSeedOrigin = if (isVerified) TypedSeedOrigin.Evidence else TypedSeedOrigin.UserInput,
     /** Explicit photo-location evidence class, when this is a Location seed. */
-    val locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass? = null
+    val locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass? = null,
+    /** Source URLs represented by the retained evidence IDs, for corroboration. */
+    val evidenceSourceUrls: List<String> = emptyList(),
+    /** Provider IDs represented by the retained evidence IDs, for corroboration. */
+    val evidenceProviderIds: List<String> = emptyList()
 ) {
     /** Naming aliases keep source/verification terminology explicit to callers. */
     val source: TypedSeedOrigin get() = origin
@@ -184,12 +191,20 @@ data class TypedSeed(
         require(exactValue.length <= MAX_VALUE_CHARS) { "Typed seed exact value is too long." }
         require(depth >= 0) { "Typed seed depth must not be negative." }
         require(evidenceIds.size <= MAX_EVIDENCE_IDS) { "Too many typed seed evidence IDs." }
+        require(evidenceSourceUrls.size <= MAX_EVIDENCE_SOURCE_URLS) {
+            "Too many typed seed evidence source URLs."
+        }
+        require(evidenceProviderIds.size <= MAX_EVIDENCE_PROVIDERS) {
+            "Too many typed seed evidence providers."
+        }
         require(discoveryPath.size <= MAX_DISCOVERY_PATH_STEPS) { "Typed seed discovery path is too long." }
     }
 
     companion object {
         const val MAX_VALUE_CHARS = 4_096
         const val MAX_EVIDENCE_IDS = 256
+        const val MAX_EVIDENCE_SOURCE_URLS = 64
+        const val MAX_EVIDENCE_PROVIDERS = 64
         const val MAX_DISCOVERY_PATH_STEPS = 64
     }
 }
@@ -311,7 +326,9 @@ class TypedSeedAdmissionModel(
         evidenceIds: List<String> = emptyList(),
         sourceUrl: String? = null,
         discoveryPath: List<String> = emptyList(),
-        locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass? = null
+        locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass? = null,
+        evidenceSourceUrls: List<String> = emptyList(),
+        evidenceProviderIds: List<String> = emptyList()
     ): Boolean {
         if (depth !in 0..config.maxDepth) return false
         val normalized = normalize(kind, rawValue) ?: return false
@@ -325,6 +342,8 @@ class TypedSeedAdmissionModel(
                 sourceClassification = sourceClassification,
                 evidenceIds = evidenceIds,
                 sourceUrl = sourceUrl,
+                evidenceSourceUrls = evidenceSourceUrls,
+                evidenceProviderIds = evidenceProviderIds,
                 discoveryPath = discoveryPath,
                 origin = origin,
                 locationEvidenceClass = locationEvidenceClass
@@ -352,6 +371,16 @@ class TypedSeedAdmissionModel(
                 .distinct()
                 .take(TypedSeed.MAX_EVIDENCE_IDS),
             sourceUrl = sourceUrl?.take(TypedSeed.MAX_VALUE_CHARS),
+            evidenceSourceUrls = (evidenceSourceUrls + listOfNotNull(sourceUrl))
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+                .take(TypedSeed.MAX_EVIDENCE_SOURCE_URLS),
+            evidenceProviderIds = evidenceProviderIds
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+                .take(TypedSeed.MAX_EVIDENCE_PROVIDERS),
             discoveryPath = discoveryPath
                 .map(String::trim)
                 .filter(String::isNotBlank)
@@ -374,6 +403,8 @@ class TypedSeedAdmissionModel(
         sourceClassification: ExposureSourceClassification,
         evidenceIds: List<String>,
         sourceUrl: String?,
+        evidenceSourceUrls: List<String>,
+        evidenceProviderIds: List<String>,
         discoveryPath: List<String>,
         origin: TypedSeedOrigin,
         locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass?
@@ -382,35 +413,86 @@ class TypedSeedAdmissionModel(
         if (index < 0) return
         val existing = admitted[index]
         val mergedState = strongerState(existing.evidenceState, evidenceState)
+        val mergedLocationEvidenceClass = strongerLocationEvidenceClass(
+            existing.locationEvidenceClass,
+            locationEvidenceClass
+        )
+        // A local/import observation may arrive before or after a public
+        // observation for the same normalized value. Keep the public
+        // provenance as the executable identity regardless of arrival order;
+        // otherwise a later local duplicate can replace a safe public pivot
+        // with LOCAL_IMPORT and silently disable recursive search. User input
+        // remains authoritative because it is the operator's explicit seed.
+        val incomingPublicEvidence = isPublicEvidenceProvenance(
+            origin = origin,
+            sourceClassification = sourceClassification,
+            sourceUrl = sourceUrl
+        )
+        val existingPublicEvidence = isPublicEvidenceProvenance(
+            origin = existing.origin,
+            sourceClassification = existing.sourceClassification,
+            sourceUrl = existing.sourceUrl
+        )
+        val preferIncomingProvenance = when {
+            existing.origin == TypedSeedOrigin.UserInput -> false
+            origin == TypedSeedOrigin.UserInput -> true
+            incomingPublicEvidence && !existingPublicEvidence -> true
+            else -> false
+        }
         val merged = existing.copy(
             isVerified = mergedState == EvidenceState.Verified,
             evidenceState = mergedState,
-            sourceClassification = if (existing.origin == TypedSeedOrigin.UserInput) {
-                existing.sourceClassification
-            } else {
+            sourceClassification = if (preferIncomingProvenance) {
                 sourceClassification
+            } else {
+                existing.sourceClassification
             },
             evidenceIds = (existing.evidenceIds + evidenceIds)
                 .map(String::trim)
                 .filter(String::isNotBlank)
                 .distinct()
                 .take(TypedSeed.MAX_EVIDENCE_IDS),
-            sourceUrl = existing.sourceUrl ?: sourceUrl,
+            evidenceSourceUrls = (existing.evidenceSourceUrls + evidenceSourceUrls + listOfNotNull(sourceUrl))
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+                .take(TypedSeed.MAX_EVIDENCE_SOURCE_URLS),
+            evidenceProviderIds = (existing.evidenceProviderIds + evidenceProviderIds)
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+                .take(TypedSeed.MAX_EVIDENCE_PROVIDERS),
             discoveryPath = (existing.discoveryPath + discoveryPath)
                 .map(String::trim)
                 .filter(String::isNotBlank)
                 .distinct()
                 .take(TypedSeed.MAX_DISCOVERY_PATH_STEPS),
-            origin = if (existing.origin == TypedSeedOrigin.UserInput) existing.origin else origin,
-            locationEvidenceClass = strongerLocationEvidenceClass(
-                existing.locationEvidenceClass,
-                locationEvidenceClass
-            )
+            sourceUrl = if (preferIncomingProvenance) {
+                sourceUrl ?: existing.sourceUrl
+            } else {
+                existing.sourceUrl ?: sourceUrl
+            },
+            origin = if (preferIncomingProvenance) origin else existing.origin,
+            locationEvidenceClass = mergedLocationEvidenceClass
         )
         admitted[index] = merged
         val pendingIndex = queue.indexOfFirst { "${it.kind.name}:${it.normalizedValue}" == key }
         if (pendingIndex >= 0) queue[pendingIndex] = merged
     }
+
+    private fun isPublicEvidenceProvenance(
+        origin: TypedSeedOrigin,
+        sourceClassification: ExposureSourceClassification,
+        sourceUrl: String?
+    ): Boolean = origin == TypedSeedOrigin.Evidence &&
+        sourceClassification in setOf(
+            ExposureSourceClassification.PUBLIC_WEB,
+            ExposureSourceClassification.PUBLIC_PROFILE,
+            ExposureSourceClassification.PUBLIC_DOCUMENT,
+            ExposureSourceClassification.PUBLIC_RECORD,
+            ExposureSourceClassification.ARCHIVE,
+            ExposureSourceClassification.AUTHORIZED_API
+        ) && !sourceUrl.isNullOrBlank()
 
     private fun strongerState(first: EvidenceState, second: EvidenceState): EvidenceState {
         if (first == second) return first
@@ -623,6 +705,16 @@ class TypedSeedAdmissionModel(
     ): ReverseImageLookupResult.LocationEvidenceClass? {
         if (first == null) return second
         if (second == null) return first
+        if (first == ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING ||
+            second == ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING
+        ) {
+            return ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING
+        }
+        if (first == ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION ||
+            second == ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION
+        ) {
+            return ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION
+        }
         val firstRank = locationEvidenceClassRank(first)
         val secondRank = locationEvidenceClassRank(second)
         return if (secondRank > firstRank) second else first

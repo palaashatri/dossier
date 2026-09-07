@@ -706,6 +706,12 @@ failure/challenge/rate-limit rate
 
 The UI should remain responsive while work proceeds. Persist enough frontier/checkpoint state for useful recovery after process death where practical.
 
+Photo analysis is optional enrichment and must be bounded and progressive: a
+slow local model or public-image provider must not block useful typed-seed or
+profile discovery. Partial local media evidence remains inspectable, and a
+timeout or unavailable media provider must leave the other discovery work and
+its evidence intact.
+
 ## 22. Security and local privacy
 
 Sensitive cases, exact exposed values, private ground truth, face data, imported exposure evidence, and derived identity graph material require local security controls.

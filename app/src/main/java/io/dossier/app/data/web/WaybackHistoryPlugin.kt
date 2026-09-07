@@ -57,6 +57,11 @@ class WaybackHistoryPlugin(
                 val captures = discover(originalUrl).take(MAX_CAPTURES_PER_URL)
                 for ((index, capture) in captures.withIndex()) {
                     val snapshotUrl = snapshotUrl(capture)
+                    val historicalPath = listOf(originalUrl, snapshotUrl)
+                        .map(String::trim)
+                        .filter(String::isNotBlank)
+                        .distinct()
+                        .take(Evidence.MAX_DISCOVERY_PATH_STEPS)
                     val fetched = if (index < MAX_DIRECT_FETCHES_PER_URL) fetchSnapshot(snapshotUrl, originalUrl) else null
                     val state = if (fetched != null) EvidenceState.Verified else EvidenceState.Observed
                     val snippet = fetched?.let { page ->
@@ -93,7 +98,8 @@ class WaybackHistoryPlugin(
                         reliability = EvidenceReliability.ArchiveSnapshot,
                         contentHashSha256 = fetched?.let { sha256(it.text) },
                         parserVersion = PARSER_VERSION,
-                        historical = true
+                        historical = true,
+                        discoveryPath = historicalPath
                     )
                     relationships += EvidenceRelationship(
                         fromValue = originalUrl,
@@ -127,7 +133,8 @@ class WaybackHistoryPlugin(
                                 reliability = EvidenceReliability.ArchiveSnapshot,
                                 contentHashSha256 = sha256(fetched.text),
                                 parserVersion = PARSER_VERSION,
-                                historical = true
+                                historical = true,
+                                discoveryPath = historicalPath
                             )
                         }
                         meta.bio?.let { bio ->
@@ -152,7 +159,8 @@ class WaybackHistoryPlugin(
                                 reliability = EvidenceReliability.ArchiveSnapshot,
                                 contentHashSha256 = sha256(fetched.text),
                                 parserVersion = PARSER_VERSION,
-                                historical = true
+                                historical = true,
+                                discoveryPath = historicalPath
                             )
                         }
                         meta.username?.let { username ->
@@ -177,7 +185,8 @@ class WaybackHistoryPlugin(
                                 reliability = EvidenceReliability.ArchiveSnapshot,
                                 contentHashSha256 = sha256(fetched.text),
                                 parserVersion = PARSER_VERSION,
-                                historical = true
+                                historical = true,
+                                discoveryPath = historicalPath
                             )
                         }
                         meta.avatarUrl?.let { avatarUrl ->
@@ -202,7 +211,8 @@ class WaybackHistoryPlugin(
                                 reliability = EvidenceReliability.ArchiveSnapshot,
                                 contentHashSha256 = sha256(fetched.text),
                                 parserVersion = PARSER_VERSION,
-                                historical = true
+                                historical = true,
+                                discoveryPath = historicalPath
                             )
                         }
                         meta.organization?.let { org ->
@@ -227,7 +237,8 @@ class WaybackHistoryPlugin(
                                 reliability = EvidenceReliability.ArchiveSnapshot,
                                 contentHashSha256 = sha256(fetched.text),
                                 parserVersion = PARSER_VERSION,
-                                historical = true
+                                historical = true,
+                                discoveryPath = historicalPath
                             )
                         }
                         meta.location?.let { loc ->
@@ -252,7 +263,8 @@ class WaybackHistoryPlugin(
                                 reliability = EvidenceReliability.ArchiveSnapshot,
                                 contentHashSha256 = sha256(fetched.text),
                                 parserVersion = PARSER_VERSION,
-                                historical = true
+                                historical = true,
+                                discoveryPath = historicalPath
                             )
                         }
                         for (link in meta.externalLinks) {
@@ -277,7 +289,8 @@ class WaybackHistoryPlugin(
                                 reliability = EvidenceReliability.ArchiveSnapshot,
                                 contentHashSha256 = sha256(fetched.text),
                                 parserVersion = PARSER_VERSION,
-                                historical = true
+                                historical = true,
+                                discoveryPath = historicalPath
                             )
                         }
                     }

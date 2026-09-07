@@ -567,6 +567,13 @@ object ScanSession {
                 input = inputToUse,
                 profiles = scanResults
             )
+            MediaIntelligenceSession.compareVerifiedProfileAvatars(
+                context = context,
+                token = mediaBindingToken,
+                input = inputToUse,
+                profiles = scanResults,
+                deepResearch = deepResearch
+            )
             checkpointStage(
                 context,
                 requestId,
@@ -632,6 +639,11 @@ object ScanSession {
                 ?: runFaceConsistency(context, inputToUse, scanResults)
             currentCoroutineContext().ensureActive()
             _faceConsistencyMatches.value = faceMatches
+            MediaIntelligenceSession.attachFaceComparisons(
+                token = mediaBindingToken,
+                input = inputToUse,
+                matches = faceMatches
+            )
             allFindings.addAll(faceFindingsFromMatches(faceMatches))
             // A model import/repair can complete while the comparison is in
             // flight.  Scores produced under the old commitment must never be

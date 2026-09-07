@@ -265,7 +265,8 @@ class TypedSeedPublicFetchExecutor(
                 TypedSeedKind.Email,
                 TypedSeedKind.Phone,
                 TypedSeedKind.Name,
-                TypedSeedKind.Username -> executeSearch(seed, input, scanId)
+                TypedSeedKind.Username,
+                TypedSeedKind.Location -> executeSearch(seed, input, scanId)
                 else -> skipped(seed)
             }
         } catch (cancelled: CancellationException) {
@@ -408,10 +409,19 @@ class TypedSeedPublicFetchExecutor(
         scanId: ScanId
     ): SeedRun {
         currentCoroutineContext().ensureActive()
+        val searchInput = if (seed.kind == TypedSeedKind.Location) {
+            locationSearchInput(seed, input)
+                ?: return unavailable(
+                    seed,
+                    "Corroborated location search requires authorized name, organization, or username context"
+                )
+        } else {
+            input
+        }
         val outcome = when {
-            searchOutcomeSearcher != null -> searchOutcomeSearcher.search(seed, input, scanId)
+            searchOutcomeSearcher != null -> searchOutcomeSearcher.search(seed, searchInput, scanId)
             searcher != null -> PublicSearchDiscoveryService.SearchOutcome.Success(
-                searcher.search(seed, input, scanId)
+                searcher.search(seed, searchInput, scanId)
             )
             else -> return unavailable(seed, "Search adapter is not configured")
         }
@@ -522,6 +532,35 @@ class TypedSeedPublicFetchExecutor(
                 )
             },
             path = discoveryPath(seed, "search-results")
+        )
+    }
+
+    /**
+     * Restricts a location search adapter to the authorized context terms
+     * allowed by the location query contract. High-sensitivity launch values
+     * such as email/phone are deliberately not copied into this request.
+     */
+    private fun locationSearchInput(seed: TypedSeed, input: IdentityInput): IdentityInput? {
+        if (seed.kind != TypedSeedKind.Location) return input
+        val fullName = input.fullName.trim()
+        val organizations = input.organizations
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .distinct()
+            .take(MAX_LOCATION_CONTEXT_TERMS)
+        val usernames = (listOfNotNull(input.primaryUsername) + input.usernames)
+            .map { it.trim().removePrefix("@") }
+            .filter(String::isNotBlank)
+            .distinctBy { it.lowercase(Locale.ROOT) }
+            .take(MAX_LOCATION_CONTEXT_TERMS)
+        if (fullName.isBlank() && organizations.isEmpty() && usernames.isEmpty()) return null
+
+        return IdentityInput(
+            fullName = fullName,
+            locations = listOf(seed.exactValue),
+            organizations = organizations,
+            usernames = usernames,
+            primaryUsername = usernames.firstOrNull()
         )
     }
 
@@ -1310,7 +1349,13 @@ class TypedSeedPublicFetchExecutor(
                 }
             else -> "Seed was outside the bounded execution budget"
         }
-        val state = if (seed.evidenceState == EvidenceState.Candidate) {
+        val state = if (seed.kind == TypedSeedKind.Location &&
+            !TypedSeedSafety.isSafeExecutableSeed(seed)
+        ) {
+            // Weak/visual/conflicting locations remain explicitly unavailable
+            // rather than being reported as executable candidate work.
+            ExecutionState.Unavailable
+        } else if (seed.evidenceState == EvidenceState.Candidate) {
             ExecutionState.Candidate
         } else {
             ExecutionState.Skipped
@@ -1658,6 +1703,7 @@ class TypedSeedPublicFetchExecutor(
         private const val MAX_SEARCH_HASH_CHARS = 128
         private const val MAX_SEARCH_PROVIDER_COUNT = 16
         private const val MAX_ARCHIVE_TIMESTAMP_CHARS = 32
+        private const val MAX_LOCATION_CONTEXT_TERMS = 8
         private const val MAX_REUSABLE_VERIFIED_PAGES = MAX_SEARCH_RESULTS
         private const val MAX_TITLE_CHARS = 240
         private const val MAX_REASON_CHARS = 256

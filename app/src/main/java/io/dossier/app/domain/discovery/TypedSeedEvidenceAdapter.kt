@@ -1,6 +1,7 @@
 package io.dossier.app.domain.discovery
 
 import io.dossier.app.data.web.DiscoveryHttpPolicy
+import io.dossier.app.data.web.PublicSearchDiscoveryService
 import io.dossier.app.data.web.TypedSeedPublicFetchExecutor
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
@@ -122,6 +123,8 @@ object TypedSeedEvidenceAdapter {
                 sourceClassification = source,
                 evidenceIds = listOf(record.id),
                 sourceUrl = record.sourceUrl,
+                evidenceSourceUrls = record.sourceUrls + listOfNotNull(record.sourceUrl),
+                evidenceProviderIds = listOfNotNull(record.providerId),
                 discoveryPath = record.discoveryPath,
                 locationEvidenceClass = record.locationEvidenceClass
             )
@@ -147,6 +150,13 @@ object TypedSeedEvidenceAdapter {
         kind == EvidenceKind.PublicSearchEvidence &&
             reliability == EvidenceReliability.ArchiveSnapshot ->
             TypedSeedKind.Archive
+        // Wayback emits historical display-name observations as Profile
+        // records. Keep the explicit attribute marker as the only semantic
+        // signal that turns a profile value into a Name pivot; unmarked
+        // Profile records remain URL navigation observations below.
+        kind == EvidenceKind.Profile &&
+            attributeKind == io.dossier.app.domain.evidence.HistoricalAttributeKind.DisplayName ->
+            TypedSeedKind.Name
         kind == EvidenceKind.Username &&
             attributeKind == io.dossier.app.domain.evidence.HistoricalAttributeKind.DisplayName ->
             TypedSeedKind.Name
@@ -285,12 +295,17 @@ object TypedSeedSafety {
             sourceClassification = seed.sourceClassification,
             evidenceIds = seed.evidenceIds,
             sourceUrl = seed.sourceUrl,
+            evidenceSourceUrls = seed.evidenceSourceUrls,
+            evidenceProviderIds = seed.evidenceProviderIds,
             discoveryPath = seed.discoveryPath
         )
     }
 
     fun isSafePublicSearchSeed(seed: TypedSeed): Boolean {
         if (seed.kind !in publicSearchKinds) return false
+        if (seed.kind == TypedSeedKind.Location) {
+            return isSafeCorroboratedLocationSeed(seed)
+        }
         if (!isStructurallySafe(seed)) return false
         if (seed.kind in PUBLIC_SEARCH_TYPED_SEED_KINDS &&
             !hasCanonicalNormalizedValue(seed)
@@ -335,7 +350,49 @@ object TypedSeedSafety {
             sourceClassification = seed.sourceClassification,
             evidenceIds = seed.evidenceIds,
             sourceUrl = seed.sourceUrl,
+            evidenceSourceUrls = seed.evidenceSourceUrls,
+            evidenceProviderIds = seed.evidenceProviderIds,
             discoveryPath = seed.discoveryPath
+        )
+    }
+
+    /**
+     * Location observations may fan out only when a reviewed public or
+     * authorized source explicitly corroborated the place. Local EXIF,
+     * visual/likely guesses, and conflicting observations remain
+     * evidence-only and are unavailable to public search.
+     */
+    private fun isSafeCorroboratedLocationSeed(seed: TypedSeed): Boolean {
+        if (!isStructurallySafe(seed)) return false
+        if (!hasCanonicalNormalizedValue(seed)) return false
+        if (seed.origin != TypedSeedOrigin.Evidence ||
+            seed.evidenceState != EvidenceState.Observed ||
+            seed.locationEvidenceClass !=
+            io.dossier.app.domain.model.ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION ||
+            seed.evidenceIds.isEmpty() ||
+            seed.sourceUrl?.let(::isSafeEvidenceSourceUrl) != true ||
+            seed.sourceClassification !in publicEvidenceSources
+        ) return false
+
+        return TypedSeedAdmissionModel(
+            TypedSeedAdmissionConfig(
+                maxDepth = TypedSeedAdmissionConfig.MAX_ALLOWED_DEPTH,
+                maxTotalSeeds = 1,
+                perKindBudgets = mapOf(TypedSeedKind.Location to 1)
+            )
+        ).offer(
+            kind = seed.kind,
+            rawValue = seed.exactValue,
+            depth = seed.depth,
+            origin = seed.origin,
+            evidenceState = seed.evidenceState,
+            sourceClassification = seed.sourceClassification,
+            evidenceIds = seed.evidenceIds,
+            sourceUrl = seed.sourceUrl,
+            evidenceSourceUrls = seed.evidenceSourceUrls,
+            evidenceProviderIds = seed.evidenceProviderIds,
+            discoveryPath = seed.discoveryPath,
+            locationEvidenceClass = seed.locationEvidenceClass
         )
     }
 
@@ -357,9 +414,10 @@ object TypedSeedSafety {
     private fun isSafeEvidenceSearchValue(seed: TypedSeed): Boolean = when (seed.kind) {
         TypedSeedKind.Name -> {
             // A display name is a weak identity signal by itself. Require two
-            // distinct evidence IDs as a provenance minimum, but do not call
-            // that independent source corroboration: TypedSeed retains only
-            // one sourceUrl, so source-URL independence remains unrepresented.
+            // distinct evidence IDs and corroboration from either independent
+            // source URLs or independent providers. The legacy single sourceUrl
+            // remains as a one-source fallback for old checkpoints, so those
+            // records stay inspectable but cannot fan out until re-adapted.
             val parts = seed.normalizedValue.trim()
                 .split(Regex("\\s+"))
                 .filter(String::isNotBlank)
@@ -367,7 +425,16 @@ object TypedSeedSafety {
                 .map(String::trim)
                 .filter(String::isNotBlank)
                 .distinct()
+            val distinctSourceUrls = (seed.evidenceSourceUrls + listOfNotNull(seed.sourceUrl))
+                .mapNotNull(::canonicalSourceUrl)
+                .distinct()
+            val distinctProviders = seed.evidenceProviderIds
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .map { it.lowercase(Locale.ROOT) }
+                .distinct()
             distinctEvidenceIds.size >= 2 &&
+                (distinctSourceUrls.size >= 2 || distinctProviders.size >= 2) &&
                 parts.size >= 2 &&
                 parts.all { part ->
                     part.length >= 2 &&
@@ -398,8 +465,16 @@ object TypedSeedSafety {
         if (seed.exactValue.any(Char::isISOControl) || seed.value.any(Char::isISOControl)) return false
         if (seed.depth !in 0..TypedSeedAdmissionConfig.MAX_ALLOWED_DEPTH) return false
         if (seed.evidenceIds.size > TypedSeed.MAX_EVIDENCE_IDS ||
+            seed.evidenceSourceUrls.size > TypedSeed.MAX_EVIDENCE_SOURCE_URLS ||
+            seed.evidenceProviderIds.size > TypedSeed.MAX_EVIDENCE_PROVIDERS ||
             seed.discoveryPath.size > TypedSeed.MAX_DISCOVERY_PATH_STEPS ||
             seed.evidenceIds.any { it.isBlank() || it.length > TypedSeed.MAX_VALUE_CHARS } ||
+            seed.evidenceSourceUrls.any {
+                it.isBlank() || it.length > TypedSeed.MAX_VALUE_CHARS || !isSafeEvidenceProvenanceUrl(it)
+            } ||
+            seed.evidenceProviderIds.any {
+                it.isBlank() || it.length > TypedSeed.MAX_VALUE_CHARS || it.any(Char::isISOControl)
+            } ||
             seed.discoveryPath.any { it.isBlank() || it.length > TypedSeed.MAX_VALUE_CHARS }
         ) return false
         if (seed.sourceUrl?.length?.let { it > TypedSeed.MAX_VALUE_CHARS } == true) return false
@@ -429,6 +504,21 @@ object TypedSeedSafety {
             DiscoveryHttpPolicy.isSafePublicHttpUrl(value)
     }
 
+    /**
+     * Provenance may include a local photo/document URI as well as a public
+     * source page. Local values are retained for inspection but never satisfy
+     * the public-source checks that authorize a search pivot.
+     */
+    private fun isSafeEvidenceProvenanceUrl(raw: String): Boolean {
+        if (isSafeEvidenceSourceUrl(raw)) return true
+        val value = raw.trim()
+        val uri = runCatching { java.net.URI(value) }.getOrNull() ?: return false
+        return uri.scheme?.lowercase(Locale.ROOT) in setOf("content", "file", "android.resource") &&
+            uri.rawUserInfo == null &&
+            !uri.rawPath.isNullOrBlank() &&
+            value.none(Char::isISOControl)
+    }
+
     private fun isSafePublicSearchValue(seed: TypedSeed): Boolean = when (seed.kind) {
         TypedSeedKind.Url,
         TypedSeedKind.Document,
@@ -441,6 +531,20 @@ object TypedSeedSafety {
                 DiscoveryHttpPolicy.isSafePublicHttpUrl("https://${seed.normalizedValue}")
 
         else -> true
+    }
+
+    /**
+     * Canonicalizes only safe public HTTP(S) provenance before using source
+     * diversity as corroboration.  The shared search URL key removes
+     * fragments, known tracking parameters, and default HTTP(S) ports while
+     * retaining functional path/query differences.  Exact source strings
+     * remain unchanged on the evidence record; this value is comparison-only.
+     */
+    private fun canonicalSourceUrl(raw: String): String? {
+        val value = raw.trim()
+        if (!isSafeEvidenceSourceUrl(value)) return null
+        return PublicSearchDiscoveryService.canonicalUrlKey(value)
+            .takeIf(::isSafeEvidenceSourceUrl)
     }
 
     private const val MIN_RECURSIVE_USERNAME_LENGTH = 3

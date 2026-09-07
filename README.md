@@ -8,51 +8,55 @@ It collects public evidence, preserves provenance, separates verification from r
 
 The current branch is the product-contract discovery-v2 reset. Mission readiness is **UNSCORED**: the representative end-to-end exposure-reconstruction benchmark required by `AGENTS.md` does not yet exist.
 
-Current source baseline:
+Parent source baseline for this delivery:
 
 ```text
-1ca30612f2814d48963830d4ff7a506f23df5396 (parent baseline for bounded verified-page reuse/replay and typed public-search execution)
+ce8f7e6634cb5c765e1f3c63027a881561b280ae (bounded verified-page reuse/replay and typed public-search execution)
 ```
 
 The current tranche extends the bounded public-search executor to Name and
-Username pivots with provenance and weak-signal admission guards. Photo,
-Image, and Location execution plus a representative end-to-end benchmark
-remain open.
+Username pivots with provenance and weak-signal admission guards. It also
+supports corroborated Location pivots only when scoped by an authorized
+name, organization, or username context; location-only and weak visual/EXIF
+guesses remain unavailable. Photo and Image execution plus a representative
+end-to-end benchmark remain open.
 
 The hardening history below is retained for context; the current source and validation record are listed above. `45520a1` added fail-closed frontier recovery for unreadable persisted pivot state and routed deep-research website traversal through the bounded declarative provider runtime with opaque host IDs, lifecycle events, redirect/auth/challenge classification, response limits and the existing six-page bound. `5f5ba8d` hardened calibration artifacts so configured contradiction weights cannot disable negative evidence.
 
 `8cbef92` adds a read-only Connections-tab graph/evidence reconciliation card that computes status from the active case snapshot, exposes bounded mismatch/dangling/truncation counts with accessibility semantics, and explicitly states that the diagnostic does not mutate graph or evidence records. The same validated tree retains the sanitized coordinator recovery diagnostics beyond the direct-profile boundary: deterministic graph, relationship-confidence, attack-path and exposure-score checkpoints, plus post-processing, now report exact request/owner-bound reuse versus rerun counts through allow-listed events and the coordinated scan HUD. It also normalizes graph entity evidence IDs with trim, legacy-ID migration, stable deduplication and a 256-ID bound, matching edge provenance behavior, and the case-level reconciliation audit now checks graph-entity provenance against an explicit persisted evidence ledger. When entity provenance exceeds that bound, the audit emits deterministic per-entity `TruncatedEvidenceReference` diagnostics with retained IDs and an exact truncation count, capped at 512 diagnostics even without a ledger. Uncatalogued explicit public profile URLs now use hashed, non-URL provider IDs and the same bounded provider runtime for concurrency, spacing, timeout, retries, response-body limits, redirect policy and lifecycle events without inflating the reviewed catalog count; transient-result deletion also fsyncs its parent directory and fails closed on sync failure. The tree retains the optional encrypted deterministic face-consistency checkpoint bound to the exact request, immutable provider-plan fingerprint, owner, TTL, identity/profile/model digest and pinned model/pipeline commitment; it stores only bounded comparison metadata, rejects unsafe/non-finite/out-of-range provenance, and drops the checkpoint if the backend changes during the run. It also hardens CaseStore case-ID validation, canonical path confinement, aggregate temp/legacy/backup cleanup and directory fsync, failing closed on unsafe names or any deletion/sync failure. The tree retains the earlier optional encrypted deterministic exposure-score checkpoint that stores only bounded dimension scores and hashed finding references, bound to the exact request, plan, owner, TTL and scoring-input digest; malformed, oversized, mismatched, incomplete-stage, tampered or record-too-large payloads fail closed and rerun scoring. It also rejects late provider/pivot projections after a terminal scan while retaining exact-owner checkpoint observability. `82568cd` adds the attack-path checkpoint, bound to the graph/confidence inputs; `d16c740` makes graph provenance exact-only: evidence-derived links carry their own IDs, while legacy id-less edges infer provenance only when one exact evidence record exists and remain idless for ambiguous URL/value matches. `1012ba3` adds the relationship-confidence checkpoint, bound to the full graph/evidence/seed input; `985dd5e` preserves exact unique ledger evidence IDs from entity-resolution support and contradiction contributions on graph profile edges without synthesizing provenance. `84f07d8` adds the earlier graph-stage checkpoint, bound to every graph-builder input; `bc623f0` adds a no-network maintenance preview that proves the pinned WhatsMyName rows convert to the Kotlin runtime contract without inflating the 78 authored-provider count. `67742db` adds an optional case-level audit that marks canonical and graph evidence IDs dangling when they do not resolve to the persisted evidence ledger, while preserving fail-soft behavior for legacy cases with no ledger. `7fd49df` keeps separately verified source pages as distinct reverse-image candidates when they reuse one canonical avatar URL, while still coalescing exact image+source duplicates. The latest tree additionally keeps authored-provider health separate from the pinned WhatsMyName executable-rule report (including explicit pinned/non-live wording), and canonicalizes graph relation keys case-insensitively while preserving the first serialized spelling and all evidence IDs. It also includes bounded encrypted post-processing checkpoint reuse (`c404592`), fail-closed legacy WorkManager status retirement (`acc325a`), its authenticated-tamper regression test (`0cbc2ca`), the request-plan binding follow-up (`1764233`), encrypted breach summaries (`9bc1cd3`), focused accessibility/reduced-motion hardening (`a810d0c`), exact relationship provenance migration (`4ee7e14`), the evidence-keyed media correction tranche (`674fe2b`), the exact-owner Pausing recovery fix (`0bd65dd`), canonical graph-assertion export separation, exact profile-evidence correction controls, bounded encrypted case persistence, held-out calibration provenance propagation, exact published-result owner recovery, pinned source-catalog maintenance diagnostics, bounded live evidence corrections, source-scoped media change history, a read-only canonical relationship source, structured face-comparison provenance, bounded graph-reconciliation diagnostics, fail-closed face-similarity math, Activity-recreation recovery, explicit provenance for external/legacy OSINT imports, direct verified-profile media linkage, and bounded encrypted relationship save/restore migration.
 
-Current working-tree validation (2026-09-06) passed these gates:
+Current working-tree validation (2026-09-07) passed these gates:
 
 ```text
 Provider registry audit             PASS — 78 definitions (70 profile templates + 8 services)
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 11 tests / no-network schema, conversion-parity + pinned source-catalog fixtures
-Debug JVM unit tests                PASS — 1,077 tests / 154 result XML files / 0 failures, errors, or skips
-Release JVM unit tests              PASS — 1,077 tests / 154 result XML files / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 1,077 tests / 154 result XML files / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 1,106 tests / 157 result XML files / 0 failures, errors, or skips
+Release JVM unit tests              PASS — 1,106 tests / 157 result XML files / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 1,106 tests / 157 result XML files / 0 failures, errors, or skips
+TypedSeedAdmissionModelTest         PASS — 28 tests / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 115,941,816 bytes; SHA-256 `01c0475c5b799df770a093d7757c8b8a7a597c98c29614664065590af4ad6476`
-uiTest APK assembly                 PASS — 243,521,929 bytes; SHA-256 `2e00062b080749cf6a4b2ff632faf4253bcc5c47db4197daeda9b664378c707d`
-Android-test APK                    PASS — 1,031,748 bytes; SHA-256 `a209b345fb86f999e11bcd57bf5d14ae97ae282f393bfa8c023739513d1fb8b7`
-Debug lint                          PASS — 0 errors / 70 warnings
-uiTest lint                         PASS — 0 errors / 74 warnings
-Connected uiTest suite              PASS — 58 tests / 0 failures / 0 skipped on API 36 `dossier-api36` emulator (`emulator-5554`)
+Debug APK assembly                  PASS — 115,958,200 bytes; SHA-256 `d8f746378b99b441519860c6b324331c40ebeba0a0ac14c4726368c74c3350e3`
+uiTest APK assembly                 PASS — 243,554,697 bytes; SHA-256 `bffcd72b0d1f4b93aadc82fbd02a5ba5508a1b781753f5f17b900595b6c6fa4f`
+Android-test APK                    PASS — 1,031,728 bytes; SHA-256 `663eed75577b6ac9c90950681a46ec41e8d6a1b842d6edd55e9770d40229fb7b`
+Release unsigned APK assembly       PASS — 409,390,599 bytes; SHA-256 `407f6461380cbf9823e64292f4ad25508591a4e3074f8e11163ca13d279a9df2`
+Debug lint                          PASS — 0 errors / 71 warnings / 6 hints
+uiTest lint                         PASS — 0 errors / 75 warnings / 6 hints
+Connected uiTest suite              NOT RUN — current host reported `No connected devices`; prior API 36 evidence remains in `2026/09/07/dossier-android-qa-final4/`
 ```
 
-The current debug, uiTest, and Android-test APKs were rebuilt from the working tree based on `1ca3061`; their SHA-256 values are recorded above. Debug lint reported 0 errors and 70 warnings, and uiTest lint reported 0 errors and 74 warnings. The connected suite ran 58 tests on `emulator-5554` (API 36) with no skipped or failed tests. The Python hygiene audit passed (2 tests), the provider audit passed (78 authored providers, 716 pinned source records, 644 executable rules, 0 conversion errors), and `git diff --check` was clean before this documentation update.
+The current debug, uiTest, Android-test, and release APKs were rebuilt from the working tree descended from `ce8f7e6`; their SHA-256 values are recorded above. Debug lint reported 0 errors, 71 warnings and 6 hints; uiTest lint reported 0 errors, 75 warnings and 6 hints. The fresh connected-suite attempt could not start because this host had no connected device. The Python hygiene audit passed (2 tests), the provider audit passed (78 authored providers, 716 pinned source records, 644 executable rules, 0 conversion errors), and `git diff --check` was clean. The prior API 36 run covered 58 tests and produced the visual evidence below.
 
-The connected suite covers the provider-health panel, WorkManager pause/resume, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, graph/export redaction, HUD status, reverse-video picker semantics, report-tab reachability, and the universal-search seed-correction path. Fresh visual evidence from the rebuilt and installed uiTest APK is retained outside Git in the task's local QA artifacts, covering universal search, local Name classification, the encrypted fixture report, report tabs, and the Images surface with matching hierarchy XML. Fixture values and URLs use reserved `.test` domains. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
+The connected suite covers the provider-health panel, WorkManager pause/resume, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, graph/export redaction, HUD status, reverse-video picker semantics, report-tab reachability, and the universal-search seed-correction path. Fresh visual evidence from the rebuilt and installed uiTest APK is retained outside Git in the task-local visualization directory `2026/09/07/dossier-android-qa-final4/`, with paired PNG/XML captures for consent, universal search, local Name classification, the encrypted fixture report, every report tab (including horizontally scrolled Actions), Images, picker, selected photo, photo progress, camera preview, and cancellation return. Every Dossier hierarchy contains `package="io.dossier.app"`; fixture values and URLs use reserved `.test` domains. The selected-photo scan remained at `Fingerprinting locally + checking public candidates…` after approximately 30 seconds; photo-pipeline completion is not claimed. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
 
-This is not a production-readiness claim. Provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
+This is not a production-readiness claim. Provider scale/live validation, progressive photo execution, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
-See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the target product contract. Email/Phone/Name/Username typed public-search execution is implemented and bounded; Photo/Image/Location typed execution and a representative end-to-end benchmark remain open.
+See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the target product contract. Email/Phone/Name/Username typed public-search execution and context-scoped corroborated Location pivots are implemented and bounded; Photo/Image execution, full photo geolocation, and a representative end-to-end benchmark remain open.
 
 ## Visual walkthrough
 
-The checked-in walkthrough captures are retained baseline images from the API 36 Medium Phone emulator. Fresh current-head captures are outside Git in the task's local QA artifacts; `02-universal-search.png`, `03-classified-name.png`, `04-fixture-report.png`, `05-report-tabs.png`, and `06-images.png` are current entry/report proofs. Analysis, report, case, tab, and provider-progress states use deterministic **uiTest-only** fixtures; case data is written through the production encrypted stores and provider counters are emitted through the production coordinator callbacks. All identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish TalkBack, whole-product large-font, reduced-motion, adaptive-layout or physical-device acceptance.
+The checked-in walkthrough captures are retained baseline images from the API 36 Medium Phone emulator. Fresh current-head captures are outside Git in `2026/09/07/dossier-android-qa-final4/`; `01-launch-consent.png`, `02-universal-search.png`, `03-name-classified.png`, `04-fixture-report.png`, `07-report-overview.png`, `08-report-evidence.png`, `10-report-timeline.png`, `11-report-connections.png`, `12-report-actions.png`, and `13-images.png` are current entry/report proofs, with additional picker/camera/photo-scan captures. Analysis and report states use deterministic **uiTest-only** fixtures; case data is written through the production encrypted stores. All identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish TalkBack, whole-product large-font, reduced-motion, adaptive-layout or physical-device acceptance.
 
 | Consent and input validation | Scan configuration |
 |---|---|
@@ -181,7 +185,16 @@ Whole-image clusters mean **duplicate/reposted image content**. They do not mean
 
 Optional local cross-photo face support uses pinned YuNet/SFace models with exact size/SHA-256 verification, deterministic preprocessing, five-landmark alignment, ambiguity/quality rejection and cosine scoring. Each comparison now retains bounded structured backend/model-hash/pipeline, calibration-state and selfie/profile-quality provenance, including explicit reference-policy, measured, imported, fallback and not-run states. Background requests may retain an encrypted bounded face-consistency checkpoint bound to the identity/profile/model digest; a model commitment change discards the checkpoint rather than reusing a score under a different backend. Face similarity remains supporting evidence; release thresholds are not advertised as measured identity probabilities until a representative benchmark exists.
 
-Directly scanned, verified profile avatars now produce bounded `VerifiedProfile` linkages with `profile:<url>` evidence; reverse-image candidate collection retains separately verified source pages even when they reuse one CDN avatar URL, while exact image+source pairs coalesce deterministically. Broader verified-account acquisition/correlation and independent visual acceptance remain incomplete. Explicit verified-profile and user-reviewed linkages are evidence-carrying associations rather than automatic identity conclusions. Whole-image similarity and face similarity are supporting evidence, not identity proof.
+Directly scanned, verified profile avatars now produce bounded `VerifiedProfile`
+linkages with `profile:<url>` evidence and may be compared locally against a
+selected Photo seed for supporting whole-image/face metadata. Reverse-image
+candidate collection retains separately verified source pages even when they
+reuse one CDN avatar URL, while exact image+source pairs coalesce
+deterministically. Broader verified-account acquisition/correlation and
+independent visual acceptance remain incomplete. Explicit verified-profile and
+user-reviewed linkages are evidence-carrying associations rather than automatic
+identity conclusions. Whole-image similarity and face similarity are
+supporting evidence, not identity proof.
 
 ## Historical evidence
 
@@ -276,7 +289,6 @@ Core checks:
 
 ```sh
 python3 tools/provider_registry_audit.py
-pwsh -File tools/verify_whatsmyname_catalog.ps1
 ./gradlew :app:testDebugUnitTest
 ./gradlew :app:assembleDebug
 ./gradlew :app:connectedUiTestAndroidTest

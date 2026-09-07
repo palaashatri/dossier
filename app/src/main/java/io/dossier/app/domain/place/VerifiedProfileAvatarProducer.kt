@@ -3,7 +3,6 @@ package io.dossier.app.domain.place
 import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import java.net.URI
-import java.security.MessageDigest
 
 /**
  * Converts directly verified profile observations into bounded media candidates.
@@ -41,7 +40,7 @@ internal object VerifiedProfileAvatarProducer {
             )
         }
         .distinctBy { candidate ->
-            "${canonical(candidate.imageUrl)}|${canonical(candidate.sourcePageUrl)}"
+            "${canonicalMediaUrl(candidate.imageUrl)}|${canonicalMediaUrl(candidate.sourcePageUrl)}"
         }
         .take(MAX_CANDIDATES)
         .toList()
@@ -49,15 +48,7 @@ internal object VerifiedProfileAvatarProducer {
     private fun stableCandidateId(accountUrl: String, imageUrl: String): String {
         // Match ReverseImageVisualMatcher's candidate identity so an automatic
         // observation and a later local comparison coalesce on the same node.
-        val canonicalValue = listOf(
-            canonical(imageUrl),
-            canonical(accountUrl),
-            SOURCE.lowercase()
-        ).joinToString("|")
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(canonicalValue.toByteArray(Charsets.UTF_8))
-            .joinToString("") { byte -> "%02x".format(byte) }
-        return "imgcandidate:${digest.take(20)}"
+        return stableMediaCandidateId(imageUrl, accountUrl, SOURCE)
     }
 
     private fun isPublicHttpUrl(raw: String): Boolean {
@@ -68,19 +59,6 @@ internal object VerifiedProfileAvatarProducer {
             uri.host?.isNotBlank() == true &&
             uri.userInfo == null
     }
-
-    private fun canonical(raw: String): String = runCatching {
-        val uri = URI(raw.trim())
-        URI(
-            uri.scheme?.lowercase(),
-            null,
-            uri.host?.lowercase(),
-            uri.port,
-            uri.path,
-            uri.query,
-            null
-        ).toString().removeSuffix("/")
-    }.getOrDefault(raw.trim().substringBefore('#').removeSuffix("/").lowercase())
 
     private const val MAX_CANDIDATES = 64
     private const val MAX_TITLE_CHARS = 160

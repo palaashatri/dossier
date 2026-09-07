@@ -5,6 +5,7 @@ import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.HistoricalAttributeKind
@@ -341,20 +342,146 @@ class TypedSeedAdmissionModelTest {
     }
 
     @Test
+    fun adapterPreservesAlternateEvidenceSourceUrlsAlongsidePrimarySourceUrl() {
+        val record = Evidence(
+            id = "profile-email-with-alternate-source",
+            kind = EvidenceKind.Email,
+            value = "person@example.test",
+            sourceUrl = "https://profile.example.test/contact",
+            sourceUrls = listOf(
+                " https://directory.example.test/person ",
+                "https://profile.example.test/contact"
+            ),
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.DirectPublicProfile
+        )
+
+        val email = TypedSeedEvidenceAdapter
+            .admit(evidence = listOf(record))
+            .admittedSeeds
+            .single()
+
+        assertEquals(
+            listOf(
+                "https://directory.example.test/person",
+                "https://profile.example.test/contact"
+            ),
+            email.evidenceSourceUrls
+        )
+    }
+
+    @Test
+    fun duplicateLocationRetainsPublicCorroborationRegardlessOfEvidenceOrder() {
+        val localExact = Evidence(
+            id = "location-exif",
+            kind = EvidenceKind.Location,
+            value = "Example City",
+            sourceUrl = "content://example/photo",
+            state = EvidenceState.Observed,
+            reliability = EvidenceReliability.LocalDerived,
+            sourceClassification = ExposureSourceClassification.LOCAL_IMPORT,
+            locationEvidenceClass = ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA
+        )
+        val publicCorroboration = Evidence(
+            id = "location-geo",
+            kind = EvidenceKind.Location,
+            value = "Example City",
+            sourceUrl = "https://maps.example.test/example-city",
+            state = EvidenceState.Observed,
+            reliability = EvidenceReliability.AuthoritativeApi,
+            sourceClassification = ExposureSourceClassification.AUTHORIZED_API,
+            locationEvidenceClass = ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION
+        )
+
+        listOf(
+            listOf(localExact, publicCorroboration),
+            listOf(publicCorroboration, localExact)
+        ).forEach { records ->
+            val location = TypedSeedEvidenceAdapter
+                .fromEvidence(records)
+                .admittedSeeds
+                .single { it.kind == TypedSeedKind.Location }
+
+            assertEquals(
+                ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION,
+                location.locationEvidenceClass
+            )
+            assertEquals(TypedSeedOrigin.Evidence, location.origin)
+            assertEquals(ExposureSourceClassification.AUTHORIZED_API, location.sourceClassification)
+            assertEquals(publicCorroboration.sourceUrl, location.sourceUrl)
+            assertEquals(EvidenceState.Observed, location.evidenceState)
+            assertTrue(localExact.id in location.evidenceIds)
+            assertTrue(publicCorroboration.id in location.evidenceIds)
+            assertTrue(localExact.sourceUrl in location.evidenceSourceUrls)
+            assertTrue(publicCorroboration.sourceUrl in location.evidenceSourceUrls)
+            assertTrue(TypedSeedSafety.isSafePublicSearchSeed(location))
+        }
+    }
+
+    @Test
+    fun duplicateTypedSeedRetainsPublicProvenanceRegardlessOfEvidenceOrder() {
+        val localAnalysis = Evidence(
+            id = "email-local-analysis",
+            kind = EvidenceKind.Email,
+            value = "person@example.test",
+            sourceUrl = "content://example/imported-email",
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.LocalDerived,
+            sourceClassification = ExposureSourceClassification.LOCAL_IMPORT
+        )
+        val publicEvidence = Evidence(
+            id = "email-public-profile",
+            kind = EvidenceKind.Email,
+            value = "person@example.test",
+            sourceUrl = "https://profile.example.test/contact",
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.DirectPublicProfile,
+            sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE
+        )
+
+        listOf(
+            listOf(localAnalysis, publicEvidence),
+            listOf(publicEvidence, localAnalysis)
+        ).forEach { records ->
+            val email = TypedSeedEvidenceAdapter
+                .fromEvidence(records)
+                .admittedSeeds
+                .single { it.kind == TypedSeedKind.Email }
+
+            assertEquals(TypedSeedOrigin.Evidence, email.origin)
+            assertEquals(ExposureSourceClassification.PUBLIC_PROFILE, email.sourceClassification)
+            assertEquals(publicEvidence.sourceUrl, email.sourceUrl)
+            assertEquals(EvidenceState.Verified, email.evidenceState)
+            assertTrue(localAnalysis.id in email.evidenceIds)
+            assertTrue(publicEvidence.id in email.evidenceIds)
+            assertTrue(TypedSeedSafety.isSafePublicSearchSeed(email))
+        }
+    }
+
+    @Test
     fun adapterTreatsVerifiedDisplayNameAsNameSearchPivot() {
         val record = Evidence(
             id = "profile-display-name",
-            kind = EvidenceKind.Username,
+            kind = EvidenceKind.Profile,
             value = "Jane Example",
-            sourceUrl = "https://profile.example.test/jane",
+            sourceUrl = "https://web.archive.org/web/20240101000000id_/https://profile.example.test/jane",
             state = EvidenceState.Verified,
-            reliability = EvidenceReliability.DirectPublicProfile,
-            sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+            reliability = EvidenceReliability.ArchiveSnapshot,
+            sourceClassification = ExposureSourceClassification.ARCHIVE,
+            historical = true,
+            discoveryPath = listOf(
+                "https://profile.example.test/jane",
+                "https://web.archive.org/web/20240101000000id_/https://profile.example.test/jane"
+            ),
             attributeKind = HistoricalAttributeKind.DisplayName
         )
         val corroboratingRecord = record.copy(
             id = "profile-display-name-corroborating",
-            sourceUrl = "https://second-profile.example.test/jane"
+            sourceUrl = "https://web.archive.org/web/20250101000000id_/https://profile.example.test/jane",
+            discoveryPath = listOf(
+                "https://profile.example.test/jane",
+                "https://web.archive.org/web/20250101000000id_/https://profile.example.test/jane"
+            )
         )
 
         val model = TypedSeedEvidenceAdapter.admit(listOf(record, corroboratingRecord))
@@ -363,7 +490,58 @@ class TypedSeedAdmissionModelTest {
         assertEquals(TypedSeedKind.Name, name.kind)
         assertEquals(record.value, name.exactValue)
         assertEquals(listOf(record.id, corroboratingRecord.id), name.evidenceIds)
+        assertEquals(ExposureSourceClassification.ARCHIVE, name.sourceClassification)
+        assertEquals(record.sourceUrl, name.sourceUrl)
+        assertEquals(
+            listOf(record.sourceUrl, corroboratingRecord.sourceUrl),
+            name.evidenceSourceUrls
+        )
+        assertEquals(record.discoveryPath.size, name.depth)
+        assertTrue(name.discoveryPath.containsAll(record.discoveryPath))
+        assertEquals(EvidenceState.Verified, name.evidenceState)
         assertTrue(TypedSeedSafety.isSafePublicSearchSeed(name))
+    }
+
+    @Test
+    fun historicalDisplayNameNeedsExplicitMarkerAndCorroborationBeforeSearchExpansion() {
+        val snapshotUrl = "https://web.archive.org/web/20240101000000id_/https://profile.example.test/jane"
+        val historicalDisplayName = Evidence(
+            id = "wayback-display-name-single",
+            kind = EvidenceKind.Profile,
+            value = "Jane Example",
+            sourceUrl = snapshotUrl,
+            state = EvidenceState.Verified,
+            reliability = EvidenceReliability.ArchiveSnapshot,
+            sourceClassification = ExposureSourceClassification.ARCHIVE,
+            historical = true,
+            attributeKind = HistoricalAttributeKind.DisplayName
+        )
+
+        // The canonical adapter records a verified historical display name as
+        // a bounded Name pivot, but one archive observation cannot fan out into
+        // broad search on its own.
+        val single = TypedSeedEvidenceAdapter.fromEvidence(listOf(historicalDisplayName))
+        val singleName = single.admittedSeeds.single()
+        assertEquals(TypedSeedKind.Name, singleName.kind)
+        assertEquals(EvidenceState.Verified, singleName.evidenceState)
+        assertFalse(TypedSeedSafety.isSafePublicSearchSeed(singleName))
+
+        val unmarkedProfile = historicalDisplayName.copy(
+            id = "wayback-profile-url",
+            value = snapshotUrl,
+            attributeKind = null
+        )
+        val unmarked = TypedSeedEvidenceAdapter.fromEvidence(listOf(unmarkedProfile))
+        assertTrue(unmarked.admittedSeeds.none { it.kind == TypedSeedKind.Name })
+        assertTrue(unmarked.admittedSeeds.all { it.kind == TypedSeedKind.Url })
+
+        val misplacedMarker = historicalDisplayName.copy(
+            id = "wayback-email-with-display-marker",
+            kind = EvidenceKind.Email,
+            value = "jane@example.test"
+        )
+        val misplaced = TypedSeedEvidenceAdapter.fromEvidence(listOf(misplacedMarker))
+        assertTrue(misplaced.admittedSeeds.none { it.kind == TypedSeedKind.Name })
     }
 
     @Test
@@ -645,7 +823,20 @@ class TypedSeedAdmissionModelTest {
             } else {
                 listOf("evidence-$kind")
             },
-            sourceUrl = "https://profile.example.test/source"
+            sourceUrl = "https://profile.example.test/source",
+            evidenceSourceUrls = if (kind == TypedSeedKind.Name) {
+                listOf(
+                    "https://profile.example.test/name-a",
+                    "https://directory.example.test/name-b"
+                )
+            } else {
+                emptyList()
+            },
+            evidenceProviderIds = if (kind == TypedSeedKind.Name) {
+                listOf("profile-provider", "directory-provider")
+            } else {
+                emptyList()
+            }
         )
 
         listOf(
@@ -684,11 +875,38 @@ class TypedSeedAdmissionModelTest {
 
         val sameSourceName = verified(TypedSeedKind.Name, "Jane Example").copy(
             evidenceIds = listOf("name-evidence-a", "name-evidence-b"),
-            sourceUrl = "https://profile.example.test/same-page"
+            sourceUrl = "https://profile.example.test/same-page",
+            evidenceSourceUrls = listOf("https://profile.example.test/same-page"),
+            evidenceProviderIds = listOf("profile-provider")
+        )
+        assertFalse(
+            "Name corroboration must reject two observations from one source/provider",
+            TypedSeedSafety.isSafePublicSearchSeed(sameSourceName)
+        )
+
+        val independentSourceName = verified(TypedSeedKind.Name, "Jane Example").copy(
+            evidenceIds = listOf("name-evidence-a", "name-evidence-b"),
+            sourceUrl = "https://profile.example.test/name-a",
+            evidenceSourceUrls = listOf(
+                "https://profile.example.test/name-a",
+                "https://directory.example.test/name-b"
+            ),
+            evidenceProviderIds = listOf("profile-provider")
         )
         assertTrue(
-            "TypedSeed cannot prove source-URL independence; preserve this known limitation",
-            TypedSeedSafety.isSafePublicSearchSeed(sameSourceName)
+            "Name corroboration may use independent source URLs",
+            TypedSeedSafety.isSafePublicSearchSeed(independentSourceName)
+        )
+
+        val independentProviderName = verified(TypedSeedKind.Name, "Jane Example").copy(
+            evidenceIds = listOf("name-evidence-a", "name-evidence-b"),
+            sourceUrl = "https://profile.example.test/name-a",
+            evidenceSourceUrls = listOf("https://profile.example.test/name-a"),
+            evidenceProviderIds = listOf("profile-provider", "directory-provider")
+        )
+        assertTrue(
+            "Name corroboration may use independent providers",
+            TypedSeedSafety.isSafePublicSearchSeed(independentProviderName)
         )
 
         listOf("A B", "User Name").forEach { weakName ->
@@ -764,6 +982,32 @@ class TypedSeedAdmissionModelTest {
             sourceClassification = ExposureSourceClassification.BREACH_INDEX
         )
         assertFalse(TypedSeedSafety.isSafePublicSearchSeed(breach))
+    }
+
+    @Test
+    fun publicSearchSafetyTreatsTrackingAndDefaultPortVariantsAsOneSource() {
+        val seed = TypedSeed(
+            kind = TypedSeedKind.Name,
+            value = "Jane Example",
+            exactValue = "Jane Example",
+            normalizedValue = "Jane Example",
+            isVerified = true,
+            evidenceState = EvidenceState.Verified,
+            origin = TypedSeedOrigin.Evidence,
+            sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+            evidenceIds = listOf("name-evidence-a", "name-evidence-b"),
+            sourceUrl = "https://profile.example.test:443/jane?utm_source=profile#bio",
+            evidenceSourceUrls = listOf(
+                "https://profile.example.test/jane?utm_medium=directory",
+                "https://profile.example.test:443/jane?ref=directory"
+            ),
+            evidenceProviderIds = listOf("profile-provider")
+        )
+
+        assertFalse(
+            "tracking parameters and default ports must not create source diversity",
+            TypedSeedSafety.isSafePublicSearchSeed(seed)
+        )
     }
 
     @Test

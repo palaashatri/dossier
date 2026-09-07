@@ -8,6 +8,10 @@ import io.dossier.app.domain.evidence.toExposureLedger
 import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
 import io.dossier.app.domain.discovery.TypedSeedKind
 import io.dossier.app.domain.discovery.TypedSeedOrigin
+import io.dossier.app.domain.discovery.TypedSeedSafety
+import io.dossier.app.domain.model.FaceComparisonBackend
+import io.dossier.app.domain.model.FaceComparisonCalibrationState
+import io.dossier.app.domain.model.FaceComparisonProvenance
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.place.MediaIntelligenceSession
@@ -441,6 +445,49 @@ class MediaEvidenceAdapterTest {
     }
 
     @Test
+    fun corroboratedLocationCandidateMapsAuthorizedSourceAndAdmitsOnlySafePivot() {
+        val corroborated = ReverseImageLookupResult.LocationCandidate(
+            value = "Example City",
+            evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION,
+            reason = "EXIF coordinates reverse-geocoded by an authorized map API",
+            evidenceIds = listOf("geo-evidence"),
+            sourceUrls = listOf("https://maps.example.test/example-city")
+        )
+        val corroboratedCollection = sampleResult()
+            .copy(locationCandidates = listOf(corroborated))
+            .toEvidenceCollection(
+                mediaSourceUri = "content://example/photo",
+                retrievedAtEpochMillis = 7L
+            )
+        val corroboratedEvidence = corroboratedCollection.evidence.single {
+            it.kind == EvidenceKind.Location && it.value == corroborated.value
+        }
+
+        assertEquals(
+            ExposureSourceClassification.AUTHORIZED_API,
+            corroboratedEvidence.sourceClassification
+        )
+        val admitted = TypedSeedEvidenceAdapter
+            .fromCollection(corroboratedCollection)
+            .admittedSeeds
+            .single { it.kind == TypedSeedKind.Location }
+        assertTrue(TypedSeedSafety.isSafePublicSearchSeed(admitted))
+
+        val likely = corroborated.copy(
+            value = "Likely City",
+            evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.LIKELY_LOCATION,
+            sourceUrls = listOf("https://pages.example.test/location")
+        )
+        val likelyCollection = sampleResult()
+            .copy(locationCandidates = listOf(likely))
+            .toEvidenceCollection()
+        assertTrue(
+            TypedSeedEvidenceAdapter.fromCollection(likelyCollection)
+                .admittedSeeds.none { it.kind == TypedSeedKind.Location }
+        )
+    }
+
+    @Test
     fun reverseImageSourcePagesBecomeObservedTypedUrlPivotsWithoutPromotingImages() {
         val page = "https://pages.example.test/repost"
         val image = "https://images.example.test/repost.jpg"
@@ -728,6 +775,31 @@ class MediaEvidenceAdapterTest {
             collection.toExposureLedger().facts.single { it.exactValue == avatar.imageUrl }
                 .sourceClassification
         )
+    }
+
+    @Test
+    fun faceComparisonMetadataRemainsCandidateSupportingEvidence() {
+        val provenance = FaceComparisonProvenance(
+            backend = FaceComparisonBackend.AppearanceDescriptor,
+            calibration = FaceComparisonCalibrationState.NotApplicable,
+            modelSource = "fixture"
+        )
+        val avatar = candidateState("verified-avatar-face", ReverseImageLookupResult.ImageCandidateState.Indexed)
+            .copy(
+                accountLinkages = listOf(verifiedProfileLinkage(avatarPageUrl("verified-avatar-face"))),
+                faceComparisonScore = 0.82f,
+                faceComparisonWarning = "Review-range visual similarity; confirm ownership manually.",
+                faceComparisonProvenance = provenance
+            )
+
+        val collection = sampleResult().copy(visualCandidates = listOf(avatar)).toEvidenceCollection()
+        val evidence = collection.evidence.single { it.value == avatar.imageUrl }
+
+        assertEquals(EvidenceState.Candidate, evidence.state)
+        assertEquals(provenance, evidence.faceComparisonProvenance)
+        assertTrue(evidence.snippet.orEmpty().contains("Face consistency: 0.820"))
+        assertTrue(evidence.snippet.orEmpty().contains("Face backend: AppearanceDescriptor"))
+        assertTrue(evidence.snippet.orEmpty().contains("Review-range visual similarity"))
     }
 
     @Test

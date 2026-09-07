@@ -9,7 +9,7 @@ This is the authoritative current-state record for Dossier.
 - **Current branch:** `feat/product-contract-discovery-v2`
 - **Open pull request:** PR #4
 - **Audited implementation baseline before the documentation reset:** `22b158fd45bcbe58c1a946ed0864ff8a2b3a3b69`
-- **Parent source baseline for the current tranche:** `1ca30612f2814d48963830d4ff7a506f23df5396`
+- **Parent source baseline for the current tranche:** `ce8f7e6634cb5c765e1f3c63027a881561b280ae`
 - **Product-contract reset commit:** `cf0f11d67974ce881513ff36130bbe2d9a7aa3d7`
 - **Audit/reset date:** 2026-09-04
 - **Previous strict readiness score:** **83/100 — RETIRED as the primary product metric**
@@ -25,16 +25,17 @@ The new acceptance question is:
 
 Until that question is measured against a real synthetic/consented corpus, mission readiness is not numerically established.
 
-## 1.1 Current working-tree validation — 2026-09-06
+## 1.1 Current working-tree validation — 2026-09-07
 
-The current working tree is on `feat/product-contract-discovery-v2`, based on parent `1ca3061`. Fresh post-change gates produced:
+The current working tree is on `feat/product-contract-discovery-v2`, descended from parent `ce8f7e6`. Fresh post-change gates produced:
 
-- `./gradlew :app:testDebugUnitTest --no-daemon --rerun-tasks --max-workers=1 --console=plain`, `:app:testReleaseUnitTest` and `:app:testUiTestUnitTest` (run sequentially): **BUILD SUCCESSFUL** for each; 1,077 tests in each variant, with 0 failures, errors, or skipped tests across 154 XML suites. The aggregate `./gradlew test --rerun-tasks` invocation was not used as evidence because a concurrent test-result writer caused a Gradle missing-result-file error; the three variant tasks were rerun serially after stopping that writer.
-- `./gradlew :app:assembleDebug`, `:app:assembleUiTest`, and `:app:assembleUiTestAndroidTest` (each with `--no-daemon --rerun-tasks --max-workers=1`): **BUILD SUCCESSFUL**. Current artifact readback: debug APK 115,941,816 bytes, SHA-256 `01c0475c5b799df770a093d7757c8b8a7a597c98c29614664065590af4ad6476`; uiTest APK 243,521,929 bytes, SHA-256 `2e00062b080749cf6a4b2ff632faf4253bcc5c47db4197daeda9b664378c707d`; Android-test APK 1,031,748 bytes, SHA-256 `a209b345fb86f999e11bcd57bf5d14ae97ae282f393bfa8c023739513d1fb8b7`.
-- `./gradlew :app:connectedUiTestAndroidTest --no-daemon`: **BUILD SUCCESSFUL**; 58 tests on the `dossier-api36` API 36 emulator (`emulator-5554`), 0 skipped and 0 failed.
+- `./gradlew :app:testDebugUnitTest`, `:app:testReleaseUnitTest`, and `:app:testUiTestUnitTest` (run sequentially with `--no-daemon --rerun-tasks --max-workers=1 --console=plain`): **BUILD SUCCESSFUL** for each; **1,106 tests** in each variant, with 0 failures, errors, or skipped tests across 157 XML suites. The focused rerun covering `TypedSeedAdmissionModelTest`, `MediaIntelligenceSessionTest`, `LocationPublicSearchDiscoveryServiceTest`, and `PublicSearchDiscoveryServiceTest` was **BUILD SUCCESSFUL** with 24 actionable tasks and 0 failures.
+- `./gradlew :app:assembleDebug :app:assembleUiTest :app:assembleUiTestAndroidTest :app:assembleRelease --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **BUILD SUCCESSFUL**. Current artifact readback: debug APK 115,958,200 bytes, SHA-256 `d8f746378b99b441519860c6b324331c40ebeba0a0ac14c4726368c74c3350e3`; uiTest APK 243,554,697 bytes, SHA-256 `bffcd72b0d1f4b93aadc82fbd02a5ba5508a1b781753f5f17b900595b6c6fa4f`; Android-test APK 1,031,728 bytes, SHA-256 `663eed75577b6ac9c90950681a46ec41e8d6a1b842d6edd55e9770d40229fb7b`; release unsigned APK 409,390,599 bytes, SHA-256 `407f6461380cbf9823e64292f4ad25508591a4e3074f8e11163ca13d279a9df2`.
+- `./gradlew -Dkotlin.incremental=false :app:connectedUiTestAndroidTest --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **NOT RUN** on this host; Gradle failed before test execution with `No connected devices`. The previous actual API 36 run remains recorded in the visual artifact directory and is not re-attributed to this fresh build.
+- `./gradlew -Dkotlin.incremental=false :app:lintDebug :app:lintUiTest --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **BUILD SUCCESSFUL**; debug lint has 0 errors, 71 warnings and 6 hints; uiTest lint has 0 errors, 75 warnings and 6 hints.
 - `python3 -m unittest tools.test_repository_hygiene_audit`: **OK**, 2 tests (the session-generated ignored `.serena` directory was moved out of the repository before this rerun).
 - `python3 tools/provider_registry_audit.py --json`: `ok: true`, 78 authored providers, 716 pinned WhatsMyName source records, 644 executable rules, and 0 conversion errors.
-- `git diff --check`: clean.
+- `git diff --check`: clean before this documentation update.
 
 The working tree also contains a network-free synthetic discovery benchmark
 harness in `DiscoveryBenchmark`: a deterministic multi-hop fixture exercises
@@ -49,11 +50,11 @@ Its metrics are regression evidence only; no mission-readiness score is derived
 from the fixture. Host-like URLs entered without a scheme are normalized to an
 `https://` seed locally and covered by a classifier regression test.
 
-The host does not have `pwsh`, so `tools/verify_whatsmyname_catalog.ps1` was not executable here; the Python provider audit supplied the equivalent pinned-catalog conversion evidence.
+The Python provider audit is the canonical pinned-catalog check in this tree; it supplied the conversion evidence without network access.
 
-The recursive pivot collector now handles completions as they arrive, persists frontier completion after each result, retains deterministic output order, leaves unfinished work pending across cancellation, and admits only verified existing results as later-depth seeds. Focused JVM coverage for this behavior is included in the totals above. The uiTest visual fixture also clears stale lifecycle ownership before writing its encrypted result; a regression covers a stale terminal marker.
+The recursive pivot collector now handles completions as they arrive, persists frontier completion after each result, retains deterministic output order, leaves unfinished work pending across cancellation, and admits only verified existing results as later-depth seeds. Focused JVM coverage for this behavior is included in the totals above. The new Location admission/executor tests cover context-scoped corroborated place pivots and preservation of authorized Email/Phone queries. The uiTest visual fixture also clears stale lifecycle ownership before writing its encrypted result; a regression covers a stale terminal marker.
 
-Fresh visual QA was performed against the rebuilt and installed `uiTest` APK on `emulator-5554` (`dossier-api36`, API 36). Evidence is retained outside Git in the task's local QA artifacts, including universal search, local Name classification, the encrypted fixture report, report tabs, and the Images surface with matching hierarchy XML. The screenshots are 1080×1920 and the hierarchies identify `package="io.dossier.app"`; fixture values use reserved `.test` domains. The valid screenshots show the single-box entry, local seed classification, evidence-backed report, graph/timeline content, report-tab reachability, and reverse-media entry. This is emulator evidence only; physical-device acceptance, broad accessibility, and the mission benchmark remain open.
+Fresh visual QA was performed against the rebuilt and installed `uiTest` APK on `emulator-5554` (`dossier-api36`, API 36). Evidence is retained outside Git in the task-local visualization directory `2026/09/07/dossier-android-qa-final4/`, with paired PNG/XML captures for consent, universal search, local Name classification, the encrypted fixture report, every report tab (including horizontally scrolled Actions), Images, picker, selected photo, photo progress, camera preview, and camera cancellation return. The screenshots are 1080×1920 and every Dossier hierarchy identifies `package="io.dossier.app"`; fixture values use reserved `.test` domains. The selected-photo scan remained at `Fingerprinting locally + checking public candidates…` after approximately 30 seconds, so completion of the photo pipeline is not claimed. This is emulator evidence only; physical-device acceptance, broad accessibility, and the mission benchmark remain open.
 
 ## 2. Repository/PR scale at reset
 
@@ -315,9 +316,9 @@ measurement.
 
 ### 7.4 Typed frontier is persisted, but general coverage is incomplete
 
-The product now has a bounded, encrypted, request/owner/plan-bound typed frontier with queued, in-flight, completed, unavailable, evidence, relationship, and rejection state. URL, domain, document, and archive seeds execute through the reviewed public-fetch/archive executor; Email, Phone, Name, and Username seeds execute through the bounded public-search executor, with exact query metadata, verification context, and weak-signal provenance guards. Newly verified links and extracted exact values feed back into the same frontier. Photo, Image, and Location kinds remain represented for admission, persistence, and diagnostics but do not yet have autonomous per-kind fetchers in this tranche. The admission snapshot reports URL/domain/document/archive and Email/Phone/Name/Username as `Available`, while the remaining unsupported kinds are `Unavailable`.
+The product now has a bounded, encrypted, request/owner/plan-bound typed frontier with queued, in-flight, completed, unavailable, evidence, relationship, and rejection state. URL, domain, document, and archive seeds execute through the reviewed public-fetch/archive executor; Email, Phone, Name, and Username seeds execute through the bounded public-search executor, with exact query metadata, verification context, and weak-signal provenance guards. Corroborated Location seeds execute through a context-scoped public-search path only when an authorized name, organization, or username context is present; location-only, EXIF-only, likely, visual-guess, and conflicting observations remain unavailable. Newly verified links and extracted exact values feed back into the same frontier. Photo and Image kinds remain represented for admission, persistence, and diagnostics but do not yet have autonomous per-kind fetchers in this tranche. The admission snapshot reports URL/domain/document/archive, Email/Phone/Name/Username, and corroborated Location as `Available`, while the remaining unsupported kinds are `Unavailable`.
 
-**Truth:** persistent typed frontier, URL-family execution, and bounded Email/Phone/Name/Username public-search execution are implemented; Photo/Image/Location execution, general all-kind frontier ownership, and broader adaptive source integration remain open.
+**Truth:** persistent typed frontier, URL-family execution, bounded Email/Phone/Name/Username public-search execution, and context-scoped corroborated Location search are implemented; Photo/Image execution, full photo geolocation, general all-kind frontier ownership, and broader adaptive source integration remain open.
 
 ### 7.5 Real-world recall is not measured
 
@@ -415,9 +416,17 @@ recursive identity/exposure pivots
 - source-page location extraction feeding a location evidence model;
 - reverse-image results automatically becoming recursive source-page/identity pivots through one canonical frontier.
 
-**Truth:** strong base with universal Photo input and local classification;
-parallel metadata/OCR/face/reverse-image/location fusion and mission-level
-benchmark coverage remain incomplete.
+The scanner now also performs a bounded local comparison between a Photo seed
+and directly verified profile avatars when the profile pass supplies both
+images. The comparison retains structured supporting provenance and never
+promotes visual similarity to identity proof. This is a local enrichment step,
+not the complete photo fan-out or recursive pipeline.
+
+**Truth:** strong base with universal Photo input, local classification, and
+bounded verified-avatar comparison; the selected-photo scan still performs its
+media lookup before it can expose media evidence, so progressive/bounded media
+execution remains incomplete. Parallel metadata/OCR/face/reverse-image/
+location fusion and mission-level benchmark coverage remain incomplete.
 
 ## 12. Photo location reconstruction truth
 
@@ -431,9 +440,15 @@ VISUAL_GUESS
 CONFLICTING
 ```
 
-The current code has pieces for EXIF/geography/media intelligence, but no audited production subsystem currently establishes the complete evidence-fusion contract above.
+The current code has pieces for EXIF/geography/media intelligence and now
+admits a corroborated Location pivot into a context-scoped public-search plan.
+That path requires an authorized name, organization, or username context and
+does not make location-only or weak visual observations searchable. No audited
+production subsystem currently establishes the complete evidence-fusion
+contract above.
 
-**Truth:** partial components only; no complete photo geolocation product claim.
+**Truth:** bounded corroborated-location search exists; complete photo
+geolocation, evidence fusion, ranked candidates, and location UX remain open.
 
 ## 13. Reverse-image/browser integration truth
 
@@ -447,11 +462,12 @@ Playwright may be useful for CI/browser adapter regression testing or external t
 
 ## 14. PII and repository hygiene audit
 
-The reset audit found concrete hygiene issues.
+The reset audit found concrete hygiene issues; the current tree records the
+cleanup state below.
 
 ### 14.1 Hard-coded device/browser fingerprint
 
-At least the current search code contains a hard-coded browser-style User-Agent including:
+The reset audit found a hard-coded browser-style User-Agent including:
 
 ```text
 SM-S931B
@@ -463,19 +479,22 @@ This is inappropriate as product network identity and can reveal developer/devic
 
 The new contract requires a generic Dossier-owned UA or the normal platform WebView UA rather than hard-coded contributor hardware/browser impersonation.
 
-**Status:** must remove.
+**Status:** resolved; current runtime paths use generic Dossier identity or the
+platform WebView identity.
 
 ### 14.2 Repository-owner URL in runtime User-Agent strings
 
-Several networking classes embed the repository URL in a runtime User-Agent string.
+The reset audit found several networking classes embedding the repository URL
+in a runtime User-Agent string.
 
 This is not sensitive PII at the level of a phone/address, but it unnecessarily couples runtime network identity to a contributor/repository owner and should be replaced with generic product identity.
 
-**Status:** must remove from runtime UA values.
+**Status:** resolved; no developer/repository URL is used as runtime network
+identity in the current tree.
 
 ### 14.3 Committed editor/agent state
 
-The branch currently contains committed directories including:
+The reset audit identified committed directories including:
 
 ```text
 .idea/
@@ -485,23 +504,27 @@ The branch currently contains committed directories including:
 
 These are not product code and should be removed unless a specific shared configuration is demonstrably required. The default cleanup decision is removal plus `.gitignore` coverage.
 
-**Status:** cleanup candidate.
+**Status:** resolved; these directories are absent from the current tree and
+covered by repository hygiene checks.
 
 ### 14.4 Empty/meaningless maintenance marker
 
-`tools/provider_registry_audit_fixed_marker.txt` contains only a sentence indicating that a guard was reviewed.
+The reset audit identified `tools/provider_registry_audit_fixed_marker.txt` as
+an empty maintenance marker.
 
 It provides no runtime or meaningful maintenance function.
 
-**Status:** delete.
+**Status:** resolved; the marker is absent from the current tree.
 
 ### 14.5 Duplicate WhatsMyName maintenance verification
 
-`tools/verify_whatsmyname_catalog.ps1` duplicates a meaningful subset of the Python provider registry audit: pinned hashes, size, source counts, and executable filtering.
+The reset audit identified `tools/verify_whatsmyname_catalog.ps1` as
+duplicating a meaningful subset of the Python provider registry audit.
 
 Unless there is a required Windows-only workflow depending on it, one maintained implementation should be enough.
 
-**Status:** likely delete after confirming no workflow references it.
+**Status:** resolved; the duplicate script is absent and
+`tools/provider_registry_audit.py` is the maintained check.
 
 ### 14.6 Overlapping `PublicSourceCatalogTest` classes
 
@@ -513,8 +536,8 @@ They are not byte-for-byte duplicates, but coverage overlaps and should be conso
 
 ## 15. README truth
 
-README now describes the reset as unscored, records the current 2026-09-06
-validation gates for verified head `230b502`, and points to the fresh emulator evidence outside Git. Its
+README now describes the reset as unscored, records the current 2026-09-07
+validation gates for this delivery, and points to the fresh emulator evidence outside Git. Its
 checked-in walkthrough images remain baseline captures for retained legacy and
 configuration surfaces; they are not independent current-head acceptance.
 
@@ -690,7 +713,7 @@ These are qualitative reset states, not a disguised numeric score.
 | Universal one-box launch | **Implemented and emulator-verified** | `MainHubScreen` now starts `UniversalSearchScreen`; text and photo seeds route into the existing scan flow, with cancellation/reset returning to the same entry. |
 | Public web discovery | **Partial** | Multiple search engines and direct verification exist, but hard caps and shallow stopping dominate. |
 | Username discovery | **Implemented but bounded** | Large pinned catalogue uses rolling workers and aggregate health/yield ordering; broader measured source yield and general frontier integration remain open. |
-| Recursive exposure frontier | **Partial, typed URL-family + public-search execution** | Encrypted typed frontier persistence, rolling completion, URL/domain/document/archive execution, and bounded Email/Phone/Name/Username public-search pivots exist; Photo/Image/Location execution and broader coordinator ownership remain open. |
+| Recursive exposure frontier | **Partial, typed URL-family + public-search + corroborated-Location execution** | Encrypted typed frontier persistence, rolling completion, URL/domain/document/archive execution, bounded Email/Phone/Name/Username public-search pivots, and context-scoped corroborated Location pivots exist; Photo/Image execution, full photo geolocation, and broader coordinator ownership remain open. |
 | Exact-value extraction | **Partial** | Evidence adapters now preserve exact and normalized values in the initial ledger model; broad document/page extraction coverage remains incomplete. |
 | Exposure Ledger | **Initial canonical model implemented** | `ExposureLedger` is bounded, normalized, provenance-aware, and adapted from evidence; full scanner-wide canonical ownership remains open. |
 | Evidence/provenance | **Strong base** | Significant existing hardening and IDs/provenance can be reused. |
@@ -700,11 +723,11 @@ These are qualitative reset states, not a disguised numeric score.
 | Archives/history | **Partial useful base** | Wayback/history exists, needs deeper frontier integration. |
 | Breach awareness | **Partial useful base** | HIBP/scaffolding exists; exact exposure reconstruction remains source-dependent. |
 | Local case security | **Strong base** | Encrypted/bounded persistence work is reusable. |
-| Photo metadata | **Partial base** | EXIF support exists and a Photo URI is accepted as a universal initial input; orchestration/fan-out/fusion/recursive execution remains incomplete. |
+| Photo metadata | **Partial base** | EXIF support exists and a Photo URI is accepted as a universal initial input; bounded verified-avatar comparison exists, while orchestration/fan-out/fusion/recursive execution remains incomplete. |
 | OCR/image analysis | **Partial base** | Dependencies/code exist; not yet central recursive discovery. |
 | Face correlation | **Substantial base, calibration incomplete** | Local pipeline exists; candidate acquisition and mission benchmark need work. |
 | Reverse image | **Partial** | Candidate/matching work exists; multi-provider recursively integrated product does not. |
-| Photo geolocation | **Partial components only** | No complete evidence-ranked location reconstruction contract yet. |
+| Photo geolocation | **Partial components only** | Corroborated Location can feed a context-scoped public search, but no complete evidence-ranked location reconstruction contract exists yet. |
 | Remediation/export | **Useful base** | Worth preserving, but dependent on better discovery. |
 | Performance | **Improved but incomplete** | WhatsMyName uses rolling workers and aggregate health/yield ordering; general coordinator/frontier scheduling and live yield calibration remain open. |
 | Real-world recall benchmark | **Synthetic regression harness only** | The deterministic multi-hop harness is regression evidence; a representative synthetic/consented mission benchmark is still absent, so readiness remains unscored. |
@@ -718,9 +741,9 @@ work should target measurable discovery utility:
 
 1. connect the typed Exposure Ledger to every scanner/parser output and persist
    discovery paths without duplicating evidence truth;
-2. extend the persisted frontier beyond the current URL-family and bounded
-   public-search tranche to Photo/Image/Location execution and scanner-wide
-   coordinator ownership;
+2. extend the persisted frontier beyond the current URL-family, bounded
+   public-search, and corroborated-Location tranche to Photo/Image execution
+   and scanner-wide coordinator ownership;
 3. add a representative synthetic/consented end-to-end corpus and publish
    Recall@known-exposure, precision, false-positive, and time-to-result metrics;
 4. feed measured source yield and provider failure/cooldown data into the

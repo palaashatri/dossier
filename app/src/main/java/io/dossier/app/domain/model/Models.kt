@@ -454,8 +454,31 @@ data class ReverseImageLookupResult(
          * Explicit account associations are kept separate from visual scores.
          * A visual match or cluster never populates this list automatically.
          */
-        val accountLinkages: List<ImageAccountLinkage> = emptyList()
-    )
+        val accountLinkages: List<ImageAccountLinkage> = emptyList(),
+        /**
+         * Optional local face-consistency observation for this candidate's
+         * already-linked profile. This is supporting evidence only; it never
+         * upgrades the candidate to an identity assertion.
+         */
+        val faceComparisonScore: Float? = null,
+        val faceComparisonWarning: String? = null,
+        val faceComparisonProvenance: FaceComparisonProvenance? = null
+    ) {
+        init {
+            require(faceComparisonScore == null ||
+                (faceComparisonScore.isFinite() && faceComparisonScore in 0f..1f)
+            ) {
+                "Face comparison score must be finite and between 0 and 1."
+            }
+            require(faceComparisonWarning == null || faceComparisonWarning.length <= MAX_FACE_WARNING_CHARS) {
+                "Face comparison warning exceeds the bounded limit."
+            }
+        }
+
+        private companion object {
+            const val MAX_FACE_WARNING_CHARS = 1_024
+        }
+    }
 
     @Serializable
     data class ImageCluster(

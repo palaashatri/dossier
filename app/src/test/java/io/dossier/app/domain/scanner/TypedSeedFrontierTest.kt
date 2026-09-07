@@ -16,6 +16,7 @@ import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.model.ReverseImageLookupResult
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -345,6 +346,54 @@ class TypedSeedFrontierTest {
         assertTrue(unavailableFrontier.offer(actionableUrl))
         assertEquals(actionableUrl.exactValue, unavailableFrontier.entries.single().seed.exactValue)
         assertEquals(TypedSeedFrontierEntryState.Pending, unavailableFrontier.entries.single().state)
+    }
+
+    @Test
+    fun laterCorroboratedLocationUpgradesEarlierLocalObservationAndRequeuesIt() {
+        val frontier = TypedSeedFrontier(
+            requestId = uuid(),
+            config = TypedSeedFrontierConfig(
+                maxDepth = 4,
+                maxTotalSeeds = 4,
+                perKindBudgets = TypedSeedKind.entries.associateWith { 128 }
+            )
+        )
+        val local = TypedSeed(
+            kind = TypedSeedKind.Location,
+            value = "example city",
+            exactValue = "Example City",
+            normalizedValue = "example city",
+            depth = 1,
+            evidenceState = EvidenceState.Observed,
+            origin = TypedSeedOrigin.LocalAnalysis,
+            sourceClassification = ExposureSourceClassification.LOCAL_IMPORT,
+            sourceUrl = "content://synthetic/photo",
+            locationEvidenceClass = ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA
+        )
+        assertTrue(frontier.offer(local))
+        val key = frontier.entries.single().key
+        assertEquals(TypedSeedFrontierEntryState.Unavailable, frontier.entries.single().state)
+
+        val corroborated = local.copy(
+            origin = TypedSeedOrigin.Evidence,
+            sourceClassification = ExposureSourceClassification.AUTHORIZED_API,
+            evidenceIds = listOf("geo-corroboration"),
+            sourceUrl = "https://maps.example.test/example-city",
+            discoveryPath = listOf("photo:synthetic", "https://maps.example.test/example-city"),
+            locationEvidenceClass = ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION
+        )
+
+        assertFalse("Duplicate should merge into the existing frontier entry", frontier.offer(corroborated))
+        val merged = frontier.entries.single()
+        assertEquals(key, merged.key)
+        assertEquals(TypedSeedOrigin.Evidence, merged.seed.origin)
+        assertEquals(ExposureSourceClassification.AUTHORIZED_API, merged.seed.sourceClassification)
+        assertEquals(
+            ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION,
+            merged.seed.locationEvidenceClass
+        )
+        assertEquals(TypedSeedFrontierEntryState.Pending, merged.state)
+        assertNull(merged.unavailableReason)
     }
 
     @Test

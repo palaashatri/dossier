@@ -1,11 +1,17 @@
 package io.dossier.app.domain.place
 
+import android.content.Context
+import android.net.Uri
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.ReverseVideoLookupResult
+import io.dossier.app.domain.model.FaceConsistencyMatch
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ProfileScanResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.Serializable
 import java.net.URI
 import java.security.MessageDigest
@@ -80,6 +86,15 @@ object MediaIntelligenceSession {
             .filterNot { it.id in existingCandidateIds }
         if (candidates.isEmpty()) return@synchronized true
 
+        // These are source observations fetched during the current scan. A
+        // retrieval timestamp is required so the later evidence projection
+        // can retain when the public avatar was observed, even when no image
+        // comparison or selected-photo lookup runs afterward.
+        val retrievedAtEpochMillis = System.currentTimeMillis()
+        val timestampedCandidates = candidates.map { candidate ->
+            candidate.copy(retrievedAtEpochMillis = retrievedAtEpochMillis)
+        }
+
         val observation = ReverseImageLookupResult(
             gps = null,
             extractedText = null,
@@ -89,12 +104,101 @@ object MediaIntelligenceSession {
             resolvedLocation = null,
             mapsUrl = null,
             webEvidence = emptyList(),
-            visualCandidates = candidates,
+            visualCandidates = timestampedCandidates,
             visualSearchNote = "Directly verified public profile avatars were recorded as source observations; no local image comparison or face analysis was performed."
         )
         val current = _snapshot.value
         _snapshot.value = current.copy(
             imageResults = (current.imageResults + observation).takeLast(MAX_IMAGE_RESULTS)
+        )
+        true
+    }
+
+    /**
+     * Compares the selected photo against the directly verified profile avatars
+     * produced by this scan. The matcher performs all image work locally; this
+     * method only commits the result if the scan binding is still current.
+     */
+    suspend fun compareVerifiedProfileAvatars(
+        context: Context,
+        token: String,
+        input: IdentityInput,
+        profiles: List<ProfileScanResult>,
+        deepResearch: Boolean = false
+    ): Boolean {
+        val selfieUri = input.selfieUri?.trim()?.takeIf(String::isNotBlank) ?: return false
+        if (token.isBlank() || profiles.none { it.exists && it.verified && !it.profileImageUrl.isNullOrBlank() }) {
+            return false
+        }
+        val canStart = synchronized(lock) {
+            token == bindingToken && boundInputFingerprint == fingerprint(input)
+        }
+        if (!canStart) return false
+
+        val outcome = try {
+            ReverseImageVisualMatcher(context).matchVerifiedProfileAvatars(
+                queryUri = Uri.parse(selfieUri),
+                profiles = profiles,
+                deepResearch = deepResearch
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return false
+        }
+        currentCoroutineContext().ensureActive()
+
+        return synchronized(lock) {
+            if (token != bindingToken || boundInputFingerprint != fingerprint(input)) {
+                false
+            } else {
+                _snapshot.value = mergeVerifiedProfileComparison(
+                    current = _snapshot.value,
+                    profiles = profiles,
+                    outcome = outcome
+                )
+                true
+            }
+        }
+    }
+
+    /**
+     * Attaches the existing local face-pipeline observations to their matching
+     * verified-avatar candidates. Scores and warnings remain supporting
+     * metadata; candidate state and account linkage are never upgraded here.
+     */
+    fun attachFaceComparisons(
+        token: String,
+        input: IdentityInput,
+        matches: List<FaceConsistencyMatch>
+    ): Boolean = synchronized(lock) {
+        if (token.isBlank() || token != bindingToken || boundInputFingerprint != fingerprint(input)) {
+            return@synchronized false
+        }
+        val faceByProfile = matches
+            .asSequence()
+            .mapNotNull { match ->
+                val profileUrl = match.profileUrl.trim().takeIf(String::isNotBlank) ?: return@mapNotNull null
+                profileUrl to match
+            }
+            .toMap()
+        if (faceByProfile.isEmpty()) return@synchronized true
+
+        _snapshot.value = _snapshot.value.copy(
+            imageResults = _snapshot.value.imageResults.map { result ->
+                result.copy(
+                    visualCandidates = result.visualCandidates.map { candidate ->
+                        if (!candidate.hasVerifiedProfileLinkage()) {
+                            candidate
+                        } else {
+                            val match = faceByProfile.entries.firstOrNull { (profileUrl, _) ->
+                                sameMediaIdentifier(profileUrl, candidate.sourcePageUrl)
+                            }?.value
+                            match?.let { candidate.withFaceComparison(it) } ?: candidate
+                        }
+                    }
+                )
+            }
         )
         true
     }
@@ -158,6 +262,156 @@ object MediaIntelligenceSession {
         boundInputFingerprint = null
         bindingToken = null
     }
+
+    internal fun mergeVerifiedProfileComparison(
+        current: MediaIntelligenceSnapshot,
+        profiles: List<ProfileScanResult>,
+        outcome: ReverseImageVisualMatcher.Outcome
+    ): MediaIntelligenceSnapshot {
+        val produced = VerifiedProfileAvatarProducer.produce(profiles)
+        if (produced.isEmpty()) return current
+
+        val comparedById = outcome.candidates.associateBy { it.id }
+        val compared = produced.map { candidate ->
+            comparedById[candidate.id]?.let { comparedCandidate ->
+                mergeCandidate(candidate, comparedCandidate)
+            } ?: candidate
+        }
+        val avatarIds = produced.mapTo(hashSetOf()) { it.id }
+        val observationIndex = current.imageResults.indexOfLast { result ->
+            result.visualCandidates.any { it.id in avatarIds }
+        }
+        if (observationIndex < 0) {
+            val observation = ReverseImageLookupResult(
+                gps = null,
+                extractedText = null,
+                labels = emptyList(),
+                faceDetected = false,
+                faceWarning = null,
+                resolvedLocation = null,
+                mapsUrl = null,
+                webEvidence = emptyList(),
+                visualMatches = outcome.matches,
+                visualCandidates = compared,
+                visualClusters = outcome.clusters,
+                visualSearchNote = outcome.note
+            )
+            return current.copy(
+                imageResults = (current.imageResults + observation).takeLast(MAX_IMAGE_RESULTS)
+            )
+        }
+
+        val existing = current.imageResults[observationIndex]
+        val candidatesById = LinkedHashMap<String, ReverseImageLookupResult.ImageCandidateProvenance>()
+        existing.visualCandidates.forEach { candidate -> candidatesById[candidate.id] = candidate }
+        compared.forEach { candidate ->
+            candidatesById[candidate.id] = mergeCandidate(candidatesById[candidate.id], candidate)
+        }
+        val matchesByKey = LinkedHashMap<String, ReverseImageLookupResult.VisualMatch>()
+        (existing.visualMatches + outcome.matches).forEach { match ->
+            val key = visualMatchKey(match)
+            matchesByKey[key] = matchesByKey[key]?.let { previous ->
+                strongerVisualMatch(previous, match)
+            } ?: match
+        }
+        val clustersById = LinkedHashMap<String, ReverseImageLookupResult.ImageCluster>()
+        (existing.visualClusters + outcome.clusters).forEach { cluster ->
+            clustersById[cluster.id] = cluster
+        }
+        val updated = existing.copy(
+            visualCandidates = candidatesById.values.toList(),
+            visualMatches = matchesByKey.values.toList(),
+            visualClusters = clustersById.values.toList(),
+            visualSearchNote = outcome.note
+        )
+        return current.copy(
+            imageResults = current.imageResults.toMutableList().also { it[observationIndex] = updated }
+        )
+    }
+
+    private fun mergeCandidate(
+        existing: ReverseImageLookupResult.ImageCandidateProvenance?,
+        updated: ReverseImageLookupResult.ImageCandidateProvenance
+    ): ReverseImageLookupResult.ImageCandidateProvenance {
+        if (existing == null) return updated
+        val updatedRank = candidateStateRank(updated.state)
+        val existingRank = candidateStateRank(existing.state)
+        val preferred = when {
+            updatedRank > existingRank -> updated
+            updatedRank < existingRank -> existing
+            updated.state == ReverseImageLookupResult.ImageCandidateState.Matched &&
+                (existing.comparisonScore ?: 0f) > (updated.comparisonScore ?: 0f) -> existing
+            else -> updated
+        }
+        return preferred.copy(
+            accountLinkages = (existing.accountLinkages + updated.accountLinkages)
+                .distinctBy { "${it.basis.name}|${it.accountUrl}" },
+            faceComparisonScore = updated.faceComparisonScore ?: existing.faceComparisonScore,
+            faceComparisonWarning = updated.faceComparisonWarning ?: existing.faceComparisonWarning,
+            faceComparisonProvenance = updated.faceComparisonProvenance
+                ?: existing.faceComparisonProvenance
+        )
+    }
+
+    private fun candidateStateRank(
+        state: ReverseImageLookupResult.ImageCandidateState
+    ): Int = when (state) {
+        ReverseImageLookupResult.ImageCandidateState.Indexed -> 0
+        ReverseImageLookupResult.ImageCandidateState.DownloadUnavailable,
+        ReverseImageLookupResult.ImageCandidateState.DecodeFailed -> 1
+        ReverseImageLookupResult.ImageCandidateState.ComparedNoMatch -> 2
+        ReverseImageLookupResult.ImageCandidateState.Matched -> 3
+    }
+
+    private fun ReverseImageLookupResult.ImageCandidateProvenance.withFaceComparison(
+        match: FaceConsistencyMatch
+    ): ReverseImageLookupResult.ImageCandidateProvenance = copy(
+        faceComparisonScore = match.similarityScore
+            .takeIf(Float::isFinite)
+            ?.coerceIn(0f, 1f),
+        faceComparisonWarning = match.warning.take(MAX_FACE_WARNING_CHARS),
+        faceComparisonProvenance = match.provenance
+    )
+
+    private fun ReverseImageLookupResult.ImageCandidateProvenance.hasVerifiedProfileLinkage(): Boolean =
+        accountLinkages.any { linkage ->
+            linkage.basis == ReverseImageLookupResult.ImageAccountLinkageBasis.VerifiedProfile &&
+                sameMediaIdentifier(linkage.accountUrl, sourcePageUrl)
+        }
+
+    private fun visualMatchKey(match: ReverseImageLookupResult.VisualMatch): String =
+        match.candidateId?.let { "candidate:$it" }
+            ?: "${canonicalUrl(match.imageUrl)}|${canonicalUrl(match.sourcePageUrl)}"
+
+    private fun strongerVisualMatch(
+        first: ReverseImageLookupResult.VisualMatch,
+        second: ReverseImageLookupResult.VisualMatch
+    ): ReverseImageLookupResult.VisualMatch {
+        val firstScore = first.similarity.takeIf(Float::isFinite)?.coerceIn(0f, 1f) ?: 0f
+        val secondScore = second.similarity.takeIf(Float::isFinite)?.coerceIn(0f, 1f) ?: 0f
+        return if (secondScore > firstScore) second else first
+    }
+
+    private fun sameMediaIdentifier(first: String, second: String): Boolean =
+        canonicalUrl(first).substringBefore('?').equals(
+            canonicalUrl(second).substringBefore('?'),
+            ignoreCase = true
+        )
+
+    private fun canonicalUrl(raw: String): String = runCatching {
+        val uri = URI(raw.trim())
+        URI(
+            uri.scheme?.lowercase(Locale.ROOT),
+            null,
+            uri.host?.lowercase(Locale.ROOT),
+            uri.port,
+            uri.path?.removeSuffix("/"),
+            uri.query,
+            null
+        ).toString().removeSuffix("/")
+    }.getOrDefault(raw.trim().substringBefore('#').removeSuffix("/").lowercase(Locale.ROOT))
+
+    private const val MAX_FACE_WARNING_CHARS = 1_024
 
     private fun fingerprint(input: IdentityInput): String {
         fun normalized(values: List<String>): String = values

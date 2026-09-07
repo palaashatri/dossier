@@ -12,6 +12,7 @@ import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.model.FindingAttribution
+import io.dossier.app.domain.model.FaceComparisonProvenance
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.place.MediaIntelligenceSnapshot
 import java.net.URI
@@ -62,7 +63,8 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
         locationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass? = null,
         locationEvidenceReason: String? = null,
         supportingEvidenceIds: List<String> = emptyList(),
-        sourceClassification: ExposureSourceClassification = ExposureSourceClassification.UNKNOWN_ORIGIN
+        sourceClassification: ExposureSourceClassification = ExposureSourceClassification.UNKNOWN_ORIGIN,
+        faceComparisonProvenance: FaceComparisonProvenance? = null
     ): String? {
         // Retain the exact observed value/source string. Normalization is
         // restricted to the stable ID key so the private ledger can show what
@@ -99,7 +101,8 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
                 .filter(String::isNotBlank)
                 .map(EvidenceIdPolicy::migrate)
                 .distinct()
-                .take(MAX_SUPPORTING_EVIDENCE_IDS)
+                .take(MAX_SUPPORTING_EVIDENCE_IDS),
+            faceComparisonProvenance = faceComparisonProvenance
         )
         return id
     }
@@ -244,6 +247,7 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             confidence = candidate.confidence,
             state = evidenceClass.toEvidenceState(),
             reliability = evidenceClass.toEvidenceReliability(),
+            sourceClassification = evidenceClass.toSourceClassification(),
             timestamp = candidate.observedAtEpochMillis ?: retrievedAtEpochMillis,
             locationEvidenceClass = evidenceClass,
             locationEvidenceReason = candidate.reason,
@@ -336,7 +340,8 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             timestamp = candidateTimestamp,
             path = candidatePath,
             providerId = candidate.source,
-            contentHashSha256 = candidate.contentSha256
+            contentHashSha256 = candidate.contentSha256,
+            faceComparisonProvenance = candidate.faceComparisonProvenance
         )
         val imageId = add(
             kind = EvidenceKind.PublicImageEvidence,
@@ -349,7 +354,8 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             timestamp = candidateTimestamp,
             path = candidatePath,
             providerId = candidate.source,
-            contentHashSha256 = candidate.contentSha256
+            contentHashSha256 = candidate.contentSha256,
+            faceComparisonProvenance = candidate.faceComparisonProvenance
         )
         imageId?.let { candidateImageEvidenceIds[candidate.id] = it }
 
@@ -378,7 +384,8 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
                     timestamp = candidateTimestamp,
                     path = candidatePath,
                     providerId = candidate.source,
-                    contentHashSha256 = candidate.contentSha256
+                    contentHashSha256 = candidate.contentSha256,
+                    faceComparisonProvenance = candidate.faceComparisonProvenance
                 )
             }
 
@@ -424,7 +431,8 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             reliability = matchReliability,
             timestamp = retrievedAtEpochMillis,
             path = matchPath,
-            providerId = match.source
+            providerId = match.source,
+            faceComparisonProvenance = linkedCandidate?.faceComparisonProvenance
         )
         val matchImageId = add(
             kind = EvidenceKind.PublicImageEvidence,
@@ -436,7 +444,8 @@ internal fun ReverseImageLookupResult.toEvidenceCollection(
             reliability = matchReliability,
             timestamp = retrievedAtEpochMillis,
             path = matchPath,
-            providerId = match.source
+            providerId = match.source,
+            faceComparisonProvenance = linkedCandidate?.faceComparisonProvenance
         )
         addObservedSourcePage(
             pageUrl = match.sourcePageUrl,
@@ -526,6 +535,24 @@ private fun ReverseImageLookupResult.LocationEvidenceClass.toEvidenceReliability
     ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING -> EvidenceReliability.Unknown
 }
 
+/**
+ * Keeps the explicit source taxonomy aligned with location evidence class.
+ * Local observations remain local, while a geo-provider corroboration is the
+ * only location class promoted to an authorized public source.
+ */
+private fun ReverseImageLookupResult.LocationEvidenceClass.toSourceClassification():
+    ExposureSourceClassification = when (this) {
+    ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA,
+    ReverseImageLookupResult.LocationEvidenceClass.VISUAL_GUESS ->
+        ExposureSourceClassification.LOCAL_IMPORT
+    ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION ->
+        ExposureSourceClassification.AUTHORIZED_API
+    ReverseImageLookupResult.LocationEvidenceClass.LIKELY_LOCATION ->
+        ExposureSourceClassification.PUBLIC_WEB
+    ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING ->
+        ExposureSourceClassification.UNKNOWN_ORIGIN
+}
+
 private fun ReverseImageLookupResult.ImageCandidateProvenance.evidenceReliability(): EvidenceReliability =
     if (hasVerifiedProfileLinkage()) {
         EvidenceReliability.DirectPublicProfile
@@ -567,6 +594,19 @@ private fun candidateMetadata(
     candidate.contentSha256?.takeIf(String::isNotBlank)?.let {
         if (isNotEmpty()) append("; ")
         append("SHA-256: ").append(it)
+    }
+    candidate.faceComparisonScore?.let { score ->
+        if (isNotEmpty()) append("; ")
+        append("Face consistency: ").append(String.format(Locale.US, "%.3f", score.coerceIn(0f, 1f)))
+    }
+    candidate.faceComparisonProvenance?.let { provenance ->
+        if (isNotEmpty()) append("; ")
+        append("Face backend: ").append(provenance.backend.name)
+        append(" / calibration: ").append(provenance.calibration.name)
+    }
+    candidate.faceComparisonWarning?.takeIf(String::isNotBlank)?.let {
+        if (isNotEmpty()) append("; ")
+        append("Face note: ").append(it)
     }
     if (candidate.width != null && candidate.height != null) {
         if (isNotEmpty()) append("; ")

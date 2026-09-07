@@ -141,13 +141,21 @@ class PublicSearchDiscoveryService(private val context: Context) {
         withContext(Dispatchers.IO) {
             val queryLimit = if (deepResearch) MAX_DEEP_QUERIES else MAX_DEFAULT_QUERIES
             val safeSeeds = typedSeeds.filter(TypedSeedSafety::isSafePublicSearchSeed)
-            val plan = buildSearchQueryPlan(input, deepResearch, verifiedResults, safeSeeds).take(queryLimit)
+            // A location pivot is intentionally queried with the original
+            // authorized context. The typed frontier still supplies the only
+            // location value, while this scoped input supplies only the
+            // name/organization/username terms allowed by the location plan.
+            val queryInput = locationQueryInput(input, verificationInput, safeSeeds)
+            val plan = boundSearchQueryPlan(
+                buildSearchQueryPlan(queryInput, deepResearch, verifiedResults, safeSeeds),
+                queryLimit
+            )
             if (plan.isEmpty()) return@withContext SearchOutcome.Success(emptyList())
 
             val scoringInput = if (verifiedResults.isNotEmpty()) {
-                expandIdentityInput(input, verifiedResults)
+                expandIdentityInput(queryInput, verifiedResults)
             } else {
-                input
+                queryInput
             }
             // Keep the query plan scoped to the current typed pivot, but let
             // page attribution see both the original authorized context and
@@ -696,10 +704,79 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val originalHandles = buildHandleTerms(input)
 
             // Phase 1b: Safe typed seeds (Emails/Phones before original terms)
-            val safeSeeds = typedSeeds
+            val safeSeedLimit = if (deepResearch) 8 else 4
+            val allSafeSeeds = typedSeeds
                 .filter(TypedSeedSafety::isSafePublicSearchSeed)
                 .distinctBy { "${it.kind}:${it.normalizedValue}" }
-                .take(if (deepResearch) 8 else 4)
+            // Reserve bounded capacity for corroborated locations. Media
+            // evidence is admitted after launch Name/Username/Email/Phone
+            // seeds, so a plain take(limit) would silently starve every
+            // location pivot in the common photo-audit case. Keeping the
+            // total seed count capped preserves the existing query budget.
+            val locationSeeds = allSafeSeeds.filter { it.kind == TypedSeedKind.Location }
+            // Preserve deterministic source order within each family, but
+            // reserve one Email and one Phone pivot before filling the
+            // remaining bounded slots. A location is reserved next whenever
+            // one is available, so a photo-derived place cannot be starved by
+            // contact or broad identity seeds. This prevents a default-size
+            // plan from retaining only Email (or only Phone) when both
+            // high-entropy families coexist with several locations.
+            val emailSeeds = allSafeSeeds.filter { it.kind == TypedSeedKind.Email }
+            val phoneSeeds = allSafeSeeds.filter { it.kind == TypedSeedKind.Phone }
+            val otherNonLocationSeeds = allSafeSeeds.filter {
+                it.kind != TypedSeedKind.Email &&
+                    it.kind != TypedSeedKind.Phone &&
+                    it.kind != TypedSeedKind.Location
+            }
+            val safeSeeds = buildList {
+                fun addFirst(candidates: List<TypedSeed>) {
+                    if (size < safeSeedLimit) candidates.firstOrNull()?.let(::add)
+                }
+
+                addFirst(emailSeeds)
+                addFirst(phoneSeeds)
+                addFirst(locationSeeds)
+
+                // Fill remaining slots with additional high-entropy pivots,
+                // then other typed seeds, and finally additional locations.
+                // The first location remains reserved whenever capacity
+                // permits while location-only plans may still use the full
+                // bounded location budget.
+                (emailSeeds.drop(1) + phoneSeeds.drop(1) +
+                    otherNonLocationSeeds + locationSeeds.drop(1))
+                    .forEach { seed ->
+                        if (size < safeSeedLimit && seed !in this) add(seed)
+                    }
+            }
+
+            // A corroborated location is a context-scoped search pivot. Do
+            // not emit a location-only query. When it is mixed with other
+            // safe typed seeds, retain those independent seed families in
+            // the same bounded plan rather than returning early.
+            val selectedLocationSeeds = safeSeeds.filter { it.kind == TypedSeedKind.Location }
+            if (selectedLocationSeeds.isNotEmpty()) {
+                val locationContextTerms = locationSearchContextTerms(input, deepResearch)
+                selectedLocationSeeds.forEach { seed ->
+                    locationContextTerms.forEach { (stage, context) ->
+                        addQuery(
+                            "${quote(seed.exactValue)} ${quote(context)}",
+                            stage,
+                            seed
+                        )
+                    }
+                }
+                // A location-only pass must not fall through to broad
+                // name/alias queries when no authorized context was supplied.
+                // Original exact email/phone values are independently
+                // authorized launch pivots, however, and must survive even
+                // when the location has no name/organization/handle context.
+                if (safeSeeds.all { it.kind == TypedSeedKind.Location } &&
+                    originalEmails.isEmpty() &&
+                    originalPhones.isEmpty()
+                ) {
+                    return entries.toList()
+                }
+            }
 
             safeSeeds.filter { it.kind == TypedSeedKind.Email || it.kind == TypedSeedKind.Phone }.forEach { seed ->
                 addQuery(quote(seed.exactValue), "typed-seed-exact", seed)
@@ -717,7 +794,11 @@ class PublicSearchDiscoveryService(private val context: Context) {
             }
 
             // Phase 1b: Other Safe typed seeds (URLs, domains, documents, archives).
-            safeSeeds.filter { it.kind != TypedSeedKind.Email && it.kind != TypedSeedKind.Phone }.forEach { seed ->
+            safeSeeds.filter {
+                it.kind != TypedSeedKind.Email &&
+                    it.kind != TypedSeedKind.Phone &&
+                    it.kind != TypedSeedKind.Location
+            }.forEach { seed ->
                 addQuery(quote(seed.exactValue), "typed-seed-exact", seed)
                 if (seed.kind == TypedSeedKind.Domain) {
                     addQuery("site:${seed.exactValue}", "typed-seed-domain", seed)
@@ -785,6 +866,58 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 }
             }
             return entries.toList()
+        }
+
+        /**
+         * Applies the runtime query budget without allowing a large batch of
+         * context-scoped location probes to consume every slot. The planner
+         * intentionally keeps its complete deterministic output for callers
+         * that need to inspect or benchmark it; the runtime uses this helper
+         * immediately before scheduling requests.
+         *
+         * When the budget cuts through location entries, retain the earliest
+         * missing non-location typed-seed kind(s) from the tail while leaving
+         * at least one location entry in the bounded plan. This preserves the
+         * independent high-entropy pivot that would otherwise be unreachable
+         * while keeping location queries scoped and bounded.
+         */
+        internal fun boundSearchQueryPlan(
+            plan: List<PublicSearchQueryPlanEntry>,
+            queryLimit: Int
+        ): List<PublicSearchQueryPlanEntry> {
+            if (queryLimit <= 0 || plan.isEmpty()) return emptyList()
+            if (plan.size <= queryLimit) return plan
+
+            val bounded = plan.take(queryLimit).toMutableList()
+            val locationSlots = bounded.indices.filter { index ->
+                bounded[index].pivotSeedKind == TypedSeedKind.Location
+            }
+            if (locationSlots.isEmpty()) return bounded
+
+            val retainedIndependentKinds = bounded
+                .asSequence()
+                .mapNotNull { it.pivotSeedKind }
+                .filter { it != TypedSeedKind.Location }
+                .toSet()
+            val missingIndependentEntries = plan
+                .asSequence()
+                .drop(queryLimit)
+                .filter { entry ->
+                    entry.pivotSeedKind != null &&
+                        entry.pivotSeedKind != TypedSeedKind.Location &&
+                        entry.pivotSeedKind !in retainedIndependentKinds
+                }
+                .distinctBy { it.pivotSeedKind }
+                // Keep at least one location context query whenever the
+                // input had any location entries inside the budget.
+                .take((locationSlots.size - 1).coerceAtLeast(0))
+                .toList()
+
+            missingIndependentEntries.forEachIndexed { offset, entry ->
+                val replacementSlot = locationSlots[locationSlots.lastIndex - offset]
+                bounded[replacementSlot] = entry
+            }
+            return bounded
         }
 
         fun buildSearchQueries(
@@ -964,6 +1097,14 @@ class PublicSearchDiscoveryService(private val context: Context) {
                         score += 0.24f
                         directIdentitySignals++
                     }
+                    TypedSeedKind.Location -> {
+                        // Location is only queryable through the dedicated
+                        // location+identity-context plan. This modest boost
+                        // keeps corroborated contextual leads eligible while
+                        // never allowing a location-only result to qualify.
+                        score += 0.12f
+                        directIdentitySignals++
+                    }
                     else -> Unit
                 }
             }
@@ -1004,6 +1145,12 @@ class PublicSearchDiscoveryService(private val context: Context) {
             input.aliases.mapNotNull(::cleanTerm).forEach { alias ->
                 if (combined.contains(alias.lowercase())) {
                     score += 0.10f
+                    directIdentitySignals++
+                }
+            }
+            input.organizations.mapNotNull(::cleanTerm).forEach { organization ->
+                if (combined.contains(organization.lowercase())) {
+                    score += 0.14f
                     directIdentitySignals++
                 }
             }
@@ -1112,6 +1259,62 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 profileUrls = (authorized.profileUrls + scoped.profileUrls).distinct(),
                 selfieUri = authorized.selfieUri ?: scoped.selfieUri
             )
+        }
+
+        /**
+         * Supplies the location plan with only the authorized identity
+         * context needed for a bounded query. The caller's typed location
+         * remains the sole location pivot; unrelated launch PII is not copied
+         * into this scoped plan.
+         */
+        private fun locationQueryInput(
+            input: IdentityInput,
+            authorized: IdentityInput?,
+            safeSeeds: List<TypedSeed>
+        ): IdentityInput {
+            if (safeSeeds.none { it.kind == TypedSeedKind.Location }) return input
+            val context = authorized ?: input
+            val locations = (safeSeeds
+                .filter { it.kind == TypedSeedKind.Location }
+                .map(TypedSeed::exactValue) + input.locations)
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+            return input.copy(
+                fullName = input.fullName.ifBlank { context.fullName },
+                locations = locations,
+                organizations = (input.organizations + context.organizations).distinct(),
+                usernames = (input.usernames + context.usernames).distinct(),
+                primaryUsername = input.primaryUsername ?: context.primaryUsername
+            )
+        }
+
+        /**
+         * Context terms allowed beside a corroborated location. Every emitted
+         * query includes exactly one of these terms, so a location observation
+         * can never broaden into a location-only search.
+         */
+        private fun locationSearchContextTerms(
+            input: IdentityInput,
+            deepResearch: Boolean
+        ): List<Pair<String, String>> = buildList {
+            input.fullName.trim()
+                .takeIf { it.length >= 2 }
+                ?.let { add("typed-location-name" to it) }
+
+            input.organizations
+                .mapNotNull(::cleanTerm)
+                .filter { it.length >= 2 }
+                .distinctBy { it.lowercase(Locale.ROOT) }
+                .take(if (deepResearch) 4 else 2)
+                .forEach { add("typed-location-organization" to it) }
+
+            (listOfNotNull(input.primaryUsername) + input.usernames)
+                .mapNotNull(::cleanTerm)
+                .filter { it.length in 2..40 }
+                .distinctBy { it.lowercase(Locale.ROOT) }
+                .take(if (deepResearch) 8 else 4)
+                .forEach { add("typed-location-username" to it) }
         }
 
         private fun sameIdentityText(first: String, second: String): Boolean =

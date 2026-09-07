@@ -330,7 +330,20 @@ class PublicSearchDiscoveryServiceTest {
                 } else {
                     listOf("username-ev")
                 },
-                sourceUrl = "https://profile.example.test/source"
+                sourceUrl = "https://profile.example.test/source",
+                evidenceSourceUrls = if (kind == io.dossier.app.domain.discovery.TypedSeedKind.Name) {
+                    listOf(
+                        "https://profile.example.test/name-a",
+                        "https://directory.example.test/name-b"
+                    )
+                } else {
+                    emptyList()
+                },
+                evidenceProviderIds = if (kind == io.dossier.app.domain.discovery.TypedSeedKind.Name) {
+                    listOf("profile-provider", "directory-provider")
+                } else {
+                    emptyList()
+                }
             )
 
         val plan = PublicSearchDiscoveryService.buildSearchQueryPlan(

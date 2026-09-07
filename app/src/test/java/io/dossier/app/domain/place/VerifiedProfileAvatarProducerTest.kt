@@ -97,6 +97,34 @@ class VerifiedProfileAvatarProducerTest {
         assertFalse(produced.zipWithNext().any { (left, right) -> left.id == right.id })
     }
 
+    @Test
+    fun canonicalizesAvatarAndProfileUrlsBeforeBuildingStableIds() {
+        val first = profile(
+            accountUrl = "https://Example.test/alice/?from=scan#profile",
+            avatarUrl = "https://CDN.Example.test/avatar.jpg/?size=1#image",
+            exists = true,
+            verified = true
+        )
+        val equivalent = profile(
+            accountUrl = "HTTPS://example.test/alice?from=scan",
+            avatarUrl = "HTTPS://cdn.example.test/avatar.jpg?size=1",
+            exists = true,
+            verified = true
+        )
+
+        val produced = VerifiedProfileAvatarProducer.produce(listOf(first, equivalent))
+
+        assertEquals(1, produced.size)
+        assertEquals(
+            stableMediaCandidateId(
+                imageUrl = first.profileImageUrl!!,
+                sourcePageUrl = first.candidate.url,
+                source = "Dossier profile discovery"
+            ),
+            produced.single().id
+        )
+    }
+
     private fun profile(
         accountUrl: String,
         avatarUrl: String?,

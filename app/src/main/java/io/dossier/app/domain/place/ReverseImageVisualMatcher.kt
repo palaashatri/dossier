@@ -9,22 +9,29 @@ import io.dossier.app.domain.image.ImageDuplicateClusterer
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.scanner.ScanSession
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
 import okhttp3.OkHttpClient
+import okhttp3.Callback
 import okhttp3.Request
+import okhttp3.Response
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.Proxy
 import java.net.URI
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * Performs real on-device near-duplicate/repost matching.
@@ -55,6 +62,11 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
         val provenance: ReverseImageLookupResult.ImageCandidateProvenance,
         val fingerprint: VisualFingerprint.FingerprintSet?,
         val match: ReverseImageLookupResult.VisualMatch?
+    )
+
+    private data class CandidateWithLinkage(
+        val candidate: ReverseImageCandidateSearchService.Candidate,
+        val accountLinkage: ReverseImageLookupResult.ImageAccountLinkage? = null
     )
 
     private val client = OkHttpClient.Builder()
@@ -101,23 +113,83 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
                     query = "Previously discovered profile avatar",
                     source = "Dossier profile discovery"
                 )
-                candidate to verifiedProfileMediaLinkage(result)
+                CandidateWithLinkage(candidate, verifiedProfileMediaLinkage(result))
             }
             .toList()
-        val profileCandidates = profileCandidatesWithLinkage.map { it.first }
-        val verifiedProfileLinkagesBySourcePage = profileCandidatesWithLinkage
-            .mapNotNull { (candidate, linkage) ->
-                linkage?.let { canonical(candidate.sourcePageUrl) to it }
-            }
-            .toMap()
+        return@withContext compareCandidates(
+            query = queryFingerprint,
+            candidateInputs = profileCandidatesWithLinkage +
+                indexedCandidates.map { CandidateWithLinkage(it) },
+            deepResearch = deepResearch,
+            emptyResultNote = "No public candidate images were available for local visual comparison. Add identity details or visible-text clues and try Deep Research."
+        )
+    }
 
-        val candidates = deduplicateReverseImageCandidates(profileCandidates + indexedCandidates)
+    /**
+     * Compares only directly verified profile avatars discovered by the same
+     * scan. The profile URLs and account linkages are already verified by the
+     * profile scanner; this pass adds bounded local image evidence without
+     * treating similarity as identity proof.
+     */
+    suspend fun matchVerifiedProfileAvatars(
+        queryUri: Uri,
+        profiles: List<ProfileScanResult>,
+        deepResearch: Boolean = false
+    ): Outcome = withContext(Dispatchers.IO) {
+        val queryBytes = context.contentResolver.openInputStream(queryUri)?.use {
+            readLimited(it, MAX_QUERY_BYTES)
+        } ?: return@withContext Outcome(emptyList(), "Could not read the selected image", 0)
+        val queryFingerprint = VisualFingerprint.fromBytes(queryBytes)
+            ?: return@withContext Outcome(emptyList(), "The selected file could not be decoded as an image", 0)
+
+        val candidates = VerifiedProfileAvatarProducer
+            .produce(profiles)
+            .map { provenance ->
+                CandidateWithLinkage(
+                    candidate = ReverseImageCandidateSearchService.Candidate(
+                        title = provenance.title,
+                        imageUrl = provenance.imageUrl,
+                        thumbnailUrl = provenance.imageUrl,
+                        sourcePageUrl = provenance.sourcePageUrl,
+                        query = provenance.acquisitionQuery,
+                        source = provenance.source
+                    ),
+                    accountLinkage = provenance.accountLinkages.firstOrNull()
+                )
+            }
+
+        return@withContext compareCandidates(
+            query = queryFingerprint,
+            candidateInputs = candidates,
+            deepResearch = deepResearch,
+            emptyResultNote = "No directly verified profile avatars were available for local visual comparison."
+        )
+    }
+
+    private suspend fun compareCandidates(
+        query: VisualFingerprint.FingerprintSet,
+        candidateInputs: List<CandidateWithLinkage>,
+        deepResearch: Boolean,
+        emptyResultNote: String
+    ): Outcome {
+        val candidates = linkedMapOf<String, CandidateWithLinkage>().also { deduplicated ->
+            candidateInputs.forEach { candidate ->
+                val key = "${canonical(candidate.candidate.imageUrl)}|${canonical(candidate.candidate.sourcePageUrl)}"
+                val previous = deduplicated[key]
+                deduplicated[key] = when {
+                    previous == null -> candidate
+                    previous.accountLinkage == null && candidate.accountLinkage != null ->
+                        previous.copy(accountLinkage = candidate.accountLinkage)
+                    else -> previous
+                }
+            }
+        }.values
             .take(if (deepResearch) MAX_DEEP_CANDIDATES else MAX_DEFAULT_CANDIDATES)
 
         if (candidates.isEmpty()) {
-            return@withContext Outcome(
+            return Outcome(
                 matches = emptyList(),
-                note = "No public candidate images were available for local visual comparison. Add identity details or visible-text clues and try Deep Research.",
+                note = emptyResultNote,
                 candidateCount = 0
             )
         }
@@ -128,9 +200,9 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
                 async(Dispatchers.IO) {
                     semaphore.withPermit {
                         compareCandidate(
-                            query = queryFingerprint,
-                            candidate = candidate,
-                            accountLinkage = verifiedProfileLinkagesBySourcePage[canonical(candidate.sourcePageUrl)]
+                            query = query,
+                            candidate = candidate.candidate,
+                            accountLinkage = candidate.accountLinkage
                         )
                     }
                 }
@@ -186,7 +258,7 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
                 "Compared ${candidates.size} public images locally; no candidate crossed the ${(MIN_MATCH_SCORE * 100).toInt()}% near-duplicate threshold. This does not prove that no copy exists outside the candidate indexes."
         }
 
-        Outcome(
+        return Outcome(
             matches = matches,
             note = note,
             candidateCount = candidates.size,
@@ -308,12 +380,13 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
 
         repeat(MAX_DOWNLOAD_ATTEMPTS) { attempt ->
             try {
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
                 val request = Request.Builder()
                     .url(url)
                     .header("User-Agent", USER_AGENT)
                     .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
                     .build()
-                client.newCall(request).execute().use { response ->
+                executeCancellable(request).use { response ->
                     if (response.isSuccessful) {
                         val length = response.body?.contentLength() ?: -1L
                         if (length > MAX_CANDIDATE_BYTES) return null
@@ -335,6 +408,8 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
                         return null
                     }
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 if (attempt < MAX_DOWNLOAD_ATTEMPTS - 1) {
                     delay(DiscoveryHttpPolicy.retryDelayMillis(attempt, null))
@@ -343,6 +418,30 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
         }
         return null
     }
+
+    /**
+     * Bridges OkHttp's callback API to a cancellable suspension so a cancelled
+     * scan also cancels the in-flight network call instead of waiting for its
+     * blocking read timeout.
+     */
+    private suspend fun executeCancellable(request: Request): Response =
+        suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: okhttp3.Call, error: java.io.IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(error)
+                }
+
+                override fun onResponse(call: okhttp3.Call, response: Response) {
+                    if (continuation.isActive) {
+                        continuation.resume(response)
+                    } else {
+                        response.close()
+                    }
+                }
+            })
+        }
 
     private fun readLimited(stream: InputStream, maximum: Long): ByteArray? {
         val output = ByteArrayOutputStream()
@@ -359,15 +458,11 @@ internal class ReverseImageVisualMatcher(private val context: Context) {
     }
 
     private fun stableCandidateId(candidate: ReverseImageCandidateSearchService.Candidate): String {
-        val canonicalValue = listOf(
-            canonical(candidate.imageUrl),
-            canonical(candidate.sourcePageUrl),
-            candidate.source.trim().lowercase()
-        ).joinToString("|")
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(canonicalValue.toByteArray(Charsets.UTF_8))
-            .joinToString("") { byte -> "%02x".format(byte) }
-        return "imgcandidate:${digest.take(20)}"
+        return stableMediaCandidateId(
+            imageUrl = candidate.imageUrl,
+            sourcePageUrl = candidate.sourcePageUrl,
+            source = candidate.source
+        )
     }
 
     private fun Long.unsignedHex(): String =
@@ -418,6 +513,22 @@ internal fun canonicalMediaUrl(url: String): String = runCatching {
         null
     ).toString().removeSuffix("/")
 }.getOrDefault(url.trim().substringBefore('#').removeSuffix("/").lowercase())
+
+internal fun stableMediaCandidateId(
+    imageUrl: String,
+    sourcePageUrl: String,
+    source: String
+): String {
+    val canonicalValue = listOf(
+        canonicalMediaUrl(imageUrl),
+        canonicalMediaUrl(sourcePageUrl),
+        source.trim().lowercase()
+    ).joinToString("|")
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(canonicalValue.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte) }
+    return "imgcandidate:${digest.take(20)}"
+}
 
 
 /**

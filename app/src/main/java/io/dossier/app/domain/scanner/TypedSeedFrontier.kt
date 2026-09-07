@@ -5,11 +5,13 @@ import io.dossier.app.domain.discovery.EXECUTABLE_TYPED_SEED_KINDS
 import io.dossier.app.domain.discovery.TypedSeed
 import io.dossier.app.domain.discovery.TypedSeedAdmissionConfig
 import io.dossier.app.domain.discovery.TypedSeedKind
+import io.dossier.app.domain.discovery.TypedSeedOrigin
 import io.dossier.app.domain.discovery.TypedSeedSafety
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.withResolvedRelationshipEvidence
+import io.dossier.app.domain.model.ReverseImageLookupResult
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -512,31 +514,64 @@ internal class TypedSeedFrontier internal constructor(
     ): TypedSeedFrontierEntry {
         val existingSeed = existing.seed
         val mergedState = strongerEvidenceState(existingSeed.evidenceState, incoming.evidenceState)
+        val mergedLocationEvidenceClass = mergeLocationEvidenceClass(
+            existingSeed.locationEvidenceClass,
+            incoming.locationEvidenceClass
+        )
+        // A media observation may first arrive as local EXIF/visual evidence
+        // and later be corroborated by an authorized public source. Prefer the
+        // incoming metadata when it is the first executable representation of
+        // the duplicate; otherwise preserve the original user/evidence
+        // identity and only merge its provenance.
+        val preferredSeed = preferredMergedSeed(
+            existing = existingSeed,
+            incoming = incoming,
+            mergedState = mergedState,
+            mergedLocationEvidenceClass = mergedLocationEvidenceClass
+        )
         val mergedSeed = existingSeed.copy(
             isVerified = mergedState == EvidenceState.Verified,
             evidenceState = mergedState,
+            origin = preferredSeed.origin,
+            sourceClassification = preferredSeed.sourceClassification,
             evidenceIds = (existingSeed.evidenceIds + incoming.evidenceIds)
                 .map(String::trim)
                 .filter(String::isNotBlank)
                 .distinct()
                 .take(TypedSeed.MAX_EVIDENCE_IDS),
-            sourceUrl = existingSeed.sourceUrl ?: incoming.sourceUrl,
+            sourceUrl = preferredSeed.sourceUrl ?: existingSeed.sourceUrl ?: incoming.sourceUrl,
+            evidenceSourceUrls = (
+                existingSeed.evidenceSourceUrls +
+                    incoming.evidenceSourceUrls +
+                    listOfNotNull(existingSeed.sourceUrl, incoming.sourceUrl)
+                )
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+                .take(TypedSeed.MAX_EVIDENCE_SOURCE_URLS),
+            evidenceProviderIds = (existingSeed.evidenceProviderIds + incoming.evidenceProviderIds)
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+                .take(TypedSeed.MAX_EVIDENCE_PROVIDERS),
             discoveryPath = (existingSeed.discoveryPath + incoming.discoveryPath)
                 .map(String::trim)
                 .filter(String::isNotBlank)
                 .distinct()
-                .take(TypedSeed.MAX_DISCOVERY_PATH_STEPS)
+                .take(TypedSeed.MAX_DISCOVERY_PATH_STEPS),
+            locationEvidenceClass = mergedLocationEvidenceClass
         )
         val reason = unavailableReason(mergedSeed)
         val nextState = when {
             existing.state == TypedSeedFrontierEntryState.Pending && reason != null ->
                 TypedSeedFrontierEntryState.Unavailable
             existing.state == TypedSeedFrontierEntryState.Unavailable &&
-                reason == null &&
-                mergedState == EvidenceState.Verified ->
-                // A later independently verified observation can make a
-                // previously failed executable seed eligible for retry. A
-                // genuinely unsupported kind still has a non-null reason.
+                unavailableReason(existingSeed) != null &&
+                reason == null ->
+                // A later independently admissible observation can make a
+                // previously failed executable seed eligible for retry. This
+                // includes corroborated Location, whose safe state is
+                // Observed rather than Verified.
                 TypedSeedFrontierEntryState.Pending
             else -> existing.state
         }
@@ -545,6 +580,75 @@ internal class TypedSeedFrontier internal constructor(
             state = nextState,
             unavailableReason = reason
         )
+    }
+
+    private fun preferredMergedSeed(
+        existing: TypedSeed,
+        incoming: TypedSeed,
+        mergedState: EvidenceState,
+        mergedLocationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass?
+    ): TypedSeed {
+        val candidates = if (existing.origin == TypedSeedOrigin.UserInput) {
+            listOf(existing, incoming)
+        } else {
+            listOf(incoming, existing)
+        }
+        candidates.firstOrNull { candidate ->
+            mergedCandidate(
+                candidate,
+                mergedState,
+                mergedLocationEvidenceClass
+            )?.let(TypedSeedSafety::isSafeExecutableSeed) == true
+        }?.let { return it }
+        candidates.firstOrNull { candidate ->
+            mergedCandidate(candidate, mergedState, mergedLocationEvidenceClass) != null
+        }?.let { return it }
+        return existing
+    }
+
+    private fun mergedCandidate(
+        candidate: TypedSeed,
+        mergedState: EvidenceState,
+        mergedLocationEvidenceClass: ReverseImageLookupResult.LocationEvidenceClass?
+    ): TypedSeed? = runCatching {
+        candidate.copy(
+            isVerified = mergedState == EvidenceState.Verified,
+            evidenceState = mergedState,
+            locationEvidenceClass = mergedLocationEvidenceClass
+        )
+    }.getOrNull()
+
+    private fun mergeLocationEvidenceClass(
+        first: ReverseImageLookupResult.LocationEvidenceClass?,
+        second: ReverseImageLookupResult.LocationEvidenceClass?
+    ): ReverseImageLookupResult.LocationEvidenceClass? {
+        if (first == null) return second
+        if (second == null) return first
+        if (first == ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING ||
+            second == ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING
+        ) {
+            return ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING
+        }
+        // An exact local observation and a later public corroboration can
+        // describe the same place. Keep the public class so the duplicate can
+        // use the context-scoped Location executor while retaining both
+        // source URLs/evidence IDs in the merged provenance.
+        if (first == ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION ||
+            second == ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION
+        ) {
+            return ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION
+        }
+        return if (locationEvidenceClassRank(second) > locationEvidenceClassRank(first)) second else first
+    }
+
+    private fun locationEvidenceClassRank(
+        evidenceClass: ReverseImageLookupResult.LocationEvidenceClass
+    ): Int = when (evidenceClass) {
+        ReverseImageLookupResult.LocationEvidenceClass.VISUAL_GUESS -> 1
+        ReverseImageLookupResult.LocationEvidenceClass.LIKELY_LOCATION -> 2
+        ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION -> 3
+        ReverseImageLookupResult.LocationEvidenceClass.EXACT_METADATA -> 4
+        ReverseImageLookupResult.LocationEvidenceClass.CONFLICTING -> 5
     }
 
     private fun unavailableReason(seed: TypedSeed): String? = when {

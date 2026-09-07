@@ -215,6 +215,12 @@ class WaybackHistoryPluginTest {
             assertEquals(snapshot.observedAtEpochMillis, attribute.observedAtEpochMillis)
             assertTrue(attribute.signals.any { it.contains("Historical observation only") })
         }
+        val displayName = attributes.single { it.attributeKind == HistoricalAttributeKind.DisplayName }
+        assertEquals(
+            listOf("https://example.com/profile", snapshot.sourceUrl),
+            displayName.discoveryPath
+        )
+        assertTrue(displayName.discoveryPath.size <= io.dossier.app.domain.evidence.Evidence.MAX_DISCOVERY_PATH_STEPS)
     }
 
     @Test

@@ -141,8 +141,12 @@ fun UniversalSearchScreen(onSearch: () -> Unit) {
                 placeholder = {
                     Text(
                         "Search name, username, phone, email or URL",
+                        // Keep the complete universal-search affordance visible
+                        // on the 1080px emulator instead of truncating the URL
+                        // hint to an ambiguous trailing "U...".
+                        fontSize = 14.sp,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Clip
                     )
                 },
                 singleLine = true,
