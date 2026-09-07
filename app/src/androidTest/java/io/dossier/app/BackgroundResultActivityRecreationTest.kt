@@ -154,6 +154,11 @@ class BackgroundResultActivityRecreationTest {
         composeRule.waitUntil(timeoutMillis = 20_000) {
             BackgroundScanResultStore(context).load()?.dossierCase == expectedCase
         }
+        composeRule.waitUntil(timeoutMillis = 20_000) {
+            composeRule.onAllNodesWithText("Background analysis")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
         val managerResult = BackgroundScanManager.latestResult(context)
         assertEquals(expectedCase, managerResult?.dossierCase)
         val hasAnalysis = composeRule
