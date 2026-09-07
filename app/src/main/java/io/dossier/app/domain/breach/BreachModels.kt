@@ -1,5 +1,8 @@
 package io.dossier.app.domain.breach
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 data class PasswordExposureResult(
     val label: String,
     val isPwned: Boolean,
@@ -8,12 +11,18 @@ data class PasswordExposureResult(
     val error: String? = null
 )
 
+@Serializable
 data class EmailBreach(
     val name: String,
     val title: String,
     val domain: String,
     val breachDate: String?,
-    val dataClasses: List<String>
+    val dataClasses: List<String>,
+    val publicationDate: String? = null,
+    val modifiedDate: String? = null,
+    val verified: Boolean? = null,
+    val sourceProvider: String = "Have I Been Pwned",
+    val retrievedAtUtc: String? = null
 )
 
 enum class HibpCoverage {

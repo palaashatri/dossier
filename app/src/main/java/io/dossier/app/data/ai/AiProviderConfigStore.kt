@@ -20,7 +20,7 @@ class AiProviderConfigStore(context: Context) {
         return AiProviderConfig(
             provider = provider,
             enabled = prefs.getBoolean("${provider.name}.enabled", defaults.enabled),
-            apiKey = readApiKey(provider, defaults),
+            apiKey = readApiKey(provider),
             baseUrl = prefs.getString("${provider.name}.baseUrl", defaults.baseUrl).orEmpty().ifBlank { defaults.baseUrl },
             model = prefs.getString("${provider.name}.model", defaults.model).orEmpty().ifBlank { defaults.model },
             priority = prefs.getInt("${provider.name}.priority", defaults.priority)
@@ -57,12 +57,53 @@ class AiProviderConfigStore(context: Context) {
             config.enabled && (!config.provider.needsApiKey || config.apiKey.isNotBlank())
         }
 
-    private fun readApiKey(provider: AiProviderType, defaults: AiProviderConfig): String {
-        val encrypted = prefs.getString("${provider.name}.apiKeyEncrypted", null)
-        val decrypted = encrypted?.let { payload ->
-            runCatching { decrypt(payload) }.getOrNull()
+    private fun readApiKey(provider: AiProviderType): String {
+        val encryptedKey = "${provider.name}.apiKeyEncrypted"
+        val legacyKey = "${provider.name}.apiKey"
+        val encrypted = prefs.getString(encryptedKey, null)
+
+        if (encrypted != null) {
+            // An encrypted value is authoritative. If it cannot be decrypted,
+            // fail closed instead of falling back to a legacy plaintext key.
+            val decrypted = runCatching { decrypt(encrypted) }.getOrNull()
+            if (decrypted == null) {
+                // Do not leave a stale plaintext credential behind when the
+                // encrypted record is unusable. A failed commit still fails
+                // closed by returning an empty key.
+                if (prefs.contains(legacyKey)) {
+                    runCatching { prefs.edit().remove(legacyKey).commit() }
+                }
+                return ""
+            }
+
+            // A previous interrupted migration may have left plaintext behind.
+            // Remove it synchronously before exposing the decrypted value.
+            if (prefs.contains(legacyKey) &&
+                !runCatching { prefs.edit().remove(legacyKey).commit() }.getOrDefault(false)
+            ) {
+                return ""
+            }
+            return decrypted
         }
-        return decrypted ?: prefs.getString("${provider.name}.apiKey", defaults.apiKey).orEmpty()
+
+        val legacyPlaintext = prefs.getString(legacyKey, null) ?: return ""
+        if (legacyPlaintext.isBlank()) {
+            // Blank legacy values are not useful credentials, but remove them so
+            // subsequent reads cannot mistake the entry for an unmigrated key.
+            runCatching { prefs.edit().remove(legacyKey).commit() }
+            return ""
+        }
+
+        // Migrate legacy plaintext exactly once. Encryption and persistence must
+        // both succeed before the key is returned to callers.
+        val migrated = runCatching { encrypt(legacyPlaintext) }.getOrNull() ?: return ""
+        val committed = runCatching {
+            prefs.edit()
+                .putString(encryptedKey, migrated)
+                .remove(legacyKey)
+                .commit()
+        }.getOrDefault(false)
+        return if (committed) legacyPlaintext else ""
     }
 
     private fun encrypt(value: String): String {

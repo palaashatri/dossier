@@ -24,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -36,8 +37,8 @@ import io.dossier.app.ui.theme.DossierCardShape
 import io.dossier.app.ui.theme.NeuralTheme
 
 /**
- * Session consent gate. It distinguishes local processing, public-network
- * discovery, optional third-party services, and explicit local persistence.
+ * One-time usage notice. This is not identity verification and deliberately asks
+ * for no documents, account linking, selfies, employer proof, or target proof.
  */
 @Composable
 fun ConsentScreen(onAccepted: () -> Unit) {
@@ -55,7 +56,8 @@ fun ConsentScreen(onAccepted: () -> Unit) {
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
+                    .verticalScroll(rememberScrollState())
+                    .clipToBounds(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Spacer(Modifier.height(32.dp))
@@ -70,7 +72,7 @@ fun ConsentScreen(onAccepted: () -> Unit) {
                     textAlign = TextAlign.Center
                 )
                 Text(
-                    text = "Personal public-footprint audit",
+                    text = "OSINT & attack-surface intelligence",
                     color = NeuralTheme.TextSecondary,
                     fontSize = 15.sp,
                     modifier = Modifier.padding(top = 3.dp)
@@ -88,13 +90,13 @@ fun ConsentScreen(onAccepted: () -> Unit) {
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
-                            text = "Before you begin",
+                            text = "One-time usage notice",
                             color = NeuralTheme.TextPrimary,
                             fontSize = 17.sp,
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "Use Dossier only for your own information, a consenting subject, or an authorized research demonstration. Results are evidence leads and require manual review; an absent result does not prove that information never existed online.",
+                            text = "Use Dossier for identities, organizations, infrastructure, cases, or research you are authorized to assess. Dossier does not ask you to prove that authorization or prove that you are the subject. Results are evidence leads and should be reviewed in context.",
                             color = NeuralTheme.TextSecondary,
                             fontSize = 13.sp,
                             lineHeight = 19.sp
@@ -105,26 +107,29 @@ fun ConsentScreen(onAccepted: () -> Unit) {
                 Spacer(Modifier.height(18.dp))
 
                 ConsentItem(
-                    title = "Public-network discovery",
-                    detail = "Names, handles, emails, profile URLs, and extracted text clues may be sent to public profiles, search engines, image indexes, and archives."
+                    title = "Public-source collection",
+                    detail = "Queries may be sent to public profiles, search engines, image indexes, archives, breach-metadata services, and other configured public sources."
                 )
                 ConsentItem(
-                    title = "Optional third-party services",
-                    detail = "HIBP and configured remote AI providers are contacted only for the features you enable. Their own policies apply."
+                    title = "Optional external services",
+                    detail = "Features such as HIBP or configured remote AI are contacted only when their corresponding feature is enabled."
                 )
                 ConsentItem(
-                    title = "Local visual processing",
-                    detail = "Reverse-image verification and optional YuNet/SFace correlation run on-device. Strong face correlation requires a separate per-scan choice."
+                    title = "Local analysis",
+                    detail = "Graph analysis, behavioral post-processing, image comparison, OCR, EXIF parsing, and optional local face correlation run on-device where implemented."
                 )
                 ConsentItem(
-                    title = "Local storage",
-                    detail = "A resumable scan input may be stored locally. Reports remain in memory unless you explicitly save an encrypted case or export evidence."
+                    title = "Storage is explicit",
+                    detail = "Background/resume state may be stored locally. A completed investigation is not promoted to a saved encrypted Case unless you choose to save it."
                 )
                 ConsentItem(
-                    title = "No Dossier backend or telemetry",
-                    detail = "The project does not operate a required server and the app does not send analytics telemetry."
+                    title = "No required Dossier cloud",
+                    detail = "Dossier has no required backend and no product analytics telemetry."
                 )
-                Spacer(Modifier.height(8.dp))
+                // Keep the final notice clear of the sticky footer when the user scrolls
+                // to the end. The scroll viewport is clipped so content never paints
+                // underneath the CTA while retaining the footer as a stable action.
+                Spacer(Modifier.height(24.dp))
             }
 
             Button(
@@ -136,7 +141,7 @@ fun ConsentScreen(onAccepted: () -> Unit) {
                     .height(54.dp)
             ) {
                 Text(
-                    text = "I understand — continue",
+                    text = "CONTINUE",
                     color = MaterialTheme.colorScheme.onPrimary,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold
@@ -152,7 +157,7 @@ private fun ConsentItem(title: String, detail: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 7.dp),
+            .padding(vertical = 5.dp),
         verticalAlignment = Alignment.Top
     ) {
         Box(

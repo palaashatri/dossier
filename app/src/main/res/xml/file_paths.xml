@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
+    <files-path name="selected_images" path="images/" />
     <cache-path name="camera_images" path="images/" />
     <cache-path name="report_exports" path="reports/" />
     <external-cache-path name="ext_camera_images" path="images/" />

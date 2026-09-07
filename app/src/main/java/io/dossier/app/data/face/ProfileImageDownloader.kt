@@ -2,10 +2,12 @@ package io.dossier.app.data.face
 
 import android.content.Context
 import android.net.Uri
+import io.dossier.app.data.web.DiscoveryHttpPolicy
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.net.Proxy
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -19,11 +21,15 @@ class ProfileImageDownloader(context: Context) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
+        .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+        .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
+        .proxy(Proxy.NO_PROXY)
         .followRedirects(true)
         .build()
 
     fun download(imageUrl: String): Uri? {
         val normalized = normalizeHttpUrl(imageUrl) ?: return null
+        if (!DiscoveryHttpPolicy.isSafePublicHttpUrl(normalized)) return null
         val target = File(cacheDir, cacheFileName(normalized))
         if (target.exists() && target.length() in MIN_BYTES..MAX_BYTES) {
             return Uri.fromFile(target)
@@ -87,7 +93,7 @@ class ProfileImageDownloader(context: Context) {
         private const val MIN_BYTES = 256L
         private const val MAX_BYTES = 5L * 1024L * 1024L
         private const val USER_AGENT =
-            "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0"
+            "Dossier/0.1 public-exposure-audit"
 
         fun normalizeHttpUrl(raw: String): String? {
             val trimmed = raw.trim()

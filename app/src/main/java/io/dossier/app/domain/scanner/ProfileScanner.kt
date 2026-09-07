@@ -1,46 +1,111 @@
 package io.dossier.app.domain.scanner
 
 import io.dossier.app.data.platform.PLATFORMS
+import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.data.platform.resolveProfileUrl
 import io.dossier.app.data.web.PublicImageSearchService
+import io.dossier.app.data.web.DiscoveryHttpPolicy
 import io.dossier.app.data.web.PublicSearchDiscoveryService
+import io.dossier.app.data.web.TypedSeedPublicFetchExecutor
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ProviderExecutionRuntime
+import io.dossier.app.domain.discovery.ProviderPlanFingerprint
+import io.dossier.app.domain.discovery.ProviderResponseClassifier
+import io.dossier.app.domain.discovery.ProviderResponseDecision
+import io.dossier.app.domain.discovery.ProviderRendererPolicy
+import io.dossier.app.domain.discovery.ProviderVerificationState
+import io.dossier.app.domain.discovery.ExtractionRules
+import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
+import io.dossier.app.domain.discovery.ScanId
+import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
+import io.dossier.app.domain.discovery.TypedSeedSafety
+import io.dossier.app.domain.discovery.TypedSeedKind
+import io.dossier.app.domain.discovery.TypedSeedOrigin
+import io.dossier.app.domain.discovery.TypedSeed
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
+import io.dossier.app.domain.evidence.EvidenceReliability
+import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
+import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.toEvidence
+import io.dossier.app.domain.evidence.withResolvedRelationshipEvidence
 import io.dossier.app.domain.model.*
 import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.username.UsernameVariant
 import io.dossier.app.domain.username.UsernameVariantGenerator
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
-import java.io.IOException
+import org.jsoup.nodes.Element
 import java.net.URI
+import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import android.content.Context
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.selects.select
 
 
 class ProfileScanner(
     private val context: Context,
     private val piiExtractor: PiiExtractor,
-    private val variantGenerator: UsernameVariantGenerator
+    private val variantGenerator: UsernameVariantGenerator,
+    /** Injectable for deterministic frontier fixtures; production uses the shared runtime. */
+    private val typedSeedExecutorOverride: TypedSeedPublicFetchExecutor? = null
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
+        .dns(DiscoveryHttpPolicy.PUBLIC_DNS)
+        .addNetworkInterceptor(DiscoveryHttpPolicy.PUBLIC_URL_INTERCEPTOR)
         .build()
 
-    suspend fun scanIdentity(input: IdentityInput, deepResearch: Boolean = false): List<ProfileScanResult> {
+    private val providerRuntime = ProviderExecutionRuntime(client)
+    /** Evidence emitted by the bounded typed URL/document/archive pass. */
+    private var typedSeedExecutionEvidence: EvidenceCollection = EvidenceCollection()
+
+    internal fun typedSeedExecutionEvidence(): EvidenceCollection = typedSeedExecutionEvidence
+
+    suspend fun scanIdentity(
+        input: IdentityInput,
+        deepResearch: Boolean = false,
+        requestId: String? = null,
+        checkpointOwnerId: String? = null,
+        checkpointGeneration: String? = null,
+        planFingerprint: String? = null,
+        mediaEvidence: EvidenceCollection = EvidenceCollection()
+    ): List<ProfileScanResult> {
+        val scanId = ScanCoordinatorRuntime.claimProviderScanId()
+        typedSeedExecutionEvidence = EvidenceCollection()
         val results = mutableListOf<ProfileScanResult>()
+
+        // Public search/image observations are resumable only for a durable
+        // WorkManager request.  The catalog-plan commitment prevents a cache
+        // created under a changed provider plan from being mistaken for this
+        // scan's output; interactive scans remain process-local as before.
+        val payloadStore = requestId
+            ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
+            ?.let { durableRequestId ->
+                runCatching {
+                    val plan = ProviderCatalogV2.plan(DiscoveryScanPreferences.selectedMode.value)
+                    PublicDiscoveryPayloadStore(
+                        context = context,
+                        requestId = durableRequestId,
+                        planFingerprint = ProviderPlanFingerprint.forPlan(plan)
+                    )
+                }.getOrNull()
+            }
 
         val usernames = mutableSetOf<String>()
         input.primaryUsername?.let { if (it.isNotBlank()) usernames.add(it) }
@@ -120,7 +185,8 @@ class ProfileScanner(
                             platform = template.platform,
                             url = profileUrl,
                             matchType = variant.type,
-                            confidence = baseConf
+                            confidence = baseConf,
+                            providerId = template.providerId
                         )
                     )
                 }
@@ -130,29 +196,25 @@ class ProfileScanner(
         input.profileUrls.forEach { url ->
             if (url.isNotBlank()) {
                 var normalizedUrl = url.trim()
-                if (!normalizedUrl.startsWith("http://", ignoreCase = true) && 
+                if (!normalizedUrl.startsWith("http://", ignoreCase = true) &&
                     !normalizedUrl.startsWith("https://", ignoreCase = true)) {
                     normalizedUrl = "https://$normalizedUrl"
                 }
 
-                val matchedTemplate = PLATFORMS.firstOrNull { template ->
-                    val domain = template.urlPattern
-                        .replace("https://", "")
-                        .replace("www.", "")
-                        .split("/").firstOrNull() ?: ""
-                    domain.isNotBlank() && normalizedUrl.contains(domain, ignoreCase = true)
-                }
+                val resolved = resolveProfileUrl(normalizedUrl)
                 // Unknown host → Website, never default to GitHub
-                val platform = matchedTemplate?.platform ?: Platform.Website
-                val username = normalizedUrl.split("/").lastOrNull { it.isNotBlank() } ?: "unknown"
-                
+                val platform = resolved?.platform ?: Platform.Website
+                val username = resolved?.username ?: normalizedUrl.split("/").lastOrNull { it.isNotBlank() } ?: "unknown"
+                val providerId = resolved?.providerId
+
                 allCandidates.add(
                     UsernameCandidate(
                         username = username,
                         platform = platform,
                         url = normalizedUrl,
                         matchType = UsernameMatchType.Exact,
-                        confidence = 1.0f
+                        confidence = 1.0f,
+                        providerId = providerId
                     )
                 )
             }
@@ -162,87 +224,172 @@ class ProfileScanner(
         // confidence (user-supplied + exact-match candidates first) and take the
         // top N. Pivot discovery can still surface additional handles afterwards.
         val uniqueCandidates = allCandidates
-            .distinctBy { it.url }
+            .distinctBy { ProfileScanCheckpointStore.canonicalCandidateKey(it.url) }
             .sortedByDescending { it.confidence }
             .take(MAX_INITIAL_CANDIDATES)
 
         // ---- Pass 1: initial fan-out over name-variant / user-supplied candidates.
-        val initialResults = coroutineScope {
-            val deferredResults = uniqueCandidates.map { candidate ->
-                async(Dispatchers.IO) {
-                    fetchAndParse(candidate, input, provenance = null)
-                }
+        val initialResults = executeInitialPass(
+            uniqueCandidates = uniqueCandidates,
+            input = input,
+            scanId = scanId,
+            requestId = requestId,
+            deepResearch = deepResearch,
+            onRecovery = { summary ->
+                ScanCoordinatorRuntime.onRecoveryDiagnostics(
+                    scanId = scanId,
+                    stage = ScanCheckpointStage.DiscoveringUsernames,
+                    checkpointAvailable = summary.checkpointAvailable,
+                    reusedCount = summary.reusedCount,
+                    rerunCount = summary.rerunCount
+                )
             }
-            deferredResults.awaitAll()
-        }
+        )
 
-        // ---- Pass 2 (+ hop 2): multi-hop pivot discovery. For every profile
-        // confirmed in pass 1, read its rendered content/links for OTHER handles
-        // the user self-disclosed, and check those as new candidates. A second
-        // hop runs on newly verified pivot results (bounded total pivots).
+        // The recursive pass is backed by a request-scoped encrypted frontier
+        // when WorkManager supplied a canonical request ID. A process-local
+        // frontier keeps direct interactive scans bounded without inventing
+        // persistence for requests that cannot be resumed safely.
+        val frontierConfig = PivotFrontierConfig.forScan(deepResearch)
+        val frontierRequestId = requestId
+            ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
+            ?: EPHEMERAL_FRONTIER_REQUEST_ID
+        val frontierStoreAttempt = requestId
+            ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
+            ?.let { runCatching { PivotFrontierStore(context, it) } }
+        val frontierStore = frontierStoreAttempt?.getOrNull()
+        val pivotFrontier = restorePivotFrontierOrFail(
+            requestId = frontierRequestId,
+            config = frontierConfig,
+            persisted = when {
+                frontierStoreAttempt == null -> null
+                frontierStoreAttempt.isFailure -> PivotFrontierLoadResult.Unavailable
+                else -> frontierStore!!.loadDetailed(frontierConfig)
+            }
+        )
+        pivotFrontier.markVisited(uniqueCandidates.map { it.url })
+        publishPivotDiagnostics(scanId, pivotFrontier)
+
+        // ---- Pass 2: bounded recursive pivot discovery. For every profile
+        // confirmed in the preceding depth, read its rendered content/links for
+        // OTHER handles the user self-disclosed and drain exactly that frontier
+        // depth. The configured maximum depth, rather than a fixed hop count,
+        // controls how far a scan may recurse.
         //
         // FAIL-SAFE: the entire pivot pass is wrapped so ANY failure here never
         // destroys the Pass-1 results. A broken pivot must not make the scan
         // return empty — Pass 1's findings are always surfaced.
         val pivotResults: List<ProfileScanResult> = try {
-            val scanned = uniqueCandidates.map { it.url.lowercase() }.toMutableSet()
-            val hop1 = runPivotPass(
-                seedResults = initialResults,
-                alreadyScannedUrls = scanned,
+            drainPivotFrontier(
+                initialResults = initialResults,
+                uniqueCandidates = uniqueCandidates,
                 input = input,
                 deepResearch = deepResearch,
-                remainingBudget = MAX_PIVOT_CANDIDATES
+                scanId = scanId,
+                frontier = pivotFrontier,
+                frontierStore = frontierStore
             )
-            hop1.forEach { scanned.add(it.candidate.url.lowercase()) }
-            // Hop 2: only on newly verified pivot results (soft-existence pages
-            // with verified=false do not seed further pivots). Shared budget across hops.
-            val usedBudget = hop1.size
-            val remaining = (MAX_PIVOT_CANDIDATES - usedBudget).coerceAtLeast(0)
-            val hop2Seeds = hop1.filter { it.exists && it.verified }
-            val hop2 = if (hop2Seeds.isNotEmpty() && remaining > 0) {
-                runPivotPass(
-                    seedResults = hop2Seeds,
-                    alreadyScannedUrls = scanned,
-                    input = input,
-                    deepResearch = deepResearch,
-                    remainingBudget = remaining
-                )
-            } else {
-                emptyList()
-            }
-            hop1 + hop2
-        } catch (e: Throwable) {
-            e.printStackTrace()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
             emptyList()
+        } finally {
+            // Persist admitted/rejected state even when a non-cancellation
+            // failure aborts one depth. Cancellation is rethrown above, while
+            // the durable queue remains resumable on the next request.
+            frontierStore?.save(pivotFrontier)
         }
+
+        // General typed frontier: every user/evidence seed is retained, while
+        // URL/document/archive pages are executed one bounded hop at a time.
+        // Newly verified links/PII are admitted back into the same queue, so a
+        // URL A -> URL B -> email/document/archive chain survives retries.
+        val typedSeedInputEvidence = (initialResults + pivotResults).toEvidenceCollection(input)
+            .merge(mediaEvidence)
+        typedSeedExecutionEvidence = runTypedSeedFrontier(
+            input = input,
+            deepResearch = deepResearch,
+            requestId = requestId,
+            checkpointOwnerId = checkpointOwnerId,
+            checkpointGeneration = checkpointGeneration,
+            planFingerprint = planFingerprint,
+            seedEvidence = typedSeedInputEvidence,
+            scanId = scanId
+        )
 
         // ---- Pass 3: public-search discovery. This broadens coverage beyond
         // deterministic username templates by querying public indexes for the
         // audited name/handles/emails and site-specific sources (including
         // Reddit + 4chan). These hits are review candidates, not verified account
         // ownership, so they are surfaced with verified=false.
-        val publicSearchResults: List<ProfileScanResult> = try {
-            val confirmedUrls = (initialResults + pivotResults)
-                .filter { it.exists && it.verified }
-                .map { PublicSearchDiscoveryService.canonicalUrlKey(it.candidate.url) }
-                .toSet()
-            runPublicSearchPass(input, confirmedUrls, deepResearch)
-        } catch (e: Throwable) {
-            e.printStackTrace()
-            emptyList()
-        }
+        val publicSearchResults: List<ProfileScanResult> = payloadStore?.load(ScanPayloadStage.PublicSearch)
+            ?: try {
+                val verifiedResults = (initialResults + pivotResults)
+                    .filter { it.exists && it.verified }
+                val confirmedUrls = verifiedResults
+                    .map { PublicSearchDiscoveryService.canonicalUrlKey(it.candidate.url) }
+                    .toSet()
+                val discovered = runPublicSearchPass(
+                    input = input,
+                    alreadyConfirmedUrls = confirmedUrls,
+                    deepResearch = deepResearch,
+                    verifiedResults = verifiedResults,
+                    typedSeedEvidence = typedSeedInputEvidence.merge(typedSeedExecutionEvidence)
+                )
+                // Persist an empty list only after the pass completed normally;
+                // exceptions below remain a cache miss and retry honestly.
+                payloadStore?.save(ScanPayloadStage.PublicSearch, discovered)
+                discovered
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                emptyList()
+            }
 
         // ---- Pass 4: public image-index discovery. This searches image indexes
         // by identity terms only; it does not upload the user's selfie or perform
         // face recognition.
-        val publicImageResults: List<ProfileScanResult> = try {
-            runPublicImagePass(input, publicSearchResults, deepResearch)
-        } catch (e: Throwable) {
-            e.printStackTrace()
-            emptyList()
-        }
+        val publicImageResults: List<ProfileScanResult> = payloadStore?.load(ScanPayloadStage.PublicImage)
+            ?: try {
+                val discovered = runPublicImagePass(input, publicSearchResults, deepResearch)
+                payloadStore?.save(ScanPayloadStage.PublicImage, discovered)
+                discovered
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                emptyList()
+            }
 
         return initialResults + pivotResults + publicSearchResults + publicImageResults
+    }
+
+    private suspend fun executeInitialPass(
+        uniqueCandidates: List<UsernameCandidate>,
+        input: IdentityInput,
+        scanId: ScanId,
+        requestId: String?,
+        deepResearch: Boolean,
+        onRecovery: (ProfileInitialPassExecutor.RecoverySummary) -> Unit = {}
+    ): List<ProfileScanResult> {
+        val planFingerprint = if (requestId != null && BackgroundScanWorker.isCanonicalUuid(requestId)) {
+            ProfileScanCheckpointStore.planFingerprint(input, deepResearch, uniqueCandidates)
+        } else null
+
+        val checkpointStore = if (requestId != null && planFingerprint != null) {
+            runCatching {
+                ProfileScanCheckpointStore(context, requestId, planFingerprint)
+            }.getOrNull()
+        } else null
+
+        return ProfileInitialPassExecutor.execute(
+            candidates = uniqueCandidates,
+            checkpoint = checkpointStore,
+            queueMiss = { candidate -> queueProviderCandidate(candidate, scanId) },
+            fetchMiss = { candidate ->
+                fetchAndParse(candidate, input, provenance = null, scanId = scanId)
+            },
+            onRecovery = onRecovery
+        )
     }
 
     /**
@@ -254,25 +401,64 @@ class ProfileScanner(
         alreadyScannedUrls: Set<String>,
         input: IdentityInput,
         deepResearch: Boolean,
-        remainingBudget: Int
+        remainingBudget: Int,
+        scanId: ScanId,
+        frontier: BoundedPivotFrontier,
+        frontierStore: PivotFrontierStore?,
+        depth: Int
     ): List<ProfileScanResult> {
         if (remainingBudget <= 0) return emptyList()
-        val scannedUrls = alreadyScannedUrls.toMutableSet()
-        val pivotCandidates = mutableListOf<HandleExtractor.PivotCandidate>()
+        val scannedUrls = alreadyScannedUrls.mapNotNull(BoundedPivotFrontier::canonicalUrlKey).toMutableSet()
+        frontier.markVisited(scannedUrls)
         seedResults.filter { it.exists && it.verified }.forEach { confirmed ->
-            if (pivotCandidates.size >= remainingBudget) return@forEach
+            if (frontier.pendingAtDepth(remainingBudget, depth).size >= remainingBudget) return@forEach
             val sourceLabel = confirmed.candidate.platform.name
             val pivots = HandleExtractor.extract(
                 profileText = confirmed.extractedText,
                 profileLinks = confirmed.links,
                 sourceUrl = confirmed.candidate.url,
-                alreadyScannedUrls = scannedUrls,
-                sourcePlatformLabel = sourceLabel
+                alreadyScannedUrls = scannedUrls + frontier.visitedUrls,
+                sourcePlatformLabel = sourceLabel,
+                depth = depth,
+                maxDepth = frontier.config.maxDepth,
+                onRejected = { rejection ->
+                    frontier.recordRejected(
+                        key = rejection.candidateUrl?.let(BoundedPivotFrontier::canonicalUrlKey).orEmpty(),
+                        normalizedValue = rejection.normalizedValue,
+                        candidateUrl = rejection.candidateUrl,
+                        sourceUrl = confirmed.candidate.url,
+                        depth = depth,
+                        signalType = rejection.signalType,
+                        reason = rejection.reason
+                    )
+                    publishPivotDiagnostics(
+                        scanId = scanId,
+                        frontier = frontier,
+                        decision = frontier.decisionDiagnostics.lastOrNull()
+                    )
+                }
             )
             pivots.forEach { pc ->
-                if (pc.candidate.url.lowercase() !in scannedUrls && pivotCandidates.size < remainingBudget) {
-                    pivotCandidates.add(pc)
-                    scannedUrls.add(pc.candidate.url.lowercase())
+                if (frontier.pendingAtDepth(remainingBudget, depth).size >= remainingBudget) return@forEach
+                val offer = frontier.offer(
+                    candidate = pc.candidate,
+                    depth = depth,
+                    signalType = pc.signalType,
+                    confidence = pc.candidate.confidence,
+                    sourceUrl = confirmed.candidate.url,
+                    provenance = pc.provenance,
+                    admissionExplanation = pc.admissionExplanation
+                )
+                publishPivotDiagnostics(
+                    scanId = scanId,
+                    frontier = frontier,
+                    decision = when (offer) {
+                        is PivotOffer.Admitted -> frontier.decisionDiagnostics.lastOrNull()
+                        is PivotOffer.Rejected -> offer.diagnostic
+                    }
+                )
+                if (offer is PivotOffer.Admitted) {
+                    scannedUrls += offer.entry.key
                 }
             }
 
@@ -280,7 +466,7 @@ class ProfileScanner(
             // profile, read their pages for MORE handles, and pivot from those
             // too. (deanonymizer's website link-follower.) Bounded to keep
             // runtime sane.
-            if (deepResearch && pivotCandidates.size < remainingBudget) {
+            if (deepResearch && frontier.pendingAtDepth(remainingBudget, depth).size < remainingBudget) {
                 val websiteFollower = io.dossier.app.data.web.WebsiteLinkFollower(context)
                 val personalSites = confirmed.links
                     .filter { link ->
@@ -293,37 +479,509 @@ class ProfileScanner(
 
                 personalSites.forEach { siteUrl ->
                     try {
-                        val followed = websiteFollower.follow(siteUrl)
+                        val followed = websiteFollower.follow(siteUrl, scanId)
                         if (followed.text.isBlank() && followed.links.isEmpty()) return@forEach
                         val sitePivots = HandleExtractor.extract(
                             profileText = followed.text,
                             profileLinks = followed.links,
                             sourceUrl = siteUrl,
-                            alreadyScannedUrls = scannedUrls,
-                            sourcePlatformLabel = "$sourceLabel → website"
+                            alreadyScannedUrls = scannedUrls + frontier.visitedUrls,
+                            sourcePlatformLabel = "$sourceLabel → website",
+                            depth = depth,
+                            maxDepth = frontier.config.maxDepth,
+                            onRejected = { rejection ->
+                                frontier.recordRejected(
+                                    key = rejection.candidateUrl?.let(BoundedPivotFrontier::canonicalUrlKey).orEmpty(),
+                                    normalizedValue = rejection.normalizedValue,
+                                    candidateUrl = rejection.candidateUrl,
+                                    sourceUrl = siteUrl,
+                                    depth = depth,
+                                    signalType = rejection.signalType,
+                                    reason = rejection.reason
+                                )
+                                publishPivotDiagnostics(
+                                    scanId = scanId,
+                                    frontier = frontier,
+                                    decision = frontier.decisionDiagnostics.lastOrNull()
+                                )
+                            }
                         )
                         sitePivots.forEach { pc ->
-                            if (pc.candidate.url.lowercase() !in scannedUrls && pivotCandidates.size < remainingBudget) {
-                                pivotCandidates.add(pc)
-                                scannedUrls.add(pc.candidate.url.lowercase())
+                            if (frontier.pendingAtDepth(remainingBudget, depth).size >= remainingBudget) return@forEach
+                            val offer = frontier.offer(
+                                candidate = pc.candidate,
+                                depth = depth,
+                                signalType = pc.signalType,
+                                confidence = pc.candidate.confidence,
+                                sourceUrl = siteUrl,
+                                provenance = pc.provenance,
+                                admissionExplanation = pc.admissionExplanation
+                            )
+                            publishPivotDiagnostics(
+                                scanId = scanId,
+                                frontier = frontier,
+                                decision = when (offer) {
+                                    is PivotOffer.Admitted -> frontier.decisionDiagnostics.lastOrNull()
+                                    is PivotOffer.Rejected -> offer.diagnostic
+                                }
+                            )
+                            if (offer is PivotOffer.Admitted) {
+                                scannedUrls += offer.entry.key
                             }
                         }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // One public website failure does not abort other bounded pivots.
                     }
                 }
             }
         }
 
-        if (pivotCandidates.isEmpty()) return emptyList()
+        frontierStore?.save(frontier)
+        val pending = frontier.pendingAtDepth(remainingBudget, depth)
+        if (pending.isEmpty()) return emptyList()
 
-        return coroutineScope {
-            val deferredPivots = pivotCandidates.map { pc ->
-                async(Dispatchers.IO) {
-                    fetchAndParse(pc.candidate, input, provenance = pc.provenance)
+        pending.forEach { queueProviderCandidate(it.candidate, scanId) }
+
+        val fetchPivot: suspend (PivotFrontierEntry) -> ProfileScanResult = { entry ->
+            fetchAndParse(
+                entry.candidate,
+                input,
+                provenance = entry.provenance,
+                scanId = scanId
+            )
+        }
+        return collectPivotFetches(
+            pending = pending,
+            frontier = frontier,
+            frontierStore = frontierStore,
+            fetch = fetchPivot,
+            onCompleted = { _, _ -> publishPivotDiagnostics(scanId, frontier) }
+        )
+    }
+
+    /**
+     * Drain each configured frontier depth in order. Results fetched at depth N
+     * become seeds for depth N+1 only when they are verified, preventing weak
+     * or unverified pages from causing recursive false-positive cascades.
+     *
+     * The shared candidate budget is decremented by completed fetches. Pending
+     * entries loaded from the encrypted request checkpoint are drained at their
+     * persisted depth, so an interrupted scan resumes without replaying an
+     * earlier hop or silently dropping admitted work.
+     */
+    private suspend fun drainPivotFrontier(
+        initialResults: List<ProfileScanResult>,
+        uniqueCandidates: List<UsernameCandidate>,
+        input: IdentityInput,
+        deepResearch: Boolean,
+        scanId: ScanId,
+        frontier: BoundedPivotFrontier,
+        frontierStore: PivotFrontierStore?
+    ): List<ProfileScanResult> {
+        val scanned = uniqueCandidates
+            .mapNotNull { url -> BoundedPivotFrontier.canonicalUrlKey(url.url) }
+            .toMutableSet()
+        var seeds = initialResults
+        var remainingBudget = minOf(MAX_PIVOT_CANDIDATES, frontier.config.maxTotalPivots)
+        val results = mutableListOf<ProfileScanResult>()
+
+        for (depth in 1..frontier.config.maxDepth) {
+            if (remainingBudget <= 0) break
+            val fetched = runPivotPass(
+                seedResults = seeds,
+                alreadyScannedUrls = scanned,
+                input = input,
+                deepResearch = deepResearch,
+                remainingBudget = remainingBudget,
+                scanId = scanId,
+                frontier = frontier,
+                frontierStore = frontierStore,
+                depth = depth
+            )
+            results += fetched
+            fetched.forEach { result ->
+                BoundedPivotFrontier.canonicalUrlKey(result.candidate.url)?.let(scanned::add)
+            }
+            remainingBudget = (remainingBudget - fetched.size).coerceAtLeast(0)
+            seeds = verifiedPivotSeeds(fetched)
+        }
+
+        return results
+    }
+
+    /**
+     * Drains the canonical typed-seed frontier with a bounded rolling scheduler.
+     * A small number of network operations can overlap, while newly available
+     * queue slots are filled as soon as any operation completes.  Results are
+     * committed in launch order so evidence, admission, and durable snapshots
+     * are deterministic even when provider latency differs.
+     */
+    internal suspend fun runTypedSeedFrontier(
+        input: IdentityInput,
+        deepResearch: Boolean,
+        requestId: String?,
+        checkpointOwnerId: String?,
+        checkpointGeneration: String?,
+        planFingerprint: String?,
+        seedEvidence: EvidenceCollection,
+        scanId: ScanId
+    ): EvidenceCollection {
+        val durable = requestId != null &&
+            checkpointOwnerId != null &&
+            checkpointGeneration != null &&
+            BackgroundScanWorker.isCanonicalUuid(requestId) &&
+            BackgroundScanWorker.isCanonicalUuid(checkpointOwnerId) &&
+            BackgroundScanWorker.isCanonicalUuid(checkpointGeneration) &&
+            ProviderPlanFingerprint.isValid(planFingerprint)
+        val config = TypedSeedFrontierConfig(
+            maxDepth = if (deepResearch) {
+                TypedSeedFrontierConfig.DEFAULT_MAX_DEPTH
+            } else {
+                (TypedSeedFrontierConfig.DEFAULT_MAX_DEPTH - 1).coerceAtLeast(1)
+            },
+            maxTotalSeeds = if (deepResearch) {
+                TypedSeedFrontierConfig.DEFAULT_MAX_TOTAL_SEEDS
+            } else {
+                32
+            }
+        )
+        val localRequestId = requestId
+            ?.takeIf(BackgroundScanWorker::isCanonicalUuid)
+            ?: EPHEMERAL_TYPED_FRONTIER_REQUEST_ID
+
+        // Durable workers receive the immutable plan commitment from the
+        // encrypted request record. Interactive scans do not persist a typed
+        // frontier and therefore do not need a plan binding.
+        if (requestId != null && checkpointOwnerId != null && checkpointGeneration != null && !durable) {
+            throw ScanExecutionException(ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE)
+        }
+
+        val frontier = if (durable) {
+            val loaded = BackgroundScanManager.loadTypedFrontierIfOwner(
+                context = context,
+                workerId = checkpointOwnerId!!,
+                generation = checkpointGeneration!!,
+                requestId = requestId!!,
+                config = config,
+                planFingerprint = planFingerprint!!
+            )
+            when (loaded) {
+                is TypedSeedFrontierLoadResult.Available -> loaded.frontier
+                TypedSeedFrontierLoadResult.Missing -> TypedSeedFrontier(
+                    requestId = localRequestId,
+                    config = config,
+                    ownerId = checkpointOwnerId,
+                    generation = checkpointGeneration,
+                    planFingerprint = planFingerprint
+                )
+                TypedSeedFrontierLoadResult.StaleOwner,
+                TypedSeedFrontierLoadResult.Unavailable ->
+                    throw ScanExecutionException(ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE)
+            }
+        } else {
+            TypedSeedFrontier(requestId = localRequestId, config = config)
+        }
+
+        // A recreated worker may have already completed some typed seeds. The
+        // encrypted frontier owns that canonical emitted collection; merge it
+        // back before deriving new pivots so resumed scans do not lose the
+        // exact evidence that was persisted before process death.
+        var cumulativeEvidence = seedEvidence.merge(frontier.evidence)
+        val admission = TypedSeedEvidenceAdapter.fromCollection(
+            collection = cumulativeEvidence,
+            input = input,
+            config = config.admissionConfig()
+        )
+        admission.admittedSeeds.forEach(frontier::offer)
+        if (durable) persistTypedFrontier(
+            frontier,
+            requestId!!,
+            checkpointOwnerId!!,
+            checkpointGeneration!!,
+            planFingerprint!!
+        )
+
+        // The initial profile pass already fetched and verified its profile URL.
+        // Mark only those exact source URLs complete; extracted navigation links
+        // are observations and still require their own bounded fetch.
+        // The initial ProfileScanner passes also already searched the user-input Name/Username.
+        admission.admittedSeeds.forEach { seed ->
+            if (alreadyFetchedByInitialProfile(seed, cumulativeEvidence)) {
+                frontier.complete(frontier.keyFor(seed))
+            } else if (
+                seed.kind in setOf(TypedSeedKind.Name, TypedSeedKind.Username) &&
+                seed.origin == TypedSeedOrigin.UserInput
+            ) {
+                frontier.complete(frontier.keyFor(seed))
+            }
+        }
+
+        val executor = typedSeedExecutorOverride
+            ?: run {
+                // One service owns the HTTP client, cache, breaker, and browser
+                // semaphore for this frontier pass. Scope each request to the
+                // typed seed so unrelated launch identity terms are not copied
+                // into every pivot; each admitted pivot still receives its own
+                // bounded query plan.
+                val searchService = PublicSearchDiscoveryService(context)
+                TypedSeedPublicFetchExecutor(
+                    providerRuntime = providerRuntime,
+                    searchOutcomeSearcher = { seed, _, _ ->
+                        searchService.discoverOutcome(
+                            input = seedScopedInput(seed),
+                            deepResearch = deepResearch,
+                            verifiedResults = emptyList(),
+                            typedSeeds = listOf(seed),
+                            verificationInput = input
+                        )
+                    }
+                )
+            }
+        data class RunningSeed(
+            val order: Int,
+            val key: String,
+            val deferred: Deferred<TypedSeedPublicFetchExecutor.Report>
+        )
+        data class CompletedSeed(
+            val order: Int,
+            val key: String,
+            val report: TypedSeedPublicFetchExecutor.Report
+        )
+
+        val running = LinkedHashMap<Int, RunningSeed>()
+        val completed = sortedMapOf<Int, CompletedSeed>()
+        var nextLaunchOrder = 0
+        var nextCommitOrder = 0
+        var parentCancelled = false
+        var committingKey: String? = null
+        try {
+            coroutineScope {
+                suspend fun launchEligible() {
+                    while (running.size < TypedSeedPublicFetchExecutor.MAX_CONCURRENT_FETCHES) {
+                        currentCoroutineContext().ensureActive()
+                        val pending = frontier.pending(maxEntries = frontier.pendingCount)
+                            .firstOrNull { candidate -> running.values.none { it.key == candidate.key } }
+                            ?: break
+                        val started = frontier.begin(pending.key) ?: continue
+                        val order = nextLaunchOrder++
+                        val deferred = async(Dispatchers.IO, start = CoroutineStart.LAZY) {
+                            try {
+                                executor.executeDetailed(
+                                    seeds = listOf(started.seed),
+                                    input = input,
+                                    scanId = scanId
+                                )
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (error: Exception) {
+                                // A provider-specific executor failure is
+                                // isolated to this seed; siblings keep running.
+                                TypedSeedPublicFetchExecutor.Report(
+                                    collection = EvidenceCollection(),
+                                    executions = listOf(
+                                        TypedSeedPublicFetchExecutor.SeedExecution(
+                                            seed = started.seed,
+                                            state = TypedSeedPublicFetchExecutor.ExecutionState.Unavailable,
+                                            reason = error.message?.take(256)
+                                                ?: "Typed seed execution failed",
+                                            fetchAttempted = true
+                                        )
+                                    )
+                                )
+                            }
+                        }
+                        running[order] = RunningSeed(order, started.key, deferred)
+                        // Persist in-flight state before the request begins so
+                        // a process death can safely release/retry it.
+                        if (durable) {
+                            persistTypedFrontier(
+                                frontier,
+                                requestId!!,
+                                checkpointOwnerId!!,
+                                checkpointGeneration!!,
+                                planFingerprint!!
+                            )
+                        }
+                        deferred.start()
+                    }
+                }
+
+                suspend fun commitReady() {
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val ready = completed.remove(nextCommitOrder) ?: break
+                        committingKey = ready.key
+                        currentCoroutineContext().ensureActive()
+                        cumulativeEvidence = cumulativeEvidence.merge(ready.report.collection)
+                        // Persist the exact emitted collection alongside queue
+                        // state; recovery never loses completed evidence.
+                        frontier.mergeEvidence(ready.report.collection)
+                        val outcome = ready.report.executions.singleOrNull()
+                        if (outcome?.state == TypedSeedPublicFetchExecutor.ExecutionState.Verified ||
+                            outcome?.state == TypedSeedPublicFetchExecutor.ExecutionState.Completed
+                        ) {
+                            frontier.complete(ready.key)
+                        } else {
+                            frontier.unavailable(
+                                ready.key,
+                                outcome?.reason ?: "Typed seed execution returned no verified result"
+                            )
+                        }
+
+                        // Newly verified exact values feed back into this same
+                        // bounded frontier.  Candidate/observed values remain
+                        // visible in the ledger but fail TypedSeedSafety.
+                        TypedSeedEvidenceAdapter.fromCollection(
+                            collection = cumulativeEvidence,
+                            input = input,
+                            config = config.admissionConfig()
+                        ).admittedSeeds.forEach(frontier::offer)
+                        nextCommitOrder++
+                        if (durable) {
+                            persistTypedFrontier(
+                                frontier,
+                                requestId!!,
+                                checkpointOwnerId!!,
+                                checkpointGeneration!!,
+                                planFingerprint!!
+                            )
+                        }
+                        committingKey = null
+                    }
+                }
+
+                launchEligible()
+                while (running.isNotEmpty()) {
+                    currentCoroutineContext().ensureActive()
+                    // Await whichever provider finishes first; this is the
+                    // rolling point that avoids fixed batch barriers.
+                    val finished = select<CompletedSeed> {
+                        running.values.forEach { active ->
+                            active.deferred.onAwait { report ->
+                                CompletedSeed(active.order, active.key, report)
+                            }
+                        }
+                    }
+                    running.remove(finished.order)
+                    completed[finished.order] = finished
+                    // Fill the freed slot immediately; commit any ready sequential
+                    // results, which may admit new pivots; then ensure those new
+                    // pivots are also launched before deciding to exit.
+                    launchEligible()
+                    commitReady()
+                    launchEligible()
+                }
+                commitReady()
+            }
+        } catch (cancelled: CancellationException) {
+            parentCancelled = true
+            running.values.forEach { active ->
+                active.deferred.cancel()
+                frontier.releaseInFlight(active.key)
+            }
+            // A child can finish between select() and the parent cancellation
+            // and already be waiting in `completed` without having committed.
+            // Release those entries too so recovery retries them.
+            completed.values.forEach { ready -> frontier.releaseInFlight(ready.key) }
+            committingKey?.let(frontier::releaseInFlight)
+            if (durable) {
+                runCatching {
+                    persistTypedFrontier(
+                        frontier,
+                        requestId!!,
+                        checkpointOwnerId!!,
+                        checkpointGeneration!!,
+                        planFingerprint!!
+                    )
                 }
             }
-            deferredPivots.awaitAll()
+            throw cancelled
+        } finally {
+            if (durable) {
+                if (parentCancelled) {
+                    // Do not replace the parent cancellation with a stale
+                    // owner/storage error while attempting a best-effort
+                    // release checkpoint.
+                    runCatching {
+                        persistTypedFrontier(
+                            frontier,
+                            requestId!!,
+                            checkpointOwnerId!!,
+                            checkpointGeneration!!,
+                            planFingerprint!!
+                        )
+                    }
+                } else {
+                    persistTypedFrontier(
+                        frontier,
+                        requestId!!,
+                        checkpointOwnerId!!,
+                        checkpointGeneration!!,
+                        planFingerprint!!
+                    )
+                }
+            }
+        }
+        return cumulativeEvidence
+    }
+
+    private fun alreadyFetchedByInitialProfile(
+        seed: TypedSeed,
+        evidence: EvidenceCollection
+    ): Boolean {
+        val requestedUrl = when (seed.kind) {
+            TypedSeedKind.Url,
+            TypedSeedKind.Document,
+            TypedSeedKind.Archive -> seed.normalizedValue
+            else -> return false
+        }
+        val requestedKey = PublicSearchDiscoveryService.canonicalUrlKey(requestedUrl)
+        return evidence.evidence.any { record ->
+            record.state == EvidenceState.Verified &&
+                record.kind in setOf(EvidenceKind.Profile, EvidenceKind.Url, EvidenceKind.Document, EvidenceKind.Archive) &&
+                record.sourceUrl?.let(PublicSearchDiscoveryService::canonicalUrlKey) == requestedKey
+        }
+    }
+
+    /**
+     * Keep a typed-frontier search focused on its high-entropy seed. The
+     * shared service still owns provider/cache policy, but does not repeat the
+     * launch identity's full query plan for every typed frontier entry.
+     */
+    private fun seedScopedInput(seed: TypedSeed): IdentityInput = IdentityInput(
+        fullName = if (seed.kind == TypedSeedKind.Name) seed.exactValue else "",
+        usernames = if (seed.kind == TypedSeedKind.Username) listOf(seed.exactValue) else emptyList(),
+        emails = if (seed.kind == TypedSeedKind.Email) listOf(seed.exactValue) else emptyList(),
+        phones = if (seed.kind == TypedSeedKind.Phone) listOf(seed.exactValue) else emptyList()
+    )
+
+    private fun persistTypedFrontier(
+        frontier: TypedSeedFrontier,
+        requestId: String,
+        ownerId: String,
+        generation: String,
+        planFingerprint: String
+    ) {
+        when (
+            val saved = BackgroundScanManager.saveTypedFrontierIfOwner(
+                context = context,
+                workerId = ownerId,
+                generation = generation,
+                requestId = requestId,
+                frontier = frontier,
+                planFingerprint = planFingerprint
+            )
+        ) {
+            TypedSeedFrontierWriteResult.Saved -> Unit
+            TypedSeedFrontierWriteResult.StaleOwner ->
+                throw ScanExecutionException(ScanLifecycleErrors.STALE_WORK_REQUEST)
+            TypedSeedFrontierWriteResult.Tombstoned,
+            TypedSeedFrontierWriteResult.Missing,
+            TypedSeedFrontierWriteResult.Invalid,
+            TypedSeedFrontierWriteResult.StorageFailure ->
+                throw ScanExecutionException(ScanLifecycleErrors.CHECKPOINT_STORAGE_FAILURE)
         }
     }
 
@@ -335,10 +993,30 @@ class ProfileScanner(
     private suspend fun runPublicSearchPass(
         input: IdentityInput,
         alreadyConfirmedUrls: Set<String>,
-        deepResearch: Boolean
+        deepResearch: Boolean,
+        verifiedResults: List<ProfileScanResult> = emptyList(),
+        typedSeedEvidence: EvidenceCollection = EvidenceCollection()
     ): List<ProfileScanResult> {
         val service = PublicSearchDiscoveryService(context)
-        val discovered = service.discover(input, deepResearch)
+        // Canonical evidence is the sole source for recursive typed pivots.
+        // User-supplied URL seeds remain authorized before verification; all
+        // evidence-derived URL/domain/document/archive seeds are filtered by
+        // the shared bounded safety predicate.
+        val canonicalEvidence = verifiedResults.toEvidenceCollection(input).merge(typedSeedEvidence)
+        val typedSeeds = TypedSeedEvidenceAdapter
+            .fromCollection(canonicalEvidence, input)
+            .admittedSeeds
+            .filter(TypedSeedSafety::isSafePublicSearchSeed)
+        val discovered = service.discover(
+            input = input,
+            deepResearch = deepResearch,
+            verifiedResults = verifiedResults,
+            typedSeeds = typedSeeds,
+            // Keep page attribution anchored to the original authorized
+            // identity when a discovered Name/Username pivot is searched.
+            // The query plan remains scoped to each typed pivot.
+            verificationInput = input
+        )
         if (discovered.isEmpty()) return emptyList()
 
         return discovered
@@ -434,7 +1112,14 @@ class ProfileScanner(
             } else {
                 "Indexed public-search evidence — review manually"
             },
-            provenance = "public search via ${searchResult.source}"
+            provenance = "public search via ${searchResult.source}",
+            pivotSeedKind = searchResult.pivotSeedKind,
+            pivotExactValue = searchResult.pivotExactValue,
+            pivotNormalizedValue = searchResult.pivotNormalizedValue,
+            pivotEvidenceIds = searchResult.pivotEvidenceIds,
+            pivotDiscoveryPath = searchResult.pivotDiscoveryPath,
+            pivotStage = searchResult.pivotStage,
+            pivotSourceUrl = searchResult.pivotSourceUrl
         )
     }
 
@@ -518,6 +1203,8 @@ class ProfileScanner(
 
     // Bounds total pivot candidates across hops so the pass can't run away.
     private val MAX_PIVOT_CANDIDATES = 30
+    private val EPHEMERAL_FRONTIER_REQUEST_ID = "00000000-0000-4000-8000-000000000000"
+    private val EPHEMERAL_TYPED_FRONTIER_REQUEST_ID = "00000000-0000-4000-8000-000000000001"
     // Bounds the Deep Research website link-following per confirmed profile.
     private val MAX_WEBSITE_FOLLOWS = 5
     // Bounds the initial fan-out (name-variants × platforms) so a long name with
@@ -538,29 +1225,361 @@ class ProfileScanner(
                         platform = template.platform,
                         url = profileUrl,
                         matchType = variant.type,
-                        confidence = baseConfidence
+                        confidence = baseConfidence,
+                        providerId = template.providerId
                     )
                 )
             }
         }
     }
 
+    private fun queueProviderCandidate(candidate: UsernameCandidate, scanId: ScanId) {
+        val catalogProviderId = candidate.providerId ?: resolveProfileUrl(candidate.url)?.providerId
+        val providerId = catalogProviderId?.takeIf { ProviderCatalogV2.findById(it) != null }
+            ?: ProviderExecutionRuntime.uncataloguedProviderId(candidate.url)
+            ?: return
+        ScanCoordinatorRuntime.onProviderQueued(providerId, scanId)
+    }
+
     /**
-     * Two-stage verification:
-     *   Stage 1 — OkHttp pre-filter: fast disqualify of *definitive* non-existence
-     *             (hard 404, strong soft-404 text, offline). Never confirms existence.
-     *   Stage 2 — WebView confirm:   the embedded browser is the authority. A profile
-     *             is reported as existing [and verified] only if its rendered DOM
-     *             survives [isProfileNotFoundPage] AND [isProfileBelongingToUser].
+     * Declarative provider execution with fallback for unmapped candidates:
+     *   1. For catalog-backed candidates, executes through [ProviderExecutionRuntime]
+     *      enforcing concurrency, interval, timeout, retries, bounded body, and lifecycle events.
+     *   2. Applies [ProviderResponseClassifier] to classify the HTTP observation.
+     *   3. Truthful state isolation:
+     *      - NotFound & SoftNotFound -> absent
+     *      - AuthenticationRequired & AutomationChallenged -> unavailable (no WebView fallback)
+     *      - RedirectedOutsideProvider -> unavailable (no adoption)
+     *      - UnexpectedStatus & InvalidResponse -> unavailable
+     *      - Present -> direct attribution or bounded SPA WebView render
      */
     private suspend fun fetchAndParse(
         candidate: UsernameCandidate,
         input: IdentityInput,
-        provenance: String? = null
+        provenance: String? = null,
+        scanId: ScanId
     ): ProfileScanResult {
-        var exists = false
-        var verified = false
-        var verificationStatus: String? = null
+        val providerId = candidate.providerId ?: resolveProfileUrl(candidate.url)?.providerId
+        val definition = providerId?.let { ProviderCatalogV2.findById(it) }
+
+        if (definition != null) {
+            val exec = providerRuntime.execute(definition, candidate.url, scanId)
+            val httpStatus = exec.statusCode
+            val decision = exec.decision
+
+            when (decision.state) {
+                ProviderVerificationState.NotFound -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "HTTP ${httpStatus ?: 404} — not found",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.NotFound
+                    )
+                }
+                ProviderVerificationState.SoftNotFound -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Not found (soft-404)",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.SoftNotFound
+                    )
+                }
+                ProviderVerificationState.AuthenticationRequired -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — public response requires authentication",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.AuthenticationRequired
+                    )
+                }
+                ProviderVerificationState.AutomationChallenged -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — automation or human verification challenge",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.AutomationChallenged
+                    )
+                }
+                ProviderVerificationState.RateLimited -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — provider rate limit is active",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.RateLimited
+                    )
+                }
+                ProviderVerificationState.Timeout -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — provider request timed out",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.Timeout
+                    )
+                }
+                ProviderVerificationState.NetworkUnavailable -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — provider network is unavailable",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.NetworkUnavailable
+                    )
+                }
+                ProviderVerificationState.RedirectedOutsideProvider -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — redirected outside provider host",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.RedirectedOutsideProvider
+                    )
+                }
+                ProviderVerificationState.UnexpectedStatus -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — unexpected status (HTTP ${httpStatus ?: "error"})",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.UnexpectedStatus
+                    )
+                }
+                ProviderVerificationState.InvalidResponse -> {
+                    return buildResult(
+                        candidate = candidate,
+                        exists = false,
+                        verified = false,
+                        verificationStatus = "Unverifiable — ${decision.explanation}",
+                        httpStatus = httpStatus,
+                        adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = definition.id,
+                        providerVerificationState = ProviderVerificationState.InvalidResponse
+                    )
+                }
+                ProviderVerificationState.Present -> {
+                    val rawHtml = exec.bodyText
+                    val doc = Jsoup.parse(rawHtml, candidate.url)
+                    val text = doc.text()
+                    val title = doc.title()
+
+                    if (isAccessChallengePage(rawHtml, text)) {
+                        return buildResult(
+                            candidate = candidate,
+                            exists = false,
+                            verified = false,
+                            verificationStatus = "Unverifiable — automation or login challenge",
+                            httpStatus = httpStatus,
+                            adjustedConfidence = 0.0f,
+                            provenance = provenance,
+                            providerId = definition.id,
+                            providerVerificationState = ProviderVerificationState.AutomationChallenged
+                        )
+                    }
+
+                    if (text.trim().length >= 300 &&
+                        !isProfileNotFoundPage(rawHtml, text, title, candidate.username, candidate.platform)
+                    ) {
+                        val extracted = DeclarativeProfileExtractor.extract(
+                            document = doc,
+                            rules = definition.extractionRules,
+                            fallbackTitle = title
+                        )
+                        if (isProfileBelongingToUser(candidate, text, extracted.displayName, input)) {
+                            val extractedText = text
+                            val confidenceSignals = mutableListOf("Direct HTTP 200 page access — real content")
+                            return finalizeResult(
+                                candidate = candidate,
+                                exists = true,
+                                verified = true,
+                                verificationStatus = "✓ Verified (HTTP 200, direct page access)",
+                                httpStatus = httpStatus,
+                                displayName = extracted.displayName,
+                                bio = extracted.bio,
+                                profileImageUrl = extracted.profileImageUrl,
+                                links = extracted.links.toMutableList(),
+                                extractedText = extractedText,
+                                findings = mutableListOf(),
+                                confidenceSignals = confidenceSignals,
+                                adjustedConfidenceIn = candidate.confidence,
+                                input = input,
+                                provenance = provenance,
+                                providerId = definition.id,
+                                providerVerificationState = ProviderVerificationState.Present
+                            )
+                        } else {
+                            return buildSoftExistenceResult(
+                                candidate = candidate,
+                                httpStatus = httpStatus,
+                                displayName = extracted.displayName,
+                                extractedText = text,
+                                verificationStatus = "Exists but not attributed to this identity — possible account",
+                                provenance = provenance,
+                                providerId = definition.id,
+                                providerVerificationState = ProviderVerificationState.Present
+                            )
+                        }
+                    }
+
+                    // Short legitimate Present SPA response -> use bounded WebView renderer
+                    check(ProviderRendererPolicy.allows(decision.state)) {
+                        "Only a directly present provider response may use the renderer"
+                    }
+                    val render: WebViewScraper.Result = try {
+                        webviewSemaphore.withPermit {
+                            WebViewScraper(context).scrape(candidate.url)
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (t: Exception) {
+                        WebViewScraper.Result.Failed("Renderer error: ${t.localizedMessage}")
+                    }
+
+                    when (render) {
+                        is WebViewScraper.Result.ChallengeDetected -> {
+                            return buildResult(
+                                candidate = candidate,
+                                exists = false,
+                                verified = false,
+                                verificationStatus = "Unverifiable — ${render.reason}",
+                                httpStatus = httpStatus,
+                                adjustedConfidence = 0.0f,
+                                provenance = provenance,
+                                providerId = definition.id,
+                                providerVerificationState = ProviderVerificationState.AutomationChallenged
+                            )
+                        }
+                        is WebViewScraper.Result.TimedOut -> {
+                            return buildResult(
+                                candidate = candidate,
+                                exists = false,
+                                verified = false,
+                                verificationStatus = "Unverifiable — render timed out",
+                                httpStatus = httpStatus,
+                                adjustedConfidence = 0.0f,
+                                provenance = provenance,
+                                providerId = definition.id,
+                                providerVerificationState = ProviderVerificationState.InvalidResponse
+                            )
+                        }
+                        is WebViewScraper.Result.Failed -> {
+                            return buildResult(
+                                candidate = candidate,
+                                exists = false,
+                                verified = false,
+                                verificationStatus = "Unverifiable — ${render.reason}",
+                                httpStatus = httpStatus,
+                                adjustedConfidence = 0.0f,
+                                provenance = provenance,
+                                providerId = definition.id,
+                                providerVerificationState = ProviderVerificationState.InvalidResponse
+                            )
+                        }
+                        is WebViewScraper.Result.Rendered -> {
+                            val docRender = Jsoup.parse(render.html, candidate.url)
+                            val extractedText = render.text
+                            val extracted = DeclarativeProfileExtractor.extract(
+                                document = docRender,
+                                rules = definition.extractionRules,
+                                fallbackTitle = docRender.title().ifBlank { title }
+                            )
+
+                            if (isProfileNotFoundPage(render.html, extractedText, docRender.title(), candidate.username, candidate.platform)) {
+                                return buildResult(
+                                    candidate = candidate,
+                                    exists = false,
+                                    verified = false,
+                                    verificationStatus = "Not found (rendered 404)",
+                                    httpStatus = httpStatus,
+                                    adjustedConfidence = 0.0f,
+                                    provenance = provenance,
+                                    providerId = definition.id,
+                                    providerVerificationState = ProviderVerificationState.NotFound
+                                )
+                            }
+
+                            if (isProfileBelongingToUser(candidate, extractedText, extracted.displayName, input)) {
+                                return finalizeResult(
+                                    candidate = candidate,
+                                    exists = true,
+                                    verified = true,
+                                    verificationStatus = "✓ Verified in-browser",
+                                    httpStatus = httpStatus,
+                                    displayName = extracted.displayName,
+                                    bio = extracted.bio,
+                                    profileImageUrl = extracted.profileImageUrl,
+                                    links = extracted.links.toMutableList(),
+                                    extractedText = extractedText,
+                                    findings = mutableListOf(),
+                                    confidenceSignals = mutableListOf("Embedded browser render confirmed against DOM"),
+                                    adjustedConfidenceIn = (candidate.confidence * 0.95f).coerceAtLeast(0.3f),
+                                    input = input,
+                                    provenance = provenance,
+                                    providerId = definition.id,
+                                    providerVerificationState = ProviderVerificationState.Present
+                                )
+                            } else {
+                                return buildSoftExistenceResult(
+                                    candidate = candidate,
+                                    httpStatus = httpStatus,
+                                    displayName = extracted.displayName,
+                                    extractedText = extractedText,
+                                    verificationStatus = "Exists but not attributed to this identity — possible account",
+                                    provenance = provenance,
+                                    providerId = definition.id,
+                                    providerVerificationState = ProviderVerificationState.Present
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Generic fallback for candidate without a catalog-backed provider definition
+        var okhttpTitle: String? = null
+        var okhttpConfirmed = false
         var httpStatus: Int? = null
         var displayName: String? = null
         var bio: String? = null
@@ -571,140 +1590,242 @@ class ProfileScanner(
         val confidenceSignals = mutableListOf<String>()
         var adjustedConfidence = candidate.confidence
 
-        // ---- Stage 1: OkHttp fetch (also a valid confirmer for substantial pages) ---
-        var okhttpTitle: String? = null
-        var okhttpConfirmed = false
+        val fallbackDefinition = ProviderExecutionRuntime.uncataloguedProfileDefinition(candidate.url)
+            ?: return buildResult(
+                candidate, exists = false, verified = false,
+                verificationStatus = "Unverifiable — profile URL is not a supported HTTP(S) URL",
+                httpStatus = null, adjustedConfidence = 0.0f,
+                provenance = provenance,
+                providerVerificationState = ProviderVerificationState.InvalidResponse
+            )
 
         try {
-            val request = Request.Builder()
-                .url(candidate.url)
-                .header("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0")
-                .build()
+            val execution = providerRuntime.execute(
+                provider = fallbackDefinition,
+                url = candidate.url,
+                scanId = scanId,
+                // Preserve the legacy fallback's explicit 401/403 handling
+                // while using the shared declarative classifier everywhere
+                // else.  The status is an authorization boundary, not absence.
+                classifier = { _, observation ->
+                    if (observation.statusCode == 401 || observation.statusCode == 403) {
+                        ProviderResponseDecision(
+                            ProviderVerificationState.AuthenticationRequired,
+                            "Public response requires authentication"
+                        )
+                    } else {
+                        ProviderResponseClassifier.classify(fallbackDefinition, observation)
+                    }
+                }
+            )
+            httpStatus = execution.statusCode
 
-            client.newCall(request).execute().use { response ->
-                httpStatus = response.code
-                when {
-                    response.code == 404 -> {
+            when (execution.decision.state) {
+                ProviderVerificationState.NotFound -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "HTTP ${httpStatus ?: 404} — not found",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.NotFound
+                )
+                ProviderVerificationState.SoftNotFound -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Not found (soft-404)",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.SoftNotFound
+                )
+                ProviderVerificationState.AuthenticationRequired -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — public response requires authentication",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.AuthenticationRequired
+                )
+                ProviderVerificationState.AutomationChallenged -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — automation or login challenge",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.AutomationChallenged
+                )
+                ProviderVerificationState.RateLimited -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — provider rate limit is active",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.RateLimited
+                )
+                ProviderVerificationState.Timeout -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — provider request timed out",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.Timeout
+                )
+                ProviderVerificationState.NetworkUnavailable -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Offline — could not reach host",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.NetworkUnavailable
+                )
+                ProviderVerificationState.RedirectedOutsideProvider -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — redirected outside provider host",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = ProviderVerificationState.RedirectedOutsideProvider
+                )
+                ProviderVerificationState.UnexpectedStatus,
+                ProviderVerificationState.InvalidResponse -> return buildResult(
+                    candidate, exists = false, verified = false,
+                    verificationStatus = "Unverifiable — ${execution.decision.explanation}",
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id,
+                    providerVerificationState = execution.decision.state
+                )
+                ProviderVerificationState.Present -> {
+                    val html = execution.bodyText
+                    val doc = Jsoup.parse(html, candidate.url)
+                    val text = doc.text()
+                    val title = doc.title()
+                    if (isAccessChallengePage(html, text)) {
                         return buildResult(
                             candidate, exists = false, verified = false,
-                            verificationStatus = "HTTP 404 — not found",
-                            httpStatus = httpStatus, adjustedConfidence = 0.0f
+                            verificationStatus = "Unverifiable — automation or login challenge",
+                            httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                            provenance = provenance,
+                            providerId = fallbackDefinition.id,
+                            providerVerificationState = ProviderVerificationState.AutomationChallenged
                         )
                     }
-                    response.isSuccessful -> {
-                        val html = response.body?.string() ?: ""
-                        val doc = Jsoup.parse(html, candidate.url)
-                        val text = doc.text()
-                        val title = doc.title()
-                        // Drop on strong, specific not-found phrases (reliable on raw HTML).
-                        if (isStrongNotFoundPage(text, title, candidate.platform)) {
-                            return buildResult(
-                                candidate, exists = false, verified = false,
-                                verificationStatus = "Not found (soft-404)",
-                                httpStatus = httpStatus, adjustedConfidence = 0.0f
+                    if (isStrongNotFoundPage(text, title, candidate.platform)) {
+                        return buildResult(
+                            candidate, exists = false, verified = false,
+                            verificationStatus = "Not found (soft-404)",
+                            httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                            provenance = provenance,
+                            providerId = fallbackDefinition.id,
+                            providerVerificationState = ProviderVerificationState.SoftNotFound
+                        )
+                    }
+                    okhttpTitle = title
+
+                    if (text.trim().length >= 300 &&
+                        !isProfileNotFoundPage(html, text, title, candidate.username, candidate.platform)) {
+                        if (isProfileBelongingToUser(candidate, text, title, input)) {
+                            displayName = title.ifBlank { null }
+                            bio = doc.select("meta[name=description]").attr("content").trim().ifBlank {
+                                doc.select("p").firstOrNull()?.text()?.take(200)
+                            }
+                            profileImageUrl = extractProfileImageUrl(doc)
+                            doc.select("a[href]").forEach { element ->
+                                val linkUrl = element.attr("abs:href")
+                                if (linkUrl.startsWith("http")) {
+                                    links.add(linkUrl)
+                                }
+                            }
+                            extractedText = text
+                            confidenceSignals.add("Direct HTTP 200 page access — real content")
+                            okhttpConfirmed = true
+                        } else {
+                            return buildSoftExistenceResult(
+                                candidate = candidate,
+                                httpStatus = httpStatus,
+                                displayName = title.ifBlank { null },
+                                extractedText = text,
+                                verificationStatus = "Exists but not attributed to this identity — possible account",
+                                provenance = provenance,
+                                providerId = fallbackDefinition.id
                             )
                         }
-                        okhttpTitle = title
-
-                        // If OkHttp already got a SUBSTANTIAL, real page (not a JS shell),
-                        // it can confirm existence + belonging directly — no WebView needed.
-                        // This is the fix for the zero-results regression: a clean HTTP 200
-                        // with real content is a legitimate confirmation (deanonymizer and
-                        // every OSINT tool use it). WebView is only the fallback for
-                        // SPA/ambiguous/blocked cases OkHttp can't resolve.
-                        if (text.trim().length >= 300 &&
-                            !isProfileNotFoundPage(html, text, title, candidate.username, candidate.platform)) {
-                            if (isProfileBelongingToUser(candidate, text, title, input)) {
-                                exists = true
-                                verified = true
-                                verificationStatus = "✓ Verified (HTTP 200, direct page access)"
-                                displayName = title.ifBlank { null }
-                                bio = doc.select("meta[name=description]").attr("content").trim().ifBlank {
-                                    doc.select("p").firstOrNull()?.text()?.take(200)
-                                }
-                                profileImageUrl = extractProfileImageUrl(doc)
-                                doc.select("a[href]").forEach { element ->
-                                    val linkUrl = element.attr("abs:href")
-                                    if (linkUrl.startsWith("http")) {
-                                        links.add(linkUrl)
-                                    }
-                                }
-                                extractedText = text
-                                confidenceSignals.add("Direct HTTP 200 page access — real content")
-                                okhttpConfirmed = true
-                            } else {
-                                // Soft existence: page is real but not attributed.
-                                // Surface as exists=true, verified=false so the report
-                                // can show "possible account" without high-risk PII.
-                                return buildSoftExistenceResult(
-                                    candidate = candidate,
-                                    httpStatus = httpStatus,
-                                    displayName = title.ifBlank { null },
-                                    extractedText = text,
-                                    verificationStatus = "Exists but not attributed to this identity — possible account",
-                                    provenance = provenance
-                                )
-                            }
-                        }
-                        // Otherwise (JS shell / short content / ambiguous) → fall through to WebView.
-                    }
-                    else -> {
-                        // Non-404 error (cloudflare 503, 429, 403...). Let the browser try.
                     }
                 }
             }
-        } catch (e: Throwable) {
-            val isOffline = e is java.net.UnknownHostException ||
-                            e is java.net.ConnectException ||
-                            e is java.net.SocketTimeoutException
-            if (isOffline) {
-                return buildResult(
-                    candidate, exists = false, verified = false,
-                    verificationStatus = "Offline — could not reach host",
-                    httpStatus = null, adjustedConfidence = 0.0f
-                )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            val state = when (e) {
+                is java.net.SocketTimeoutException,
+                is java.io.InterruptedIOException -> ProviderVerificationState.Timeout
+                is java.net.UnknownHostException,
+                is java.net.ConnectException -> ProviderVerificationState.NetworkUnavailable
+                else -> ProviderVerificationState.InvalidResponse
             }
-            // Transient/other errors → fall through to browser attempt.
+            val status = when (state) {
+                ProviderVerificationState.Timeout -> "Unverifiable — provider request timed out"
+                ProviderVerificationState.NetworkUnavailable -> "Offline — could not reach host"
+                else -> "Unverifiable — provider request failed"
+            }
+            return buildResult(
+                candidate, exists = false, verified = false,
+                verificationStatus = status,
+                httpStatus = null, adjustedConfidence = 0.0f,
+                provenance = provenance,
+                providerId = fallbackDefinition.id,
+                providerVerificationState = state
+            )
         }
 
-        // OkHttp already confirmed — skip the (slow) WebView stage entirely and
-        // fall through to the shared confidence/PII/finding assembly below.
         if (okhttpConfirmed) {
-            return finalizeResult(candidate, exists, verified, verificationStatus, httpStatus,
-                displayName, bio, profileImageUrl, links, extractedText, findings, confidenceSignals, adjustedConfidence, input, provenance)
+            return finalizeResult(
+                candidate, exists = true, verified = true,
+                verificationStatus = "✓ Verified (HTTP 200, direct page access)",
+                httpStatus = httpStatus,
+                displayName = displayName, bio = bio, profileImageUrl = profileImageUrl,
+                links = links, extractedText = extractedText, findings = findings,
+                confidenceSignals = confidenceSignals, adjustedConfidenceIn = adjustedConfidence,
+                input = input, provenance = provenance,
+                providerId = fallbackDefinition.id
+            )
         }
 
-        // ---- Stage 2: WebView confirm (fallback for SPA/ambiguous/blocked) ----
         val render: WebViewScraper.Result = try {
             webviewSemaphore.withPermit {
                 WebViewScraper(context).scrape(candidate.url)
             }
-        } catch (t: Throwable) {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (t: Exception) {
             WebViewScraper.Result.Failed("Renderer error: ${t.localizedMessage}")
         }
 
         when (render) {
             is WebViewScraper.Result.ChallengeDetected -> {
-                // Bot-check / login wall hides the real content. The profile is
-                // *unverifiable* — never a match, never counted as not-found.
                 return buildResult(
                     candidate, exists = false, verified = false,
                     verificationStatus = "Unverifiable — ${render.reason}",
-                    httpStatus = httpStatus, adjustedConfidence = 0.0f
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id
                 )
             }
             is WebViewScraper.Result.TimedOut -> {
                 return buildResult(
                     candidate, exists = false, verified = false,
                     verificationStatus = "Unverifiable — render timed out",
-                    httpStatus = httpStatus, adjustedConfidence = 0.0f
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id
                 )
             }
             is WebViewScraper.Result.Failed -> {
                 return buildResult(
                     candidate, exists = false, verified = false,
                     verificationStatus = "Unverifiable — ${render.reason}",
-                    httpStatus = httpStatus, adjustedConfidence = 0.0f
+                    httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                    provenance = provenance,
+                    providerId = fallbackDefinition.id
                 )
             }
             is WebViewScraper.Result.Rendered -> {
@@ -715,15 +1836,13 @@ class ProfileScanner(
                     return buildResult(
                         candidate, exists = false, verified = false,
                         verificationStatus = "Not found (rendered 404)",
-                        httpStatus = httpStatus, adjustedConfidence = 0.0f
+                        httpStatus = httpStatus, adjustedConfidence = 0.0f,
+                        provenance = provenance,
+                        providerId = fallbackDefinition.id
                     )
                 }
 
-                // Belonging is decided against the rendered DOM.
                 if (isProfileBelongingToUser(candidate, extractedText, doc.title(), input)) {
-                    exists = true
-                    verified = true
-                    verificationStatus = "✓ Verified in-browser"
                     displayName = doc.title().ifBlank { okhttpTitle }
                     bio = doc.select("meta[name=description]").attr("content").trim().ifBlank {
                         doc.select("p").firstOrNull()?.text()?.take(200)
@@ -737,27 +1856,34 @@ class ProfileScanner(
                     }
                     confidenceSignals.add("Embedded browser render confirmed against DOM")
                     adjustedConfidence = (adjustedConfidence * 0.95f).coerceAtLeast(0.3f)
+                    return finalizeResult(
+                        candidate, exists = true, verified = true,
+                        verificationStatus = "✓ Verified in-browser",
+                        httpStatus = httpStatus,
+                        displayName = displayName, bio = bio, profileImageUrl = profileImageUrl,
+                        links = links, extractedText = extractedText, findings = findings,
+                        confidenceSignals = confidenceSignals, adjustedConfidenceIn = adjustedConfidence,
+                        input = input, provenance = provenance,
+                        providerId = fallbackDefinition.id
+                    )
                 } else {
-                    // Soft existence for WebView path (same policy as OkHttp path).
                     return buildSoftExistenceResult(
                         candidate = candidate,
                         httpStatus = httpStatus,
                         displayName = doc.title().ifBlank { okhttpTitle },
                         extractedText = extractedText,
                         verificationStatus = "Exists but not attributed to this identity — possible account",
-                        provenance = provenance
+                        provenance = provenance,
+                        providerId = fallbackDefinition.id
                     )
                 }
             }
         }
-
-        return finalizeResult(candidate, exists, verified, verificationStatus, httpStatus,
-            displayName, bio, profileImageUrl, links, extractedText, findings, confidenceSignals, adjustedConfidence, input, provenance)
     }
 
     /**
      * Shared confidence-boost + PII + finding-assembly for a confirmed profile.
-     * Used by both the OkHttp-confirmed path and the WebView-confirmed path so
+     * Used by both the direct HTTP-confirmed path and the WebView-confirmed path so
      * they produce identical output structure.
      */
     private fun finalizeResult(
@@ -775,7 +1901,9 @@ class ProfileScanner(
         confidenceSignals: MutableList<String>,
         adjustedConfidenceIn: Float,
         input: IdentityInput,
-        provenance: String?
+        provenance: String?,
+        providerId: String? = candidate.providerId,
+        providerVerificationState: ProviderVerificationState? = null
     ): ProfileScanResult {
         var adjustedConfidence = adjustedConfidenceIn
 
@@ -818,9 +1946,7 @@ class ProfileScanner(
                     confidenceSignals.add("Username slug contains both name parts (+3%)")
                 }
             }
-        }
 
-        if (exists && extractedText.isNotBlank()) {
             val piiFindings = piiExtractor.extract(extractedText, candidate.url, input)
             findings.addAll(piiFindings)
 
@@ -857,10 +1983,12 @@ class ProfileScanner(
             )
         }
 
-        // CRITICAL: only rewrite risk/confidence for PlausibleProfileMatch.
-        // PII findings (Email/Phone/etc.) keep the extractor's original risk —
-        // overwriting them with profile confidence was elevating every email to
-        // Critical whenever the account matched well.
+        val isDirectVerifiedProfile = exists && verified &&
+            (providerVerificationState == null || providerVerificationState == ProviderVerificationState.Present) &&
+            PublicSearchDiscoveryService.isAbsoluteHttpUrl(candidate.url) &&
+            (verificationStatus == null || !PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata(verificationStatus)) &&
+            (provenance == null || !PublicSearchDiscoveryService.isAmbiguousOrUnverifiedMetadata(provenance))
+
         val finalFindings = findings.map { finding ->
             if (finding.type == FindingType.PlausibleProfileMatch) {
                 finding.copy(
@@ -872,13 +2000,22 @@ class ProfileScanner(
                         else -> RiskLevel.Low
                     }
                 )
+            } else if (isDirectVerifiedProfile &&
+                (finding.type == FindingType.Email || finding.type == FindingType.Phone) &&
+                finding.sourceUrl != null &&
+                PublicSearchDiscoveryService.isAbsoluteHttpUrl(finding.sourceUrl) &&
+                PublicSearchDiscoveryService.canonicalUrlKey(finding.sourceUrl) == PublicSearchDiscoveryService.canonicalUrlKey(candidate.url)
+            ) {
+                finding.copy(
+                    confidence = maxOf(finding.confidence, 0.85f)
+                )
             } else {
                 finding
             }
         }
 
         return ProfileScanResult(
-            candidate = candidate.copy(confidence = adjustedConfidence),
+            candidate = candidate.copy(confidence = adjustedConfidence, providerId = providerId ?: candidate.providerId),
             exists = exists,
             httpStatus = httpStatus,
             displayName = displayName,
@@ -890,7 +2027,9 @@ class ProfileScanner(
             confidenceSignals = confidenceSignals,
             verified = verified,
             verificationStatus = verificationStatus,
-            provenance = provenance
+            provenance = provenance,
+            providerId = providerId ?: candidate.providerId,
+            providerVerificationState = providerVerificationState
         )
     }
 
@@ -904,7 +2043,9 @@ class ProfileScanner(
         displayName: String?,
         extractedText: String,
         verificationStatus: String,
-        provenance: String?
+        provenance: String?,
+        providerId: String? = candidate.providerId,
+        providerVerificationState: ProviderVerificationState? = null
     ): ProfileScanResult {
         val softConfidence = (candidate.confidence * 0.25f).coerceIn(0.1f, 0.35f)
         val softFinding = Finding(
@@ -917,7 +2058,7 @@ class ProfileScanner(
             remediation = "Review this possible account manually. Do not treat it as confirmed ownership."
         )
         return ProfileScanResult(
-            candidate = candidate.copy(confidence = softConfidence),
+            candidate = candidate.copy(confidence = softConfidence, providerId = providerId ?: candidate.providerId),
             exists = true,
             httpStatus = httpStatus,
             displayName = displayName,
@@ -929,7 +2070,9 @@ class ProfileScanner(
             confidenceSignals = listOf("Page exists but not attributed to identity"),
             verified = false,
             verificationStatus = verificationStatus,
-            provenance = provenance
+            provenance = provenance,
+            providerId = providerId ?: candidate.providerId,
+            providerVerificationState = providerVerificationState
         )
     }
 
@@ -941,9 +2084,11 @@ class ProfileScanner(
         verificationStatus: String,
         httpStatus: Int?,
         adjustedConfidence: Float,
-        provenance: String? = null
+        provenance: String? = null,
+        providerId: String? = candidate.providerId,
+        providerVerificationState: ProviderVerificationState? = null
     ): ProfileScanResult = ProfileScanResult(
-        candidate = candidate.copy(confidence = adjustedConfidence),
+        candidate = candidate.copy(confidence = adjustedConfidence, providerId = providerId ?: candidate.providerId),
         exists = exists,
         httpStatus = httpStatus,
         displayName = null,
@@ -955,7 +2100,9 @@ class ProfileScanner(
         confidenceSignals = emptyList(),
         verified = verified,
         verificationStatus = verificationStatus,
-        provenance = provenance
+        provenance = provenance,
+        providerId = providerId ?: candidate.providerId,
+        providerVerificationState = providerVerificationState
     )
 
     private fun extractProfileImageUrl(doc: Document): String? {
@@ -1149,25 +2296,47 @@ class ProfileScanner(
     )
 
     companion object {
+        internal fun isAccessChallengePage(html: String, text: String): Boolean {
+            val lowerHtml = html.lowercase()
+            val lowerText = text.lowercase()
+            val compactLength = text.count { !it.isWhitespace() }
+            val hardHtmlMarkers = listOf(
+                "cf-challenge",
+                "g-recaptcha",
+                "h-captcha",
+                "data-sitekey",
+                "authwall"
+            )
+            if (hardHtmlMarkers.any(lowerHtml::contains)) return true
+
+            val challengeTextMarkers = listOf(
+                "checking your browser",
+                "verify you are human",
+                "are you a robot",
+                "unusual traffic",
+                "attention required",
+                "log in to continue",
+                "sign in to continue"
+            )
+            return compactLength < 600 && challengeTextMarkers.any {
+                lowerText.contains(it) || lowerHtml.contains(it)
+            }
+        }
+
         /**
          * Pure (no Context / no network) belonging decision, extracted so it can be
          * unit-tested.
          *
-         * IMPORTANT: this is ONLY ever called after the WebView confirm stage has
-         * verified that the page actually renders real content (not a 404, not a
-         * challenge/bot wall). So unlike the old check #6 — which approved a slug
-         * match with zero page verification and manufactured hallucinations — any
-         * handle-based acceptance here operates on a verified-existing page.
+         * This is called only after direct or rendered content passes provider
+         * existence checks. Page existence remains separate from subject ownership.
          *
          * Attribution paths (any one is sufficient):
          *  - user explicitly supplied the URL
          *  - full name / both name parts appear in the rendered page
          *  - a user-supplied email / phone / alias / location / org appears in the page
-         *  - the candidate handle embeds BOTH full first and last name (e.g.
-         *    "janedoe", "jane.doe" from "Jane Doe") — such a handle
-         *    uniquely derives from this person's name, so a verified-existing page
-         *    under it is a plausible match. Weak variants (initials like "jdoe",
-         *    or single names like "jane"/"doe") do NOT qualify.
+         *
+         * A matching URL slug or username is candidate discovery evidence only.
+         * It never verifies ownership without an independent page signal.
          */
         fun belongsToUserPure(
             candidateUsername: String,
@@ -1182,57 +2351,27 @@ class ProfileScanner(
                 return true
             }
 
-            val suppliedUsernames = buildList {
-                input.primaryUsername?.takeIf { it.isNotBlank() }?.let { add(it) }
-                addAll(input.usernames.filter { it.isNotBlank() })
-            }
-            val exactUsernameMatch = suppliedUsernames.any {
-                it.equals(candidateUsername, ignoreCase = true)
-            }
-
-            // Strong identity includes explicit usernames / primaryUsername —
-            // username-only scans must be able to attribute exact handle matches.
-            val hasStrongIdentity = input.fullName.trim().split("\\s+".toRegex()).filter { it.isNotBlank() }.size > 1 ||
-                input.emails.any { it.isNotBlank() } ||
-                input.aliases.any { it.isNotBlank() } ||
-                input.profileUrls.any { it.isNotBlank() } ||
-                input.primaryUsername?.isNotBlank() == true ||
-                input.usernames.any { it.isNotBlank() }
-
-            // Exact username match on a verified-existing page is enough when the
-            // user supplied that handle (hasStrongIdentity includes usernames).
-            if (exactUsernameMatch && hasStrongIdentity) {
-                return true
-            }
-
-            if (!hasStrongIdentity) {
-                return false
-            }
-
             val text = (extractedText + " " + (displayName ?: "")).lowercase()
+            val candidateNeedle = candidateUsername.trim().lowercase()
+            val corroboratingText = if (candidateNeedle.length >= 2) {
+                text.replace(candidateNeedle, " ")
+            } else {
+                text
+            }
             val fullNameLower = input.fullName.trim().lowercase()
             val nameParts = input.fullName.trim().split("\\s+".toRegex()).filter { it.isNotBlank() }
             val isSingleWordName = nameParts.size <= 1
 
-            // Single-word name is restricted: allow only when email/alias present
-            // (handled below via page matches) OR exact username match (above).
-            // Without those, fall through carefully — name-embedding is multi-word only.
-
             // 1. Check for full name match
-            if (fullNameLower.isNotBlank() && text.contains(fullNameLower)) {
-                // Single-word name alone is too weak unless email/alias also present
-                // or exact username already matched (handled above).
+            if (fullNameLower.isNotBlank() && corroboratingText.contains(fullNameLower)) {
                 if (!isSingleWordName) return true
-                val hasEmailOrAlias = input.emails.any { it.isNotBlank() } ||
-                    input.aliases.any { it.isNotBlank() }
-                if (hasEmailOrAlias) return true
             }
 
             // 2. Check if both first and last name match (for multi-word names)
             if (nameParts.size > 1) {
                 val first = nameParts.first().lowercase()
                 val last = nameParts.last().lowercase()
-                if (text.contains(first) && text.contains(last)) {
+                if (corroboratingText.contains(first) && corroboratingText.contains(last)) {
                     return true
                 }
             }
@@ -1245,30 +2384,11 @@ class ProfileScanner(
             }
 
             // 4. Check for any of the user's supplied aliases, locations, or organizations
-            val hasMeaningfulIdentitySignals = nameParts.size > 1 ||
-                input.primaryUsername?.isNotBlank() == true ||
-                input.usernames.any { it.isNotBlank() } ||
-                input.emails.any { it.isNotBlank() } ||
-                input.aliases.any { it.isNotBlank() }
-            if (hasMeaningfulIdentitySignals) {
-                val hasMatchingAlias = input.aliases.any { it.isNotBlank() && text.contains(it.lowercase()) }
-                val hasMatchingLoc = input.locations.any { it.isNotBlank() && text.contains(it.lowercase()) }
-                val hasMatchingOrg = input.organizations.any { it.isNotBlank() && text.contains(it.lowercase()) }
-                if (hasMatchingAlias || hasMatchingLoc || hasMatchingOrg) {
-                    return true
-                }
-            }
-
-            // 5. Name-derived handle: the candidate username embeds BOTH the full first
-            //    AND last name (e.g. "janedoe", "jane.doe", "jane_doe" from
-            //    "Jane Doe"). Multi-word names only.
-            if (nameParts.size > 1) {
-                val first = nameParts.first().lowercase()
-                val last = nameParts.last().lowercase()
-                val slug = candidateUsername.lowercase()
-                if (first.length >= 3 && last.length >= 3 && slug.contains(first) && slug.contains(last)) {
-                    return true
-                }
+            val hasMatchingAlias = input.aliases.any { it.isNotBlank() && text.contains(it.lowercase()) }
+            val hasMatchingLoc = input.locations.any { it.isNotBlank() && text.contains(it.lowercase()) }
+            val hasMatchingOrg = input.organizations.any { it.isNotBlank() && text.contains(it.lowercase()) }
+            if (hasMatchingAlias || hasMatchingLoc || hasMatchingOrg) {
+                return true
             }
 
             return false
@@ -1292,14 +2412,220 @@ class ProfileScanner(
         deepResearch: Boolean = false
     ): EvidenceCollection {
         val results = scanIdentity(input, deepResearch = deepResearch)
-        return results.toEvidenceCollection(input)
+        // This is the retrieval boundary for a fresh scan. Capture one batch
+        // timestamp here; the pure adapter below remains parameterized for
+        // deterministic conversion of restored/test data.
+        return results.toEvidenceCollection(
+            input,
+            retrievedAtEpochMillis = System.currentTimeMillis()
+        ).merge(typedSeedExecutionEvidence())
     }
 
-    /** Maps already-fetched [ProfileScanResult]s to Evidence without re-scanning. */
+    /**
+     * Maps already-fetched [ProfileScanResult]s to Evidence without re-scanning.
+     * Callers converting a fresh fetch should retain the same batch timestamp
+     * by passing it to the internal adapter; this public convenience method is
+     * intentionally timestamp-free for restored data and deterministic callers.
+     */
     fun toEvidenceCollection(
         results: List<ProfileScanResult>,
         input: IdentityInput
     ): EvidenceCollection = results.toEvidenceCollection(input)
+}
+
+internal data class DeclarativeProfileFields(
+    val displayName: String?,
+    val bio: String?,
+    val profileImageUrl: String?,
+    val links: List<String>
+)
+
+/** Applies provider-owned CSS extraction rules without making selectors fatal. */
+internal object DeclarativeProfileExtractor {
+    fun extract(
+        document: Document,
+        rules: ExtractionRules?,
+        fallbackTitle: String? = null
+    ): DeclarativeProfileFields {
+        val configured = rules ?: ExtractionRules()
+        val displayName = selectedText(document, configured.displayNameSelectors, MAX_DISPLAY_NAME_CHARS)
+            ?: (fallbackTitle ?: document.title()).trim().take(MAX_DISPLAY_NAME_CHARS).takeIf(String::isNotBlank)
+        val bio = selectedText(document, configured.bioSelectors, MAX_BIO_CHARS)
+            ?: document.select("meta[name=description]").attr("content").trim().takeIf(String::isNotBlank)
+            ?: document.select("p").firstOrNull()?.text()?.trim()?.take(MAX_BIO_CHARS)?.takeIf(String::isNotBlank)
+        val profileImageUrl = selectedUrl(document, configured.avatarSelectors)
+            ?.let(::normalizeHttpUrl)
+            ?: defaultImageUrl(document)
+        val linkSelectors = configured.linkSelectors.ifEmpty { ExtractionRules().linkSelectors }
+        val links = selectedUrls(document, linkSelectors)
+        val canonical = selectedUrl(document, configured.canonicalSelectors)
+            ?.let(::normalizeHttpUrl)
+        return DeclarativeProfileFields(
+            displayName = displayName,
+            bio = bio,
+            profileImageUrl = profileImageUrl,
+            links = (listOfNotNull(canonical) + links).distinct().take(MAX_LINKS)
+        )
+    }
+
+    private fun selectedText(document: Document, selectors: List<String>, maxChars: Int): String? =
+        selectedElements(document, selectors)
+            .asSequence()
+            .mapNotNull { element ->
+                sequenceOf(
+                    element.attr("content"),
+                    element.attr("value"),
+                    element.text()
+                ).map(String::trim).firstOrNull(String::isNotBlank)?.take(maxChars)
+            }
+            .firstOrNull()
+
+    private fun selectedUrl(document: Document, selectors: List<String>): String? =
+        selectedElements(document, selectors)
+            .asSequence()
+            .mapNotNull { element ->
+                sequenceOf(
+                    element.attr("abs:content"),
+                    element.attr("abs:src"),
+                    element.attr("abs:href"),
+                    element.attr("content"),
+                    element.attr("src"),
+                    element.attr("href")
+                ).map(String::trim).firstOrNull(String::isNotBlank)?.take(MAX_URL_CHARS)
+            }
+            .firstOrNull()
+
+    private fun selectedUrls(document: Document, selectors: List<String>): List<String> =
+        selectedElements(document, selectors)
+            .asSequence()
+            .mapNotNull { element ->
+                sequenceOf(element.attr("abs:href"), element.attr("abs:src"))
+                    .map(String::trim)
+                    .firstOrNull { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+            }
+            .distinct()
+            .take(MAX_LINKS)
+            .toList()
+
+    private fun selectedElements(document: Document, selectors: List<String>): List<Element> =
+        selectors.asSequence()
+            .flatMap { selector ->
+                runCatching { document.select(selector).asSequence() }
+                    .getOrElse { emptySequence() }
+            }
+            .toList()
+
+    private fun defaultImageUrl(document: Document): String? {
+        val selectors = listOf(
+            "meta[property=og:image]",
+            "meta[name=og:image]",
+            "meta[name=twitter:image]",
+            "meta[property=twitter:image]",
+            "meta[name=twitter:image:src]",
+            "meta[property=twitter:image:src]",
+            "link[rel=image_src]",
+            "img.avatar",
+            "img[alt*=avatar]",
+            "img[alt*=profile]",
+            "img[src*=avatar]",
+            "img[src*=profile]"
+        )
+        return selectedUrl(document, selectors)?.let(::normalizeHttpUrl)
+    }
+
+    private fun normalizeHttpUrl(raw: String): String? {
+        if (raw.length > MAX_URL_CHARS || !io.dossier.app.domain.util.UrlNormalizer.isHttpUrl(raw)) return null
+        val normalized = io.dossier.app.domain.util.UrlNormalizer.stripFragment(
+            io.dossier.app.domain.util.UrlNormalizer.ensureHttps(raw)
+        )
+        val uri = runCatching { java.net.URI(normalized) }.getOrNull() ?: return null
+        if (uri.scheme?.lowercase() !in setOf("http", "https") || uri.host.isNullOrBlank() || uri.userInfo != null) {
+            return null
+        }
+        return normalized.take(MAX_URL_CHARS)
+    }
+
+    private const val MAX_DISPLAY_NAME_CHARS = 240
+    private const val MAX_BIO_CHARS = 2_000
+    private const val MAX_URL_CHARS = 4_096
+    private const val MAX_LINKS = 256
+}
+
+/**
+ * Collects recursive fetches as they finish while retaining queue order in the
+ * returned list. Frontier completion is owned by this collector, so a fetch
+ * that is still running (or is cancelled/throws) remains pending for resume.
+ */
+internal suspend fun collectPivotFetches(
+    pending: List<PivotFrontierEntry>,
+    frontier: BoundedPivotFrontier,
+    frontierStore: PivotFrontierStore?,
+    fetch: suspend (PivotFrontierEntry) -> ProfileScanResult,
+    onCompleted: (PivotFrontierEntry, ProfileScanResult) -> Unit = { _, _ -> }
+): List<ProfileScanResult> = coroutineScope {
+    if (pending.isEmpty()) return@coroutineScope emptyList()
+
+    val orderedResults = arrayOfNulls<ProfileScanResult>(pending.size)
+    val deferredPivots = pending.mapIndexed { index, entry ->
+        async(Dispatchers.IO) {
+            index to fetch(entry)
+        }
+    }.toMutableList()
+
+    while (deferredPivots.isNotEmpty()) {
+        val completed = select<
+            Pair<Deferred<Pair<Int, ProfileScanResult>>, Pair<Int, ProfileScanResult>>
+            > {
+            deferredPivots.forEach { deferred ->
+                deferred.onAwait { deferred to it }
+            }
+        }
+        deferredPivots.remove(completed.first)
+
+        val (index, scanResult) = completed.second
+        val entry = pending[index]
+        frontier.complete(entry.key)
+        frontierStore?.save(frontier)
+        onCompleted(entry, scanResult)
+        orderedResults[index] = scanResult
+    }
+
+    orderedResults.mapIndexed { index, result ->
+        requireNotNull(result) { "Missing recursive result at index $index" }
+    }
+}
+
+internal fun verifiedPivotSeeds(results: List<ProfileScanResult>): List<ProfileScanResult> =
+    results.filter { it.exists && it.verified }
+
+/**
+ * Bridges only bounded frontier metadata to the coordinator. The diagnostic
+ * intentionally excludes candidate/source URLs and normalized handles so the
+ * live scan surface cannot become a second evidence store.
+ */
+private fun publishPivotDiagnostics(
+    scanId: ScanId,
+    frontier: BoundedPivotFrontier,
+    decision: PivotDecisionDiagnostic? = null
+) {
+    ScanCoordinatorRuntime.onPivotDiagnostics(
+        scanId = scanId,
+        decision = decision?.let {
+            io.dossier.app.domain.discovery.PivotDecisionSummary(
+                admitted = it.admitted,
+                signalType = it.signalType.name,
+                depth = it.depth,
+                reason = it.reason
+            )
+        },
+        pendingCount = frontier.pendingCount,
+        pendingByDepth = frontier.pendingByDepth,
+        admittedCount = frontier.admittedCount,
+        rejectedCount = frontier.rejectedCount,
+        visitedCount = frontier.visitedCount,
+        maxDepth = frontier.config.maxDepth,
+        maxTotalPivots = frontier.config.maxTotalPivots
+    )
 }
 
 /**
@@ -1308,28 +2634,118 @@ class ProfileScanner(
  * that are not recoverable from findings alone.
  */
 internal fun List<ProfileScanResult>.toEvidenceCollection(
-    input: IdentityInput
+    input: IdentityInput,
+    retrievedAtEpochMillis: Long? = null
 ): EvidenceCollection {
     val evidence = mutableListOf<Evidence>()
     val relationships = mutableListOf<EvidenceRelationship>()
 
-    forEach { result ->
+    // Prioritize verified profiles when applying the global text-link bound;
+    // indexed candidates must not crowd useful exact links out of the ledger.
+    val textLinksByResultIndex = mutableMapOf<Int, List<String>>()
+    var remainingTextLinks = MAX_TOTAL_TEXT_LINKS
+    withIndex()
+        .sortedWith(
+            compareByDescending<IndexedValue<ProfileScanResult>> { it.value.exists && it.value.verified }
+                .thenByDescending { it.value.exists }
+                .thenBy { it.index }
+        )
+        .forEach { indexed ->
+            if (remainingTextLinks <= 0) return@forEach
+            val directKeys = indexed.value.links
+                .asSequence()
+                .map(::profileLinkKey)
+                .toSet()
+            val selected = extractAbsoluteHttpUrlsFromText(indexed.value.extractedText)
+                .asSequence()
+                .filterNot { profileLinkKey(it) in directKeys }
+                .distinctBy(::profileLinkKey)
+                .take(MAX_TEXT_LINKS_PER_PROFILE)
+                .take(remainingTextLinks)
+                .toList()
+            textLinksByResultIndex[indexed.index] = selected
+            remainingTextLinks -= selected.size
+        }
+
+    forEachIndexed { resultIndex, result ->
         val url = result.candidate.url
         val conf = result.candidate.confidence.coerceIn(0f, 1f)
+        val path = if (result.pivotDiscoveryPath.isNotEmpty()) {
+            // Keep the candidate URL as the terminal step while respecting
+            // Evidence's bounded path contract, even if a serialized result
+            // supplied an already-full 64-step pivot path.
+            result.pivotDiscoveryPath
+                .filter(String::isNotBlank)
+                .take((Evidence.MAX_DISCOVERY_PATH_STEPS - 1).coerceAtLeast(0)) + url
+        } else if (!result.provenance.isNullOrBlank()) {
+            listOf(result.provenance)
+        } else {
+            emptyList()
+        }
+        val verifiedProfile = result.exists && result.verified
+        val pivotSourceUrl = result.pivotSourceUrl
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && DiscoveryHttpPolicy.isSafePublicHttpUrl(it) }
+        val pivotSignals = buildList {
+            result.pivotStage
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { add("Public search query stage: $it") }
+            result.pivotNormalizedValue
+                ?.trim()
+                ?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) }
+                ?.let { add("Public search pivot normalized value: $it") }
+        }
+        val pivotSourceUrls = listOfNotNull(pivotSourceUrl)
+            .filterNot { sameSourceUrl(it, url) }
+            .take(Evidence.MAX_SOURCE_URLS)
+        val pivotEvidenceIds = result.pivotEvidenceIds
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .distinct()
+            .take(EvidenceRelationshipPolicy.MAX_EVIDENCE_IDS_PER_RELATIONSHIP)
+
+        if (result.pivotEvidenceIds.isNotEmpty() && result.pivotExactValue != null) {
+            relationships.add(
+                EvidenceRelationship(
+                    fromValue = url,
+                    toValue = result.pivotExactValue,
+                    relation = "derived_from",
+                    evidence = publicSearchPivotDescription(
+                        result = result,
+                        sourceUrl = pivotSourceUrl
+                    ),
+                    evidenceIds = pivotEvidenceIds
+                )
+            )
+        }
 
         // Profile observation (native, not via the Finding adapter).
-        evidence.add(
-            Evidence(
-                id = "profile:${url}",
-                kind = EvidenceKind.Profile,
-                value = url,
-                sourceUrl = url,
-                snippet = result.displayName?.let { "Profile: $it" },
-                confidence = conf,
-                risk = if (result.verified && result.exists) RiskLevel.High else RiskLevel.Low,
-                signals = result.confidenceSignals
-            )
+        val profileEvidence = Evidence(
+            id = "profile:${url}",
+            kind = EvidenceKind.Profile,
+            value = url,
+            sourceUrl = url,
+            snippet = result.displayName?.let { "Profile: $it" },
+            confidence = conf,
+            risk = if (verifiedProfile) RiskLevel.High else RiskLevel.Low,
+            signals = (result.confidenceSignals + pivotSignals).distinct(),
+            providerId = result.providerId ?: result.candidate.providerId,
+            retrievedAtEpochMillis = retrievedAtEpochMillis,
+            state = when {
+                !result.exists -> EvidenceState.Candidate
+                verifiedProfile -> EvidenceState.Verified
+                else -> EvidenceState.Observed
+            },
+            reliability = if (verifiedProfile) {
+                EvidenceReliability.DirectPublicProfile
+            } else {
+                EvidenceReliability.SearchEngineCandidate
+            },
+            discoveryPath = path,
+            sourceUrls = pivotSourceUrls
         )
+        evidence.add(profileEvidence)
 
         // Username → profile assertion (scanner knowledge).
         if (result.candidate.username.isNotBlank()
@@ -1341,21 +2757,189 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                     fromValue = result.candidate.username,
                     toValue = url,
                     relation = "username_on_profile",
-                    evidence = result.candidate.platform.name
+                    evidence = result.candidate.platform.name,
+                    evidenceIds = listOf(profileEvidence.id)
                 )
             )
         }
 
+        // Verified Profile Fields
+        if (verifiedProfile) {
+            result.displayName?.takeIf(String::isNotBlank)?.let { displayName ->
+                val ev = Evidence(
+                    id = stableProfileEvidenceId("display-name", url, displayName),
+                    kind = EvidenceKind.Username,
+                    value = displayName,
+                    sourceUrl = url,
+                    confidence = conf,
+                    risk = RiskLevel.Low,
+                    providerId = result.providerId ?: result.candidate.providerId,
+                    retrievedAtEpochMillis = retrievedAtEpochMillis,
+                    state = EvidenceState.Verified,
+                    reliability = EvidenceReliability.DirectPublicProfile,
+                    discoveryPath = path,
+                    attributeKind = io.dossier.app.domain.evidence.HistoricalAttributeKind.DisplayName
+                )
+                evidence.add(ev)
+                relationships.add(EvidenceRelationship(fromValue = url, toValue = displayName, relation = "has_name", evidence = "Verified Display Name", evidenceIds = listOf(ev.id)))
+            }
+            result.bio?.takeIf(String::isNotBlank)?.let { bio ->
+                val ev = Evidence(
+                    id = stableProfileEvidenceId("bio", url, bio),
+                    kind = EvidenceKind.SensitiveSnippet,
+                    value = bio,
+                    sourceUrl = url,
+                    confidence = conf,
+                    risk = RiskLevel.Low,
+                    providerId = result.providerId ?: result.candidate.providerId,
+                    retrievedAtEpochMillis = retrievedAtEpochMillis,
+                    state = EvidenceState.Verified,
+                    reliability = EvidenceReliability.DirectPublicProfile,
+                    discoveryPath = path,
+                    attributeKind = io.dossier.app.domain.evidence.HistoricalAttributeKind.Bio
+                )
+                evidence.add(ev)
+                relationships.add(EvidenceRelationship(fromValue = url, toValue = bio, relation = "has_bio", evidence = "Verified Bio", evidenceIds = listOf(ev.id)))
+            }
+            result.profileImageUrl?.takeIf(String::isNotBlank)?.let { imageUrl ->
+                val ev = Evidence(
+                    id = stableProfileEvidenceId("image", url, imageUrl),
+                    kind = EvidenceKind.Image,
+                    value = imageUrl,
+                    sourceUrl = url,
+                    confidence = conf,
+                    risk = RiskLevel.Low,
+                    providerId = result.providerId ?: result.candidate.providerId,
+                    retrievedAtEpochMillis = retrievedAtEpochMillis,
+                    state = EvidenceState.Verified,
+                    reliability = EvidenceReliability.DirectPublicProfile,
+                    discoveryPath = path,
+                    attributeKind = io.dossier.app.domain.evidence.HistoricalAttributeKind.AvatarUrl
+                )
+                evidence.add(ev)
+                relationships.add(
+                    EvidenceRelationship(
+                        fromValue = url,
+                        toValue = imageUrl,
+                        relation = "uses_avatar",
+                        evidence = "Verified Profile Image",
+                        evidenceIds = listOf(ev.id)
+                    )
+                )
+            }
+        }
+
+        // Extracted Public Links as Evidence
+        fun emitLinkEvidence(rawLink: String) {
+            val kind = classifyProfileLink(rawLink)
+            val isArchive = kind == EvidenceKind.Archive
+            // The link was observed in the response body/fields of this
+            // directly verified profile.  Publication by that profile is the
+            // verified observation; the target site's identity is not being
+            // inferred or merged here.  Candidate/unverified profiles remain
+            // Observed/Candidate below and therefore cannot become typed pivots.
+            val explicitlyAttributed = verifiedProfile
+            val linkState = when {
+                explicitlyAttributed -> EvidenceState.Verified
+                result.exists -> EvidenceState.Observed
+                else -> EvidenceState.Candidate
+            }
+            val ev = Evidence(
+                id = stableProfileEvidenceId(kind.name.lowercase(Locale.ROOT), url, rawLink),
+                kind = kind,
+                // Keep the exact observed source string; normalization is only
+                // used by classification, IDs, and downstream deduplication.
+                value = rawLink,
+                sourceUrl = url,
+                confidence = conf,
+                risk = RiskLevel.Low,
+                providerId = result.providerId ?: result.candidate.providerId,
+                retrievedAtEpochMillis = retrievedAtEpochMillis,
+                state = linkState,
+                reliability = if (verifiedProfile) {
+                    EvidenceReliability.DirectPublicProfile
+                } else {
+                    EvidenceReliability.SearchEngineCandidate
+                },
+                historical = isArchive,
+                discoveryPath = path,
+                signals = pivotSignals,
+                sourceUrls = pivotSourceUrls
+            )
+            evidence.add(ev)
+            relationships.add(EvidenceRelationship(fromValue = url, toValue = rawLink, relation = "links_to", evidence = "Profile Link", evidenceIds = listOf(ev.id)))
+
+            runCatching { java.net.URI(rawLink.trim()).host?.lowercase(Locale.ROOT)?.removeSuffix(".") }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { host ->
+                    val domainEv = Evidence(
+                        id = stableProfileEvidenceId("domain", url, host),
+                        kind = EvidenceKind.Domain,
+                        value = host,
+                        sourceUrl = url,
+                        confidence = conf,
+                        risk = RiskLevel.Low,
+                        providerId = result.providerId ?: result.candidate.providerId,
+                        retrievedAtEpochMillis = retrievedAtEpochMillis,
+                        state = linkState,
+                        reliability = if (verifiedProfile) {
+                            EvidenceReliability.DirectPublicProfile
+                        } else {
+                            EvidenceReliability.SearchEngineCandidate
+                        },
+                        historical = isArchive,
+                        discoveryPath = path,
+                        signals = pivotSignals,
+                        sourceUrls = pivotSourceUrls
+                    )
+                    evidence.add(domainEv)
+                    relationships.add(EvidenceRelationship(fromValue = url, toValue = host, relation = "links_to_domain", evidence = "Profile Domain Link", evidenceIds = listOf(domainEv.id)))
+                }
+        }
+        (result.links.asSequence() + textLinksByResultIndex[resultIndex].orEmpty().asSequence())
+            .filter { it.isNotBlank() }
+            .distinctBy(::profileLinkKey)
+            .forEach { rawLink ->
+                emitLinkEvidence(rawLink)
+            }
+
         // Each finding bridges losslessly; PII-on-profile is asserted explicitly.
         result.findings.forEach { finding ->
-            evidence.add(finding.toEvidence())
-            if (finding.sourceUrl == url || result.exists) {
+            val directlyObservedOnProfile = verifiedProfile && sameSourceUrl(finding.sourceUrl, url)
+            val findingEvidence = finding.toEvidence(retrievedAtEpochMillis, path).let { record ->
+                val withPivotMetadata = if (pivotSignals.isNotEmpty() || pivotSourceUrls.isNotEmpty()) {
+                    record.copy(
+                        signals = (record.signals + pivotSignals).distinct(),
+                        sourceUrls = (record.sourceUrls + pivotSourceUrls)
+                            .distinct()
+                            .take(Evidence.MAX_SOURCE_URLS)
+                    )
+                } else {
+                    record
+                }
+                if (
+                    directlyObservedOnProfile &&
+                    finding.type in setOf(FindingType.Email, FindingType.Phone) &&
+                    finding.attribution == FindingAttribution.ExactSelfSupplied
+                ) {
+                    withPivotMetadata.copy(
+                        state = EvidenceState.Verified,
+                        reliability = EvidenceReliability.DirectPublicProfile
+                    )
+                } else {
+                    withPivotMetadata
+                }
+            }
+            evidence.add(findingEvidence)
+            if (sameSourceUrl(finding.sourceUrl, url)) {
                 relationships.add(
                     EvidenceRelationship(
                         fromValue = url,
                         toValue = finding.value,
                         relation = "mentions",
-                        evidence = finding.type.name
+                        evidence = finding.type.name,
+                        evidenceIds = listOf(findingEvidence.id)
                     )
                 )
             }
@@ -1373,8 +2957,172 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
         evidence.add(Evidence(id = "seed:username:$it", kind = EvidenceKind.Username, value = it, confidence = 1.0f))
     }
 
-    return EvidenceCollection(
+    val collection = EvidenceCollection(
         evidence = evidence.distinctBy { it.id },
-        relationships = relationships.distinctBy { "${it.fromValue}|${it.toValue}|${it.relation}" }
+        relationships = EvidenceRelationshipPolicy.normalize(relationships)
     )
+    return collection
 }
+
+private fun classifyProfileLink(link: String): EvidenceKind {
+    val uri = runCatching { URI(link.trim()) }.getOrNull()
+    val host = uri?.host.orEmpty().lowercase(Locale.ROOT)
+    if (host == "web.archive.org" || host.endsWith(".web.archive.org") ||
+        host == "archive.org" || host.endsWith(".archive.org") ||
+        host == "archive.today" || host.endsWith(".archive.today") ||
+        host == "archive.ph" || host.endsWith(".archive.ph") ||
+        host == "archive.is" || host.endsWith(".archive.is")
+    ) {
+        return EvidenceKind.Archive
+    }
+    val pathAndQuery = listOfNotNull(uri?.rawPath, uri?.rawQuery)
+        .joinToString("?")
+        .lowercase(Locale.ROOT)
+    return if (DOCUMENT_EXTENSION.containsMatchIn(pathAndQuery)) {
+        EvidenceKind.Document
+    } else {
+        EvidenceKind.Url
+    }
+}
+
+private fun publicSearchPivotDescription(
+    result: ProfileScanResult,
+    sourceUrl: String?
+): String {
+    val metadata = buildList {
+        result.pivotStage
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) }
+            ?.let { add("stage=$it") }
+        result.pivotNormalizedValue
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) }
+            ?.let { add("normalized=$it") }
+        sourceUrl?.let { add("source=$it") }
+    }
+    return if (metadata.isEmpty()) {
+        "public search pivot"
+    } else {
+        "public search pivot (${metadata.joinToString("; ")})"
+    }
+}
+
+/** Merges a bounded typed-seed collection into the canonical scanner evidence. */
+private fun EvidenceCollection.merge(other: EvidenceCollection): EvidenceCollection = EvidenceCollection(
+    evidence = (evidence + other.evidence).distinctBy(Evidence::id),
+    relationships = EvidenceRelationshipPolicy.normalize(relationships + other.relationships)
+).withResolvedRelationshipEvidence()
+
+/** Maximum extracted text links retained for one profile observation. */
+internal const val MAX_TEXT_LINKS_PER_PROFILE = 64
+
+/** Maximum extracted text links retained across one evidence conversion. */
+internal const val MAX_TOTAL_TEXT_LINKS = 256
+
+private const val MAX_EXTRACTED_TEXT_URL_CHARS = 4_096
+
+private val ABSOLUTE_HTTP_URL_PATTERN = Regex("""(?i)(?<![A-Za-z0-9+._-])https?://[^\s<>\[\]{}"'`]+""")
+private val DISALLOWED_SCHEME_PREFIX = Regex("""(?i)^(?:javascript|data|file|mailto|content|ftp):""")
+
+/**
+ * Extracts only bounded, syntactically valid HTTP(S) URL tokens from already
+ * fetched text. The lexical prefix check prevents a disallowed URI such as
+ * `javascript:/*...*/https://...` from donating its HTTP-looking suffix.
+ */
+internal fun extractAbsoluteHttpUrlsFromText(text: String): List<String> {
+    if (text.isBlank()) return emptyList()
+    return ABSOLUTE_HTTP_URL_PATTERN.findAll(text)
+        .mapNotNull { match ->
+            val start = match.range.first
+            if (hasDisallowedSchemePrefix(text, start)) return@mapNotNull null
+            val candidate = trimUrlPunctuation(match.value)
+            if (isValidExtractedHttpUrl(candidate)) candidate else null
+        }
+        .distinctBy(::profileLinkKey)
+        .toList()
+}
+
+private fun hasDisallowedSchemePrefix(text: String, urlStart: Int): Boolean {
+    var tokenStart = urlStart
+    while (tokenStart > 0 && !text[tokenStart - 1].isWhitespace()) tokenStart--
+    val prefix = text.substring(tokenStart, urlStart)
+        .trimStart('(', '[', '{', '<', '"', '\'', '`')
+    return DISALLOWED_SCHEME_PREFIX.containsMatchIn(prefix)
+}
+
+private fun trimUrlPunctuation(raw: String): String {
+    var value = raw.trim()
+    while (value.isNotEmpty()) {
+        when (value.last()) {
+            '.', ',', ';', ':', '!', '\'', '"', '>', ']' -> value = value.dropLast(1)
+            ')' -> {
+                if (value.count { it == '(' } < value.count { it == ')' }) {
+                    value = value.dropLast(1)
+                } else {
+                    break
+                }
+            }
+            '}' -> {
+                if (value.count { it == '{' } < value.count { it == '}' }) {
+                    value = value.dropLast(1)
+                } else {
+                    break
+                }
+            }
+            else -> break
+        }
+    }
+    return value
+}
+
+private fun isValidExtractedHttpUrl(value: String): Boolean {
+    if (value.isBlank() || value.length > MAX_EXTRACTED_TEXT_URL_CHARS || value.any(Char::isISOControl)) {
+        return false
+    }
+    val uri = runCatching { URI(value) }.getOrNull() ?: return false
+    if (uri.scheme?.equals("http", ignoreCase = true) != true &&
+        uri.scheme?.equals("https", ignoreCase = true) != true
+    ) return false
+    val host = uri.host ?: return false
+    if (host.isBlank() || uri.rawUserInfo != null || uri.port !in -1..65_535) return false
+    if (host.startsWith('.') || host.endsWith('.') || host.contains("..")) return false
+    return DiscoveryHttpPolicy.isSafePublicHttpUrl(value)
+}
+
+/** Canonicalizes only scheme/host for evidence deduplication. */
+private fun profileLinkKey(raw: String): String {
+    val value = raw.trim()
+    val uri = runCatching { URI(value) }.getOrNull()
+    val scheme = uri?.scheme?.lowercase(Locale.ROOT)
+    val host = uri?.host?.lowercase(Locale.ROOT)
+    if (scheme != null && host != null && scheme in setOf("http", "https") && uri.rawUserInfo == null) {
+        return buildString {
+            append(scheme).append("://").append(host)
+            if (uri.port >= 0) append(':').append(uri.port)
+            append(uri.rawPath.orEmpty())
+            uri.rawQuery?.let { append('?').append(it) }
+            uri.rawFragment?.let { append('#').append(it) }
+        }
+    }
+    return value
+}
+
+private fun sameSourceUrl(first: String?, second: String): Boolean =
+    first?.trim()?.equals(second.trim(), ignoreCase = true) == true
+
+private val DOCUMENT_EXTENSION = Regex(
+    "\\.(?:pdf|docx?|rtf|odt|txt|csv|xlsx?|pptx?|ods|odp)(?:$|[?#&])",
+    RegexOption.IGNORE_CASE
+)
+
+private fun stableProfileEvidenceId(kind: String, profileUrl: String, exactValue: String): String {
+    val canonical = listOf(kind, profileUrl, exactValue)
+        .joinToString("\u001f") { stableProfileEvidencePart(it) }
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(canonical.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(Locale.ROOT, byte) }
+    return "profile:$kind:${digest.take(32)}"
+}
+
+private fun stableProfileEvidencePart(value: String): String =
+    profileLinkKey(value).replace(Regex("\\s+"), " ")

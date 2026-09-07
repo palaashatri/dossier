@@ -5,6 +5,7 @@ import android.net.Uri
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -33,7 +34,11 @@ data class FaceCorrelationThresholds(
     val highFalseMatchRate: Float?,
     val reviewTrueMatchRate: Float?,
     val highTrueMatchRate: Float?,
-    val measured: Boolean
+    val measured: Boolean,
+    /** The held-out corpus must keep identities disjoint from calibration. */
+    val identityDisjoint: Boolean = false,
+    /** Importers must explicitly attest that the images were consented or legally distributable. */
+    val consentConfirmed: Boolean = false
 ) {
     init {
         require(reviewThreshold.isFinite() && reviewThreshold in -1f..1f)
@@ -42,6 +47,12 @@ data class FaceCorrelationThresholds(
         require(sfaceSha256.matches(Regex("[a-fA-F0-9]{64}")))
         require(yunetSha256.matches(Regex("[a-fA-F0-9]{64}")))
         if (measured) {
+            require(identityDisjoint) {
+                "Measured calibration requires an identity-disjoint held-out corpus."
+            }
+            require(consentConfirmed) {
+                "Measured calibration requires an explicit consent/legal-distribution attestation."
+            }
             require(positivePairCount >= MIN_MEASURED_POSITIVE_PAIRS) {
                 "Measured calibration requires at least $MIN_MEASURED_POSITIVE_PAIRS held-out positive pairs."
             }
@@ -66,7 +77,7 @@ data class FaceCorrelationThresholds(
     fun summary(): String = if (measured) {
         "Measured calibration: review >= ${format(reviewThreshold)}, high >= ${format(highSimilarityThreshold)}; " +
             "$positivePairCount positive and $negativePairCount negative held-out pairs; " +
-            "high-band FMR ${formatRate(highFalseMatchRate)}."
+            "high-band FMR ${formatRate(highFalseMatchRate)}; identity-disjoint authorized corpus."
     } else {
         "Reference policy: review >= ${format(reviewThreshold)}, high >= ${format(highSimilarityThreshold)}. " +
             "The high band is conservative but not yet Dossier-benchmarked."
@@ -149,7 +160,9 @@ class FaceCorrelationCalibrationStore(private val context: Context) {
             highFalseMatchRate = null,
             reviewTrueMatchRate = null,
             highTrueMatchRate = null,
-            measured = false
+            measured = false,
+            identityDisjoint = false,
+            consentConfirmed = false
         )
 
         fun parse(json: String): FaceCorrelationThresholds {
@@ -190,6 +203,12 @@ class FaceCorrelationCalibrationStore(private val context: Context) {
             val highTmr = root.float("highTrueMatchRate")
                 ?: root.float("high_true_match_rate")
                 ?: root.float("samePersonTrueAcceptRate")
+            val identityDisjoint = root.boolean("identityDisjoint")
+                ?: root.boolean("identity_disjoint")
+                ?: false
+            val consentConfirmed = root.boolean("consentConfirmed")
+                ?: root.boolean("consent_confirmed")
+                ?: false
             val measured = positiveCount > 0 && negativeCount > 0 &&
                 reviewFmr != null && highFmr != null && reviewTmr != null && highTmr != null
             return FaceCorrelationThresholds(
@@ -205,7 +224,9 @@ class FaceCorrelationCalibrationStore(private val context: Context) {
                 highFalseMatchRate = highFmr,
                 reviewTrueMatchRate = reviewTmr,
                 highTrueMatchRate = highTmr,
-                measured = measured
+                measured = measured,
+                identityDisjoint = identityDisjoint,
+                consentConfirmed = consentConfirmed
             )
         }
 
@@ -216,6 +237,7 @@ class FaceCorrelationCalibrationStore(private val context: Context) {
 
         private fun JsonObject.float(name: String): Float? = this[name]?.jsonPrimitive?.floatOrNull
         private fun JsonObject.int(name: String): Int? = this[name]?.jsonPrimitive?.intOrNull
+        private fun JsonObject.boolean(name: String): Boolean? = this[name]?.jsonPrimitive?.booleanOrNull
         private fun JsonObject.string(name: String): String? =
             this[name]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
     }

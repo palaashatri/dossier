@@ -27,4 +27,24 @@ class FaceAppearanceDescriptorTest {
             0.0001f
         )
     }
+
+    @Test
+    fun nonFiniteDescriptorsFailClosed() {
+        assertEquals(
+            0f,
+            FaceAppearanceDescriptor.cosineSimilarity(
+                floatArrayOf(Float.NaN, 1f),
+                floatArrayOf(1f, 0f)
+            ),
+            0.0001f
+        )
+        assertEquals(
+            0f,
+            FaceAppearanceDescriptor.cosineSimilarity(
+                floatArrayOf(Float.POSITIVE_INFINITY, 1f),
+                floatArrayOf(1f, 0f)
+            ),
+            0.0001f
+        )
+    }
 }

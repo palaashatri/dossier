@@ -4,10 +4,10 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.CancellationException
 import java.io.InputStream
 
 /**
@@ -22,19 +22,20 @@ class TextRecognizer(private val context: Context) {
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
     /** Returns the recognized text, or null if recognition failed/produced nothing. */
-    fun recognize(uri: Uri): String? {
+    suspend fun recognize(uri: Uri): String? {
         val bitmap = loadBitmap(uri) ?: return null
         return recognize(bitmap)
     }
 
     /** Returns the recognized text from an in-memory frame/bitmap. */
-    fun recognize(bitmap: Bitmap): String? {
+    suspend fun recognize(bitmap: Bitmap): String? {
         val inputImage = InputImage.fromBitmap(bitmap, 0)
         val task = recognizer.process(inputImage)
         val result = try {
-            Tasks.await(task)
-        } catch (e: Exception) {
-            e.printStackTrace()
+            task.awaitCancellable()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
             return null
         }
         val text = result.text.trim()

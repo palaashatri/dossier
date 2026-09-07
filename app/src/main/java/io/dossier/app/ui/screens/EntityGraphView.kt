@@ -40,7 +40,9 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -225,6 +227,10 @@ private fun GraphViewTab(
             .clip(RoundedCornerShape(9.dp))
             .background(if (selected) accent.copy(alpha = 0.12f) else Color.Transparent)
             .border(1.dp, if (selected) accent else border, RoundedCornerShape(9.dp))
+            .semantics {
+                this.selected = selected
+                stateDescription = if (selected) "Selected" else "Not selected"
+            }
     ) {
         Text(
             text = label,
@@ -319,21 +325,35 @@ private fun GraphCanvas(
                         style = Stroke(width = 2f * density)
                     )
                 }
+                val labelPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                    textSize = 11f * density
+                    color = android.graphics.Color.argb(
+                        if (dimmed) 110 else 255,
+                        (textPrimary.red * 255).toInt(),
+                        (textPrimary.green * 255).toInt(),
+                        (textPrimary.blue * 255).toInt()
+                    )
+                    textAlign = android.graphics.Paint.Align.CENTER
+                }
+                val rawLabel = "${entity.type.name.take(3).uppercase()} · ${entity.label}"
+                val edgePadding = GRAPH_LABEL_EDGE_PADDING_DP * density
+                val maxLabelWidth = (size.width - edgePadding * 2f).coerceAtLeast(0f)
+                val label = fitGraphLabelText(rawLabel, labelPaint, maxLabelWidth)
+                val placement = clampGraphLabelPlacement(
+                    nodeCenterX = position.x,
+                    nodeBaselineY = position.y - radius - 7f * density,
+                    labelWidth = labelPaint.measureText(label),
+                    canvasWidth = size.width,
+                    canvasHeight = size.height,
+                    fontAscent = labelPaint.fontMetrics.ascent,
+                    fontDescent = labelPaint.fontMetrics.descent,
+                    edgePadding = edgePadding
+                )
                 drawContext.canvas.nativeCanvas.drawText(
-                    "${entity.type.name.take(3).uppercase()} · ${entity.label.take(16)}",
-                    position.x,
-                    position.y - radius - 7f * density,
-                    android.graphics.Paint().apply {
-                        textSize = 11f * density
-                        this.color = android.graphics.Color.argb(
-                            if (dimmed) 110 else 255,
-                            (textPrimary.red * 255).toInt(),
-                            (textPrimary.green * 255).toInt(),
-                            (textPrimary.blue * 255).toInt()
-                        )
-                        textAlign = android.graphics.Paint.Align.CENTER
-                        isAntiAlias = true
-                    }
+                    label,
+                    placement.centerX,
+                    placement.baselineY,
+                    labelPaint
                 )
             }
         }
@@ -369,6 +389,10 @@ private fun AdjacencyList(
                     .clip(RoundedCornerShape(8.dp))
                     .background(if (selected) accent.copy(alpha = 0.12f) else Color.Transparent)
                     .clickable { onSelect(entity.id) }
+                    .semantics {
+                        this.selected = selected
+                        stateDescription = if (selected) "Selected" else "Not selected"
+                    }
                     .padding(horizontal = 10.dp, vertical = 10.dp)
             ) {
                 Text(
@@ -480,4 +504,67 @@ private fun squaredDistance(first: Offset, second: Offset): Float {
     return dx * dx + dy * dy
 }
 
+/** Pixel placement for one canvas label, constrained to the drawable viewport. */
+internal data class GraphLabelPlacement(
+    val centerX: Float,
+    val baselineY: Float
+)
+
+/**
+ * Keeps a measured label inside the canvas on both axes. The graph can be
+ * horizontally scrollable, but labels still must not be clipped by the
+ * canvas' own bounds when a node is laid out close to an edge.
+ */
+internal fun clampGraphLabelPlacement(
+    nodeCenterX: Float,
+    nodeBaselineY: Float,
+    labelWidth: Float,
+    canvasWidth: Float,
+    canvasHeight: Float,
+    fontAscent: Float,
+    fontDescent: Float,
+    edgePadding: Float
+): GraphLabelPlacement {
+    val safeCanvasWidth = canvasWidth.coerceAtLeast(0f)
+    val safeCanvasHeight = canvasHeight.coerceAtLeast(0f)
+    val safeLabelWidth = labelWidth.coerceAtLeast(0f)
+    val safeEdgePadding = edgePadding.coerceAtLeast(0f)
+
+    val minCenterX = safeEdgePadding + safeLabelWidth / 2f
+    val maxCenterX = safeCanvasWidth - safeEdgePadding - safeLabelWidth / 2f
+    val centerX = if (maxCenterX >= minCenterX) {
+        nodeCenterX.coerceIn(minCenterX, maxCenterX)
+    } else {
+        safeCanvasWidth / 2f
+    }
+
+    val minBaseline = safeEdgePadding - fontAscent
+    val maxBaseline = safeCanvasHeight - safeEdgePadding - fontDescent
+    val baselineY = if (maxBaseline >= minBaseline) {
+        nodeBaselineY.coerceIn(minBaseline, maxBaseline)
+    } else {
+        safeCanvasHeight / 2f
+    }
+
+    return GraphLabelPlacement(centerX = centerX, baselineY = baselineY)
+}
+
+private fun fitGraphLabelText(
+    rawText: String,
+    paint: android.graphics.Paint,
+    maxWidth: Float
+): String {
+    if (rawText.isBlank() || maxWidth <= 0f || paint.measureText(rawText) <= maxWidth) {
+        return if (maxWidth > 0f) rawText else ""
+    }
+
+    val ellipsisWidth = paint.measureText(GRAPH_LABEL_ELLIPSIS)
+    if (ellipsisWidth > maxWidth) return ""
+    val prefixWidth = maxWidth - ellipsisWidth
+    val prefixLength = paint.breakText(rawText, true, prefixWidth, null)
+    return rawText.take(prefixLength).trimEnd() + GRAPH_LABEL_ELLIPSIS
+}
+
 private const val NODE_RADIUS_DP = 17f
+private const val GRAPH_LABEL_EDGE_PADDING_DP = 10f
+private const val GRAPH_LABEL_ELLIPSIS = "…"

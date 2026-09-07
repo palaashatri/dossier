@@ -46,6 +46,13 @@ import io.dossier.app.ui.theme.NeuralTheme
 
 enum class HudLevel { OK, WARN, CRIT, INFO }
 
+private fun HudLevel.accessibilityDescription(): String = when (this) {
+    HudLevel.OK -> "Positive status"
+    HudLevel.WARN -> "Warning status"
+    HudLevel.CRIT -> "Critical status"
+    HudLevel.INFO -> "Informational status"
+}
+
 @Composable
 fun hudLevelColor(level: HudLevel): Color = when (level) {
     HudLevel.OK -> NeuralTheme.Emerald
@@ -105,6 +112,10 @@ fun HudStatusPill(
         modifier = modifier
             .background(color.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
             .border(0.8.dp, color.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+            .semantics {
+                // The pill's severity is otherwise encoded only by its color.
+                stateDescription = level.accessibilityDescription()
+            }
             .padding(horizontal = 8.dp, vertical = 5.dp)
     )
 }

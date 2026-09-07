@@ -1,41 +1,73 @@
 package io.dossier.app.data.platform
 
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.QueryCapability
 import io.dossier.app.domain.model.Platform
 import io.dossier.app.domain.model.PlatformProfileTemplate
 
-/**
- * Public profile registry.
- *
- * `shouldFetchByDefault=false` means the platform is still supported for explicit
- * URLs and discovered pivots, but is not sprayed for every generated username.
- * This avoids spending the scan budget on destinations that are consistently
- * login-gated, numeric-ID-only, or non-public.
- */
-val PLATFORMS = listOf(
-    PlatformProfileTemplate(Platform.GitHub, "https://github.com/{username}", false, true),
-    PlatformProfileTemplate(Platform.Instagram, "https://www.instagram.com/{username}/", false, true),
-    PlatformProfileTemplate(Platform.Facebook, "https://www.facebook.com/{username}", true, false),
-    PlatformProfileTemplate(Platform.X, "https://x.com/{username}", false, true),
-    PlatformProfileTemplate(Platform.Reddit, "https://www.reddit.com/user/{username}", false, true),
-    PlatformProfileTemplate(Platform.StackOverflow, "https://stackoverflow.com/users/{username}", false, false),
-    PlatformProfileTemplate(Platform.TikTok, "https://www.tiktok.com/@{username}", false, true),
-    PlatformProfileTemplate(Platform.YouTube, "https://www.youtube.com/@{username}", false, true),
-    PlatformProfileTemplate(Platform.Medium, "https://medium.com/@{username}", false, true),
-    PlatformProfileTemplate(Platform.LinkedIn, "https://www.linkedin.com/in/{username}", true, false),
-    PlatformProfileTemplate(Platform.Pinterest, "https://www.pinterest.com/{username}/", false, true),
-    PlatformProfileTemplate(Platform.Telegram, "https://t.me/{username}", false, true),
-    PlatformProfileTemplate(Platform.Bluesky, "https://bsky.app/profile/{username}", false, true),
-    PlatformProfileTemplate(Platform.Mastodon, "https://mastodon.social/@{username}", false, true),
-    PlatformProfileTemplate(Platform.DevTo, "https://dev.to/{username}", false, true),
-    PlatformProfileTemplate(Platform.Twitch, "https://www.twitch.tv/{username}", false, true),
-    PlatformProfileTemplate(Platform.GitLab, "https://gitlab.com/{username}", false, true),
-    PlatformProfileTemplate(Platform.HackerNews, "https://news.ycombinator.com/user?id={username}", false, true),
-    PlatformProfileTemplate(Platform.Threads, "https://www.threads.net/@{username}", false, true),
-    PlatformProfileTemplate(Platform.Snapchat, "https://www.snapchat.com/add/{username}", false, false),
-    PlatformProfileTemplate(Platform.Discord, "https://discord.com/users/{username}", false, false),
+private data class LegacyProviderEntry(
+    val providerId: String,
+    val platform: Platform,
+    val urlPattern: String,
+    val requiresLoginUsually: Boolean
 )
 
-data class ResolvedProfile(val platform: Platform, val username: String, val url: String)
+private val LEGACY_PROVIDER_ENTRIES: List<LegacyProviderEntry> = ProviderCatalogV2.definitions
+    .asSequence()
+    .filter { definition ->
+        definition.profileUrlTemplate != null &&
+            QueryCapability.Username in definition.queryCapabilities &&
+            definition.legacyTemplateCompatible
+    }
+    .map { definition ->
+        LegacyProviderEntry(
+            providerId = definition.id,
+            platform = definition.legacyPlatformName
+                ?.let { name -> runCatching { Platform.valueOf(name) }.getOrNull() }
+                ?: Platform.Website,
+            urlPattern = requireNotNull(definition.profileUrlTemplate),
+            requiresLoginUsually = "authentication-often-required" in definition.tags
+        )
+    }
+    .toList()
+
+/**
+ * Compatibility view consumed by the existing ProfileScanner and HandleExtractor.
+ *
+ * Discovery Fabric v2 is authoritative for provider metadata. The list keeps
+ * all resolvable templates available for explicit URLs, while
+ * shouldFetchByDefault is computed from the currently selected real scan plan.
+ * This lets Quick/Standard/Deep/Exhaustive alter actual provider fan-out without
+ * duplicating the legacy scanner or faking progress totals.
+ */
+val PLATFORMS: List<PlatformProfileTemplate> = object : AbstractList<PlatformProfileTemplate>() {
+    override val size: Int
+        get() = LEGACY_PROVIDER_ENTRIES.size
+
+    override fun get(index: Int): PlatformProfileTemplate {
+        val entry = LEGACY_PROVIDER_ENTRIES[index]
+        val plannedIds = ProviderCatalogV2
+            .plan(DiscoveryScanPreferences.selectedMode.value)
+            .providers
+            .asSequence()
+            .map { it.id }
+            .toSet()
+        return PlatformProfileTemplate(
+            platform = entry.platform,
+            urlPattern = entry.urlPattern,
+            requiresLoginUsually = entry.requiresLoginUsually,
+            shouldFetchByDefault = entry.providerId in plannedIds,
+            providerId = entry.providerId
+        )
+    }
+}
+
+data class ResolvedProfile(
+    val platform: Platform,
+    val username: String,
+    val url: String,
+    val providerId: String? = null
+)
 
 /** Best-effort mapping from a public profile URL to a platform and handle. */
 fun resolveProfileUrl(rawUrl: String): ResolvedProfile? {
@@ -76,7 +108,7 @@ fun resolveProfileUrl(rawUrl: String): ResolvedProfile? {
     val normalizedHost = hostAliases[host] ?: host
 
     for (template in PLATFORMS) {
-        if (template.platform == Platform.Website) continue
+        if (template.platform == Platform.Website && template.urlPattern.contains("{username}").not()) continue
         val pattern = template.urlPattern
         val patternHost = pattern
             .replace("https://", "", ignoreCase = true)
@@ -84,7 +116,7 @@ fun resolveProfileUrl(rawUrl: String): ResolvedProfile? {
             .replace("www.", "", ignoreCase = true)
             .substringBefore("/")
             .lowercase()
-        if (patternHost.isBlank()) continue
+        if (patternHost.isBlank() || patternHost.contains("{username}")) continue
 
         val hostMatches = normalizedHost == patternHost ||
             host == patternHost ||
@@ -97,7 +129,12 @@ fun resolveProfileUrl(rawUrl: String): ResolvedProfile? {
         if (pattern.contains("?id=$placeholder")) {
             val idValue = query.substringAfter("id=", "").substringBefore("&").trim()
             if (idValue.isNotBlank() && idValue.length >= 2) {
-                return ResolvedProfile(template.platform, idValue, template.urlPattern.replace(placeholder, idValue))
+                return ResolvedProfile(
+                    template.platform,
+                    idValue,
+                    template.urlPattern.replace(placeholder, idValue),
+                    template.providerId
+                )
             }
         } else {
             val patternPath = pattern
@@ -120,7 +157,12 @@ fun resolveProfileUrl(rawUrl: String): ResolvedProfile? {
             val handle = handleSegment.removePrefix("@")
             if (handle.length < 2) continue
             if (handle.equals("www", true) || handle.equals(host, true)) continue
-            return ResolvedProfile(template.platform, handle, template.urlPattern.replace(placeholder, handle))
+            return ResolvedProfile(
+                template.platform,
+                handle,
+                template.urlPattern.replace(placeholder, handle),
+                template.providerId
+            )
         }
     }
     return null

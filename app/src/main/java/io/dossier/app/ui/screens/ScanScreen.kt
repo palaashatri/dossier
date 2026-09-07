@@ -34,6 +34,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -43,6 +45,11 @@ import io.dossier.app.data.face.FaceCorrelationConsentStore
 import io.dossier.app.data.face.FaceCorrelationModelPack
 import io.dossier.app.data.face.FaceCorrelationSessionPolicy
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.search.hasUsableUniversalSeed
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
+import io.dossier.app.domain.discovery.ScanRequest
+import io.dossier.app.domain.scanner.BackgroundScanWorker
 import io.dossier.app.domain.scanner.ScanSession
 import io.dossier.app.ui.components.AnimatedObsidianBackground
 import io.dossier.app.ui.components.LottieLoop
@@ -63,8 +70,10 @@ import kotlinx.coroutines.launch
 @Composable
 fun ScanScreen(
     onScanComplete: () -> Unit,
+    onScanFailed: () -> Unit,
     onScanCancelled: () -> Unit,
-    onInvalidInput: () -> Unit = onScanCancelled
+    onInvalidInput: () -> Unit = onScanCancelled,
+    onScanBackgrounded: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -131,11 +140,24 @@ fun ScanScreen(
         liveLogs.add(visualMode)
         liveLogs.add("Starting scan…")
         if (deepResearch) liveLogs.add("Deep Research enabled — following linked sites")
-        ScanSession.startScan(context, input, deepResearch = deepResearch)
+        coroutineScope.launch {
+            ScanCoordinatorRuntime.start(
+                context = context,
+                request = ScanRequest(
+                    input = input,
+                    mode = DiscoveryScanPreferences.selectedMode.value,
+                    deepResearch = deepResearch
+                )
+            )
+        }
     }
 
     LaunchedEffect(progressText) {
-        if (progressText.isNotBlank() && liveLogs.lastOrNull() != progressText) {
+        if (
+            (hasStarted || isScanning) &&
+            progressText.isNotBlank() &&
+            liveLogs.lastOrNull() != progressText
+        ) {
             liveLogs.add(friendlyStage(progressText))
         }
     }
@@ -152,9 +174,9 @@ fun ScanScreen(
         FaceCorrelationSessionPolicy.useBasicMatching()
         val resume = ScanSession.loadResumePoint(context)
         val input = ScanSession.tempInput ?: ScanSession.currentInput.value ?: resume?.first
-        if (input == null || !hasUsableIdentityInput(input)) {
-            startError = "No valid identity input was supplied. Return to Identity Setup and enter at least one name, username, email, phone number, or profile URL."
-            liveLogs.add("Scan not started: identity input is missing")
+        if (input == null || !input.hasUsableUniversalSeed()) {
+            startError = "No usable search seed was supplied. Return to Search and enter text or choose a photo."
+            liveLogs.add("Scan not started: search seed is missing")
             return@LaunchedEffect
         }
 
@@ -189,10 +211,11 @@ fun ScanScreen(
                 !cancelledByUser &&
                 progressText != "SCAN_CANCELLED"
             ) {
-                liveLogs.add("Scan complete.")
+                val failed = progressText.startsWith(BackgroundScanWorker.STAGE_FAILED)
+                liveLogs.add(if (failed) "Scan failed." else "Scan complete.")
                 navigationCompleted = true
                 delay(300)
-                onScanComplete()
+                if (failed) onScanFailed() else onScanComplete()
             }
         }
     }
@@ -385,7 +408,7 @@ fun ScanScreen(
                             .fillMaxWidth()
                             .height(48.dp)
                     ) {
-                        Text("RETURN TO IDENTITY SETUP", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text("RETURN TO SEARCH", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     }
                 }
 
@@ -412,12 +435,40 @@ fun ScanScreen(
 
                 if (isScanning) {
                     Spacer(modifier = Modifier.height(12.dp))
+                    onScanBackgrounded?.let { backgroundScan ->
+                        OutlinedButton(
+                            onClick = backgroundScan,
+                            border = BorderStroke(
+                                1.dp,
+                                NeuralTheme.Cobalt.copy(alpha = 0.85f)
+                            ),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = NeuralTheme.Cobalt
+                            ),
+                            shape = io.dossier.app.ui.theme.DossierButtonShape,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp)
+                                .semantics {
+                                    contentDescription =
+                                        "Continue using Dossier while this scan runs in the background"
+                                }
+                        ) {
+                            Text(
+                                text = "CONTINUE IN BACKGROUND",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                letterSpacing = 0.7.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
                     OutlinedButton(
                         onClick = {
                             FaceCorrelationSessionPolicy.useBasicMatching()
                             cancelledByUser = true
                             navigationCompleted = true
-                            ScanSession.cancelScan()
+                            ScanCoordinatorRuntime.cancel()
                             onScanCancelled()
                         },
                         border = BorderStroke(1.2.dp, NeuralTheme.Crimson.copy(alpha = 0.8f)),
@@ -587,14 +638,6 @@ private fun FaceCorrelationChoiceDialog(
     )
 }
 
-private fun hasUsableIdentityInput(input: IdentityInput): Boolean =
-    input.fullName.isNotBlank() ||
-        !input.primaryUsername.isNullOrBlank() ||
-        input.usernames.any { it.isNotBlank() } ||
-        input.emails.any { it.isNotBlank() } ||
-        input.phones.any { it.isNotBlank() } ||
-        input.profileUrls.any { it.isNotBlank() }
-
 private fun formatFacePackSize(bytes: Long): String =
     "%.1f MB".format(bytes.toDouble() / (1024.0 * 1024.0))
 
@@ -607,6 +650,7 @@ private fun friendlyStage(raw: String): String = when {
     raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating analysis"
     raw.contains("AUDITING", ignoreCase = true) -> "Auditing place image metadata"
     raw.contains("CANCELLED", ignoreCase = true) -> "Scan cancelled"
+    raw.contains("FAILED", ignoreCase = true) -> "Scan failed"
     else -> raw.lowercase().replace('_', ' ')
 }
 
@@ -619,5 +663,6 @@ private fun friendlyStageLabel(raw: String): String = when {
     raw.contains("COMPILING", ignoreCase = true) -> "Compiling report"
     raw.contains("GENERATING_AI", ignoreCase = true) -> "Generating analysis"
     raw.contains("CANCELLED", ignoreCase = true) -> "Cancelled"
+    raw.contains("FAILED", ignoreCase = true) -> "Failed"
     else -> raw.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
 }

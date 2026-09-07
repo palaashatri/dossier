@@ -2,6 +2,10 @@ package io.dossier.app.data.face
 
 import android.content.Context
 import android.net.Uri
+import io.dossier.app.domain.model.FaceComparisonBackend
+import io.dossier.app.domain.model.FaceComparisonCalibrationState
+import io.dossier.app.domain.model.FaceComparisonProvenance
+import io.dossier.app.domain.model.FaceComparisonQuality
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -96,7 +100,10 @@ class YuNetSFaceCorrelationEngine(
 
     private sealed class Preparation {
         data class Ready(val face: PreparedFace) : Preparation()
-        data class Rejected(val reason: String) : Preparation()
+        data class Rejected(
+            val reason: String,
+            val quality: FaceComparisonQuality? = null
+        ) : Preparation()
     }
 
     private sealed class FaceSelection {
@@ -121,16 +128,26 @@ class YuNetSFaceCorrelationEngine(
         profileUrl: String,
         runtime: Runtime
     ): FaceConsistencyMatch {
+        val thresholds = calibrationStore.getThresholds()
+        val baseProvenance = thresholds.toFaceComparisonProvenance()
         val selfie = prepare(selfieUri, "selected selfie", runtime)
         if (selfie is Preparation.Rejected) {
-            return rejected(profileUrl, selfie.reason)
+            return rejected(
+                profileUrl,
+                selfie.reason,
+                baseProvenance.copy(selfieQuality = selfie.quality)
+            )
         }
         val selfieFace = (selfie as Preparation.Ready).face
 
         val profile = prepare(profileUri, "profile image", runtime)
         if (profile is Preparation.Rejected) {
             selfieFace.close()
-            return rejected(profileUrl, profile.reason)
+            return rejected(
+                profileUrl,
+                profile.reason,
+                baseProvenance.copy(profileQuality = profile.quality)
+            )
         }
         val profileFace = (profile as Preparation.Ready).face
 
@@ -140,7 +157,6 @@ class YuNetSFaceCorrelationEngine(
                 profileFace.feature,
                 FaceRecognizerSF.FR_COSINE
             ).toFloat().coerceIn(-1f, 1f)
-            val thresholds = calibrationStore.getThresholds()
             FaceConsistencyMatch(
                 profileUrl = profileUrl,
                 // Existing report/UI surfaces model this field as a 0..1
@@ -152,6 +168,10 @@ class YuNetSFaceCorrelationEngine(
                     thresholds = thresholds,
                     selfieQuality = selfieFace.quality,
                     profileQuality = profileFace.quality
+                ),
+                provenance = baseProvenance.copy(
+                    selfieQuality = selfieFace.quality.toComparisonQuality(),
+                    profileQuality = profileFace.quality.toComparisonQuality()
                 )
             )
         } finally {
@@ -248,7 +268,8 @@ class YuNetSFaceCorrelationEngine(
             if (!quality.accepted) {
                 return Preparation.Rejected(
                     "Insufficient $label quality: ${quality.reason}. " +
-                        "${quality.summary()}."
+                        "${quality.summary()}.",
+                    quality = quality.toComparisonQuality()
                 )
             }
 
@@ -462,11 +483,13 @@ class YuNetSFaceCorrelationEngine(
 
     private fun rejected(
         profileUrl: String,
-        reason: String
+        reason: String,
+        provenance: FaceComparisonProvenance
     ): FaceConsistencyMatch = FaceConsistencyMatch(
         profileUrl = profileUrl,
         similarityScore = 0f,
-        warning = "$reason No identity conclusion was produced."
+        warning = "$reason No identity conclusion was produced.",
+        provenance = provenance
     )
 
     /**
@@ -566,3 +589,42 @@ class YuNetSFaceCorrelationEngine(
         private const val STREAM_BUFFER_BYTES = 64 * 1024
     }
 }
+
+/**
+ * Keeps the pinned model and calibration identity next to every strong-path
+ * score. Reference policies remain explicitly distinct from measured imports.
+ */
+internal fun FaceCorrelationThresholds.toFaceComparisonProvenance(
+    selfieQuality: FaceComparisonQuality? = null,
+    profileQuality: FaceComparisonQuality? = null
+): FaceComparisonProvenance = FaceComparisonProvenance(
+    backend = FaceComparisonBackend.YuNetSFace,
+    calibration = if (measured) {
+        FaceComparisonCalibrationState.Measured
+    } else {
+        FaceComparisonCalibrationState.ReferencePolicy
+    },
+    modelSource = "OpenCV Zoo YuNet 2023mar + SFace 2021dec",
+    modelHashes = listOf(
+        FaceCorrelationModelPack.YUNET.sha256,
+        FaceCorrelationModelPack.SFACE.sha256
+    ),
+    pipelineVersion = pipelineVersion,
+    selfieQuality = selfieQuality,
+    profileQuality = profileQuality
+)
+
+private fun YuNetSFaceCorrelationEngine.FaceQuality.toComparisonQuality(): FaceComparisonQuality =
+    FaceComparisonQuality(
+        accepted = accepted,
+        reason = reason,
+        detectorScore = detectorScore.finiteOrNull(),
+        faceWidth = faceWidth.finiteOrNull(),
+        faceHeight = faceHeight.finiteOrNull(),
+        eyeDistance = eyeDistance.finiteOrNull(),
+        rollDegrees = rollDegrees.finiteOrNull(),
+        brightness = brightness.finiteOrNull(),
+        sharpness = laplacianVariance.finiteOrNull()
+    )
+
+private fun Float.finiteOrNull(): Float? = takeIf { it.isFinite() }

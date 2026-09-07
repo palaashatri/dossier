@@ -1,71 +1,2889 @@
 package io.dossier.app.domain.scanner
 
 import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import io.dossier.app.data.platform.ProviderCatalogV2
+import io.dossier.app.domain.discovery.DiscoveryScanPreferences
+import io.dossier.app.domain.discovery.ProviderPlanFingerprint
+import io.dossier.app.domain.discovery.ProviderScanPlan
+import io.dossier.app.domain.discovery.ScanMode
+import io.dossier.app.domain.discovery.ScanPlanSummary
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.GeneralSecurityException
+import java.security.KeyStore
+import java.util.Base64
+import java.util.Locale
+import java.util.UUID
+import javax.crypto.AEADBadTagException
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+
+internal class ResumeCryptoFailure(
+    val reason: ResumeStorageReason,
+    cause: Throwable? = null
+) : Exception(cause)
+
+internal class BoundedReadException : Exception()
 
 /**
- * Resumable-scan checkpoint (ROADMAP M16).
+ * Durable, allow-listed boundaries owned by the scan coordinator.
  *
- * Persists only the *resume point* — the identity input and the deep-research
- * flag — to a single small JSON file in private storage. This is deliberately
- * NOT a full saved case (that is the explicit M13 "Save Case" action); it just
- * lets the Scan screen offer "Resume last scan" so an interrupted/cancelled run
- * can be continued without re-typing the subject. No cloud, opt-in write.
+ * These are deliberately semantic stages rather than arbitrary progress text:
+ * no URLs, identifiers, exception messages, or provider response content may
+ * enter encrypted checkpoint metadata.  A recreated worker may safely rerun
+ * an incomplete stage; [completed] only records boundaries that were actually
+ * crossed by the prior owner.
  */
-@Serializable
-private data class ResumeMarker(
-    val fullName: String,
-    val primaryUsername: String?,
-    val usernames: List<String>,
-    val emails: List<String>,
-    val phones: List<String>,
-    val organizations: List<String>,
-    val locations: List<String>,
-    val profileUrls: List<String>,
-    val deepResearch: Boolean
+internal enum class ScanCheckpointStage(
+    val wireName: String,
+    val order: Int
+) {
+    Queued("QUEUED_BACKGROUND_SCAN", 0),
+    DiscoveringUsernames("DISCOVERING_USERNAMES", 1),
+    ComparingFaceConsistency("COMPARING_FACE_CONSISTENCY", 2),
+    CheckingBreachExposure("CHECKING_BREACH_EXPOSURE", 3),
+    BuildingEntityGraph("BUILDING_ENTITY_GRAPH", 4),
+    ScoringRelationshipConfidence("SCORING_RELATIONSHIP_CONFIDENCE", 5),
+    TracingAttackPaths("TRACING_ATTACK_PATHS", 6),
+    CompilingExposureLevels("COMPILING_EXPOSURE_LEVELS", 7),
+    CompilingExposureScores("COMPILING_EXPOSURE_SCORES", 8),
+    GeneratingAiSummary("GENERATING_AI_SUMMARY", 9),
+    PostProcessing("POST_PROCESSING", 10),
+    Completed("BACKGROUND_SCAN_COMPLETE", 11);
+
+    companion object {
+        private val BY_WIRE_NAME = entries.associateBy(ScanCheckpointStage::wireName)
+
+        fun fromWire(value: String?): ScanCheckpointStage? =
+            value?.let(BY_WIRE_NAME::get)
+    }
+}
+
+internal data class ScanCheckpoint(
+    val currentStage: ScanCheckpointStage,
+    val completedStages: List<ScanCheckpointStage>,
+    val ownerId: String?
 )
 
-internal class ScanResumeStore(private val dir: File) {
+/**
+ * Non-sensitive output shape recorded after an allow-listed stage completes.
+ *
+ * Counts are intentionally the only payload. They make a resumed run
+ * inspectable without persisting URLs, identifiers, snippets, provider
+ * responses, exception messages, or generated text in the coordinator ledger.
+ */
+internal data class ScanStageOutput(
+    val itemCount: Int,
+    val verifiedCount: Int = 0,
+    val omittedCount: Int = 0
+)
 
-    constructor(context: Context) : this(File(context.filesDir, "dossier_resume"))
+/**
+ * The allow-listed output of the breach stage.  This is deliberately a
+ * summary, not a provider response cache: no password, API key, response
+ * body, cookie, token or other credential material is accepted here.  The
+ * surrounding request record is encrypted and authenticated; the explicit
+ * request/plan/owner fields make accidental cross-generation reuse fail
+ * closed even if a caller hands the value to the wrong checkpoint boundary.
+ */
+@Serializable
+internal data class BreachStageCheckpoint(
+    val requestId: String,
+    val planFingerprint: String,
+    val ownerId: String,
+    val capturedAtEpochMillis: Long,
+    val results: List<BreachStageCheckpointResult>
+)
 
-    private val json = Json { prettyPrint = false }
-    private val file: File
-        get() = File(dir, "dossier_resume.json")
+@Serializable
+internal data class BreachStageCheckpointResult(
+    val email: String,
+    val breachCount: Int,
+    val breachTitles: List<String> = emptyList(),
+    val publicHitCount: Int = 0,
+    val publicEvidenceUrls: List<String> = emptyList(),
+    val sources: List<String> = emptyList(),
+    val note: String? = null
+)
 
-    fun save(input: IdentityInput, deepResearch: Boolean): Boolean = runCatching {
-        val marker = ResumeMarker(
-            fullName = input.fullName,
-            primaryUsername = input.primaryUsername,
-            usernames = input.usernames,
-            emails = input.emails,
-            phones = input.phones,
-            organizations = input.organizations,
-            locations = input.locations,
-            profileUrls = input.profileUrls,
-            deepResearch = deepResearch
+/**
+ * Exact, bounded output of deterministic post-processing. The serialized
+ * analysis is retained only inside the authenticated encrypted request record
+ * and can be reused after a worker retry when the stable input digest matches.
+ */
+@Serializable
+internal data class PostProcessingStageCheckpoint(
+    val requestId: String,
+    val planFingerprint: String,
+    val ownerId: String,
+    val capturedAtEpochMillis: Long,
+    val inputDigest: String,
+    val analysisJson: String
+)
+
+internal sealed interface ResumeCheckpointWriteState {
+    data class Saved(val point: ResumePoint) : ResumeCheckpointWriteState
+    data object Missing : ResumeCheckpointWriteState
+    data object StaleOwner : ResumeCheckpointWriteState
+    data class Invalid(val reason: ResumeInvalidReason) : ResumeCheckpointWriteState
+    data class StorageFailure(val reason: ResumeStorageReason) : ResumeCheckpointWriteState
+}
+
+internal interface DirectorySyncer {
+    fun sync(dir: File)
+}
+
+internal class AndroidDirectorySyncer : DirectorySyncer {
+    override fun sync(dir: File) {
+        val fd = android.system.Os.open(
+            dir.absolutePath,
+            android.system.OsConstants.O_RDONLY,
+            0
         )
-        file.writeText(json.encodeToString(marker))
-    }.isSuccess
+        try {
+            android.system.Os.fsync(fd)
+        } finally {
+            android.system.Os.close(fd)
+        }
+    }
 
-    fun load(): Pair<IdentityInput, Boolean>? = runCatching {
-        if (!file.exists()) return null
-        val marker = json.decodeFromString<ResumeMarker>(file.readText())
-        IdentityInput(
+}
+
+/**
+ * Encrypted local resume state for an interrupted scan.
+ *
+ * The old [dossier_resume.json] marker is read only by the bounded migration
+ * path below. New records contain the complete [IdentityInput] and scan
+ * options inside AES-GCM ciphertext. The only unencrypted state is an opaque
+ * UUID pointer and UUID-named encrypted record files.
+ */
+internal class ScanResumeStore internal constructor(
+    private val recordsDir: File,
+    private val legacyDir: File,
+    private val crypto: ResumeCrypto,
+    private val nowMillis: () -> Long,
+    private val idFactory: () -> String,
+    private val dirSyncer: DirectorySyncer
+) {
+
+    /** Production constructor. It never uses the JVM test crypto. */
+    constructor(context: Context) : this(
+        File(context.applicationContext.filesDir, RECORDS_DIRECTORY),
+        File(context.applicationContext.filesDir, LEGACY_DIRECTORY),
+        AndroidKeystoreResumeCrypto(),
+        { System.currentTimeMillis() },
+        { UUID.randomUUID().toString() },
+        AndroidDirectorySyncer()
+    )
+
+    /** JVM seam: callers must provide crypto explicitly; no insecure default exists. */
+    internal constructor(
+        recordsDir: File,
+        crypto: ResumeCrypto,
+        nowMillis: () -> Long = { System.currentTimeMillis() },
+        idFactory: () -> String = { UUID.randomUUID().toString() },
+        legacyDir: File = recordsDir,
+        dirSyncer: DirectorySyncer = object : DirectorySyncer { override fun sync(dir: File) {} }
+    ) : this(recordsDir, legacyDir, crypto, nowMillis, idFactory, dirSyncer)
+
+    private val json = Json {
+        encodeDefaults = true
+        explicitNulls = false
+        ignoreUnknownKeys = false
+        coerceInputValues = false
+    }
+
+    /** Source-compatible facade used by ScanSession. */
+    fun save(input: IdentityInput, deepResearch: Boolean): Boolean =
+        saveDetailed(input, deepResearch, false) is ResumeWriteState.Saved
+
+    /**
+     * Source-compatible facade used by IdentityScreen/ScanScreen. It retains
+     * the historical mode side effect only after a valid encrypted load.
+     */
+    fun load(): Pair<IdentityInput, Boolean>? = when (val state = loadDetailed()) {
+        is ResumeReadState.Available -> {
+            DiscoveryScanPreferences.setMode(state.point.scanMode)
+            state.point.input to state.point.deepResearch
+        }
+        else -> null
+    }
+
+    /** Source-compatible facade used by ScanSession. */
+    fun clear(): Boolean = clearDetailed() is ResumeWriteState.Cleared
+
+    internal fun saveRequestDetailed(
+        input: IdentityInput,
+        deepResearch: Boolean,
+        strongFaceCorrelation: Boolean
+    ): ResumeWriteState = saveDetailed(input, deepResearch, strongFaceCorrelation)
+
+    /**
+     * Writes an encrypted request record without making it the active request.
+     *
+     * This is the first half of the checkpoint A -> B hand-off.  The active
+     * pointer and any record it names are deliberately left untouched until
+     * [promotePreparedRequest] succeeds.
+     */
+    internal fun prepareRequestDetailed(
+        input: IdentityInput,
+        deepResearch: Boolean,
+        strongFaceCorrelation: Boolean
+    ): ResumeWriteState = synchronized(STORE_LOCK) {
+        return try {
+            val inputIssue = validateInput(input)
+            if (inputIssue != null) return ResumeWriteState.Invalid(inputIssue)
+            if (hasClearAllGuard()) {
+                return ResumeWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+            }
+
+            val id = idFactory()
+            if (!isValidRequestId(id)) {
+                return ResumeWriteState.Invalid(ResumeInvalidReason.InvalidRequestId)
+            }
+
+            val now = nowMillis()
+            val expiresAt = expiresAt(now)
+            val scanMode = DiscoveryScanPreferences.selectedMode.value
+            val providerPlan = ProviderCatalogV2.plan(scanMode)
+            val scanPlan = ScanPlanSummary.from(providerPlan)
+            val point = ResumePoint(
+                requestId = id,
+                input = input,
+                deepResearch = deepResearch,
+                scanMode = scanMode,
+                strongFaceCorrelation = strongFaceCorrelation,
+                createdAtEpochMillis = now,
+                expiresAtEpochMillis = expiresAt,
+                planFingerprint = ProviderPlanFingerprint.forPlan(providerPlan),
+                plannedProviderIds = ProviderPlanFingerprint.persistedProviderIds(providerPlan),
+                plannedProviderCount = providerPlan.providers.size,
+                scanPlan = scanPlan
+            )
+            val record = ResumeRecord(
+                formatVersion = FORMAT_VERSION,
+                requestId = point.requestId,
+                createdAtEpochMillis = point.createdAtEpochMillis,
+                updatedAtEpochMillis = now,
+                expiresAtEpochMillis = expiresAt,
+                input = point.input,
+                deepResearch = point.deepResearch,
+                scanMode = point.scanMode,
+                strongFaceCorrelation = point.strongFaceCorrelation,
+                planFingerprint = point.planFingerprint,
+                plannedProviderIds = point.plannedProviderIds,
+                plannedProviderCount = point.plannedProviderCount,
+                scanPlan = point.scanPlan
+            )
+
+            // Capture this before publishing the prepared marker. The marker
+            // itself is durable state, so consulting canCreateKey() after it
+            // is written would incorrectly make a first fresh save look like
+            // an existing-generation recovery and deny keystore key creation.
+            discardStaleMarkerOnlyState()
+            val allowKeyCreation = canCreateKey()
+
+            // The opaque marker is committed before B. A crash can therefore
+            // leave a harmless marker-only entry, but never an unmarked
+            // prepared record that generic orphan recovery could activate.
+            persistPreparedMarker(record.requestId)
+            persistPreparedRecord(record, allowKeyCreation)
+            try {
+                // Once a new encrypted request exists, retaining the legacy
+                // plaintext marker is never necessary for recovery.
+                deleteLegacyOrThrow()
+            } catch (error: Exception) {
+                // If unlink may already have committed and only its directory
+                // fsync failed, deleting B as well would destroy both recovery
+                // copies. Clean B only while the legacy marker is still
+                // observably present; otherwise retain encrypted B for retry.
+                if (legacyFile.exists()) {
+                    val cleanupReason = cleanupPreparedRecord(record.requestId)
+                    if (cleanupReason != null) {
+                        throw ResumeCryptoFailure(cleanupReason, error)
+                    }
+                }
+                when (error) {
+                    is ResumeCryptoFailure -> throw error
+                    else -> throw ResumeCryptoFailure(ResumeStorageReason.LegacyDeletionFailure, error)
+                }
+            }
+            // Keep the existing result type so callers can consume the
+            // request id without a second API-specific wrapper.
+            ResumeWriteState.Saved(point)
+        } catch (error: ResumeCryptoFailure) {
+            ResumeWriteState.StorageFailure(error.reason)
+        } catch (error: ResumeInvalidOperation) {
+            ResumeWriteState.Invalid(error.reason)
+        } catch (_: SerializationException) {
+            ResumeWriteState.StorageFailure(ResumeStorageReason.SerializationFailure)
+        } catch (_: GeneralSecurityException) {
+            ResumeWriteState.StorageFailure(ResumeStorageReason.KeyFailure)
+        } catch (_: Exception) {
+            ResumeWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+    }
+
+    /**
+     * Loads exactly one encrypted record without consulting the active
+     * pointer.  An invalid/expired prepared record may be removed, but the
+     * cleanup path never removes a different active generation.
+     */
+    internal fun loadPreparedRequestDetailed(requestId: String): ResumeReadState = synchronized(STORE_LOCK) {
+        if (!isValidRequestId(requestId)) {
+            return@synchronized ResumeReadState.Invalid(ResumeInvalidReason.InvalidRequestId)
+        }
+        if (hasClearAllGuard() || hasClearTombstone(requestId)) {
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        return@synchronized try {
+            when (val state = loadRecord(requestId)) {
+                ResumeReadState.Expired,
+                is ResumeReadState.Invalid -> {
+                    val cleanupFailure = cleanupPreparedRecord(requestId)
+                    cleanupFailure?.let(ResumeReadState::StorageFailure) ?: state
+                }
+                else -> state
+            }
+        } catch (error: ResumeCryptoFailure) {
+            ResumeReadState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+    }
+
+    /**
+     * Promotes a verified prepared record to the active pointer.  The
+     * boolean facade is intentionally conservative: true is returned only
+     * after the pointer switch and previous-record deletion both complete.
+     */
+    internal fun promotePreparedRequest(requestId: String): Boolean =
+        promotePreparedRequestDetailed(requestId) is ResumeReadState.Available
+
+    /** Typed promotion result for callers that need the failure reason. */
+    internal fun promotePreparedRequestDetailed(requestId: String): ResumeReadState = synchronized(STORE_LOCK) {
+        if (!isValidRequestId(requestId)) {
+            return@synchronized ResumeReadState.Invalid(ResumeInvalidReason.InvalidRequestId)
+        }
+        if (hasClearAllGuard() || hasClearTombstone(requestId)) {
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+
+        val prepared = try {
+            loadRecord(requestId)
+        } catch (error: ResumeCryptoFailure) {
+            return@synchronized ResumeReadState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        when (prepared) {
+            is ResumeReadState.Available -> Unit
+            ResumeReadState.Expired,
+            is ResumeReadState.Invalid -> {
+                val cleanupFailure = cleanupPreparedRecord(requestId)
+                return@synchronized cleanupFailure?.let(ResumeReadState::StorageFailure) ?: prepared
+            }
+            ResumeReadState.Missing,
+            is ResumeReadState.StorageFailure -> return@synchronized prepared
+        }
+
+        val priorPointer = try {
+            readPointer()
+        } catch (error: ResumeCryptoFailure) {
+            return@synchronized ResumeReadState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.PointerFailure)
+        }
+        if (priorPointer != null && !isValidRequestId(priorPointer)) {
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.PointerFailure)
+        }
+        if (priorPointer != null &&
+            priorPointer != requestId &&
+            hasClearTombstone(priorPointer)
+        ) {
+            // A pointer naming a generation already under explicit clear is
+            // not a recoverable prior generation. Do not switch to B while
+            // that pair's state is ambiguous.
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        if (priorPointer != requestId && !hasValidPreparedMarker(requestId)) {
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val hasUnexpectedRecord = try {
+            hasUnexpectedRecoverableRecord(requestId, priorPointer)
+        } catch (error: ResumeCryptoFailure) {
+            return@synchronized ResumeReadState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        if (hasUnexpectedRecord) {
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        // A valid prepared record that is already current is safe to treat as
+        // an idempotent promotion; importantly, no record is deleted.
+        if (priorPointer == requestId) {
+            return@synchronized try {
+                deleteLegacyOrThrow()
+                deletePreparedMarker(requestId)
+                prepared
+            } catch (error: ResumeCryptoFailure) {
+                ResumeReadState.StorageFailure(error.reason)
+            } catch (_: Exception) {
+                ResumeReadState.StorageFailure(ResumeStorageReason.LegacyDeletionFailure)
+            }
+        }
+
+        return@synchronized try {
+            val priorPointerBytes = try {
+                if (pointerFile.exists()) pointerFile.readBounded(MAX_POINTER_BYTES) else null
+            } catch (_: BoundedReadException) {
+                return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.PointerFailure)
+            } catch (_: Exception) {
+                return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.PointerFailure)
+            }
+            val priorRecordBackup = if (priorPointer != null) {
+                val priorFile = recordFile(priorPointer)
+                if (priorFile.exists()) {
+                    try {
+                        PriorRecordBackup(
+                            file = priorFile,
+                            bytes = priorFile.readBounded(MAX_ENVELOPE_BYTES),
+                            pointerBytes = priorPointerBytes ?: priorPointer.toByteArray(Charsets.UTF_8)
+                        )
+                    } catch (_: BoundedReadException) {
+                        return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+                    } catch (_: Exception) {
+                        return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+                    }
+                } else {
+                    return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+                }
+            } else {
+                null
+            }
+
+            try {
+                atomicWrite(pointerFile, requestId.toByteArray(Charsets.UTF_8))
+            } catch (error: Exception) {
+                // atomicWrite may have moved the file before a directory-sync
+                // failure. Restore the prior pointer as far as the filesystem
+                // permits, while leaving the prepared record available.
+                try {
+                    if (priorPointerBytes != null) {
+                        atomicWrite(pointerFile, priorPointerBytes)
+                    } else {
+                        deleteFileDurably(pointerFile, ResumeStorageReason.PointerFailure)
+                    }
+                } catch (rollback: Throwable) {
+                    error.addSuppressed(rollback)
+                }
+                return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.PointerFailure)
+            }
+
+            if (priorRecordBackup != null && priorRecordBackup.file.name != recordFile(requestId).name) {
+                try {
+                    deleteFileDurably(priorRecordBackup.file, ResumeStorageReason.IoFailure)
+                } catch (error: Throwable) {
+                    val rollbackFailures = rollbackPromotion(
+                        requestId = requestId,
+                        priorPointerBytes = priorPointerBytes,
+                        priorRecordBackup = priorRecordBackup
+                    )
+                    rollbackFailures.forEach(error::addSuppressed)
+                    val reason = (error as? ResumeCryptoFailure)?.reason ?: ResumeStorageReason.IoFailure
+                    return@synchronized ResumeReadState.StorageFailure(reason)
+                }
+            }
+
+            try {
+                deleteLegacyOrThrow()
+                deletePreparedMarker(requestId)
+                prepared
+            } catch (error: ResumeCryptoFailure) {
+                ResumeReadState.StorageFailure(error.reason)
+            } catch (_: Exception) {
+                ResumeReadState.StorageFailure(ResumeStorageReason.LegacyDeletionFailure)
+            }
+        } catch (error: ResumeCryptoFailure) {
+            ResumeReadState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+    }
+
+    /**
+     * Discards only the exact non-active prepared record.  Any malformed
+     * existing pointer causes a fail-closed result because the active
+     * generation cannot be identified safely.
+     */
+    internal fun discardPreparedRequest(requestId: String): Boolean = synchronized(STORE_LOCK) {
+        if (!isValidRequestId(requestId)) return@synchronized false
+        if (hasClearAllGuard()) return@synchronized false
+        return@synchronized try {
+            val pointer = readPointer()
+            if (pointer != null && !isValidRequestId(pointer)) return@synchronized false
+            if (pointer == requestId) return@synchronized false
+            persistClearTombstone(requestId)
+            deleteFileDurably(recordFile(requestId), ResumeStorageReason.IoFailure)
+            deletePreparedMarker(requestId)
+            deleteClearTombstone(requestId)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    internal fun loadRequestDetailed(requestId: String): ResumeReadState = synchronized(STORE_LOCK) {
+        if (!isValidRequestId(requestId)) {
+            return@synchronized ResumeReadState.Invalid(ResumeInvalidReason.InvalidRequestId)
+        }
+        if (hasClearAllGuard() || hasClearTombstone(requestId)) {
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val pointer = try {
+            readPointer()
+        } catch (error: ResumeCryptoFailure) {
+            return@synchronized ResumeReadState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        if (pointer != requestId) return@synchronized ResumeReadState.Missing
+
+        when (val state = loadRecord(requestId)) {
+            ResumeReadState.Expired,
+            is ResumeReadState.Invalid -> {
+                val cleanupFailure = cleanupActiveRecord(requestId)
+                cleanupFailure?.let(ResumeReadState::StorageFailure) ?: state
+            }
+            ResumeReadState.Missing -> {
+                val cleanupFailure = cleanupActiveRecord(requestId)
+                cleanupFailure?.let(ResumeReadState::StorageFailure) ?: ResumeReadState.Missing
+            }
+            else -> state
+        }
+    }
+
+    /**
+     * Binds the current WorkManager owner to the encrypted request record and
+     * resets only the in-flight stage.  Completed boundaries remain intact so
+     * a recreated worker can distinguish work that must be rerun from work
+     * that was durably crossed before process death.
+     *
+     * The lifecycle manager calls this while holding its exact owner/generation
+     * compare-and-swap lock.  The store itself still validates both UUIDs and
+     * the active opaque pointer before replacing ciphertext.
+     */
+    internal fun bindCheckpointOwner(
+        requestId: String,
+        ownerId: String
+    ): ResumeCheckpointWriteState = synchronized(STORE_LOCK) {
+        if (!isValidRequestId(requestId) || !isValidRequestId(ownerId)) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(
+                ResumeInvalidReason.InvalidRequestId
+            )
+        }
+        if (hasClearAllGuard() || hasClearTombstone(requestId)) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(
+                ResumeStorageReason.IoFailure
+            )
+        }
+        val pointer = runCatching { readPointer() }.getOrElse {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(
+                ResumeStorageReason.PointerFailure
+            )
+        }
+        if (pointer != requestId) return@synchronized ResumeCheckpointWriteState.Missing
+
+        val state = try {
+            loadRecord(requestId)
+        } catch (error: ResumeCryptoFailure) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val available = state as? ResumeReadState.Available
+            ?: return@synchronized state.toCheckpointWriteState()
+        val record = recordForPoint(available.point)
+        val now = runCatching { nowMillis() }.getOrElse {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val rebound = record.copy(
+            updatedAtEpochMillis = now.coerceAtLeast(record.updatedAtEpochMillis),
+            checkpointStage = ScanCheckpointStage.Queued.wireName,
+            checkpointOwnerId = ownerId,
+            // A paused generation may be resumed by a fresh WorkManager UUID.
+            // Retain a completed breach result only after validating its
+            // original request/plan/owner binding, then rebind it to the new
+            // exact owner. Any malformed or cross-request value is discarded
+            // rather than being exposed to a retry.
+            breachCheckpoint = record.breachCheckpoint
+                ?.takeIf { isValidBreachCheckpoint(it, record, record.checkpointOwnerId) }
+                ?.copy(ownerId = ownerId),
+            faceCheckpoint = record.faceCheckpoint
+                ?.takeIf { isValidFaceCheckpoint(it, record, record.checkpointOwnerId) }
+                ?.copy(ownerId = ownerId),
+            postProcessingCheckpoint = record.postProcessingCheckpoint
+                ?.takeIf { isValidPostProcessingCheckpoint(it, record, record.checkpointOwnerId) }
+                ?.copy(ownerId = ownerId),
+            entityGraphCheckpoint = record.entityGraphCheckpoint
+                ?.takeIf { isValidEntityGraphCheckpoint(it, record, record.checkpointOwnerId) }
+                ?.copy(ownerId = ownerId),
+            relationshipConfidenceCheckpoint = record.relationshipConfidenceCheckpoint
+                ?.takeIf { isValidRelationshipConfidenceCheckpoint(it, record, record.checkpointOwnerId) }
+                ?.copy(ownerId = ownerId),
+            attackPathsCheckpoint = record.attackPathsCheckpoint
+                ?.takeIf { isValidAttackPathsCheckpoint(it, record, record.checkpointOwnerId) }
+                ?.copy(ownerId = ownerId),
+            exposureCheckpoint = record.exposureCheckpoint
+                ?.takeIf { isValidExposureCheckpoint(it, record, record.checkpointOwnerId) }
+                ?.copy(ownerId = ownerId)
+        )
+        persistUpdatedRecord(rebound)
+    }
+
+    /**
+     * Advances the exact owner's semantic checkpoint.  A stale owner can read
+     * the record but cannot overwrite a newer owner's stage.  Out-of-order
+     * callbacks never regress the durable current stage; they may still record
+     * that their lower boundary was completed.
+     */
+    internal fun advanceCheckpoint(
+        requestId: String,
+        ownerId: String,
+        stage: ScanCheckpointStage,
+        completed: Boolean,
+        output: ScanStageOutput? = null,
+        payloads: List<ScanPayloadSummary> = emptyList(),
+        breachCheckpoint: BreachStageCheckpoint? = null,
+        faceCheckpoint: FaceConsistencyStageCheckpoint? = null,
+        postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
+        entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
+        relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
+        attackPathsCheckpoint: AttackPathsStageCheckpoint? = null,
+        exposureCheckpoint: ExposureStageCheckpoint? = null
+    ): ResumeCheckpointWriteState = synchronized(STORE_LOCK) {
+        if (!isValidRequestId(requestId) || !isValidRequestId(ownerId)) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(
+                ResumeInvalidReason.InvalidRequestId
+            )
+        }
+        if (hasClearAllGuard() || hasClearTombstone(requestId)) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(
+                ResumeStorageReason.IoFailure
+            )
+        }
+        val pointer = runCatching { readPointer() }.getOrElse {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(
+                ResumeStorageReason.PointerFailure
+            )
+        }
+        if (pointer != requestId) return@synchronized ResumeCheckpointWriteState.Missing
+
+        val state = try {
+            loadRecord(requestId)
+        } catch (error: ResumeCryptoFailure) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val available = state as? ResumeReadState.Available
+            ?: return@synchronized state.toCheckpointWriteState()
+        if (available.point.checkpointOwnerId != ownerId) {
+            return@synchronized ResumeCheckpointWriteState.StaleOwner
+        }
+        if (output != null && !completed) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+        if (output != null && !isValidStageOutput(output)) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+        if (payloads.isNotEmpty() &&
+            (!completed || stage != ScanCheckpointStage.DiscoveringUsernames || !isValidPayloadSummaries(payloads))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+        if (breachCheckpoint != null &&
+            (!completed ||
+                stage != ScanCheckpointStage.CheckingBreachExposure ||
+                !isValidBreachCheckpoint(
+                    breachCheckpoint,
+                    recordForPoint(available.point),
+                    ownerId
+                ))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+        if (faceCheckpoint != null &&
+            (!completed ||
+                stage != ScanCheckpointStage.ComparingFaceConsistency ||
+                !isValidFaceCheckpoint(
+                    faceCheckpoint,
+                    recordForPoint(available.point),
+                    ownerId,
+                    requireCompletedStage = false
+                ))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+        if (postProcessingCheckpoint != null &&
+            (!completed ||
+                stage != ScanCheckpointStage.PostProcessing ||
+                !isValidPostProcessingCheckpoint(
+                    postProcessingCheckpoint,
+                    recordForPoint(available.point),
+                    ownerId
+                ))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+        if (entityGraphCheckpoint != null &&
+            (!completed ||
+                stage != ScanCheckpointStage.BuildingEntityGraph ||
+                !isValidEntityGraphCheckpoint(
+                    entityGraphCheckpoint,
+                    recordForPoint(available.point),
+                    ownerId
+                ))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+        if (relationshipConfidenceCheckpoint != null &&
+            (!completed ||
+                stage != ScanCheckpointStage.ScoringRelationshipConfidence ||
+                !isValidRelationshipConfidenceCheckpoint(
+                    relationshipConfidenceCheckpoint,
+                    recordForPoint(available.point),
+                    ownerId,
+                    requireCompletedStage = false
+                ))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+        if (attackPathsCheckpoint != null &&
+            (!completed ||
+                stage != ScanCheckpointStage.TracingAttackPaths ||
+                !isValidAttackPathsCheckpoint(
+                    attackPathsCheckpoint,
+                    recordForPoint(available.point),
+                    ownerId,
+                    requireCompletedStage = false
+                ))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+        if (exposureCheckpoint != null &&
+            (!completed ||
+                stage != ScanCheckpointStage.CompilingExposureScores ||
+                !isValidExposureCheckpoint(
+                    exposureCheckpoint,
+                    recordForPoint(available.point),
+                    ownerId,
+                    requireCompletedStage = false
+                ))
+        ) {
+            return@synchronized ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+
+        val current = available.point.checkpointStage
+        val completedStages = available.point.completedCheckpointStages
+            .toMutableList()
+        if (completed && stage !in completedStages) completedStages += stage
+        val stageOutputs = available.point.stageOutputs.toMutableMap()
+        if (completed && output != null) stageOutputs[stage] = output
+        val payloadSummaries = available.point.payloadSummaries
+            .associateBy(ScanPayloadSummary::stage)
+            .toMutableMap()
+        if (completed) payloads.forEach { payloadSummaries[it.stage] = it }
+        val retainedBreachCheckpoint = breachCheckpoint ?: available.point.breachCheckpoint
+        val retainedFaceCheckpoint = when {
+            stage == ScanCheckpointStage.ComparingFaceConsistency && completed -> faceCheckpoint
+            else -> available.point.faceCheckpoint
+        }
+        val retainedPostProcessingCheckpoint = when {
+            stage == ScanCheckpointStage.PostProcessing && completed -> postProcessingCheckpoint
+            else -> available.point.postProcessingCheckpoint
+        }
+        val retainedEntityGraphCheckpoint = when {
+            stage == ScanCheckpointStage.BuildingEntityGraph && completed -> entityGraphCheckpoint
+            else -> available.point.entityGraphCheckpoint
+        }
+        val retainedRelationshipConfidenceCheckpoint = when {
+            stage == ScanCheckpointStage.ScoringRelationshipConfidence && completed -> relationshipConfidenceCheckpoint
+            else -> available.point.relationshipConfidenceCheckpoint
+        }
+        val retainedAttackPathsCheckpoint = when {
+            stage == ScanCheckpointStage.TracingAttackPaths && completed -> attackPathsCheckpoint
+            else -> available.point.attackPathsCheckpoint
+        }
+        val retainedExposureCheckpoint = when {
+            stage == ScanCheckpointStage.CompilingExposureScores && completed -> exposureCheckpoint
+            else -> available.point.exposureCheckpoint
+        }
+        val nextCurrent = if (stage.order >= current.order) stage else current
+        val now = runCatching { nowMillis() }.getOrElse {
+            return@synchronized ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val updated = recordForPoint(available.point).copy(
+            updatedAtEpochMillis = now.coerceAtLeast(available.point.updatedAtEpochMillis),
+            checkpointStage = nextCurrent.wireName,
+            completedCheckpointStages = completedStages
+                .sortedBy(ScanCheckpointStage::order)
+                .distinct()
+                .map(ScanCheckpointStage::wireName)
+                .take(MAX_CHECKPOINT_STAGES),
+            stageOutputs = stageOutputs
+                .toList()
+                .sortedBy { it.first.order }
+                .take(MAX_CHECKPOINT_STAGES)
+                .map { (outputStage, outputValue) ->
+                    StageOutputRecord(
+                        stage = outputStage.wireName,
+                        itemCount = outputValue.itemCount,
+                        verifiedCount = outputValue.verifiedCount,
+                        omittedCount = outputValue.omittedCount
+                    )
+                },
+            payloadSummaries = payloadSummaries
+                .toList()
+                .sortedBy { it.first.ordinal }
+                .take(MAX_PAYLOAD_SUMMARIES)
+                .map { it.second },
+            breachCheckpoint = retainedBreachCheckpoint,
+            faceCheckpoint = retainedFaceCheckpoint,
+            postProcessingCheckpoint = retainedPostProcessingCheckpoint,
+            entityGraphCheckpoint = retainedEntityGraphCheckpoint,
+            relationshipConfidenceCheckpoint = retainedRelationshipConfidenceCheckpoint,
+            attackPathsCheckpoint = retainedAttackPathsCheckpoint,
+            exposureCheckpoint = retainedExposureCheckpoint,
+            checkpointOwnerId = ownerId
+        )
+        persistUpdatedRecord(updated)
+    }
+
+    /** Removes one exact request generation without touching a different pointer. */
+    internal fun clearRequest(requestId: String): Boolean = synchronized(STORE_LOCK) {
+        if (!isValidRequestId(requestId)) return@synchronized false
+        if (hasClearAllGuard()) return@synchronized false
+        return@synchronized try {
+            val pointer = readPointer()
+            if (pointer != null && !isValidRequestId(pointer)) return@synchronized false
+            val guardAlreadyCommitted = hasClearTombstone(requestId)
+            val exactRecordExists = recordFile(requestId).exists()
+            val exactPreparedMarkerExists = preparedMarkerFile(requestId).exists()
+            if (pointer != requestId &&
+                !guardAlreadyCommitted &&
+                !exactRecordExists &&
+                !exactPreparedMarkerExists
+            ) {
+                return@synchronized true
+            }
+            // Persist a do-not-recover guard before unlinking either side of
+            // the pointer -> record pair. If the clear is interrupted after
+            // the pointer is gone, orphan recovery must not resurrect it.
+            if (!guardAlreadyCommitted) persistClearTombstone(requestId)
+            // Remove the selector first. A directory-sync failure must retain
+            // the encrypted record; it must never leave a durable pointer that
+            // names a record already deleted by this operation.
+            if (pointer == requestId) {
+                deleteFileDurably(pointerFile, ResumeStorageReason.PointerFailure)
+            }
+            deleteFileDurably(recordFile(requestId), ResumeStorageReason.IoFailure)
+            deletePreparedMarker(requestId)
+            deleteClearTombstone(requestId)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    internal fun saveDetailed(
+        input: IdentityInput,
+        deepResearch: Boolean,
+        strongFaceCorrelation: Boolean = false
+    ): ResumeWriteState = synchronized(STORE_LOCK) {
+        val prepared = prepareRequestDetailed(
+            input = input,
+            deepResearch = deepResearch,
+            strongFaceCorrelation = strongFaceCorrelation
+        )
+        if (prepared !is ResumeWriteState.Saved) return@synchronized prepared
+
+        return@synchronized when (val promoted = promotePreparedRequestDetailed(prepared.point.requestId)) {
+            is ResumeReadState.Available -> prepared
+            is ResumeReadState.Invalid -> {
+                discardPreparedRequest(prepared.point.requestId)
+                ResumeWriteState.Invalid(promoted.reason)
+            }
+            is ResumeReadState.StorageFailure -> {
+                // Promotion may have committed B's pointer, or a rollback may
+                // only be visible but not durable after a directory-fsync
+                // failure. Preserve encrypted B + its prepared marker; exact
+                // reconciliation can retry without risking pointer -> missing.
+                ResumeWriteState.StorageFailure(promoted.reason)
+            }
+            ResumeReadState.Expired,
+            ResumeReadState.Missing -> {
+                discardPreparedRequest(prepared.point.requestId)
+                ResumeWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+            }
+        }
+    }
+
+    /** Typed state for callers that need to distinguish absence from corruption. */
+    internal fun loadDetailed(): ResumeReadState = synchronized(STORE_LOCK) {
+        return try {
+            if (hasClearAllGuard()) {
+                return@synchronized ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+            }
+            when (val migration = migrateLegacyIfNeeded()) {
+                LegacyMigration.None -> loadActiveRecord()
+                is LegacyMigration.Migrated -> {
+                    if (hasClearTombstone(migration.requestId)) {
+                        ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+                    } else {
+                        loadRecord(migration.requestId)
+                    }
+                }
+                is LegacyMigration.Invalid -> ResumeReadState.Invalid(migration.reason)
+                is LegacyMigration.StorageFailure -> ResumeReadState.StorageFailure(migration.reason)
+            }
+        } catch (error: ResumeCryptoFailure) {
+            ResumeReadState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+    }
+
+    internal fun clearDetailed(): ResumeWriteState = synchronized(STORE_LOCK) {
+        return try {
+            val failures = mutableListOf<ResumeStorageReason>()
+            val guardReady = try {
+                // The global guard is committed before the selector is
+                // touched. It blocks every orphan-recovery path while an
+                // explicit clear is incomplete.
+                persistClearAllGuard()
+                true
+            } catch (error: ResumeCryptoFailure) {
+                failures += error.reason
+                false
+            } catch (_: Exception) {
+                failures += ResumeStorageReason.IoFailure
+                false
+            }
+
+            val pointerCleared = if (guardReady) {
+                try {
+                    // Pointer-first preserves the pointer -> record invariant
+                    // if either deletion or its directory fsync fails. The
+                    // guard above prevents a deleted pointer from making the
+                    // encrypted record eligible for orphan recovery.
+                    deleteFileDurably(pointerFile, ResumeStorageReason.PointerFailure)
+                    true
+                } catch (error: ResumeCryptoFailure) {
+                    failures += error.reason
+                    false
+                } catch (_: Exception) {
+                    failures += ResumeStorageReason.PointerFailure
+                    false
+                }
+            } else {
+                false
+            }
+
+            if (pointerCleared && recordsDir.exists()) {
+                val files = recordsDir.listFiles()
+                if (files == null) {
+                    failures += ResumeStorageReason.IoFailure
+                } else {
+                    files.filter {
+                        it.name.endsWith(RECORD_EXTENSION) ||
+                            it.name.endsWith(PREPARED_EXTENSION) ||
+                            it.name.endsWith(CLEAR_TOMBSTONE_EXTENSION) ||
+                            it.name.endsWith(".$TEMP_EXTENSION")
+                    }
+                        .forEach { file ->
+                            try {
+                                deleteFileDurably(file, ResumeStorageReason.IoFailure)
+                            } catch (error: ResumeCryptoFailure) {
+                                failures += error.reason
+                            } catch (_: Exception) {
+                                failures += ResumeStorageReason.IoFailure
+                            }
+                        }
+                }
+            }
+
+            // Keep the legacy fallback recoverable when the encrypted side
+            // could not be durably selected for clearing. Once all known
+            // encrypted artifacts are gone, remove it as part of the explicit
+            // clear transaction.
+            if (pointerCleared && failures.isEmpty()) {
+                try {
+                    deleteLegacyOrThrow()
+                } catch (error: ResumeCryptoFailure) {
+                    failures += error.reason
+                } catch (_: Exception) {
+                    failures += ResumeStorageReason.LegacyDeletionFailure
+                }
+            }
+            if (pointerCleared && failures.isEmpty() && !legacyFile.exists()) {
+                try {
+                    removeEmptyLegacyDirectory()
+                } catch (error: ResumeCryptoFailure) {
+                    failures += error.reason
+                } catch (_: Exception) {
+                    failures += ResumeStorageReason.LegacyDeletionFailure
+                }
+            }
+            if (failures.isEmpty()) {
+                try {
+                    deleteClearAllGuard()
+                } catch (error: ResumeCryptoFailure) {
+                    failures += error.reason
+                } catch (_: Exception) {
+                    failures += ResumeStorageReason.IoFailure
+                }
+            }
+            if (failures.isNotEmpty()) {
+                ResumeWriteState.StorageFailure(failures.first())
+            } else {
+                ResumeWriteState.Cleared
+            }
+        } catch (error: ResumeCryptoFailure) {
+            ResumeWriteState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            ResumeWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+    }
+
+    private fun loadActiveRecord(): ResumeReadState {
+        if (hasClearAllGuard()) {
+            return ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val pointer = readPointer()
+            ?: return recoverOrphanRecord() ?: ResumeReadState.Missing
+        if (!isValidRequestId(pointer)) {
+            return cleanupPointerFailureOr(ResumeInvalidReason.InvalidRequestId)
+        }
+        if (hasClearTombstone(pointer)) {
+            // An explicit clear may have removed the pointer but not yet
+            // removed the encrypted payload. Never expose that payload while
+            // its durable do-not-recover guard remains.
+            return ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+
+        return when (val state = loadRecord(pointer)) {
+            is ResumeReadState.Expired -> {
+                val failure = cleanupActiveRecord(pointer)
+                failure?.let(ResumeReadState::StorageFailure) ?: state
+            }
+            is ResumeReadState.Invalid -> {
+                // A malformed/tampered resume must never be retried as plaintext.
+                val failure = cleanupActiveRecord(pointer)
+                failure?.let(ResumeReadState::StorageFailure) ?: state
+            }
+            ResumeReadState.Missing -> {
+                val failure = cleanupActiveRecord(pointer)
+                failure?.let(ResumeReadState::StorageFailure)
+                    ?: recoverOrphanRecord()
+                    ?: ResumeReadState.Missing
+            }
+            else -> state
+        }
+    }
+
+    private fun cleanupPointerFailureOr(reason: ResumeInvalidReason): ResumeReadState {
+        return try {
+            deleteFileDurably(pointerFile, ResumeStorageReason.PointerFailure)
+            ResumeReadState.Invalid(reason)
+        } catch (error: ResumeCryptoFailure) {
+            ResumeReadState.StorageFailure(error.reason)
+        } catch (_: Exception) {
+            ResumeReadState.StorageFailure(ResumeStorageReason.PointerFailure)
+        }
+    }
+
+    private fun cleanupActiveRecord(requestId: String): ResumeStorageReason? {
+        var failure: ResumeStorageReason? = null
+        // Commit the guard before unlinking either half of the active pair.
+        // If any later unlink/fsync is uncertain, the payload remains hidden
+        // from orphan recovery until a retry completes the clear.
+        try {
+            persistClearTombstone(requestId)
+        } catch (error: ResumeCryptoFailure) {
+            return error.reason
+        } catch (_: Exception) {
+            return ResumeStorageReason.PointerFailure
+        }
+        // Clear the selector before the payload. If this is not durably
+        // possible, retain the payload and report the pointer failure.
+        try {
+            deleteFileDurably(pointerFile, ResumeStorageReason.PointerFailure)
+        } catch (error: ResumeCryptoFailure) {
+            failure = error.reason
+        } catch (_: Exception) {
+            failure = ResumeStorageReason.PointerFailure
+        }
+        if (failure != null) return failure
+        try {
+            deleteFileDurably(recordFile(requestId), ResumeStorageReason.IoFailure)
+        } catch (error: ResumeCryptoFailure) {
+            failure = error.reason
+        } catch (_: Exception) {
+            failure = ResumeStorageReason.IoFailure
+        }
+        if (failure == null) {
+            try {
+                deletePreparedMarker(requestId)
+            } catch (error: ResumeCryptoFailure) {
+                failure = error.reason
+            } catch (_: Exception) {
+                failure = ResumeStorageReason.IoFailure
+            }
+        }
+        if (failure == null) {
+            try {
+                deleteClearTombstone(requestId)
+            } catch (error: ResumeCryptoFailure) {
+                failure = error.reason
+            } catch (_: Exception) {
+                failure = ResumeStorageReason.IoFailure
+            }
+        }
+        return failure
+    }
+
+    /** Removes one exact record, clearing the pointer only when it names it. */
+    private fun cleanupPreparedRecord(requestId: String): ResumeStorageReason? {
+        val pointer = try {
+            readPointer()
+        } catch (error: ResumeCryptoFailure) {
+            return error.reason
+        } catch (_: Exception) {
+            return ResumeStorageReason.PointerFailure
+        }
+        if (pointer != null && !isValidRequestId(pointer)) {
+            // We cannot establish that this record is not the active one.
+            return ResumeStorageReason.PointerFailure
+        }
+        return if (pointer == requestId) {
+            cleanupActiveRecord(requestId)
+        } else {
+            try {
+                persistClearTombstone(requestId)
+                deleteFileDurably(recordFile(requestId), ResumeStorageReason.IoFailure)
+                deletePreparedMarker(requestId)
+                deleteClearTombstone(requestId)
+                null
+            } catch (error: ResumeCryptoFailure) {
+                error.reason
+            } catch (_: Exception) {
+                ResumeStorageReason.IoFailure
+            }
+        }
+    }
+
+    /**
+     * Restores the previous generation after a promotion-side deletion
+     * failure.  The returned list is intentionally diagnostic only; callers
+     * still report the original storage failure and keep the operation
+     * fail-closed.
+     */
+    private fun rollbackPromotion(
+        requestId: String,
+        priorPointerBytes: ByteArray?,
+        priorRecordBackup: PriorRecordBackup?
+    ): List<Throwable> {
+        val failures = mutableListOf<Throwable>()
+        var priorRecordRestored = priorRecordBackup == null
+        if (priorRecordBackup != null) {
+            try {
+                atomicWrite(priorRecordBackup.file, priorRecordBackup.bytes)
+                priorRecordRestored = true
+            } catch (error: Throwable) {
+                failures += error
+                // A read-back after a failed directory fsync only proves the
+                // current process view, not crash durability. Keep B and do
+                // not restore the pointer when A restoration is uncertain.
+                priorRecordRestored = false
+            }
+        }
+        var pointerRestored = false
+        // Restore the pointer only after A is known recoverable. Until then,
+        // the current pointer and encrypted B record remain a coherent pair.
+        if (priorRecordRestored) {
+            try {
+                if (priorPointerBytes != null) {
+                    atomicWrite(pointerFile, priorPointerBytes)
+                } else {
+                    deleteFileDurably(pointerFile, ResumeStorageReason.PointerFailure)
+                }
+                pointerRestored = true
+            } catch (error: Throwable) {
+                failures += error
+                // Never infer durable pointer restoration from immediate
+                // read-back after a failed directory fsync.
+                pointerRestored = false
+            }
+        }
+        // Never delete B while any on-disk pointer may still name B or while
+        // restoring A is uncertain. An encrypted orphan is safer than a
+        // pointer that references a missing record.
+        if (pointerRestored && priorRecordRestored) {
+            try {
+                deleteFileDurably(recordFile(requestId), ResumeStorageReason.IoFailure)
+                deletePreparedMarker(requestId)
+            } catch (error: Throwable) {
+                failures += error
+            }
+        }
+        return failures
+    }
+
+    private fun loadRecord(requestId: String): ResumeReadState {
+        if (!isValidRequestId(requestId)) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.InvalidRequestId)
+        }
+        val file = recordFile(requestId)
+        if (!file.exists()) return ResumeReadState.Missing
+
+        val envelopeBytes = try {
+            file.readBounded(MAX_ENVELOPE_BYTES)
+        } catch (_: BoundedReadException) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.MalformedEnvelope)
+        } catch (_: Exception) {
+            return ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+
+        val envelope = try {
+            json.decodeFromString<EncryptedEnvelope>(envelopeBytes.toString(Charsets.UTF_8))
+        } catch (_: Exception) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.MalformedEnvelope)
+        }
+        if (envelope.formatVersion != FORMAT_VERSION) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.UnsupportedVersion)
+        }
+
+        val iv = try {
+            Base64.getDecoder().decode(envelope.ivBase64)
+        } catch (_: IllegalArgumentException) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.MalformedEnvelope)
+        }
+        val ciphertext = try {
+            Base64.getDecoder().decode(envelope.ciphertextBase64)
+        } catch (_: IllegalArgumentException) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.MalformedEnvelope)
+        }
+        if (iv.size != GCM_IV_BYTES || ciphertext.size <= GCM_TAG_BYTES || ciphertext.size > MAX_RECORD_BYTES + GCM_TAG_BYTES) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.MalformedEnvelope)
+        }
+
+        val plaintext = try {
+            crypto.open(
+                SealedResumePayload(iv = iv, ciphertext = ciphertext),
+                aad(requestId)
+            )
+        } catch (_: AEADBadTagException) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.AuthenticationFailed)
+        } catch (error: ResumeCryptoFailure) {
+            return ResumeReadState.StorageFailure(error.reason)
+        } catch (_: GeneralSecurityException) {
+            return ResumeReadState.StorageFailure(ResumeStorageReason.KeyFailure)
+        } catch (_: Exception) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.AuthenticationFailed)
+        }
+
+        val record = try {
+            json.decodeFromString<ResumeRecord>(plaintext.toString(Charsets.UTF_8))
+        } catch (_: Exception) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.MalformedPayload)
+        }
+        if (record.formatVersion != FORMAT_VERSION || record.requestId != requestId) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.RequestIdMismatch)
+        }
+
+        if (!hasValidTimestamps(record)) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.InvalidTimestamp)
+        }
+
+        if (record.expiresAtEpochMillis <= nowMillis()) {
+            return ResumeReadState.Expired
+        }
+        if (!isValidRequestId(record.requestId) ||
+            validateInput(record.input) != null ||
+            !validPlanMetadata(record)
+        ) {
+            return ResumeReadState.Invalid(ResumeInvalidReason.InvalidPayload)
+        }
+
+        return ResumeReadState.Available(
+            ResumePoint(
+                requestId = record.requestId,
+                input = record.input,
+                deepResearch = record.deepResearch,
+                scanMode = record.scanMode,
+                strongFaceCorrelation = record.strongFaceCorrelation,
+                createdAtEpochMillis = record.createdAtEpochMillis,
+                expiresAtEpochMillis = record.expiresAtEpochMillis,
+                updatedAtEpochMillis = record.updatedAtEpochMillis,
+                planFingerprint = record.planFingerprint,
+                plannedProviderIds = record.plannedProviderIds,
+                plannedProviderCount = record.plannedProviderCount,
+                scanPlan = record.scanPlan,
+                checkpointStage = ScanCheckpointStage.fromWire(record.checkpointStage)
+                    ?: ScanCheckpointStage.Queued,
+                completedCheckpointStages = record.completedCheckpointStages.mapNotNull(
+                    ScanCheckpointStage::fromWire
+                ),
+                stageOutputs = record.stageOutputs.mapNotNull { output ->
+                    ScanCheckpointStage.fromWire(output.stage)?.let { stage ->
+                        stage to output.toDomain()
+                    }
+                }.toMap(),
+                payloadSummaries = record.payloadSummaries
+                    .take(MAX_PAYLOAD_SUMMARIES)
+                    .filter(ScanPayloadSummary::isWellFormed),
+                // A malformed authenticated stage payload is not allowed to
+                // poison the whole request. Omit it so the worker reruns the
+                // breach stage; never expose or reuse an invalid value.
+                breachCheckpoint = record.breachCheckpoint
+                    ?.takeIf { isValidBreachCheckpoint(it, record, record.checkpointOwnerId) },
+                faceCheckpoint = record.faceCheckpoint
+                    ?.takeIf { isValidFaceCheckpoint(it, record, record.checkpointOwnerId) },
+                postProcessingCheckpoint = record.postProcessingCheckpoint
+                    ?.takeIf { isValidPostProcessingCheckpoint(it, record, record.checkpointOwnerId) },
+                entityGraphCheckpoint = record.entityGraphCheckpoint
+                    ?.takeIf { isValidEntityGraphCheckpoint(it, record, record.checkpointOwnerId) },
+                relationshipConfidenceCheckpoint = record.relationshipConfidenceCheckpoint
+                    ?.takeIf { isValidRelationshipConfidenceCheckpoint(it, record, record.checkpointOwnerId) },
+                attackPathsCheckpoint = record.attackPathsCheckpoint
+                    ?.takeIf { isValidAttackPathsCheckpoint(it, record, record.checkpointOwnerId) },
+                exposureCheckpoint = record.exposureCheckpoint
+                    ?.takeIf { isValidExposureCheckpoint(it, record, record.checkpointOwnerId) },
+                checkpointOwnerId = record.checkpointOwnerId
+            )
+        )
+    }
+
+    private fun validPlanMetadata(record: ResumeRecord): Boolean {
+        val fingerprint = record.planFingerprint
+        val ids = record.plannedProviderIds
+        val count = record.plannedProviderCount
+        // Version-1 records created before plan metadata was added remain
+        // resumable. They are explicitly marked as lacking a reproducibility
+        // guard rather than being assigned the current catalog retroactively.
+        val planValid = if (fingerprint == null && ids.isEmpty() && count == 0) {
+            true
+        } else {
+            ProviderPlanFingerprint.isValid(fingerprint) &&
+                ProviderPlanFingerprint.areValidProviderIds(ids) &&
+                count >= ids.size
+        }
+        if (!planValid) return false
+        record.scanPlan?.let { persistedPlan ->
+            val currentPlan = runCatching { ProviderCatalogV2.plan(record.scanMode) }
+                .getOrNull()
+                ?: return false
+            if (!persistedPlan.matches(currentPlan) ||
+                persistedPlan.providerPlanFingerprint != fingerprint ||
+                persistedPlan.providerCount != count
+            ) return false
+        }
+        if (ScanCheckpointStage.fromWire(record.checkpointStage) == null) return false
+        val completed = record.completedCheckpointStages
+        if (completed.size > MAX_CHECKPOINT_STAGES || completed.distinct().size != completed.size) {
+            return false
+        }
+        if (completed.any { ScanCheckpointStage.fromWire(it) == null }) return false
+        val outputs = record.stageOutputs
+        if (outputs.size > MAX_CHECKPOINT_STAGES ||
+            outputs.map { it.stage }.distinct().size != outputs.size
+        ) return false
+        if (outputs.any { output ->
+                val parsedStage = ScanCheckpointStage.fromWire(output.stage)
+                parsedStage == null ||
+                    parsedStage.wireName !in completed ||
+                    !isValidStageOutput(output.toDomain())
+            }
+        ) return false
+        if (!isValidPayloadSummaries(record.payloadSummaries)) return false
+        if (record.payloadSummaries.isNotEmpty() &&
+            ScanCheckpointStage.DiscoveringUsernames.wireName !in completed
+        ) return false
+        // Invalid breach output is intentionally treated as absent. The
+        // request, plan and owner remain resumable, but ScanSession must rerun
+        // that stage rather than using stale or malformed metadata.
+        return record.checkpointOwnerId == null || isValidRequestId(record.checkpointOwnerId)
+    }
+
+    private fun isValidStageOutput(output: ScanStageOutput): Boolean =
+        output.itemCount in 0..MAX_STAGE_OUTPUT_COUNT &&
+            output.verifiedCount in 0..output.itemCount &&
+            output.omittedCount in 0..MAX_STAGE_OUTPUT_COUNT
+
+    private fun isValidPayloadSummaries(payloads: List<ScanPayloadSummary>): Boolean =
+        payloads.size <= MAX_PAYLOAD_SUMMARIES &&
+            payloads.map(ScanPayloadSummary::stage).distinct().size == payloads.size &&
+            payloads.all(ScanPayloadSummary::isWellFormed)
+
+    private fun isValidBreachCheckpoint(
+        checkpoint: BreachStageCheckpoint,
+        record: ResumeRecord,
+        expectedOwnerId: String?
+    ): Boolean {
+        if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
+        if (record.planFingerprint.isNullOrBlank() ||
+            checkpoint.planFingerprint != record.planFingerprint ||
+            !ProviderPlanFingerprint.isValid(checkpoint.planFingerprint)
+        ) return false
+        if (!isValidRequestId(checkpoint.ownerId) ||
+            expectedOwnerId == null ||
+            checkpoint.ownerId != expectedOwnerId ||
+            record.checkpointOwnerId != expectedOwnerId
+        ) return false
+        if (checkpoint.capturedAtEpochMillis !in record.createdAtEpochMillis..record.expiresAtEpochMillis) {
+            return false
+        }
+        if (checkpoint.results.size > MAX_BREACH_RESULTS) return false
+        val allowedEmails = record.input.emails
+            .map { it.trim().lowercase(Locale.ROOT) }
+            .filter { it.isNotBlank() }
+            .toSet()
+        if (checkpoint.results.map { it.email.trim().lowercase(Locale.ROOT) }.distinct().size != checkpoint.results.size) {
+            return false
+        }
+        return checkpoint.results.all { result ->
+            val email = result.email.trim()
+            email.length in 1..MAX_BREACH_EMAIL_CHARS &&
+                email.lowercase(Locale.ROOT) in allowedEmails &&
+                isSafeCheckpointText(email, MAX_BREACH_EMAIL_CHARS) &&
+                result.breachCount in 0..MAX_BREACH_COUNT &&
+                result.publicHitCount in 0..MAX_BREACH_COUNT &&
+                result.breachTitles.size <= MAX_BREACH_TITLES &&
+                result.sources.size <= MAX_BREACH_SOURCES &&
+                result.publicEvidenceUrls.size <= MAX_BREACH_SOURCES &&
+                result.breachTitles.all { isSafeCheckpointText(it, MAX_BREACH_TITLE_CHARS) } &&
+                result.sources.all { isSafeCheckpointText(it, MAX_BREACH_SOURCE_CHARS) } &&
+                result.publicEvidenceUrls.all(::isSafePublicUrl) &&
+                (result.note == null || isSafeCheckpointNote(result.note))
+        }
+    }
+
+    private fun isValidFaceCheckpoint(
+        checkpoint: FaceConsistencyStageCheckpoint,
+        record: ResumeRecord,
+        expectedOwnerId: String?,
+        requireCompletedStage: Boolean = true
+    ): Boolean {
+        if (requireCompletedStage &&
+            ScanCheckpointStage.ComparingFaceConsistency.wireName !in record.completedCheckpointStages
+        ) {
+            return false
+        }
+        if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
+        if (record.planFingerprint.isNullOrBlank() ||
+            checkpoint.planFingerprint != record.planFingerprint ||
+            !ProviderPlanFingerprint.isValid(checkpoint.planFingerprint)
+        ) return false
+        if (!isValidRequestId(checkpoint.ownerId) ||
+            expectedOwnerId == null ||
+            checkpoint.ownerId != expectedOwnerId ||
+            record.checkpointOwnerId != expectedOwnerId
+        ) return false
+        if (checkpoint.capturedAtEpochMillis !in record.createdAtEpochMillis..record.expiresAtEpochMillis) {
+            return false
+        }
+        if (!FaceCheckpointCodec.isValidDigest(checkpoint.inputDigest)) return false
+        return FaceCheckpointCodec.decode(checkpoint.matchesJson) != null
+    }
+
+    private fun isValidPostProcessingCheckpoint(
+        checkpoint: PostProcessingStageCheckpoint,
+        record: ResumeRecord,
+        expectedOwnerId: String?
+    ): Boolean {
+        if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
+        if (record.planFingerprint.isNullOrBlank() ||
+            checkpoint.planFingerprint != record.planFingerprint ||
+            !ProviderPlanFingerprint.isValid(checkpoint.planFingerprint)
+        ) return false
+        if (!isValidRequestId(checkpoint.ownerId) ||
+            expectedOwnerId == null ||
+            checkpoint.ownerId != expectedOwnerId ||
+            record.checkpointOwnerId != expectedOwnerId
+        ) return false
+        if (checkpoint.capturedAtEpochMillis !in record.createdAtEpochMillis..record.expiresAtEpochMillis) {
+            return false
+        }
+        if (!PostProcessingCheckpointCodec.isValidDigest(checkpoint.inputDigest)) return false
+        return PostProcessingCheckpointCodec.decode(checkpoint.analysisJson) != null
+    }
+
+    private fun isValidEntityGraphCheckpoint(
+        checkpoint: EntityGraphStageCheckpoint,
+        record: ResumeRecord,
+        expectedOwnerId: String?
+    ): Boolean {
+        if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
+        if (record.planFingerprint.isNullOrBlank() ||
+            checkpoint.planFingerprint != record.planFingerprint ||
+            !ProviderPlanFingerprint.isValid(checkpoint.planFingerprint)
+        ) return false
+        if (!isValidRequestId(checkpoint.ownerId) ||
+            expectedOwnerId == null ||
+            checkpoint.ownerId != expectedOwnerId ||
+            record.checkpointOwnerId != expectedOwnerId
+        ) return false
+        if (checkpoint.capturedAtEpochMillis !in record.createdAtEpochMillis..record.expiresAtEpochMillis) {
+            return false
+        }
+        if (!GraphCheckpointCodec.isValidDigest(checkpoint.inputDigest)) return false
+        return GraphCheckpointCodec.decode(checkpoint.graphJson) != null
+    }
+
+    private fun isValidRelationshipConfidenceCheckpoint(
+        checkpoint: RelationshipConfidenceStageCheckpoint,
+        record: ResumeRecord,
+        expectedOwnerId: String?,
+        requireCompletedStage: Boolean = true
+    ): Boolean {
+        if (requireCompletedStage &&
+            ScanCheckpointStage.ScoringRelationshipConfidence.wireName !in record.completedCheckpointStages
+        ) {
+            return false
+        }
+        if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
+        if (record.planFingerprint.isNullOrBlank() ||
+            checkpoint.planFingerprint != record.planFingerprint ||
+            !ProviderPlanFingerprint.isValid(checkpoint.planFingerprint)
+        ) return false
+        if (!isValidRequestId(checkpoint.ownerId) ||
+            expectedOwnerId == null ||
+            checkpoint.ownerId != expectedOwnerId ||
+            record.checkpointOwnerId != expectedOwnerId
+        ) return false
+        if (checkpoint.capturedAtEpochMillis !in record.createdAtEpochMillis..record.expiresAtEpochMillis) {
+            return false
+        }
+        if (!ConfidenceCheckpointCodec.isValidDigest(checkpoint.inputDigest)) return false
+        return ConfidenceCheckpointCodec.decode(checkpoint.confidenceJson) != null
+    }
+
+    private fun isValidAttackPathsCheckpoint(
+        checkpoint: AttackPathsStageCheckpoint,
+        record: ResumeRecord,
+        expectedOwnerId: String?,
+        requireCompletedStage: Boolean = true
+    ): Boolean {
+        if (requireCompletedStage &&
+            ScanCheckpointStage.TracingAttackPaths.wireName !in record.completedCheckpointStages
+        ) {
+            return false
+        }
+        if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
+        if (record.planFingerprint.isNullOrBlank() ||
+            checkpoint.planFingerprint != record.planFingerprint ||
+            !ProviderPlanFingerprint.isValid(checkpoint.planFingerprint)
+        ) return false
+        if (!isValidRequestId(checkpoint.ownerId) ||
+            expectedOwnerId == null ||
+            checkpoint.ownerId != expectedOwnerId ||
+            record.checkpointOwnerId != expectedOwnerId
+        ) return false
+        if (checkpoint.capturedAtEpochMillis !in record.createdAtEpochMillis..record.expiresAtEpochMillis) {
+            return false
+        }
+        if (!AttackPathsCheckpointCodec.isValidDigest(checkpoint.inputDigest)) return false
+        return AttackPathsCheckpointCodec.decode(checkpoint.attackPathsJson) != null
+    }
+
+    private fun isValidExposureCheckpoint(
+        checkpoint: ExposureStageCheckpoint,
+        record: ResumeRecord,
+        expectedOwnerId: String?,
+        requireCompletedStage: Boolean = true
+    ): Boolean {
+        if (requireCompletedStage &&
+            ScanCheckpointStage.CompilingExposureScores.wireName !in record.completedCheckpointStages
+        ) {
+            return false
+        }
+        if (!isValidRequestId(checkpoint.requestId) || checkpoint.requestId != record.requestId) return false
+        if (record.planFingerprint.isNullOrBlank() ||
+            checkpoint.planFingerprint != record.planFingerprint ||
+            !ProviderPlanFingerprint.isValid(checkpoint.planFingerprint)
+        ) return false
+        if (!isValidRequestId(checkpoint.ownerId) ||
+            expectedOwnerId == null ||
+            checkpoint.ownerId != expectedOwnerId ||
+            record.checkpointOwnerId != expectedOwnerId
+        ) return false
+        if (checkpoint.capturedAtEpochMillis !in record.createdAtEpochMillis..record.expiresAtEpochMillis) {
+            return false
+        }
+        if (!ExposureCheckpointCodec.isValidDigest(checkpoint.inputDigest)) return false
+        return ExposureCheckpointCodec.decode(checkpoint.exposureJson) != null
+    }
+
+    private fun isSafeCheckpointText(value: String, maxChars: Int): Boolean =
+        value.length in 1..maxChars && value.none { it.code < 0x20 || it.code == 0x7f }
+
+    private fun isSafeCheckpointNote(value: String): Boolean =
+        isSafeCheckpointText(value, MAX_BREACH_NOTE_CHARS) &&
+            !UNSAFE_BREACH_NOTE_PATTERN.containsMatchIn(value)
+
+    private fun isSafePublicUrl(value: String): Boolean =
+        isSafeCheckpointText(value, MAX_BREACH_URL_CHARS) &&
+            runCatching {
+                val uri = java.net.URI(value)
+                uri.scheme.lowercase(Locale.ROOT) in setOf("http", "https") &&
+                    !uri.host.isNullOrBlank() &&
+                    uri.userInfo == null
+            }.getOrDefault(false)
+
+    private fun recordForPoint(point: ResumePoint): ResumeRecord = ResumeRecord(
+        formatVersion = FORMAT_VERSION,
+        requestId = point.requestId,
+        createdAtEpochMillis = point.createdAtEpochMillis,
+        updatedAtEpochMillis = point.updatedAtEpochMillis,
+        expiresAtEpochMillis = point.expiresAtEpochMillis,
+        input = point.input,
+        deepResearch = point.deepResearch,
+        scanMode = point.scanMode,
+        strongFaceCorrelation = point.strongFaceCorrelation,
+        planFingerprint = point.planFingerprint,
+        plannedProviderIds = point.plannedProviderIds,
+        plannedProviderCount = point.plannedProviderCount,
+        scanPlan = point.scanPlan,
+        checkpointStage = point.checkpointStage.wireName,
+        completedCheckpointStages = point.completedCheckpointStages.map(ScanCheckpointStage::wireName),
+        stageOutputs = point.stageOutputs
+            .toList()
+            .sortedBy { it.first.order }
+            .take(MAX_CHECKPOINT_STAGES)
+            .map { (stage, output) ->
+                StageOutputRecord(
+                    stage = stage.wireName,
+                    itemCount = output.itemCount,
+                    verifiedCount = output.verifiedCount,
+                    omittedCount = output.omittedCount
+                )
+            },
+        payloadSummaries = point.payloadSummaries
+            .sortedBy(ScanPayloadSummary::stage)
+            .take(MAX_PAYLOAD_SUMMARIES),
+        breachCheckpoint = point.breachCheckpoint,
+        faceCheckpoint = point.faceCheckpoint,
+        postProcessingCheckpoint = point.postProcessingCheckpoint,
+        entityGraphCheckpoint = point.entityGraphCheckpoint,
+        relationshipConfidenceCheckpoint = point.relationshipConfidenceCheckpoint,
+        attackPathsCheckpoint = point.attackPathsCheckpoint,
+        exposureCheckpoint = point.exposureCheckpoint,
+        checkpointOwnerId = point.checkpointOwnerId
+    )
+
+    private fun ResumeReadState.toCheckpointWriteState(): ResumeCheckpointWriteState = when (this) {
+        ResumeReadState.Missing -> ResumeCheckpointWriteState.Missing
+        ResumeReadState.Expired -> ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.InvalidTimestamp)
+        is ResumeReadState.Invalid -> ResumeCheckpointWriteState.Invalid(reason)
+        is ResumeReadState.StorageFailure -> ResumeCheckpointWriteState.StorageFailure(reason)
+        is ResumeReadState.Available -> error("available state requires a record")
+    }
+
+    private fun persistUpdatedRecord(record: ResumeRecord): ResumeCheckpointWriteState {
+        return try {
+            val plaintext = json.encodeToString(record).toByteArray(Charsets.UTF_8)
+            if (plaintext.size > MAX_RECORD_BYTES) {
+                return ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.RecordTooLarge)
+            }
+            val sealed = crypto.seal(plaintext, aad(record.requestId), allowKeyCreation = false)
+            if (sealed.iv.size != GCM_IV_BYTES ||
+                sealed.ciphertext.size <= GCM_TAG_BYTES ||
+                sealed.ciphertext.size > MAX_RECORD_BYTES + GCM_TAG_BYTES
+            ) {
+                return ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.KeyFailure)
+            }
+            val envelope = EncryptedEnvelope(
+                formatVersion = FORMAT_VERSION,
+                ivBase64 = Base64.getEncoder().encodeToString(sealed.iv),
+                ciphertextBase64 = Base64.getEncoder().encodeToString(sealed.ciphertext)
+            )
+            val encoded = json.encodeToString(envelope).toByteArray(Charsets.UTF_8)
+            if (encoded.size > MAX_ENVELOPE_BYTES) {
+                return ResumeCheckpointWriteState.Invalid(ResumeInvalidReason.RecordTooLarge)
+            }
+            val target = recordFile(record.requestId)
+            if (!target.exists() || !target.isFile || Files.isSymbolicLink(target.toPath())) {
+                return ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+            }
+            atomicWrite(target, encoded)
+            ResumeCheckpointWriteState.Saved(record.toPoint())
+        } catch (error: ResumeCryptoFailure) {
+            ResumeCheckpointWriteState.StorageFailure(error.reason)
+        } catch (_: GeneralSecurityException) {
+            ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.KeyFailure)
+        } catch (_: Exception) {
+            ResumeCheckpointWriteState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+    }
+
+    private fun ResumeRecord.toPoint(): ResumePoint = ResumePoint(
+        requestId = requestId,
+        input = input,
+        deepResearch = deepResearch,
+        scanMode = scanMode,
+        strongFaceCorrelation = strongFaceCorrelation,
+        createdAtEpochMillis = createdAtEpochMillis,
+        expiresAtEpochMillis = expiresAtEpochMillis,
+        updatedAtEpochMillis = updatedAtEpochMillis,
+        planFingerprint = planFingerprint,
+        plannedProviderIds = plannedProviderIds,
+        plannedProviderCount = plannedProviderCount,
+        scanPlan = scanPlan,
+        checkpointStage = ScanCheckpointStage.fromWire(checkpointStage)
+            ?: ScanCheckpointStage.Queued,
+        completedCheckpointStages = completedCheckpointStages.mapNotNull(ScanCheckpointStage::fromWire),
+        stageOutputs = stageOutputs.mapNotNull { output ->
+            ScanCheckpointStage.fromWire(output.stage)?.let { stage ->
+                stage to output.toDomain()
+            }
+        }.toMap(),
+        payloadSummaries = payloadSummaries
+            .take(MAX_PAYLOAD_SUMMARIES)
+            .filter(ScanPayloadSummary::isWellFormed),
+        breachCheckpoint = breachCheckpoint,
+        faceCheckpoint = faceCheckpoint,
+        postProcessingCheckpoint = postProcessingCheckpoint,
+        entityGraphCheckpoint = entityGraphCheckpoint,
+        relationshipConfidenceCheckpoint = relationshipConfidenceCheckpoint,
+        attackPathsCheckpoint = attackPathsCheckpoint,
+        exposureCheckpoint = exposureCheckpoint,
+        checkpointOwnerId = checkpointOwnerId
+    )
+
+    /**
+     * Persists a prepared record without touching either the active pointer or
+     * the record currently selected by that pointer.
+     */
+    private fun persistPreparedMarker(requestId: String) {
+        val currentPointer = readPointer()
+        if (currentPointer != null && !isValidRequestId(currentPointer)) {
+            throw ResumeCryptoFailure(ResumeStorageReason.PointerFailure)
+        }
+        if (currentPointer == requestId ||
+            recordFile(requestId).exists() ||
+            preparedMarkerFile(requestId).exists() ||
+            clearTombstoneFile(requestId).exists()
+        ) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.InvalidRequestId)
+        }
+        atomicWrite(preparedMarkerFile(requestId), PREPARED_MARKER_BYTES)
+    }
+
+    private fun persistPreparedRecord(record: ResumeRecord, allowKeyCreation: Boolean) {
+        if (hasClearAllGuard()) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure)
+        }
+        val currentPointer = readPointer()
+        if (currentPointer != null && !isValidRequestId(currentPointer)) {
+            throw ResumeCryptoFailure(ResumeStorageReason.PointerFailure)
+        }
+        if (currentPointer == record.requestId) {
+            // A UUID collision must never overwrite the active generation.
+            throw ResumeInvalidOperation(ResumeInvalidReason.InvalidRequestId)
+        }
+        if (currentPointer != null && !recordFile(currentPointer).exists()) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure)
+        }
+        val target = recordFile(record.requestId)
+        if (target.exists()) {
+            // A UUID collision must never overwrite another recoverable
+            // prepared/orphaned generation.
+            throw ResumeInvalidOperation(ResumeInvalidReason.InvalidRequestId)
+        }
+        val plaintext = json.encodeToString(record).toByteArray(Charsets.UTF_8)
+        if (plaintext.size > MAX_RECORD_BYTES) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.RecordTooLarge)
+        }
+        ensureDirectory(recordsDir)
+        val sealed = crypto.seal(plaintext, aad(record.requestId), allowKeyCreation)
+        if (sealed.iv.size != GCM_IV_BYTES) {
+            throw ResumeCryptoFailure(ResumeStorageReason.KeyFailure, IllegalStateException("Invalid IV size"))
+        }
+        if (sealed.ciphertext.size <= GCM_TAG_BYTES ||
+            sealed.ciphertext.size > MAX_RECORD_BYTES + GCM_TAG_BYTES
+        ) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.RecordTooLarge)
+        }
+        val envelope = EncryptedEnvelope(
+            formatVersion = FORMAT_VERSION,
+            ivBase64 = Base64.getEncoder().encodeToString(sealed.iv),
+            ciphertextBase64 = Base64.getEncoder().encodeToString(sealed.ciphertext)
+        )
+        val encodedEnvelope = json.encodeToString(envelope).toByteArray(Charsets.UTF_8)
+        if (encodedEnvelope.size > MAX_ENVELOPE_BYTES) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.RecordTooLarge)
+        }
+
+        val targetBackup: ByteArray? = null
+        try {
+            atomicWrite(target, encodedEnvelope)
+        } catch (error: Exception) {
+            val rollbackFailure = restoreFile(target, targetBackup, ResumeStorageReason.IoFailure)
+            val failure = ResumeCryptoFailure(ResumeStorageReason.IoFailure, error)
+            rollbackFailure?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
+    private fun persistRecord(record: ResumeRecord) {
+        if (hasClearAllGuard()) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure)
+        }
+        val priorPointer = readPointer()
+        if (pointerFile.exists() && priorPointer == null) {
+            throw ResumeCryptoFailure(ResumeStorageReason.PointerFailure)
+        }
+        if (priorPointer != null && !isValidRequestId(priorPointer)) {
+            throw ResumeCryptoFailure(ResumeStorageReason.PointerFailure)
+        }
+        val priorPointerBytes = if (priorPointer != null) {
+            pointerFile.readBounded(MAX_POINTER_BYTES)
+        } else {
+            null
+        }
+        val priorRecordBackup: PriorRecordBackup?
+        if (priorPointer != null) {
+            val priorFile = recordFile(priorPointer)
+            if (priorFile.exists()) {
+                priorRecordBackup = PriorRecordBackup(
+                    file = priorFile,
+                    bytes = priorFile.readBounded(MAX_ENVELOPE_BYTES),
+                    pointerBytes = priorPointerBytes ?: priorPointer.toByteArray(Charsets.UTF_8)
+                )
+            } else {
+                throw ResumeCryptoFailure(ResumeStorageReason.IoFailure)
+            }
+        } else {
+            priorRecordBackup = null
+        }
+        val target = recordFile(record.requestId)
+        // Never overwrite an active, prepared, or orphaned encrypted
+        // generation when a UUID source collides.
+        if (target.exists()) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.InvalidRequestId)
+        }
+        val plaintext = json.encodeToString(record).toByteArray(Charsets.UTF_8)
+        if (plaintext.size > MAX_RECORD_BYTES) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.RecordTooLarge)
+        }
+        ensureDirectory(recordsDir)
+        val allowKeyCreation = canCreateKey()
+        val sealed = crypto.seal(plaintext, aad(record.requestId), allowKeyCreation)
+        if (sealed.iv.size != GCM_IV_BYTES) {
+            throw ResumeCryptoFailure(ResumeStorageReason.KeyFailure, IllegalStateException("Invalid IV size"))
+        }
+        if (sealed.ciphertext.size <= GCM_TAG_BYTES ||
+            sealed.ciphertext.size > MAX_RECORD_BYTES + GCM_TAG_BYTES
+        ) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.RecordTooLarge)
+        }
+
+        val envelope = EncryptedEnvelope(
+            formatVersion = FORMAT_VERSION,
+            ivBase64 = Base64.getEncoder().encodeToString(sealed.iv),
+            ciphertextBase64 = Base64.getEncoder().encodeToString(sealed.ciphertext)
+        )
+        val encodedEnvelope = json.encodeToString(envelope).toByteArray(Charsets.UTF_8)
+        if (encodedEnvelope.size > MAX_ENVELOPE_BYTES) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.RecordTooLarge)
+        }
+        try {
+            atomicWrite(target, encodedEnvelope)
+        } catch (error: Exception) {
+            val rollbackFailure = restoreFile(target, null, ResumeStorageReason.IoFailure)
+            val failure = ResumeCryptoFailure(ResumeStorageReason.IoFailure, error)
+            rollbackFailure?.let(failure::addSuppressed)
+            throw failure
+        }
+
+        try {
+            atomicWrite(pointerFile, record.requestId.toByteArray(Charsets.UTF_8))
+        } catch (error: Exception) {
+            val rollbackFailures = rollbackPromotion(
+                requestId = record.requestId,
+                priorPointerBytes = priorPointerBytes,
+                priorRecordBackup = priorRecordBackup
+            )
+            val failure = ResumeCryptoFailure(ResumeStorageReason.PointerFailure, error)
+            rollbackFailures.forEach(failure::addSuppressed)
+            throw failure
+        }
+        if (priorRecordBackup != null && priorRecordBackup.file.name != target.name) {
+            try {
+                deleteFileDurably(priorRecordBackup.file, ResumeStorageReason.IoFailure)
+            } catch (error: Exception) {
+                val rollbackFailures = rollbackPromotion(
+                    requestId = record.requestId,
+                    priorPointerBytes = priorPointerBytes,
+                    priorRecordBackup = priorRecordBackup
+                )
+                val failure = ResumeCryptoFailure(ResumeStorageReason.IoFailure, error)
+                rollbackFailures.forEach(failure::addSuppressed)
+                throw failure
+            }
+        }
+    }
+
+    private fun deleteLegacyAndReturn(result: LegacyMigration): LegacyMigration {
+        // A storage/key/pointer failure means no encrypted replacement has
+        // been verified. Preserve the only recoverable legacy marker for a
+        // later retry instead of turning a transient failure into data loss.
+        if (result is LegacyMigration.StorageFailure) return result
+        return try {
+            deleteLegacyOrThrow()
+            result
+        } catch (_: ResumeCryptoFailure) {
+            LegacyMigration.StorageFailure(ResumeStorageReason.LegacyDeletionFailure)
+        } catch (_: Exception) {
+            LegacyMigration.StorageFailure(ResumeStorageReason.LegacyDeletionFailure)
+        }
+    }
+
+    private fun migrateLegacyIfNeeded(): LegacyMigration {
+        if (hasClearAllGuard()) {
+            return LegacyMigration.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        if (!legacyFile.exists()) return LegacyMigration.None
+
+        val currentPointer = try {
+            readPointer()
+        } catch (error: ResumeCryptoFailure) {
+            return deleteLegacyAndReturn(LegacyMigration.StorageFailure(error.reason))
+        } catch (_: Exception) {
+            return deleteLegacyAndReturn(LegacyMigration.StorageFailure(ResumeStorageReason.IoFailure))
+        }
+        if (currentPointer != null && isValidRequestId(currentPointer)) {
+            if (hasClearTombstone(currentPointer)) {
+                return LegacyMigration.StorageFailure(ResumeStorageReason.IoFailure)
+            }
+            when (val current = loadRecord(currentPointer)) {
+                is ResumeReadState.Available -> return deleteLegacyAndReturn(LegacyMigration.None)
+                is ResumeReadState.StorageFailure -> {
+                    return deleteLegacyAndReturn(LegacyMigration.StorageFailure(current.reason))
+                }
+                else -> Unit
+            }
+        } else if (currentPointer == null) {
+            when (val recovered = recoverOrphanRecord()) {
+                is ResumeReadState.Available -> return deleteLegacyAndReturn(LegacyMigration.None)
+                is ResumeReadState.StorageFailure -> {
+                    return deleteLegacyAndReturn(LegacyMigration.StorageFailure(recovered.reason))
+                }
+                else -> Unit
+            }
+        }
+
+        val legacyBytes = try {
+            legacyFile.readBounded(MAX_LEGACY_BYTES)
+        } catch (_: BoundedReadException) {
+            return deleteLegacyAndReturn(LegacyMigration.Invalid(ResumeInvalidReason.LegacyTooLarge))
+        } catch (_: Exception) {
+            return deleteLegacyAndReturn(LegacyMigration.StorageFailure(ResumeStorageReason.IoFailure))
+        }
+
+        val marker = try {
+            json.decodeFromString<LegacyResumeMarker>(legacyBytes.toString(Charsets.UTF_8))
+        } catch (_: Exception) {
+            return deleteLegacyAndReturn(LegacyMigration.Invalid(ResumeInvalidReason.MalformedLegacy))
+        }
+        val legacyInput = IdentityInput(
             fullName = marker.fullName,
+            aliases = emptyList(),
             primaryUsername = marker.primaryUsername,
             usernames = marker.usernames,
             emails = marker.emails,
             phones = marker.phones,
             organizations = marker.organizations,
             locations = marker.locations,
-            profileUrls = marker.profileUrls
-        ) to marker.deepResearch
-    }.getOrNull()
+            profileUrls = marker.profileUrls,
+            selfieUri = null
+        )
+        val inputIssue = validateInput(legacyInput)
+        if (inputIssue != null) {
+            return deleteLegacyAndReturn(LegacyMigration.Invalid(inputIssue))
+        }
 
-    fun clear(): Boolean = runCatching { file.delete() }.getOrDefault(false)
+        val now = try {
+            nowMillis()
+        } catch (_: Exception) {
+            return deleteLegacyAndReturn(LegacyMigration.StorageFailure(ResumeStorageReason.IoFailure))
+        }
+        val expiresAt = try {
+            expiresAt(now)
+        } catch (error: ResumeInvalidOperation) {
+            return deleteLegacyAndReturn(LegacyMigration.Invalid(error.reason))
+        }
+        val requestId = try {
+            idFactory()
+        } catch (_: Exception) {
+            return deleteLegacyAndReturn(LegacyMigration.StorageFailure(ResumeStorageReason.IoFailure))
+        }
+        if (!isValidRequestId(requestId)) {
+            return deleteLegacyAndReturn(LegacyMigration.Invalid(ResumeInvalidReason.InvalidRequestId))
+        }
+        val record = ResumeRecord(
+            formatVersion = FORMAT_VERSION,
+            requestId = requestId,
+            createdAtEpochMillis = now,
+            updatedAtEpochMillis = now,
+            expiresAtEpochMillis = expiresAt,
+            input = legacyInput,
+            deepResearch = marker.deepResearch,
+            scanMode = marker.scanMode
+        )
+
+        return try {
+            persistRecord(record)
+            when (val verified = loadRecord(requestId)) {
+                is ResumeReadState.Available -> deleteLegacyAndReturn(LegacyMigration.Migrated(requestId))
+                is ResumeReadState.StorageFailure -> {
+                    val cleanupFailure = cleanupFailedMigration(requestId)
+                    val result = cleanupFailure?.let(LegacyMigration::StorageFailure)
+                        ?: LegacyMigration.StorageFailure(verified.reason)
+                    deleteLegacyAndReturn(result)
+                }
+                else -> {
+                    val cleanupFailure = cleanupFailedMigration(requestId)
+                    val result = cleanupFailure?.let(LegacyMigration::StorageFailure)
+                        ?: LegacyMigration.Invalid(ResumeInvalidReason.MigrationVerificationFailed)
+                    deleteLegacyAndReturn(result)
+                }
+            }
+        } catch (error: ResumeCryptoFailure) {
+            val cleanupFailure = cleanupFailedMigration(requestId)
+            val result = cleanupFailure?.let(LegacyMigration::StorageFailure)
+                ?: LegacyMigration.StorageFailure(error.reason)
+            deleteLegacyAndReturn(result)
+        } catch (error: ResumeInvalidOperation) {
+            val cleanupFailure = cleanupFailedMigration(requestId)
+            val result = cleanupFailure?.let(LegacyMigration::StorageFailure)
+                ?: LegacyMigration.Invalid(error.reason)
+            deleteLegacyAndReturn(result)
+        } catch (_: GeneralSecurityException) {
+            val cleanupFailure = cleanupFailedMigration(requestId)
+            val result = cleanupFailure?.let(LegacyMigration::StorageFailure)
+                ?: LegacyMigration.StorageFailure(ResumeStorageReason.KeyFailure)
+            deleteLegacyAndReturn(result)
+        } catch (_: Exception) {
+            val cleanupFailure = cleanupFailedMigration(requestId)
+            val result = cleanupFailure?.let(LegacyMigration::StorageFailure)
+                ?: LegacyMigration.StorageFailure(ResumeStorageReason.IoFailure)
+            deleteLegacyAndReturn(result)
+        }
+    }
+
+    private fun cleanupFailedMigration(requestId: String): ResumeStorageReason? {
+        val pointer = try {
+            readPointer()
+        } catch (error: ResumeCryptoFailure) {
+            return error.reason
+        } catch (_: Exception) {
+            return ResumeStorageReason.IoFailure
+        }
+        try {
+            persistClearTombstone(requestId)
+        } catch (error: ResumeCryptoFailure) {
+            return error.reason
+        } catch (_: Exception) {
+            return ResumeStorageReason.IoFailure
+        }
+        if (pointer == requestId) {
+            try {
+                deleteFileDurably(pointerFile, ResumeStorageReason.PointerFailure)
+            } catch (error: ResumeCryptoFailure) {
+                return error.reason
+            } catch (_: Exception) {
+                return ResumeStorageReason.PointerFailure
+            }
+        }
+        return try {
+            deleteFileDurably(recordFile(requestId), ResumeStorageReason.IoFailure)
+            deleteClearTombstone(requestId)
+            null
+        } catch (error: ResumeCryptoFailure) {
+            error.reason
+        } catch (_: Exception) {
+            ResumeStorageReason.IoFailure
+        }
+    }
+
+    /**
+     * Promotion may only choose between B and the exact generation selected
+     * by the pointer. Any other unguarded encrypted record could be recovered
+     * as an orphan after a crash, so promotion fails closed until that state is
+     * reconciled. Prepared and explicitly-cleared generations are intentionally
+     * excluded because generic recovery already refuses to activate them.
+     */
+    private fun hasUnexpectedRecoverableRecord(
+        requestId: String,
+        priorPointer: String?
+    ): Boolean {
+        return encryptedRecordFiles().any { file ->
+            val candidateId = file.name.removeSuffix(RECORD_EXTENSION)
+            if (candidateId == requestId || candidateId == priorPointer) {
+                false
+            } else {
+                !hasClearTombstone(candidateId) &&
+                    !preparedMarkerFile(candidateId).exists()
+            }
+        }
+    }
+
+    private fun recoverOrphanRecord(): ResumeReadState? {
+        if (hasClearAllGuard()) {
+            return ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val candidates = encryptedRecordFiles().sortedByDescending { it.lastModified() }
+        var guardedCandidate = false
+        val recoverable = mutableListOf<Pair<String, ResumeReadState.Available>>()
+        for (file in candidates) {
+            val requestId = file.name.removeSuffix(RECORD_EXTENSION)
+            if (!isValidRequestId(requestId)) continue
+            // Prepared B records are activated only by explicit promotion or
+            // lifecycle reconciliation, never by generic orphan ordering.
+            if (preparedMarkerFile(requestId).exists()) continue
+            if (hasClearTombstone(requestId)) {
+                guardedCandidate = true
+                continue
+            }
+            when (val state = loadRecord(requestId)) {
+                is ResumeReadState.Available -> {
+                    recoverable += requestId to state
+                }
+                is ResumeReadState.StorageFailure -> return state
+                is ResumeReadState.Expired,
+                is ResumeReadState.Invalid -> {
+                    try {
+                        deleteFileDurably(file, ResumeStorageReason.IoFailure)
+                    } catch (error: ResumeCryptoFailure) {
+                        return ResumeReadState.StorageFailure(error.reason)
+                    } catch (_: Exception) {
+                        return ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+                    }
+                }
+                is ResumeReadState.Missing -> Unit
+            }
+        }
+        if (recoverable.size > 1) {
+            // Never choose a generation by timestamp when two independent
+            // unguarded records are valid. Leave the pointer untouched until
+            // an explicit reconciliation identifies the intended generation.
+            return ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        }
+        val single = recoverable.singleOrNull()
+        if (single != null) {
+            val (requestId, state) = single
+            return try {
+                atomicWrite(pointerFile, requestId.toByteArray(Charsets.UTF_8))
+                state
+            } catch (error: Exception) {
+                val cleanupFailure = runCatching {
+                    deleteFileDurably(pointerFile, ResumeStorageReason.PointerFailure)
+                }.exceptionOrNull()
+                val failure = ResumeCryptoFailure(ResumeStorageReason.PointerFailure, error)
+                cleanupFailure?.let(failure::addSuppressed)
+                ResumeReadState.StorageFailure(failure.reason)
+            }
+        }
+        return if (guardedCandidate) {
+            ResumeReadState.StorageFailure(ResumeStorageReason.IoFailure)
+        } else {
+            null
+        }
+    }
+
+    private fun readPointer(): String? {
+        if (!pointerFile.exists()) return null
+        val bytes = try {
+            pointerFile.readBounded(MAX_POINTER_BYTES)
+        } catch (e: BoundedReadException) {
+            return "invalid_pointer_oversized"
+        } catch (e: Exception) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure, e)
+        }
+        val pointer = bytes.toString(Charsets.UTF_8).trim()
+        return pointer.ifBlank { "invalid_pointer_blank" }
+    }
+
+    private fun deleteLegacyOrThrow() {
+        if (!legacyFile.exists()) return
+        deleteFileDurably(legacyFile, ResumeStorageReason.LegacyDeletionFailure)
+        removeEmptyLegacyDirectory()
+    }
+
+    private fun removeEmptyLegacyDirectory() {
+        if (legacyDir == recordsDir || !legacyDir.exists()) return
+        val files = legacyDir.listFiles()
+            ?: throw ResumeCryptoFailure(ResumeStorageReason.LegacyDeletionFailure)
+        if (files.isEmpty()) {
+            if (!legacyDir.delete()) {
+                throw ResumeCryptoFailure(ResumeStorageReason.LegacyDeletionFailure)
+            }
+            legacyDir.parentFile?.let(dirSyncer::sync)
+        }
+    }
+
+    private fun encryptedRecordFiles(): List<File> {
+        if (!recordsDir.exists()) return emptyList()
+        val files = recordsDir.listFiles()
+        if (files == null) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure)
+        }
+        return files.filter { file ->
+            file.isFile && file.name.endsWith(RECORD_EXTENSION) &&
+                isValidRequestId(file.name.removeSuffix(RECORD_EXTENSION))
+        }
+    }
+
+    private fun recordFile(requestId: String): File {
+        if (!isValidRequestId(requestId)) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.InvalidRequestId)
+        }
+        val root = try {
+            recordsDir.canonicalFile
+        } catch (e: Exception) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure, e)
+        }
+        val target = try {
+            File(root, "$requestId$RECORD_EXTENSION").canonicalFile
+        } catch (e: Exception) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure, e)
+        }
+        if (target.parentFile != root) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.InvalidRequestId)
+        }
+        return target
+    }
+
+    private fun preparedMarkerFile(requestId: String): File {
+        if (!isValidRequestId(requestId)) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.InvalidRequestId)
+        }
+        val root = try {
+            recordsDir.canonicalFile
+        } catch (error: Exception) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure, error)
+        }
+        val target = try {
+            File(root, "$requestId$PREPARED_EXTENSION").canonicalFile
+        } catch (error: Exception) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure, error)
+        }
+        if (target.parentFile != root) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.InvalidRequestId)
+        }
+        return target
+    }
+
+    private fun hasValidPreparedMarker(requestId: String): Boolean {
+        val marker = preparedMarkerFile(requestId)
+        if (!marker.exists() || !marker.isFile) return false
+        return try {
+            marker.readBounded(MAX_PREPARED_MARKER_BYTES)
+                .contentEquals(PREPARED_MARKER_BYTES)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun deletePreparedMarker(requestId: String) {
+        deleteFileDurably(preparedMarkerFile(requestId), ResumeStorageReason.IoFailure)
+    }
+
+    /**
+     * Returns the durable per-request clear guard. Its filename contains only
+     * the opaque request UUID already used by the encrypted record; the guard
+     * payload contains no identity input or other plaintext metadata.
+     */
+    private fun clearTombstoneFile(requestId: String): File {
+        if (!isValidRequestId(requestId)) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.InvalidRequestId)
+        }
+        val root = try {
+            recordsDir.canonicalFile
+        } catch (error: Exception) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure, error)
+        }
+        val target = try {
+            File(root, "$requestId$CLEAR_TOMBSTONE_EXTENSION").canonicalFile
+        } catch (error: Exception) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure, error)
+        }
+        if (target.parentFile != root) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.InvalidRequestId)
+        }
+        return target
+    }
+
+    private fun hasClearTombstone(requestId: String): Boolean =
+        clearTombstoneFile(requestId).exists()
+
+    private fun persistClearTombstone(requestId: String) {
+        persistClearGuard(clearTombstoneFile(requestId), ResumeStorageReason.IoFailure)
+    }
+
+    private fun deleteClearTombstone(requestId: String) {
+        deleteFileDurably(clearTombstoneFile(requestId), ResumeStorageReason.IoFailure)
+    }
+
+    private fun hasClearAllGuard(): Boolean = clearAllGuardFile.exists()
+
+    private fun persistClearAllGuard() {
+        persistClearGuard(clearAllGuardFile, ResumeStorageReason.IoFailure)
+    }
+
+    private fun deleteClearAllGuard() {
+        deleteFileDurably(clearAllGuardFile, ResumeStorageReason.IoFailure)
+    }
+
+    /**
+     * A guard is idempotent only when its exact one-byte marker is present. An
+     * unexpected existing path is treated as a fail-closed storage failure;
+     * it is never overwritten while encrypted data may still be recoverable.
+     */
+    private fun persistClearGuard(file: File, reason: ResumeStorageReason) {
+        if (file.exists()) {
+            if (!file.isFile) throw ResumeCryptoFailure(reason)
+            val existing = try {
+                file.readBounded(MAX_CLEAR_GUARD_BYTES)
+            } catch (error: Exception) {
+                throw ResumeCryptoFailure(reason, error)
+            }
+            if (!existing.contentEquals(CLEAR_GUARD_BYTES)) {
+                throw ResumeCryptoFailure(reason)
+            }
+            return
+        }
+        try {
+            atomicWrite(file, CLEAR_GUARD_BYTES)
+        } catch (error: ResumeCryptoFailure) {
+            throw error
+        } catch (error: Exception) {
+            throw ResumeCryptoFailure(reason, error)
+        }
+    }
+
+    private fun ensureDirectory(dir: File) {
+        if (dir.exists()) {
+            if (!dir.isDirectory) throw IOException("Resume path is not a directory")
+            return
+        }
+        if (!dir.mkdirs() && !dir.isDirectory) {
+            throw IOException("Unable to create resume directory")
+        }
+    }
+
+    /**
+     * A crash can commit a prepared marker before the encrypted record write
+     * begins. When that marker is the only recognized state left, remove the
+     * opaque marker (and any encrypted-write temporary) before deciding
+     * whether a missing keystore key may be created. Never discard it when an
+     * encrypted record, pointer, tombstone, global guard, or unknown artifact
+     * is present.
+     */
+    private fun discardStaleMarkerOnlyState() {
+        if (!recordsDir.exists()) return
+        if (!recordsDir.isDirectory) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure)
+        }
+        val files = recordsDir.listFiles()
+            ?: throw ResumeCryptoFailure(ResumeStorageReason.IoFailure)
+        if (pointerFile.exists() || clearAllGuardFile.exists()) return
+        if (files.any {
+                it.name.endsWith(RECORD_EXTENSION) ||
+                    it.name.endsWith(CLEAR_TOMBSTONE_EXTENSION)
+            }
+        ) {
+            return
+        }
+        val markerFiles = files.filter { it.name.endsWith(PREPARED_EXTENSION) }
+        if (markerFiles.isEmpty()) return
+        if (markerFiles.any { file ->
+                val requestId = file.name.removeSuffix(PREPARED_EXTENSION)
+                !isValidRequestId(requestId) || !hasValidPreparedMarker(requestId)
+            }
+        ) {
+            return
+        }
+        val unknownFiles = files.filter { file ->
+            !file.name.endsWith(PREPARED_EXTENSION) &&
+                !file.name.endsWith(".$TEMP_EXTENSION")
+        }
+        if (unknownFiles.isNotEmpty()) return
+
+        markerFiles.forEach { file ->
+            deleteFileDurably(file, ResumeStorageReason.IoFailure)
+        }
+        files.filter { it.name.endsWith(".$TEMP_EXTENSION") }
+            .forEach { file ->
+                deleteFileDurably(file, ResumeStorageReason.IoFailure)
+            }
+    }
+
+    private fun canCreateKey(): Boolean {
+        if (pointerFile.exists()) return false
+        if (!recordsDir.exists()) return true
+        if (!recordsDir.isDirectory) {
+            throw ResumeCryptoFailure(ResumeStorageReason.IoFailure)
+        }
+        val files = recordsDir.listFiles()
+            ?: throw ResumeCryptoFailure(ResumeStorageReason.IoFailure)
+        return files.none { file ->
+            file.name.endsWith(RECORD_EXTENSION) || file.name.endsWith(".$TEMP_EXTENSION")
+                || file.name.endsWith(PREPARED_EXTENSION)
+                || file.name.endsWith(CLEAR_TOMBSTONE_EXTENSION)
+                || file.name == CLEAR_GUARD_FILE_NAME
+        }
+    }
+
+    private fun deleteFileDurably(file: File, reason: ResumeStorageReason) {
+        if (!file.exists()) return
+        if (!file.delete()) {
+            throw ResumeCryptoFailure(reason)
+        }
+        val parent = file.parentFile
+        if (parent != null) {
+            try {
+                dirSyncer.sync(parent)
+            } catch (error: Exception) {
+                throw ResumeCryptoFailure(reason, error)
+            }
+        }
+    }
+
+    private fun restoreFile(
+        target: File,
+        previousBytes: ByteArray?,
+        reason: ResumeStorageReason
+    ): Throwable? {
+        try {
+            if (previousBytes == null) {
+                deleteFileDurably(target, reason)
+            } else {
+                atomicWrite(target, previousBytes)
+            }
+        } catch (error: Throwable) {
+            return error
+        }
+        return null
+    }
+
+    private fun expiresAt(now: Long): Long {
+        if (now < 0) throw ResumeInvalidOperation(ResumeInvalidReason.InvalidTimestamp)
+        return try {
+            Math.addExact(now, TTL_MILLIS)
+        } catch (error: ArithmeticException) {
+            throw ResumeInvalidOperation(ResumeInvalidReason.InvalidTimestamp)
+        }
+    }
+
+    private fun hasValidTimestamps(record: ResumeRecord): Boolean {
+        if (record.createdAtEpochMillis < 0 ||
+            record.updatedAtEpochMillis < record.createdAtEpochMillis ||
+            record.updatedAtEpochMillis > record.expiresAtEpochMillis
+        ) {
+            return false
+        }
+        val expectedExpiry = try {
+            Math.addExact(record.createdAtEpochMillis, TTL_MILLIS)
+        } catch (_: ArithmeticException) {
+            return false
+        }
+        return record.expiresAtEpochMillis == expectedExpiry
+    }
+
+    private fun atomicWrite(target: File, bytes: ByteArray) {
+        val parent = target.parentFile ?: throw IOException("Missing target parent")
+        ensureDirectory(parent)
+        val tempId = UUID.randomUUID().toString()
+        val temporary = File(parent, "${target.name}.$tempId.$TEMP_EXTENSION")
+        var failure: Exception? = null
+        try {
+            FileOutputStream(temporary).use { output ->
+                output.write(bytes)
+                output.fd.sync()
+            }
+            Files.move(
+                temporary.toPath(),
+                target.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+            dirSyncer.sync(parent)
+        } catch (error: Exception) {
+            failure = error
+        }
+        if (temporary.exists() && !temporary.delete()) {
+            val cleanupFailure = IOException("Unable to remove temporary resume file")
+            if (failure == null) {
+                failure = cleanupFailure
+            } else {
+                failure?.addSuppressed(cleanupFailure)
+            }
+        }
+        if (failure != null) {
+            throw failure as Exception
+        }
+    }
+
+    private fun File.readBounded(maxBytes: Long): ByteArray {
+        if (!exists()) throw IOException("Missing file")
+        require(maxBytes in 0 until Int.MAX_VALUE.toLong())
+        val capacity = (maxBytes + 1L).toInt()
+        FileInputStream(this).use { input ->
+            val bytes = ByteArray(capacity)
+            var count = 0
+            while (count < bytes.size) {
+                val read = input.read(bytes, count, bytes.size - count)
+                if (read < 0) break
+                if (read == 0) {
+                    val single = input.read()
+                    if (single < 0) break
+                    bytes[count++] = single.toByte()
+                } else {
+                    count += read
+                }
+            }
+            if (count > maxBytes) {
+                throw BoundedReadException()
+            }
+            return bytes.copyOf(count)
+        }
+    }
+
+    private fun aad(requestId: String): ByteArray =
+        "$FORMAT_VERSION:$requestId".toByteArray(Charsets.UTF_8)
+
+    private fun validateInput(input: IdentityInput): ResumeInvalidReason? {
+        val strings = listOfNotNull(
+            input.fullName,
+            input.primaryUsername,
+            input.selfieUri
+        ) + input.aliases + input.usernames + input.emails + input.phones +
+            input.organizations + input.locations + input.profileUrls
+        if (strings.any { it.length > MAX_FIELD_CHARS }) return ResumeInvalidReason.InputTooLarge
+        val lists = listOf(
+            input.aliases,
+            input.usernames,
+            input.emails,
+            input.phones,
+            input.organizations,
+            input.locations,
+            input.profileUrls
+        )
+        if (lists.any { it.size > MAX_LIST_ITEMS }) return ResumeInvalidReason.InputTooLarge
+        return null
+    }
+
+    private fun isValidRequestId(value: String): Boolean {
+        if (!REQUEST_ID_PATTERN.matches(value)) return false
+        return runCatching { UUID.fromString(value).toString() == value.lowercase(Locale.ROOT) }
+            .getOrDefault(false)
+    }
+
+    @Serializable
+    private data class ResumeRecord(
+        val formatVersion: Int,
+        val requestId: String,
+        val createdAtEpochMillis: Long,
+        val updatedAtEpochMillis: Long,
+        val expiresAtEpochMillis: Long,
+        val input: IdentityInput,
+        val deepResearch: Boolean,
+        val scanMode: ScanMode,
+        val strongFaceCorrelation: Boolean = false,
+        /** Optional for backward-compatible decoding of pre-plan records. */
+        val planFingerprint: String? = null,
+        val plannedProviderIds: List<String> = emptyList(),
+        val plannedProviderCount: Int = 0,
+        /** Full allow-listed coordinator plan; absent on pre-plan records. */
+        val scanPlan: ScanPlanSummary? = null,
+        /** Semantic coordinator checkpoint; old records default to queued. */
+        val checkpointStage: String = ScanCheckpointStage.Queued.wireName,
+        val completedCheckpointStages: List<String> = emptyList(),
+        /** Bounded non-sensitive output shape for completed stages. */
+        val stageOutputs: List<StageOutputRecord> = emptyList(),
+        /** Bounded metadata for encrypted public discovery payloads. */
+        val payloadSummaries: List<ScanPayloadSummary> = emptyList(),
+        /** Exact safe output of the completed breach stage, when available. */
+        val breachCheckpoint: BreachStageCheckpoint? = null,
+        /** Exact bounded output of the completed face-consistency stage, when available. */
+        val faceCheckpoint: FaceConsistencyStageCheckpoint? = null,
+        /** Exact bounded output of deterministic post-processing, when available. */
+        val postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
+        /** Exact bounded output of deterministic graph construction, when available. */
+        val entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
+        /** Exact bounded output of deterministic relationship confidence scoring, when available. */
+        val relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
+        /** Exact bounded output of deterministic attack-path tracing, when available. */
+        val attackPathsCheckpoint: AttackPathsStageCheckpoint? = null,
+        /** Exact bounded output of deterministic exposure scoring, when available. */
+        val exposureCheckpoint: ExposureStageCheckpoint? = null,
+        /** Exact WorkManager owner bound after lifecycle CAS succeeds. */
+        val checkpointOwnerId: String? = null
+    )
+
+    @Serializable
+    private data class StageOutputRecord(
+        val stage: String,
+        val itemCount: Int,
+        val verifiedCount: Int = 0,
+        val omittedCount: Int = 0
+    ) {
+        fun toDomain(): ScanStageOutput = ScanStageOutput(
+            itemCount = itemCount,
+            verifiedCount = verifiedCount,
+            omittedCount = omittedCount
+        )
+    }
+
+    private data class PriorRecordBackup(
+        val file: File,
+        val bytes: ByteArray,
+        val pointerBytes: ByteArray
+    )
+
+    @Serializable
+    private data class EncryptedEnvelope(
+        val formatVersion: Int,
+        val ivBase64: String,
+        val ciphertextBase64: String
+    )
+
+    @Serializable
+    private data class LegacyResumeMarker(
+        val fullName: String,
+        val primaryUsername: String? = null,
+        val usernames: List<String> = emptyList(),
+        val emails: List<String> = emptyList(),
+        val phones: List<String> = emptyList(),
+        val organizations: List<String> = emptyList(),
+        val locations: List<String> = emptyList(),
+        val profileUrls: List<String> = emptyList(),
+        val deepResearch: Boolean = false,
+        val scanMode: ScanMode = ScanMode.Standard
+    )
+
+    private sealed interface LegacyMigration {
+        data object None : LegacyMigration
+        data class Migrated(val requestId: String) : LegacyMigration
+        data class Invalid(val reason: ResumeInvalidReason) : LegacyMigration
+        data class StorageFailure(val reason: ResumeStorageReason) : LegacyMigration
+    }
+
+    private class ResumeInvalidOperation(val reason: ResumeInvalidReason) : Exception()
+
+    internal companion object {
+        private val STORE_LOCK = Any()
+        const val FORMAT_VERSION = 1
+        const val TTL_MILLIS = 24L * 60L * 60L * 1000L
+        const val MAX_RECORD_BYTES = 128 * 1024
+        const val MAX_ENVELOPE_BYTES = MAX_RECORD_BYTES * 2L
+        const val MAX_LEGACY_BYTES = 64 * 1024L
+        const val MAX_FIELD_CHARS = 4_096
+        const val MAX_LIST_ITEMS = 128
+        const val MAX_CHECKPOINT_STAGES = 16
+        const val MAX_STAGE_OUTPUT_COUNT = 100_000
+        const val MAX_PAYLOAD_SUMMARIES = 2
+        const val MAX_BREACH_RESULTS = 128
+        const val MAX_BREACH_COUNT = 10_000
+        const val MAX_BREACH_TITLES = 128
+        const val MAX_BREACH_SOURCES = 128
+        const val MAX_BREACH_EMAIL_CHARS = 320
+        const val MAX_BREACH_TITLE_CHARS = 512
+        const val MAX_BREACH_SOURCE_CHARS = 2_048
+        const val MAX_BREACH_URL_CHARS = 2_048
+        const val MAX_BREACH_NOTE_CHARS = 512
+        const val MAX_POINTER_BYTES = 64L
+        const val GCM_IV_BYTES = 12
+        const val GCM_TAG_BYTES = 16
+        const val RECORD_EXTENSION = ".dscan"
+        const val PREPARED_EXTENSION = ".prepared"
+        const val CLEAR_TOMBSTONE_EXTENSION = ".cleared"
+        const val TOMBSTONE_EXTENSION = CLEAR_TOMBSTONE_EXTENSION
+        const val TEMP_EXTENSION = "tmp"
+        const val RECORDS_DIRECTORY = "dossier_scan_checkpoints"
+        const val LEGACY_DIRECTORY = "dossier_resume"
+        const val LEGACY_FILE_NAME = "dossier_resume.json"
+        const val POINTER_FILE_NAME = "active_checkpoint.id"
+        private const val MAX_PREPARED_MARKER_BYTES = 8L
+        private val PREPARED_MARKER_BYTES = byteArrayOf(1)
+        private const val MAX_CLEAR_GUARD_BYTES = 8L
+        private val CLEAR_GUARD_BYTES = byteArrayOf(1)
+        private const val CLEAR_GUARD_FILE_NAME = "clear.guard"
+        const val KEY_ALIAS = "dossier-scan-resume-v1"
+        private val REQUEST_ID_PATTERN =
+            Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+        private val UNSAFE_BREACH_NOTE_PATTERN =
+            Regex("(?i)(password|passwd|token|secret|cookie|authorization|bearer|api[ -_]?key)")
+    }
+
+    private val pointerFile: File
+        get() = File(recordsDir, POINTER_FILE_NAME)
+
+    private val clearAllGuardFile: File
+        get() = File(recordsDir, CLEAR_GUARD_FILE_NAME)
+
+    private val legacyFile: File
+        get() = File(legacyDir, LEGACY_FILE_NAME)
+}
+
+internal data class ResumePoint(
+    val requestId: String,
+    val input: IdentityInput,
+    val deepResearch: Boolean,
+    val scanMode: ScanMode,
+    val strongFaceCorrelation: Boolean,
+    val createdAtEpochMillis: Long,
+    val expiresAtEpochMillis: Long,
+    val updatedAtEpochMillis: Long = createdAtEpochMillis,
+    /** SHA-256 commitment to the immutable declarative plan at enqueue time. */
+    val planFingerprint: String? = null,
+    /** Ordered IDs are bounded; the fingerprint still covers the full plan. */
+    val plannedProviderIds: List<String> = emptyList(),
+    val plannedProviderCount: Int = 0,
+    val scanPlan: ScanPlanSummary? = null,
+    val checkpointStage: ScanCheckpointStage = ScanCheckpointStage.Queued,
+    val completedCheckpointStages: List<ScanCheckpointStage> = emptyList(),
+    val stageOutputs: Map<ScanCheckpointStage, ScanStageOutput> = emptyMap(),
+    val payloadSummaries: List<ScanPayloadSummary> = emptyList(),
+    val breachCheckpoint: BreachStageCheckpoint? = null,
+    val faceCheckpoint: FaceConsistencyStageCheckpoint? = null,
+    val postProcessingCheckpoint: PostProcessingStageCheckpoint? = null,
+    val entityGraphCheckpoint: EntityGraphStageCheckpoint? = null,
+    val relationshipConfidenceCheckpoint: RelationshipConfidenceStageCheckpoint? = null,
+    val attackPathsCheckpoint: AttackPathsStageCheckpoint? = null,
+    val exposureCheckpoint: ExposureStageCheckpoint? = null,
+    val checkpointOwnerId: String? = null
+)
+
+internal sealed interface ResumeReadState {
+    data class Available(val point: ResumePoint) : ResumeReadState
+    data object Missing : ResumeReadState
+    data object Expired : ResumeReadState
+    data class Invalid(val reason: ResumeInvalidReason) : ResumeReadState
+    data class StorageFailure(val reason: ResumeStorageReason) : ResumeReadState
+}
+
+internal sealed interface ResumeWriteState {
+    data class Saved(val point: ResumePoint) : ResumeWriteState
+    data object Cleared : ResumeWriteState
+    data class Invalid(val reason: ResumeInvalidReason) : ResumeWriteState
+    data class StorageFailure(val reason: ResumeStorageReason) : ResumeWriteState
+}
+
+internal enum class ResumeInvalidReason {
+    InvalidRequestId,
+    MalformedEnvelope,
+    UnsupportedVersion,
+    AuthenticationFailed,
+    MalformedPayload,
+    RequestIdMismatch,
+    InvalidPayload,
+    InvalidTimestamp,
+    RecordTooLarge,
+    InputTooLarge,
+    LegacyTooLarge,
+    MalformedLegacy,
+    MigrationVerificationFailed
+}
+
+internal enum class ResumeStorageReason {
+    IoFailure,
+    PointerFailure,
+    LegacyDeletionFailure,
+    SerializationFailure,
+    KeyFailure,
+    KeyUnavailable
+}
+
+internal data class SealedResumePayload(
+    val iv: ByteArray,
+    val ciphertext: ByteArray
+)
+
+/** Injectable only for JVM tests; production uses the AndroidKeyStore implementation. */
+internal interface ResumeCrypto {
+    fun seal(plaintext: ByteArray, aad: ByteArray, allowKeyCreation: Boolean): SealedResumePayload
+    fun open(payload: SealedResumePayload, aad: ByteArray): ByteArray
+}
+
+private class AndroidKeystoreResumeCrypto : ResumeCrypto {
+    override fun seal(
+        plaintext: ByteArray,
+        aad: ByteArray,
+        allowKeyCreation: Boolean
+    ): SealedResumePayload {
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, getKey(allowKeyCreation))
+        cipher.updateAAD(aad)
+        return SealedResumePayload(cipher.iv, cipher.doFinal(plaintext))
+    }
+
+    override fun open(payload: SealedResumePayload, aad: ByteArray): ByteArray {
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            getKey(createIfMissing = false),
+            GCMParameterSpec(GCM_TAG_BITS, payload.iv)
+        )
+        cipher.updateAAD(aad)
+        return cipher.doFinal(payload.ciphertext)
+    }
+
+    private fun getKey(createIfMissing: Boolean): SecretKey {
+        val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        (keyStore.getKey(ScanResumeStore.KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        if (!createIfMissing) {
+            throw ResumeCryptoFailure(ResumeStorageReason.KeyUnavailable)
+        }
+        return try {
+            val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+            generator.init(
+                KeyGenParameterSpec.Builder(
+                    ScanResumeStore.KEY_ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(256)
+                    .setRandomizedEncryptionRequired(true)
+                    .build()
+            )
+            generator.generateKey()
+        } catch (error: GeneralSecurityException) {
+            throw ResumeCryptoFailure(ResumeStorageReason.KeyFailure, error)
+        }
+    }
+
+    private companion object {
+        const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+        const val TRANSFORMATION = "AES/GCM/NoPadding"
+        const val GCM_TAG_BITS = 128
+    }
 }

@@ -2,7 +2,15 @@ package io.dossier.app.domain.graph
 
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationship
+import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.HistoricalAttributeKind
+import io.dossier.app.domain.evidence.EvidenceCollection
+import io.dossier.app.domain.evidence.EvidenceIdPolicy
+import io.dossier.app.domain.evidence.withResolvedRelationshipEvidence
+import io.dossier.app.domain.identity.EntityResolverV2
+import io.dossier.app.domain.identity.ResolutionBand
 import io.dossier.app.domain.model.BreachDigest
 import io.dossier.app.domain.model.DossierEdge
 import io.dossier.app.domain.model.DossierEntity
@@ -11,14 +19,29 @@ import io.dossier.app.domain.model.EntityType
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
+import io.dossier.app.domain.model.GraphEntityKind
+import io.dossier.app.domain.model.GraphNodeState
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.ProfileScanResult
 import java.util.Locale
 
+private const val MAX_EDGE_EVIDENCE_IDS = 256
+
+private fun mergeEvidenceIds(existing: List<String>, incoming: List<String>): List<String> =
+    (existing + incoming)
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .map(EvidenceIdPolicy::migrate)
+        .distinct()
+        .take(MAX_EDGE_EVIDENCE_IDS)
+
 /**
- * Pure builder that fuses identity input, profile scan results, findings,
- * face matches, and breach digests into a single entity graph for the report.
+ * Relation names are a persisted compatibility surface, so retain the first
+ * spelling on an edge while using a stable key for duplicate detection.
  */
+private fun canonicalRelationKey(value: String): String = value.trim().lowercase(Locale.ROOT)
+
+/** Fuses identity input, verified observations, evidence, images and breach summaries into one graph. */
 object EntityGraphBuilder {
 
     fun build(
@@ -36,20 +59,82 @@ object EntityGraphBuilder {
         fun putEntity(entity: DossierEntity) {
             val existing = entities[entity.id]
             if (existing == null) {
-                entities[entity.id] = entity
+                entities[entity.id] = entity.copy(
+                    evidenceIds = mergeEvidenceIds(emptyList(), entity.evidenceIds)
+                )
             } else {
                 entities[entity.id] = existing.copy(
                     confidence = maxOf(existing.confidence, entity.confidence),
                     sourceUrls = (existing.sourceUrls + entity.sourceUrls).distinct(),
-                    label = if (entity.label.length > existing.label.length) entity.label else existing.label
+                    label = if (entity.label.length > existing.label.length) entity.label else existing.label,
+                    kind = mergeGraphEntityKind(existing.kind, entity.kind),
+                    evidenceIds = mergeEvidenceIds(existing.evidenceIds, entity.evidenceIds),
+                    historical = existing.historical || entity.historical,
+                    firstObservedAtEpochMillis = minNullable(
+                        existing.firstObservedAtEpochMillis,
+                        entity.firstObservedAtEpochMillis
+                    ),
+                    lastObservedAtEpochMillis = maxNullable(
+                        existing.lastObservedAtEpochMillis,
+                        entity.lastObservedAtEpochMillis
+                    ),
+                    state = strongerState(existing.state, entity.state)
                 )
             }
         }
 
-        fun link(fromId: String, toId: String, relation: String, evidence: String? = null) {
+        fun addLink(
+            fromId: String,
+            toId: String,
+            relation: String,
+            evidenceText: String? = null,
+            evidenceIds: List<String> = emptyList(),
+            contradictingEvidenceIds: List<String> = emptyList()
+        ) {
             if (fromId == toId) return
-            if (edges.any { it.fromId == fromId && it.toId == toId && it.relation == relation }) return
-            edges.add(DossierEdge(fromId = fromId, toId = toId, relation = relation, evidence = evidence))
+            val relationKey = canonicalRelationKey(relation)
+            val duplicateIndex = edges.indexOfFirst {
+                it.fromId == fromId &&
+                    it.toId == toId &&
+                    canonicalRelationKey(it.relation) == relationKey
+            }
+            if (duplicateIndex >= 0) {
+                val existing = edges[duplicateIndex]
+                edges[duplicateIndex] = existing.copy(
+                    evidence = existing.evidence ?: evidenceText,
+                    evidenceIds = mergeEvidenceIds(existing.evidenceIds, evidenceIds),
+                    contradictingEvidenceIds = mergeEvidenceIds(
+                        existing.contradictingEvidenceIds,
+                        contradictingEvidenceIds
+                    )
+                )
+                return
+            }
+            edges.add(
+                DossierEdge(
+                    fromId = fromId,
+                    toId = toId,
+                    relation = relation,
+                    evidence = evidenceText,
+                    evidenceIds = mergeEvidenceIds(emptyList(), evidenceIds),
+                    contradictingEvidenceIds = mergeEvidenceIds(emptyList(), contradictingEvidenceIds)
+                )
+            )
+        }
+
+        fun link(fromId: String, toId: String, relation: String, evidenceText: String? = null) {
+            addLink(fromId, toId, relation, evidenceText)
+        }
+
+        fun linkWithEvidence(
+            fromId: String,
+            toId: String,
+            relation: String,
+            evidenceText: String? = null,
+            evidenceIds: List<String> = emptyList(),
+            contradictingEvidenceIds: List<String> = emptyList()
+        ) {
+            addLink(fromId, toId, relation, evidenceText, evidenceIds, contradictingEvidenceIds)
         }
 
         val subjectLabel = input.fullName.trim().ifBlank {
@@ -64,20 +149,36 @@ object EntityGraphBuilder {
                 id = subjectId,
                 type = EntityType.Person,
                 label = subjectLabel,
-                confidence = 1.0f
+                confidence = 1.0f,
+                state = GraphNodeState.Confirmed
             )
         )
 
-        // ---- Identity seeds -------------------------------------------------
         input.emails.filter { it.isNotBlank() }.forEach { email ->
             val id = entityId(EntityType.Email, email)
-            putEntity(DossierEntity(id = id, type = EntityType.Email, label = email.trim(), confidence = 1.0f))
-            link(subjectId, id, "has_email")
+            putEntity(
+                DossierEntity(
+                    id = id,
+                    type = EntityType.Email,
+                    label = email.trim(),
+                    confidence = 1.0f,
+                    state = GraphNodeState.Confirmed
+                )
+            )
+            link(subjectId, id, "has_email", "user-supplied")
         }
         input.phones.filter { it.isNotBlank() }.forEach { phone ->
             val id = entityId(EntityType.Phone, phone)
-            putEntity(DossierEntity(id = id, type = EntityType.Phone, label = phone.trim(), confidence = 1.0f))
-            link(subjectId, id, "has_phone")
+            putEntity(
+                DossierEntity(
+                    id = id,
+                    type = EntityType.Phone,
+                    label = phone.trim(),
+                    confidence = 1.0f,
+                    state = GraphNodeState.Confirmed
+                )
+            )
+            link(subjectId, id, "has_phone", "user-supplied")
         }
         val usernameSeeds = buildList {
             input.primaryUsername?.takeIf { it.isNotBlank() }?.let { add(it) }
@@ -85,18 +186,26 @@ object EntityGraphBuilder {
         }.distinctBy { it.lowercase(Locale.US) }
         usernameSeeds.forEach { username ->
             val id = entityId(EntityType.Username, username)
-            putEntity(DossierEntity(id = id, type = EntityType.Username, label = username.trim(), confidence = 1.0f))
-            link(subjectId, id, "uses_username")
+            putEntity(
+                DossierEntity(
+                    id = id,
+                    type = EntityType.Username,
+                    label = username.trim(),
+                    confidence = 1.0f,
+                    state = GraphNodeState.Confirmed
+                )
+            )
+            link(subjectId, id, "uses_username", "user-supplied")
         }
         input.organizations.filter { it.isNotBlank() }.forEach { org ->
             val id = entityId(EntityType.Organization, org)
-            putEntity(DossierEntity(id = id, type = EntityType.Organization, label = org.trim(), confidence = 0.9f))
-            link(subjectId, id, "affiliated_with")
+            putEntity(DossierEntity(id, EntityType.Organization, org.trim(), 0.9f, state = GraphNodeState.Confirmed))
+            link(subjectId, id, "affiliated_with", "user-supplied")
         }
         input.locations.filter { it.isNotBlank() }.forEach { loc ->
             val id = entityId(EntityType.Location, loc)
-            putEntity(DossierEntity(id = id, type = EntityType.Location, label = loc.trim(), confidence = 0.9f))
-            link(subjectId, id, "associated_with_location")
+            putEntity(DossierEntity(id, EntityType.Location, loc.trim(), 0.9f, state = GraphNodeState.Confirmed))
+            link(subjectId, id, "associated_with_location", "user-supplied")
         }
         input.profileUrls.filter { it.isNotBlank() }.forEach { url ->
             val id = entityId(EntityType.Profile, url)
@@ -106,17 +215,19 @@ object EntityGraphBuilder {
                     type = EntityType.Profile,
                     label = url.trim(),
                     confidence = 1.0f,
-                    sourceUrls = listOf(url.trim())
+                    sourceUrls = listOf(url.trim()),
+                    state = GraphNodeState.Confirmed
                 )
             )
-            link(subjectId, id, "owns_profile", evidence = "user-supplied")
+            link(subjectId, id, "owns_profile", "user-supplied")
         }
 
-        // ---- Confirmed / candidate profiles ---------------------------------
         profileResults.forEach { result ->
             val url = result.candidate.url
             val profileId = entityId(EntityType.Profile, url)
-            val conf = result.candidate.confidence.coerceIn(0f, 1f)
+            val resolution = EntityResolverV2.resolve(input, result, evidence = evidence)
+            val resolverConfidence = resolution.score.toFloat().coerceIn(0f, 1f)
+            val conf = maxOf(result.candidate.confidence.coerceIn(0f, 1f), resolverConfidence)
             putEntity(
                 DossierEntity(
                     id = profileId,
@@ -124,19 +235,31 @@ object EntityGraphBuilder {
                     label = result.displayName?.takeIf { it.isNotBlank() }
                         ?: "${result.candidate.platform.name}: ${result.candidate.username}",
                     confidence = conf,
-                    sourceUrls = listOf(url)
+                    sourceUrls = listOf(url),
+                    state = resolution.band.toGraphState()
                 )
             )
-            val relation = when {
-                result.verified && result.exists -> "has_profile"
-                result.exists -> "possible_profile"
-                else -> "candidate_profile"
+            val relation = when (resolution.band) {
+                ResolutionBand.Confirmed -> "owns_profile"
+                ResolutionBand.High,
+                ResolutionBand.Medium -> "has_profile"
+                ResolutionBand.Low -> "possible_profile"
+                ResolutionBand.Conflicting -> "candidate_profile"
+                ResolutionBand.Unresolved -> if (result.exists) "possible_profile" else "candidate_profile"
             }
-            link(
+            linkWithEvidence(
                 subjectId,
                 profileId,
                 relation,
-                evidence = result.verificationStatus ?: result.provenance
+                resolution.explanation.takeIf { it.isNotBlank() }
+                    ?: result.verificationStatus
+                    ?: result.provenance,
+                evidenceIds = resolution.supporting
+                    .flatMap { it.evidenceIds }
+                    .distinct(),
+                contradictingEvidenceIds = resolution.contradicting
+                    .flatMap { it.evidenceIds }
+                    .distinct()
             )
 
             val username = result.candidate.username
@@ -148,22 +271,18 @@ object EntityGraphBuilder {
                         type = EntityType.Username,
                         label = username,
                         confidence = conf,
-                        sourceUrls = listOf(url)
+                        sourceUrls = listOf(url),
+                        state = resolution.band.toGraphState()
                     )
                 )
-                if (result.exists) {
-                    link(subjectId, usernameId, "uses_username", evidence = url)
-                }
+                if (result.exists) link(subjectId, usernameId, "uses_username", url)
                 link(profileId, usernameId, "username_on_profile")
             }
-
-            // PII findings attributed to this profile
             result.findings.forEach { finding ->
                 attachFinding(finding, subjectId, profileId, ::putEntity, ::link)
             }
         }
 
-        // ---- Standalone findings (face, breach, public search, etc.) --------
         findings.forEach { finding ->
             val profileId = finding.sourceUrl?.takeIf { it.isNotBlank() }?.let { entityId(EntityType.Profile, it) }
             if (profileId != null && profileId !in entities) {
@@ -173,31 +292,53 @@ object EntityGraphBuilder {
                         type = EntityType.Profile,
                         label = finding.sourceUrl!!,
                         confidence = finding.confidence,
-                        sourceUrls = listOf(finding.sourceUrl)
+                        sourceUrls = listOf(finding.sourceUrl),
+                        state = GraphNodeState.Unresolved
                     )
                 )
-                link(subjectId, profileId, "related_profile", evidence = finding.type.name)
+                link(subjectId, profileId, "related_profile", finding.type.name)
             }
             attachFinding(finding, subjectId, profileId, ::putEntity, ::link)
         }
 
-        // ---- Evidence layer (M6: first-class Evidence correlation) -----------
-        // Evidence is the universal language; the graph now fuses it directly
-        // rather than only through the Finding adapter. Scanner-asserted
-        // relationships seed edges before the correlation engine generalizes.
-        relationships.forEach { rel ->
-            val fromId = entityIdForValue(rel.fromValue)
-            val toId = entityIdForValue(rel.toValue)
-            putEntity(DossierEntity(id = fromId, type = EntityType.Website, label = rel.fromValue, confidence = 0.7f))
-            putEntity(DossierEntity(id = toId, type = EntityType.Website, label = rel.toValue, confidence = 0.7f))
-            link(fromId, toId, rel.relation, rel.evidence)
-        }
         evidence.forEach { ev ->
-            attachEvidence(ev, subjectId, ::putEntity, ::link)
+            attachEvidence(
+                ev,
+                subjectId,
+                ::putEntity,
+                { fromId, toId, relation, evidenceText, evidenceIds ->
+                    linkWithEvidence(fromId, toId, relation, evidenceText, evidenceIds)
+                }
+            )
         }
 
-        // ---- Face consistency -----------------------------------------------
+        val resolvedRelationships = EvidenceCollection(
+            evidence = evidence,
+            relationships = relationships
+        ).withResolvedRelationshipEvidence().relationships
+        resolvedRelationships.forEach { rel ->
+            // Reuse one exact canonical entity when the relationship endpoint
+            // already exists. This keeps evidence/plugin relationships in the
+            // same graph source of truth as profile/finding/input nodes while
+            // refusing ambiguous or fuzzy merges.
+            val fromId = resolveExistingEntityId(rel.fromValue, entities)
+                ?: entityIdForValue(rel.fromValue)
+            val toId = resolveExistingEntityId(rel.toValue, entities)
+                ?: entityIdForValue(rel.toValue)
+            if (fromId !in entities) {
+                putEntity(DossierEntity(fromId, EntityType.Website, rel.fromValue, 0.7f))
+            }
+            if (toId !in entities) {
+                putEntity(DossierEntity(toId, EntityType.Website, rel.toValue, 0.7f))
+            }
+            linkWithEvidence(fromId, toId, rel.relation, rel.evidence, rel.evidenceIds)
+        }
+
         faceMatches.forEach { match ->
+            // Canonical ImageConsistency evidence is the source of truth for a
+            // matching profile. Keep the legacy structured projection only for
+            // callers that have not persisted the bridge evidence yet.
+            if (evidenceIdsForFaceMatch(match, evidence).isNotEmpty()) return@forEach
             val profileId = entityId(EntityType.Profile, match.profileUrl)
             if (profileId !in entities) {
                 putEntity(
@@ -206,27 +347,31 @@ object EntityGraphBuilder {
                         type = EntityType.Profile,
                         label = match.profileUrl,
                         confidence = match.similarityScore.coerceIn(0f, 1f),
-                        sourceUrls = listOf(match.profileUrl)
+                        sourceUrls = listOf(match.profileUrl),
+                        state = GraphNodeState.Unresolved
                     )
                 )
-                link(subjectId, profileId, "possible_profile", evidence = match.warning)
+                link(subjectId, profileId, "possible_profile", match.warning)
             }
             val imageId = entityId(EntityType.Image, "face:${match.profileUrl}")
             putEntity(
                 DossierEntity(
                     id = imageId,
                     type = EntityType.Image,
-                    label = "Face match ${(match.similarityScore * 100).toInt()}%",
+                    label = "Face similarity score ${"%.3f".format(Locale.US, match.similarityScore)}",
                     confidence = match.similarityScore.coerceIn(0f, 1f),
-                    sourceUrls = listOf(match.profileUrl)
+                    sourceUrls = listOf(match.profileUrl),
+                    state = GraphNodeState.Unresolved
                 )
             )
-            link(subjectId, imageId, "face_similar_to", evidence = match.warning)
-            link(imageId, profileId, "image_of_profile", evidence = match.warning)
+            link(subjectId, imageId, "face_similar_to", match.warning)
+            link(imageId, profileId, "image_of_profile", match.warning)
         }
 
-        // ---- Breaches -------------------------------------------------------
         breachDigests.forEach { digest ->
+            // A typed breach-membership record already owns the email → breach
+            // projection. Digest data remains a legacy fallback only.
+            if (evidenceIdsForBreachDigest(digest, evidence).isNotEmpty()) return@forEach
             val emailId = entityId(EntityType.Email, digest.email)
             if (emailId !in entities) {
                 putEntity(
@@ -237,7 +382,6 @@ object EntityGraphBuilder {
                         confidence = 0.9f
                     )
                 )
-                link(subjectId, emailId, "has_email")
             }
             if (digest.breachCount > 0 || digest.sources.isNotEmpty()) {
                 val breachId = entityId(EntityType.Breach, digest.email)
@@ -252,17 +396,17 @@ object EntityGraphBuilder {
                         type = EntityType.Breach,
                         label = label,
                         confidence = if (digest.breachCount > 0) 0.95f else 0.6f,
-                        sourceUrls = digest.sources
+                        sourceUrls = digest.sources,
+                        state = if (digest.breachCount > 0) GraphNodeState.High else GraphNodeState.Unresolved
                     )
                 )
-                link(emailId, breachId, "exposed_in", evidence = digest.note)
-                link(subjectId, breachId, "has_breach_exposure", evidence = digest.note)
+                link(emailId, breachId, "exposed_in", digest.note)
             }
         }
 
-        return EntityGraph(
-            entities = entities.values.toList(),
-            edges = edges.toList()
+        return enrichEdgeProvenance(
+            EntityGraph(entities.values.toList(), edges.toList()),
+            evidence
         )
     }
 
@@ -286,21 +430,68 @@ object EntityGraphBuilder {
                 sourceUrls = listOfNotNull(finding.sourceUrl)
             )
         )
-        val relation = when (type) {
-            EntityType.Email -> "has_email"
-            EntityType.Phone -> "has_phone"
-            EntityType.Username -> "uses_username"
-            EntityType.Organization -> "affiliated_with"
-            EntityType.Location -> "associated_with_location"
-            EntityType.Profile -> "has_profile"
-            EntityType.Website -> "linked_website"
-            EntityType.Image -> "related_image"
-            EntityType.Breach -> "has_breach_exposure"
-            EntityType.Person -> "related_person"
-        }
+        val relation = relationFor(type)
         link(subjectId, id, relation, finding.evidenceSnippet)
-        if (profileId != null) {
-            link(profileId, id, "mentions", finding.evidenceSnippet)
+        if (profileId != null) link(profileId, id, "mentions", finding.evidenceSnippet)
+    }
+
+    private fun evidenceKindToEntityType(kind: EvidenceKind): EntityType? = when (kind) {
+        EvidenceKind.Email -> EntityType.Email
+        EvidenceKind.Phone -> EntityType.Phone
+        EvidenceKind.Address, EvidenceKind.Location -> EntityType.Location
+        EvidenceKind.Username, EvidenceKind.UsernameReuse -> EntityType.Username
+        EvidenceKind.Profile, EvidenceKind.PlausibleProfileMatch -> EntityType.Profile
+        EvidenceKind.Organization -> EntityType.Organization
+        EvidenceKind.PublicSearchEvidence, EvidenceKind.PublicImageEvidence -> EntityType.Website
+        EvidenceKind.ImageConsistency -> EntityType.Image
+        EvidenceKind.SensitiveSnippet -> null
+        EvidenceKind.BreachMembership -> EntityType.Breach
+        EvidenceKind.Url -> EntityType.Website
+        EvidenceKind.Document -> EntityType.Website
+        EvidenceKind.Archive -> EntityType.Website
+        EvidenceKind.Domain -> EntityType.Website
+        EvidenceKind.Photo -> EntityType.Image
+        EvidenceKind.Image -> EntityType.Image
+    }
+
+    /**
+     * Maps evidence to the richer graph taxonomy while retaining the stable
+     * [EntityType] storage enum for old cases and renderers.
+     */
+    private fun graphEntityKind(ev: Evidence): GraphEntityKind = when (ev.attributeKind) {
+        HistoricalAttributeKind.AvatarUrl -> GraphEntityKind.Image
+        HistoricalAttributeKind.Username -> GraphEntityKind.Username
+        HistoricalAttributeKind.ExternalLink -> when (ev.kind) {
+            EvidenceKind.Document -> GraphEntityKind.Document
+            EvidenceKind.Archive -> GraphEntityKind.ArchiveSnapshot
+            EvidenceKind.Domain -> GraphEntityKind.Domain
+            else -> GraphEntityKind.URL
+        }
+        HistoricalAttributeKind.Organization -> GraphEntityKind.Organization
+        HistoricalAttributeKind.Location -> GraphEntityKind.Location
+        HistoricalAttributeKind.DisplayName -> GraphEntityKind.DisplayName
+        HistoricalAttributeKind.Bio -> GraphEntityKind.EvidenceArtifact
+        null -> when (ev.kind) {
+            EvidenceKind.Email -> GraphEntityKind.Email
+            EvidenceKind.Phone -> GraphEntityKind.Phone
+            EvidenceKind.Address,
+            EvidenceKind.Location -> GraphEntityKind.Location
+            EvidenceKind.Username,
+            EvidenceKind.UsernameReuse -> GraphEntityKind.Username
+            EvidenceKind.Profile,
+            EvidenceKind.PlausibleProfileMatch -> GraphEntityKind.Account
+            EvidenceKind.Organization -> GraphEntityKind.Organization
+            EvidenceKind.PublicSearchEvidence,
+            EvidenceKind.PublicImageEvidence -> GraphEntityKind.Website
+            EvidenceKind.ImageConsistency,
+            EvidenceKind.Photo,
+            EvidenceKind.Image -> GraphEntityKind.Image
+            EvidenceKind.BreachMembership -> GraphEntityKind.Breach
+            EvidenceKind.Url -> GraphEntityKind.URL
+            EvidenceKind.Document -> GraphEntityKind.Document
+            EvidenceKind.Archive -> GraphEntityKind.ArchiveSnapshot
+            EvidenceKind.Domain -> GraphEntityKind.Domain
+            EvidenceKind.SensitiveSnippet -> GraphEntityKind.EvidenceArtifact
         }
     }
 
@@ -316,34 +507,192 @@ object EntityGraphBuilder {
         FindingType.SensitiveSnippet -> null
     }
 
-    private fun evidenceKindToEntityType(kind: EvidenceKind): EntityType? = when (kind) {
-        EvidenceKind.Email -> EntityType.Email
-        EvidenceKind.Phone -> EntityType.Phone
-        EvidenceKind.Address -> EntityType.Location
-        EvidenceKind.Location -> EntityType.Location
-        EvidenceKind.Username, EvidenceKind.UsernameReuse -> EntityType.Username
-        EvidenceKind.Profile, EvidenceKind.PlausibleProfileMatch -> EntityType.Profile
-        EvidenceKind.Organization -> EntityType.Organization
-        EvidenceKind.PublicSearchEvidence, EvidenceKind.PublicImageEvidence -> EntityType.Website
-        EvidenceKind.ImageConsistency -> EntityType.Image
-        EvidenceKind.SensitiveSnippet -> null
-    }
-
-    /**
-     * Fuses a single [Evidence] observation into the graph. Mirrors
-     * [attachFinding] but consumes Evidence natively (so scanners that emit
-     * Evidence directly — the canonical path per ROADMAP — feed the graph
-     * without round-tripping through the Finding adapter).
-     */
     private fun attachEvidence(
         ev: Evidence,
         subjectId: String,
         putEntity: (DossierEntity) -> Unit,
-        link: (String, String, String, String?) -> Unit
+        link: (String, String, String, String?, List<String>) -> Unit
     ) {
         val value = ev.value.trim()
         if (value.isBlank()) return
-        val type = evidenceKindToEntityType(ev.kind) ?: return
+        if (ev.kind == EvidenceKind.ImageConsistency) {
+            // Face evidence is a relationship observation about a public
+            // profile, not a standalone image identity. Reuse the same image
+            // node as the structured face-stage projection so restored cases
+            // and live matches share one canonical edge/provenance record.
+            val profileUrl = ev.sourceUrl?.trim()?.takeIf(String::isNotBlank) ?: return
+            val imageId = entityId(EntityType.Image, "face:$profileUrl")
+            val profileId = entityId(EntityType.Profile, profileUrl)
+            val timestamp = ev.observedAtEpochMillis ?: ev.retrievedAtEpochMillis
+            putEntity(
+                DossierEntity(
+                    id = imageId,
+                    type = EntityType.Image,
+                    label = value,
+                    confidence = ev.confidence.coerceIn(0f, 1f),
+                    sourceUrls = listOf(profileUrl),
+                    state = ev.state.toGraphState(),
+                    evidenceIds = listOf(ev.id),
+                    firstObservedAtEpochMillis = ev.firstObservedAtEpochMillis
+                        ?: ev.observedAtEpochMillis
+                        ?: ev.retrievedAtEpochMillis,
+                    lastObservedAtEpochMillis = ev.lastObservedAtEpochMillis
+                        ?: ev.observedAtEpochMillis
+                        ?: ev.retrievedAtEpochMillis,
+                    kind = GraphEntityKind.Image
+                )
+            )
+            putEntity(
+                DossierEntity(
+                    id = profileId,
+                    type = EntityType.Profile,
+                    label = profileUrl,
+                    confidence = ev.confidence.coerceIn(0f, 1f),
+                    sourceUrls = listOf(profileUrl),
+                    state = ev.state.toGraphState(),
+                    evidenceIds = listOf(ev.id),
+                    firstObservedAtEpochMillis = ev.firstObservedAtEpochMillis
+                        ?: timestamp,
+                    lastObservedAtEpochMillis = ev.lastObservedAtEpochMillis
+                        ?: timestamp,
+                    kind = GraphEntityKind.Account
+                )
+            )
+            link(subjectId, imageId, "face_similar_to", ev.snippet, listOf(ev.id))
+            link(imageId, profileId, "image_of_profile", ev.snippet, listOf(ev.id))
+            return
+        }
+        if (ev.kind == EvidenceKind.BreachMembership) {
+            // Breach membership proves that an identifier appeared in a
+            // provider's exposure set. It does not prove that the identifier
+            // belongs to the audited subject, so this branch deliberately
+            // creates only email -> breach evidence and never a subject edge.
+            val email = value
+            val emailId = entityId(EntityType.Email, email)
+            val breachId = entityId(EntityType.Breach, email)
+            val timestamp = ev.observedAtEpochMillis ?: ev.retrievedAtEpochMillis
+            val sourceUrls = (ev.sourceUrls + listOfNotNull(ev.sourceUrl))
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+            putEntity(
+                DossierEntity(
+                    id = emailId,
+                    type = EntityType.Email,
+                    label = email,
+                    confidence = ev.confidence.coerceIn(0f, 1f),
+                    sourceUrls = sourceUrls,
+                    state = ev.state.toGraphState(),
+                    evidenceIds = listOf(ev.id),
+                    firstObservedAtEpochMillis = ev.firstObservedAtEpochMillis
+                        ?: timestamp,
+                    lastObservedAtEpochMillis = ev.lastObservedAtEpochMillis
+                        ?: timestamp,
+                    kind = GraphEntityKind.Email
+                )
+            )
+            putEntity(
+                DossierEntity(
+                    id = breachId,
+                    type = EntityType.Breach,
+                    label = breachLabel(ev, email),
+                    confidence = ev.confidence.coerceIn(0f, 1f),
+                    sourceUrls = sourceUrls,
+                    state = ev.state.toGraphState(),
+                    evidenceIds = listOf(ev.id),
+                    firstObservedAtEpochMillis = ev.firstObservedAtEpochMillis
+                        ?: timestamp,
+                    lastObservedAtEpochMillis = ev.lastObservedAtEpochMillis
+                        ?: timestamp,
+                    kind = GraphEntityKind.Breach
+                )
+            )
+            link(emailId, breachId, "exposed_in", ev.snippet, listOf(ev.id))
+            return
+        }
+        val timestamp = ev.observedAtEpochMillis ?: ev.retrievedAtEpochMillis
+        val historicalArchive = ev.historical && ev.reliability == EvidenceReliability.ArchiveSnapshot
+        val sourceId = if (historicalArchive && ev.attributeKind != null) {
+            ev.sourceUrl?.trim()?.takeIf(String::isNotBlank)?.let { sourceUrl ->
+                val id = entityId(EntityType.Website, sourceUrl)
+                // Attribute records are observations about the archived page, not
+                // standalone current profiles. Keep the archive source node
+                // historical and attach the attribute evidence to it.
+                putEntity(
+                    DossierEntity(
+                        id = id,
+                        type = EntityType.Website,
+                        label = sourceUrl,
+                        confidence = ev.confidence.coerceIn(0f, 1f),
+                        sourceUrls = listOf(sourceUrl),
+                        state = ev.state.toGraphState(),
+                        evidenceIds = listOf(ev.id),
+                        historical = historicalArchive,
+                        firstObservedAtEpochMillis = timestamp,
+                        lastObservedAtEpochMillis = timestamp,
+                        kind = GraphEntityKind.ArchiveSnapshot
+                    )
+                )
+                id
+            }
+        } else {
+            null
+        }
+
+        // Display names and bios are textual claims. Historical attributes stay
+        // attached to their archive source; current verified attributes stay on
+        // the current profile record without becoming direct subject ownership.
+        if (ev.attributeKind == HistoricalAttributeKind.DisplayName ||
+            ev.attributeKind == HistoricalAttributeKind.Bio
+        ) {
+            if (historicalArchive) {
+                sourceId?.let { archiveId ->
+                    link(
+                        subjectId,
+                        archiveId,
+                        "archived_as",
+                        ev.snippet,
+                        listOf(ev.id)
+                    )
+                }
+            } else {
+                ev.sourceUrl?.trim()?.takeIf(String::isNotBlank)?.let { sourceUrl ->
+                    val profileId = entityId(EntityType.Profile, sourceUrl)
+                    putEntity(
+                        DossierEntity(
+                            id = profileId,
+                            type = EntityType.Profile,
+                            label = sourceUrl,
+                            confidence = ev.confidence.coerceIn(0f, 1f),
+                            sourceUrls = listOf(sourceUrl),
+                            state = ev.state.toGraphState(),
+                            evidenceIds = listOf(ev.id),
+                            firstObservedAtEpochMillis = timestamp,
+                            lastObservedAtEpochMillis = timestamp
+                        )
+                    )
+                    link(
+                        subjectId,
+                        profileId,
+                        "mentions",
+                        ev.snippet,
+                        listOf(ev.id)
+                    )
+                }
+            }
+            return
+        }
+
+        val type = when (ev.attributeKind) {
+            HistoricalAttributeKind.ExternalLink -> EntityType.Website
+            HistoricalAttributeKind.AvatarUrl -> EntityType.Image
+            HistoricalAttributeKind.Username -> EntityType.Username
+            HistoricalAttributeKind.Organization -> EntityType.Organization
+            HistoricalAttributeKind.Location -> EntityType.Location
+            null -> evidenceKindToEntityType(ev.kind)
+            else -> evidenceKindToEntityType(ev.kind)
+        } ?: return
+
         val id = entityId(type, value)
         putEntity(
             DossierEntity(
@@ -351,36 +700,295 @@ object EntityGraphBuilder {
                 type = type,
                 label = value,
                 confidence = ev.confidence.coerceIn(0f, 1f),
-                sourceUrls = listOfNotNull(ev.sourceUrl)
+                sourceUrls = listOfNotNull(ev.sourceUrl),
+                state = ev.state.toGraphState(),
+                evidenceIds = listOf(ev.id),
+                historical = ev.historical,
+                firstObservedAtEpochMillis = timestamp,
+                lastObservedAtEpochMillis = timestamp,
+                // EntityType is a stable legacy enum. Preserve the richer
+                // URL/document/archive/domain distinction in GraphEntityKind.
+                kind = graphEntityKind(ev)
             )
         )
-        val relation = when (type) {
-            EntityType.Email -> "has_email"
-            EntityType.Phone -> "has_phone"
-            EntityType.Username -> "uses_username"
-            EntityType.Organization -> "affiliated_with"
-            EntityType.Location -> "associated_with_location"
-            EntityType.Profile -> "has_profile"
-            EntityType.Website -> "linked_website"
-            EntityType.Image -> "related_image"
-            EntityType.Breach -> "has_breach_exposure"
-            EntityType.Person -> "related_person"
-        }
-        link(subjectId, id, relation, ev.snippet)
-        if (ev.sourceUrl != null) {
-            val profileId = entityId(EntityType.Profile, ev.sourceUrl)
-            link(profileId, id, "mentions", ev.snippet)
+        if (sourceId != null && historicalArchive) {
+            val relation = when (ev.attributeKind) {
+                HistoricalAttributeKind.ExternalLink -> "links_to"
+                HistoricalAttributeKind.AvatarUrl -> "uses_avatar"
+                HistoricalAttributeKind.Username -> "claims_identity"
+                HistoricalAttributeKind.Organization,
+                HistoricalAttributeKind.Location -> "mentions"
+                else -> "mentions"
+            }
+            link(sourceId, id, relation, ev.snippet, listOf(ev.id))
+        } else {
+            val subjectRelation = if (historicalArchive && ev.attributeKind == null) {
+                "archived_as"
+            } else {
+                relationFor(type)
+            }
+            link(subjectId, id, subjectRelation, ev.snippet, listOf(ev.id))
+            if (!historicalArchive) {
+                ev.sourceUrl?.let { sourceUrl ->
+                    val profileId = entityId(EntityType.Profile, sourceUrl)
+                    link(profileId, id, "mentions", ev.snippet, listOf(ev.id))
+                }
+            }
         }
     }
 
-    /** Stable entity id for an arbitrary observed value (relationship endpoints). */
-    private fun entityIdForValue(raw: String): String {
-        val key = raw.trim().lowercase(Locale.US)
-        return "value:$key"
+    private fun enrichEdgeProvenance(graph: EntityGraph, evidence: List<Evidence>): EntityGraph {
+        if (graph.edges.isEmpty()) return graph
+        val byId = graph.entities.associateBy(DossierEntity::id)
+        val evidenceById = evidence.associateBy { EvidenceIdPolicy.migrate(it.id) }
+
+        fun uniqueExactEvidence(
+            raw: String,
+            excludedKinds: Set<EvidenceKind> = emptySet()
+        ): Evidence? {
+            val key = raw.trim().lowercase(Locale.US)
+            if (key.isBlank()) return null
+            val matches = evidence.asSequence()
+                .filter { record ->
+                    record.kind !in excludedKinds &&
+                        (
+                            record.value.trim().lowercase(Locale.US) == key ||
+                                record.sourceUrl?.trim()?.lowercase(Locale.US) == key
+                            )
+                }
+                .distinctBy { EvidenceIdPolicy.migrate(it.id) }
+                .toList()
+            return matches.singleOrNull()
+        }
+
+        val enrichedEdges = graph.edges.map { edge ->
+            val from = byId[edge.fromId]
+            val to = byId[edge.toId]
+            val subjectOwnership = from?.type == EntityType.Person &&
+                canonicalRelationKey(edge.relation) in setOf("has_email", "has_breach_exposure")
+            val explicitEvidenceIds = if (subjectOwnership) {
+                edge.evidenceIds.filterNot { evidenceId ->
+                    evidenceById[EvidenceIdPolicy.migrate(evidenceId)]?.kind == EvidenceKind.BreachMembership
+                }
+            } else {
+                edge.evidenceIds
+            }
+            val explicitContradictingEvidenceIds = if (subjectOwnership) {
+                edge.contradictingEvidenceIds.filterNot { evidenceId ->
+                    evidenceById[EvidenceIdPolicy.migrate(evidenceId)]?.kind == EvidenceKind.BreachMembership
+                }
+            } else {
+                edge.contradictingEvidenceIds
+            }
+            val excludedFallbackKinds = if (subjectOwnership) {
+                setOf(EvidenceKind.BreachMembership)
+            } else {
+                emptySet()
+            }
+            val relevant = buildList {
+                addAll(explicitEvidenceIds.mapNotNull { evidenceById[EvidenceIdPolicy.migrate(it)] })
+                /*
+                 * Explicit producer evidence IDs are authoritative. Only legacy
+                 * id-less edges receive a conservative exact lookup, and each
+                 * endpoint/source key must resolve to one evidence record. This
+                 * prevents duplicate records sharing a URL from becoming broad
+                 * provenance for an unrelated graph edge.
+                 */
+                if (edge.evidenceIds.isEmpty() && edge.contradictingEvidenceIds.isEmpty()) {
+                    to?.let { entity ->
+                        uniqueExactEvidence(entity.label, excludedFallbackKinds)?.let(::add)
+                        entity.sourceUrls.forEach {
+                            url -> uniqueExactEvidence(url, excludedFallbackKinds)?.let(::add)
+                        }
+                    }
+                    if (from != null && from.type != EntityType.Person) {
+                        uniqueExactEvidence(from.label, excludedFallbackKinds)?.let(::add)
+                    }
+                }
+            }.distinctBy(Evidence::id)
+            val contradictions = relevant.filter { it.state == EvidenceState.Conflicting }
+            edge.copy(
+                evidenceIds = (explicitEvidenceIds + relevant.map(Evidence::id))
+                    .map(EvidenceIdPolicy::migrate)
+                    .distinct(),
+                contradictingEvidenceIds = (
+                    explicitContradictingEvidenceIds + contradictions.map(Evidence::id)
+                ).map(EvidenceIdPolicy::migrate).distinct(),
+                confidence = edge.confidence ?: to?.confidence,
+                historical = edge.historical || relevant.any(Evidence::historical) || (to?.historical == true)
+            )
+        }
+        return graph.copy(edges = enrichedEdges)
     }
 
-    private fun entityId(type: EntityType, raw: String): String {
-        val key = raw.trim().lowercase(Locale.US)
-        return "${type.name.lowercase(Locale.US)}:$key"
+    private fun evidenceIdsForFaceMatch(
+        match: FaceConsistencyMatch,
+        evidence: List<Evidence>
+    ): List<String> = evidence
+        .asSequence()
+        .filter { it.kind == EvidenceKind.ImageConsistency }
+        .filter { it.sourceUrl?.trim()?.equals(match.profileUrl.trim(), ignoreCase = true) == true }
+        .map { EvidenceIdPolicy.migrate(it.id) }
+        .distinct()
+        .take(MAX_EDGE_EVIDENCE_IDS)
+        .toList()
+
+    private fun evidenceIdsForBreachDigest(
+        digest: BreachDigest,
+        evidence: List<Evidence>
+    ): List<String> = evidence
+        .asSequence()
+        .filter { it.kind == EvidenceKind.BreachMembership }
+        .filter { it.value.trim().equals(digest.email.trim(), ignoreCase = true) }
+        .map { EvidenceIdPolicy.migrate(it.id) }
+        .distinct()
+        .take(MAX_EDGE_EVIDENCE_IDS)
+        .toList()
+
+    private fun breachLabel(ev: Evidence, email: String): String {
+        val count = ev.signals.asSequence()
+            .mapNotNull { signal ->
+                BREACH_COUNT_SIGNAL.find(signal)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            }
+            .firstOrNull()
+        return if (count != null) {
+            "$count breach(es) for $email"
+        } else {
+            "Breach exposure for $email"
+        }
     }
+
+    private fun relationFor(type: EntityType): String = when (type) {
+        EntityType.Email -> "has_email"
+        EntityType.Phone -> "has_phone"
+        EntityType.Username -> "uses_username"
+        EntityType.Organization -> "affiliated_with"
+        EntityType.Location -> "associated_with_location"
+        EntityType.Profile -> "has_profile"
+        EntityType.Website -> "linked_website"
+        EntityType.Image -> "related_image"
+        EntityType.Breach -> "has_breach_exposure"
+        EntityType.Person -> "related_person"
+    }
+
+    private fun ResolutionBand.toGraphState(): GraphNodeState = when (this) {
+        ResolutionBand.Confirmed -> GraphNodeState.Confirmed
+        ResolutionBand.High -> GraphNodeState.High
+        ResolutionBand.Medium -> GraphNodeState.Medium
+        ResolutionBand.Low -> GraphNodeState.Low
+        ResolutionBand.Unresolved -> GraphNodeState.Unresolved
+        ResolutionBand.Conflicting -> GraphNodeState.Conflicting
+    }
+
+    private fun EvidenceState.toGraphState(): GraphNodeState = when (this) {
+        EvidenceState.Verified -> GraphNodeState.Confirmed
+        EvidenceState.Probable -> GraphNodeState.High
+        EvidenceState.Candidate -> GraphNodeState.Medium
+        EvidenceState.Observed -> GraphNodeState.Unresolved
+        EvidenceState.Conflicting -> GraphNodeState.Conflicting
+        EvidenceState.Rejected -> GraphNodeState.Low
+        EvidenceState.Unavailable -> GraphNodeState.Unresolved
+    }
+
+    private fun strongerState(a: GraphNodeState, b: GraphNodeState): GraphNodeState {
+        if (a == GraphNodeState.Conflicting || b == GraphNodeState.Conflicting) return GraphNodeState.Conflicting
+        val order = listOf(
+            GraphNodeState.Unresolved,
+            GraphNodeState.Low,
+            GraphNodeState.Medium,
+            GraphNodeState.High,
+            GraphNodeState.Confirmed
+        )
+        return if (order.indexOf(a) >= order.indexOf(b)) a else b
+    }
+
+    private fun mergeGraphEntityKind(
+        existing: GraphEntityKind,
+        incoming: GraphEntityKind
+    ): GraphEntityKind = when {
+        existing == incoming -> existing
+        existing == GraphEntityKind.Website -> incoming
+        incoming == GraphEntityKind.Website -> existing
+        existing == GraphEntityKind.URL && incoming == GraphEntityKind.Document -> incoming
+        existing == GraphEntityKind.URL && incoming == GraphEntityKind.ArchiveSnapshot -> incoming
+        existing == GraphEntityKind.Document && incoming == GraphEntityKind.ArchiveSnapshot -> incoming
+        else -> existing
+    }
+
+    private fun minNullable(a: Long?, b: Long?): Long? = when {
+        a == null -> b
+        b == null -> a
+        else -> minOf(a, b)
+    }
+
+    private fun maxNullable(a: Long?, b: Long?): Long? = when {
+        a == null -> b
+        b == null -> a
+        else -> maxOf(a, b)
+    }
+
+    private fun entityIdForValue(raw: String): String = "value:${raw.trim().lowercase(Locale.US)}"
+
+    /**
+     * Resolves only an exact, unique label/source URL match. Multiple entities
+     * with the same public value remain unresolved rather than being merged by
+     * a relationship payload that lacks a typed endpoint.
+     */
+    private fun resolveExistingEntityId(
+        raw: String,
+        entities: Map<String, DossierEntity>
+    ): String? {
+        val trimmed = raw.trim()
+        val key = trimmed.lowercase(Locale.US)
+        if (key.isBlank()) return null
+        // Canonical stage adapters may persist a typed endpoint ID. Resolve
+        // that exact key before label/source matching; no fuzzy or cross-type
+        // merge is allowed.
+        typedEndpointEntityId(key)?.takeIf(entities::containsKey)?.let { return it }
+        entities.keys.firstOrNull { it == key }?.let { return it }
+        val labelMatches = entities.values
+            .asSequence()
+            .filter { entity -> entity.label.trim().lowercase(Locale.US) == key }
+            .map(DossierEntity::id)
+            .distinct()
+            .toList()
+        if (labelMatches.size == 1) return labelMatches.single()
+        if (labelMatches.isNotEmpty()) return null
+
+        val sourceMatches = entities.values
+            .asSequence()
+            .filter { entity -> entity.sourceUrls.any { it.trim().lowercase(Locale.US) == key } }
+            .toList()
+        val typedUrlMatches = sourceMatches.filter {
+            it.type == EntityType.Profile || it.type == EntityType.Website
+        }.map(DossierEntity::id).distinct()
+        return when {
+            typedUrlMatches.size == 1 -> typedUrlMatches.single()
+            sourceMatches.map(DossierEntity::id).distinct().size == 1 -> sourceMatches.single().id
+            else -> null
+        }
+    }
+
+    /**
+     * Converts the small typed-endpoint vocabulary emitted by canonical stage
+     * adapters back to the stable graph entity IDs they already projected.
+     * Unknown endpoint forms intentionally remain unresolved values rather
+     * than being guessed into an entity type.
+     */
+    private fun typedEndpointEntityId(normalized: String): String? = when {
+        normalized.startsWith("image:face:") ->
+            entityId(EntityType.Image, "face:${normalized.removePrefix("image:face:")}")
+        normalized.startsWith("profile:") ->
+            entityId(EntityType.Profile, normalized.removePrefix("profile:"))
+        normalized.startsWith("email:") ->
+            entityId(EntityType.Email, normalized.removePrefix("email:"))
+        normalized.startsWith("breach:") ->
+            entityId(EntityType.Breach, normalized.removePrefix("breach:"))
+        else -> null
+    }
+
+    private fun entityId(type: EntityType, raw: String): String =
+        "${type.name.lowercase(Locale.US)}:${raw.trim().lowercase(Locale.US)}"
 }
+
+private val BREACH_COUNT_SIGNAL = Regex("^Breach membership count:\\s*(\\d+)")

@@ -4,11 +4,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.label.ImageLabeling
 import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
 import io.dossier.app.domain.model.ReverseImageLookupResult
+import kotlinx.coroutines.CancellationException
 import java.io.InputStream
 
 /**
@@ -29,19 +29,20 @@ class ImageLabeler(private val context: Context) {
     )
 
     /** Returns labels with confidence >= threshold, or empty list on failure. */
-    fun label(uri: Uri): List<ReverseImageLookupResult.ImageLabel> {
+    suspend fun label(uri: Uri): List<ReverseImageLookupResult.ImageLabel> {
         val bitmap = loadBitmap(uri) ?: return emptyList()
         return label(bitmap)
     }
 
     /** Returns labels from an in-memory frame/bitmap. */
-    fun label(bitmap: Bitmap): List<ReverseImageLookupResult.ImageLabel> {
+    suspend fun label(bitmap: Bitmap): List<ReverseImageLookupResult.ImageLabel> {
         val inputImage = InputImage.fromBitmap(bitmap, 0)
         val task = labeler.process(inputImage)
         val labels = try {
-            Tasks.await(task)
-        } catch (e: Exception) {
-            e.printStackTrace()
+            task.awaitCancellable()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
             return emptyList()
         }
         return labels.map { ReverseImageLookupResult.ImageLabel(it.text, it.confidence) }

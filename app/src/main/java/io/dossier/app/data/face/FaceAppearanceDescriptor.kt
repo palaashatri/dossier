@@ -91,6 +91,9 @@ object FaceAppearanceDescriptor {
 
     fun cosineSimilarity(first: FloatArray, second: FloatArray): Float {
         if (first.isEmpty() || first.size != second.size) return 0f
+        // Descriptor values may originate from an imported/model backend. Keep
+        // non-finite input or arithmetic from becoming persisted evidence.
+        if (first.any { !it.isFinite() } || second.any { !it.isFinite() }) return 0f
         var dot = 0.0
         var normFirst = 0.0
         var normSecond = 0.0
@@ -101,8 +104,10 @@ object FaceAppearanceDescriptor {
             normFirst += a * a
             normSecond += b * b
         }
+        if (!dot.isFinite() || !normFirst.isFinite() || !normSecond.isFinite()) return 0f
         if (normFirst <= 0.0 || normSecond <= 0.0) return 0f
-        return (dot / (sqrt(normFirst) * sqrt(normSecond))).toFloat().coerceIn(-1f, 1f)
+        val score = dot / (sqrt(normFirst) * sqrt(normSecond))
+        return if (score.isFinite()) score.toFloat().coerceIn(-1f, 1f) else 0f
     }
 
     private fun histogramBin(value: Float): Int =

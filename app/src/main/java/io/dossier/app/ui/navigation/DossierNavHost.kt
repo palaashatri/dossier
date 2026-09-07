@@ -1,11 +1,14 @@
 package io.dossier.app.ui.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
+import io.dossier.app.data.local.UsageNoticeStore
 import io.dossier.app.ui.screens.ConsentScreen
 import io.dossier.app.ui.screens.MainHubScreen
 import io.dossier.app.ui.screens.WebBrowserScreen
@@ -21,13 +24,18 @@ sealed class Screen(val route: String) {
 
 @Composable
 fun DossierNavHost(navController: NavHostController) {
-    NavHost(navController = navController, startDestination = Screen.Consent.route) {
+    val context = LocalContext.current
+    val startDestination = remember(context) {
+        if (UsageNoticeStore.isAccepted(context)) Screen.MainHub.route else Screen.Consent.route
+    }
+
+    NavHost(navController = navController, startDestination = startDestination) {
         composable(Screen.Consent.route) {
             ConsentScreen(
                 onAccepted = {
+                    UsageNoticeStore.accept(context)
                     navController.navigate(Screen.MainHub.route) {
-                        // Consent is a session gate, not a destination users
-                        // should return to when pressing Back from the app.
+                        // One-time onboarding is not part of the normal back stack.
                         popUpTo(Screen.Consent.route) { inclusive = true }
                         launchSingleTop = true
                     }

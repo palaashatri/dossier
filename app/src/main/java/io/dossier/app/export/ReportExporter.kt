@@ -8,6 +8,7 @@ import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import androidx.core.content.FileProvider
+import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.model.FaceConsistencyMatch
 import io.dossier.app.domain.model.Finding
 import kotlinx.serialization.encodeToString
@@ -22,6 +23,12 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
+/** Explicit export privacy choice. */
+enum class ExportRedactionMode {
+    None,
+    ShareSafe
+}
+
 /** Produces human-readable and machine-verifiable local report exports. */
 class ReportExporter(private val context: Context) {
     private val json = Json {
@@ -30,8 +37,11 @@ class ReportExporter(private val context: Context) {
         explicitNulls = false
     }
 
-    fun exportToJson(findings: List<Finding>): String = runCatching {
-        json.encodeToString(findings)
+    fun exportToJson(
+        findings: List<Finding>,
+        redactionMode: ExportRedactionMode = ExportRedactionMode.None
+    ): String = runCatching {
+        json.encodeToString(prepareExport(findings = findings, redactionMode = redactionMode).findings)
     }.getOrDefault("[]")
 
     fun shareReport(
@@ -42,28 +52,44 @@ class ReportExporter(private val context: Context) {
         faceMatches: List<FaceConsistencyMatch> = emptyList(),
         entityGraphSummary: String? = null,
         breachDigests: List<String> = emptyList(),
-        riskLevel: String? = null
+        riskLevel: String? = null,
+        redactionMode: ExportRedactionMode = ExportRedactionMode.None,
+        canonicalRelationships: List<EvidenceRelationship> = emptyList()
     ) {
         val generatedAt = Instant.now()
+        val prepared = prepareExport(
+            findings = findings,
+            subjectName = subjectName,
+            profileSummaries = profileSummaries,
+            aiSummary = aiSummary,
+            faceMatches = faceMatches,
+            entityGraphSummary = entityGraphSummary,
+            canonicalRelationships = canonicalRelationships,
+            breachDigests = breachDigests,
+            redactionMode = redactionMode
+        )
         val reportText = buildReportText(
-            findings,
-            subjectName,
-            profileSummaries,
-            aiSummary,
-            faceMatches,
-            entityGraphSummary,
-            breachDigests,
+            prepared.findings,
+            prepared.subjectName,
+            prepared.profileSummaries,
+            prepared.aiSummary,
+            prepared.faceMatches,
+            prepared.entityGraphSummary,
+            prepared.canonicalRelationships,
+            prepared.breachDigests,
             riskLevel,
-            generatedAt
+            generatedAt,
+            prepared.redacted
         )
 
         val attachments = runCatching {
             val directory = File(context.cacheDir, "reports").also { it.mkdirs() }
-            val safeName = subjectName.replace(Regex("[^A-Za-z0-9._-]+"), "-")
+            val safeName = prepared.subjectName.replace(Regex("[^A-Za-z0-9._-]+"), "-")
                 .trim('-').ifBlank { "subject" }.take(40)
             val timestamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
                 .format(LocalDateTime.now())
-            val base = "dossier-$safeName-$timestamp"
+            val redactionSuffix = if (prepared.redacted) "-redacted" else ""
+            val base = "dossier-$safeName-$timestamp$redactionSuffix"
 
             val pdfFile = File(directory, "$base.pdf")
             writePdf(pdfFile, reportText)
@@ -71,21 +97,23 @@ class ReportExporter(private val context: Context) {
             writeEvidencePackage(
                 file = jsonFile,
                 generatedAt = generatedAt,
-                subjectName = subjectName,
-                findings = findings,
-                profileSummaries = profileSummaries,
-                aiSummary = aiSummary,
-                faceMatches = faceMatches,
-                entityGraphSummary = entityGraphSummary,
-                breachDigests = breachDigests,
+                subjectName = prepared.subjectName,
+                findings = prepared.findings,
+                profileSummaries = prepared.profileSummaries,
+                aiSummary = prepared.aiSummary,
+                faceMatches = prepared.faceMatches,
+                entityGraphSummary = prepared.entityGraphSummary,
+                canonicalRelationships = prepared.canonicalRelationships,
+                breachDigests = prepared.breachDigests,
                 riskLevel = riskLevel,
-                reportText = reportText
+                reportText = reportText,
+                redacted = prepared.redacted
             )
             listOf(pdfFile, jsonFile)
         }.getOrDefault(emptyList())
 
         if (attachments.isEmpty()) {
-            sharePlainText(subjectName, reportText)
+            sharePlainText(prepared.subjectName, reportText)
             return
         }
 
@@ -100,7 +128,7 @@ class ReportExporter(private val context: Context) {
 
         val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
             type = "*/*"
-            putExtra(Intent.EXTRA_SUBJECT, "Dossier privacy audit — $subjectName")
+            putExtra(Intent.EXTRA_SUBJECT, "Dossier privacy audit — ${prepared.subjectName}")
             putExtra(Intent.EXTRA_TEXT, reportText)
             putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -122,9 +150,11 @@ class ReportExporter(private val context: Context) {
         aiSummary: String?,
         faceMatches: List<FaceConsistencyMatch>,
         entityGraphSummary: String?,
+        canonicalRelationships: List<EvidenceRelationship>,
         breachDigests: List<String>,
         riskLevel: String?,
-        generatedAt: Instant
+        generatedAt: Instant,
+        redacted: Boolean
     ): String {
         val localTime = LocalDateTime.now()
         val preparedAt = localTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
@@ -142,8 +172,13 @@ class ReportExporter(private val context: Context) {
             appendLine("PREPARED:  $preparedAt")
             appendLine("UTC:       $generatedAt")
             appendLine("PURPOSE:   Authorized public-footprint audit")
+            appendLine("REDACTION: ${if (redacted) "SHARE-SAFE" else "NONE"}")
             if (!riskLevel.isNullOrBlank()) appendLine("PRIORITY:  $riskLevel")
             appendLine()
+            if (redacted) {
+                appendLine("Share-safe export: direct identity values, source URLs, snippets, graph details, breach details, and generated analysis were removed or generalized.")
+                appendLine("This redaction is designed to reduce disclosure; review the generated files before sharing them.")
+            }
             appendLine("Interpretation note: risk describes potential impact; confidence describes attribution support.")
             appendLine("An absent result does not prove that information never existed online.")
             appendLine()
@@ -166,7 +201,7 @@ class ReportExporter(private val context: Context) {
                     appendLine("[${index + 1}] RISK:         ${finding.risk}")
                     appendLine("    CATEGORY:     ${finding.type}")
                     appendLine("    DETAIL:       ${finding.value}")
-                    appendLine("    SOURCE:       ${finding.sourceUrl ?: "Self-supplied or locally derived"}")
+                    appendLine("    SOURCE:       ${finding.sourceUrl ?: if (redacted) "Redacted" else "Self-supplied or locally derived"}")
                     if (!finding.evidenceSnippet.isNullOrBlank()) {
                         appendLine("    EVIDENCE:     ${finding.evidenceSnippet}")
                     }
@@ -193,8 +228,26 @@ class ReportExporter(private val context: Context) {
             }
 
             if (!entityGraphSummary.isNullOrBlank()) {
-                appendSection("RECORDED RELATIONSHIPS")
+                appendSection("GRAPH PROJECTION")
+                appendLine("These are persisted EntityGraph edges. They may include derived or resolved material and are not the canonical scanner assertion ledger.")
+                appendLine()
                 appendLine(entityGraphSummary.trim())
+                appendLine()
+            }
+
+            if (canonicalRelationships.isNotEmpty()) {
+                appendSection("CANONICAL SCANNER ASSERTIONS")
+                appendLine("These assertions are retained separately from graph edges. They record scanner/plugin claims and do not, by themselves, prove identity or account ownership.")
+                appendLine()
+                canonicalRelationships.forEachIndexed { index, relationship ->
+                    appendLine("[A${index + 1}] ${relationship.fromValue} —${relationship.relation}→ ${relationship.toValue}")
+                    relationship.evidence?.takeIf(String::isNotBlank)?.let { evidence ->
+                        appendLine("     EVIDENCE: $evidence")
+                    }
+                    if (relationship.evidenceIds.isNotEmpty()) {
+                        appendLine("     EVIDENCE IDS: ${relationship.evidenceIds.joinToString(" | ")}")
+                    }
+                }
                 appendLine()
             }
 
@@ -230,9 +283,11 @@ class ReportExporter(private val context: Context) {
         aiSummary: String?,
         faceMatches: List<FaceConsistencyMatch>,
         entityGraphSummary: String?,
+        canonicalRelationships: List<EvidenceRelationship>,
         breachDigests: List<String>,
         riskLevel: String?,
-        reportText: String
+        reportText: String,
+        redacted: Boolean
     ) {
         val sections = linkedMapOf(
             "findings" to json.encodeToString(findings),
@@ -241,16 +296,19 @@ class ReportExporter(private val context: Context) {
             "breachDigests" to json.encodeToString(breachDigests),
             "analysis" to (aiSummary ?: ""),
             "entityGraphSummary" to (entityGraphSummary ?: ""),
+            "canonicalAssertions" to json.encodeToString(canonicalRelationships),
             "reportText" to reportText
         )
         val sectionHashes = sections.mapValues { sha256(it.value.toByteArray(Charsets.UTF_8)) }
         val manifestCanonical = sectionHashes.entries.joinToString("\n") { "${it.key}:${it.value}" }
 
         val root = buildJsonObject {
-            put("schemaVersion", JsonPrimitive(1))
+            put("schemaVersion", JsonPrimitive(EVIDENCE_PACKAGE_SCHEMA_VERSION))
             put("generatedAtUtc", JsonPrimitive(generatedAt.toString()))
             put("subject", JsonPrimitive(subjectName))
             put("riskLevel", JsonPrimitive(riskLevel ?: "Unknown"))
+            put("redacted", JsonPrimitive(redacted))
+            put("redactionMode", JsonPrimitive(if (redacted) ExportRedactionMode.ShareSafe.name else ExportRedactionMode.None.name))
             put("integrityAlgorithm", JsonPrimitive("SHA-256"))
             put("manifestSha256", JsonPrimitive(sha256(manifestCanonical.toByteArray(Charsets.UTF_8))))
             put("sectionHashes", buildJsonObject {
@@ -262,6 +320,7 @@ class ReportExporter(private val context: Context) {
             put("breachDigests", json.parseToJsonElement(sections.getValue("breachDigests")))
             put("analysis", JsonPrimitive(aiSummary ?: ""))
             put("entityGraphSummary", JsonPrimitive(entityGraphSummary ?: ""))
+            put("canonicalAssertions", json.parseToJsonElement(sections.getValue("canonicalAssertions")))
             put("reportText", JsonPrimitive(reportText))
         }
         file.writeText(json.encodeToString(root))
@@ -328,12 +387,106 @@ class ReportExporter(private val context: Context) {
         .digest(bytes)
         .joinToString("") { byte -> "%02x".format(byte) }
 
-    private companion object {
+    internal data class PreparedExport(
+        val subjectName: String,
+        val findings: List<Finding>,
+        val profileSummaries: List<String>,
+        val aiSummary: String?,
+        val faceMatches: List<FaceConsistencyMatch>,
+        val entityGraphSummary: String?,
+        val canonicalRelationships: List<EvidenceRelationship>,
+        val breachDigests: List<String>,
+        val redacted: Boolean
+    )
+
+    companion object {
+        internal fun prepareExport(
+            findings: List<Finding>,
+            subjectName: String = "Unnamed subject",
+            profileSummaries: List<String> = emptyList(),
+            aiSummary: String? = null,
+            faceMatches: List<FaceConsistencyMatch> = emptyList(),
+            entityGraphSummary: String? = null,
+            breachDigests: List<String> = emptyList(),
+            redactionMode: ExportRedactionMode = ExportRedactionMode.None,
+            canonicalRelationships: List<EvidenceRelationship> = emptyList()
+        ): PreparedExport {
+            if (redactionMode == ExportRedactionMode.None) {
+                return PreparedExport(
+                    subjectName = subjectName,
+                    findings = findings,
+                    profileSummaries = profileSummaries,
+                    aiSummary = aiSummary,
+                    faceMatches = faceMatches,
+                    entityGraphSummary = entityGraphSummary,
+                    canonicalRelationships = canonicalRelationships,
+                    breachDigests = breachDigests,
+                    redacted = false
+                )
+            }
+
+            val redactedFindings = findings.mapIndexed { index, finding ->
+                val replacement = "[redacted ${finding.type.name.lowercase(Locale.US)} ${index + 1}]"
+                finding.copy(
+                    value = replacement,
+                    sourceUrl = null,
+                    evidenceSnippet = null,
+                    remediation = finding.remediation
+                        .replace(finding.value, "[redacted]", ignoreCase = false)
+                )
+            }
+            val redactedProfiles = profileSummaries.mapIndexed { index, _ ->
+                "Profile check ${index + 1}: identifying details redacted"
+            }
+            val redactedFaces = faceMatches.mapIndexed { index, match ->
+                match.copy(profileUrl = "[redacted visual source ${index + 1}]")
+            }
+            val redactedBreaches = breachDigests.mapIndexed { index, _ ->
+                "Breach/exposure record ${index + 1}: identifying details redacted"
+            }
+            val redactedCanonicalRelationships = redactCanonicalRelationships(canonicalRelationships)
+
+            return PreparedExport(
+                subjectName = "Redacted subject",
+                findings = redactedFindings,
+                profileSummaries = redactedProfiles,
+                aiSummary = if (aiSummary.isNullOrBlank()) null else
+                    "Generated analysis omitted from share-safe export because it may reproduce identifying evidence values.",
+                faceMatches = redactedFaces,
+                entityGraphSummary = if (entityGraphSummary.isNullOrBlank()) null else
+                    "Relationship details omitted from share-safe export because graph labels may contain identifying values.",
+                canonicalRelationships = redactedCanonicalRelationships,
+                breachDigests = redactedBreaches,
+                redacted = true
+            )
+        }
+
         const val PDF_WIDTH = 595
         const val PDF_HEIGHT = 842
         const val PDF_MARGIN = 34
         const val PDF_LINE_HEIGHT = 12f
         const val PDF_LINES_PER_PAGE = 62
         const val PDF_LINE_CHARACTERS = 94
+        const val EVIDENCE_PACKAGE_SCHEMA_VERSION = 3
+
+        private fun redactCanonicalRelationships(
+            relationships: List<EvidenceRelationship>
+        ): List<EvidenceRelationship> {
+            val endpointLabels = linkedMapOf<String, String>()
+            fun redactEndpoint(raw: String): String {
+                val key = raw.trim().lowercase(Locale.US)
+                return endpointLabels.getOrPut(key) {
+                    "[redacted assertion endpoint ${endpointLabels.size + 1}]"
+                }
+            }
+            return relationships.map { relationship ->
+                relationship.copy(
+                    fromValue = redactEndpoint(relationship.fromValue),
+                    toValue = redactEndpoint(relationship.toValue),
+                    evidence = null,
+                    evidenceIds = emptyList()
+                )
+            }
+        }
     }
 }

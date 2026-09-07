@@ -1,6 +1,7 @@
 package io.dossier.app.domain.pii
 
 import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
@@ -41,6 +42,14 @@ class PiiExtractor {
                     "This exact self-supplied email is public. Remove it or replace it with a masked alias."
                 } else {
                     "Review the source before associating this email with the audited identity."
+                },
+                // A page-level name/handle match does not identify every
+                // contact value printed on that page. Only the exact
+                // user-supplied email may become a recursive pivot.
+                attribution = if (exact) {
+                    FindingAttribution.ExactSelfSupplied
+                } else {
+                    FindingAttribution.Unconfirmed
                 }
             )
         }
@@ -62,6 +71,11 @@ class PiiExtractor {
                     "This exact self-supplied phone number is public. Remove it and review account recovery exposure."
                 } else {
                     "Review the context before treating this phone number as belonging to the subject."
+                },
+                attribution = if (exact) {
+                    FindingAttribution.ExactSelfSupplied
+                } else {
+                    FindingAttribution.Unconfirmed
                 }
             )
         }
@@ -133,6 +147,11 @@ class PiiExtractor {
                 "Review whether this location is necessary and reduce its precision where possible."
             } else {
                 "Review whether this organisation association should remain public."
+            },
+            attribution = when {
+                exact -> FindingAttribution.ExactSelfSupplied
+                attribution.strong -> FindingAttribution.IndependentPageSignals
+                else -> FindingAttribution.Unconfirmed
             }
         )
     }
@@ -157,7 +176,8 @@ class PiiExtractor {
             snippet(text, match.range),
             confidence,
             risk,
-            remediation
+            remediation,
+            attribution = FindingAttribution.ExactSelfSupplied
         )
     }
 
@@ -180,6 +200,8 @@ class PiiExtractor {
             if (attribution.strong) 0.92f else 0.80f,
             if (type == FindingType.Location) RiskLevel.High else RiskLevel.Medium,
             if (type == FindingType.Location) "Reduce precise public location exposure." else "Review this public organisation association."
+            ,
+            attribution = FindingAttribution.ExactSelfSupplied
         )
     }
 
