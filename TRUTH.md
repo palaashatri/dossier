@@ -9,7 +9,7 @@ This is the authoritative current-state record for Dossier.
 - **Current branch:** `feat/product-contract-discovery-v2`
 - **Open pull request:** PR #4
 - **Audited implementation baseline before the documentation reset:** `22b158fd45bcbe58c1a946ed0864ff8a2b3a3b69`
-- **Parent source baseline for the current tranche:** `ce8f7e6634cb5c765e1f3c63027a881561b280ae`
+- **Parent source baseline for the current tranche:** `0b137792a9de8f88bf87c1cc835cd0a5130ced11`
 - **Product-contract reset commit:** `cf0f11d67974ce881513ff36130bbe2d9a7aa3d7`
 - **Audit/reset date:** 2026-09-04
 - **Previous strict readiness score:** **83/100 — RETIRED as the primary product metric**
@@ -27,13 +27,13 @@ Until that question is measured against a real synthetic/consented corpus, missi
 
 ## 1.1 Current working-tree validation — 2026-09-07
 
-The current working tree is on `feat/product-contract-discovery-v2`, descended from parent `ce8f7e6`. Fresh post-change gates produced:
+The current working tree is on `feat/product-contract-discovery-v2`, descended from parent `0b13779`. Fresh post-change gates produced:
 
-- `./gradlew :app:testDebugUnitTest`, `:app:testReleaseUnitTest`, and `:app:testUiTestUnitTest` (run sequentially with `--no-daemon --rerun-tasks --max-workers=1 --console=plain`): **BUILD SUCCESSFUL** for each; **1,106 tests** in each variant, with 0 failures, errors, or skipped tests across 157 XML suites. The focused rerun covering `TypedSeedAdmissionModelTest`, `MediaIntelligenceSessionTest`, `LocationPublicSearchDiscoveryServiceTest`, and `PublicSearchDiscoveryServiceTest` was **BUILD SUCCESSFUL** with 24 actionable tasks and 0 failures.
-- `./gradlew :app:assembleDebug :app:assembleUiTest :app:assembleUiTestAndroidTest :app:assembleRelease --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **BUILD SUCCESSFUL**. Current artifact readback: debug APK 115,958,200 bytes, SHA-256 `d8f746378b99b441519860c6b324331c40ebeba0a0ac14c4726368c74c3350e3`; uiTest APK 243,554,697 bytes, SHA-256 `bffcd72b0d1f4b93aadc82fbd02a5ba5508a1b781753f5f17b900595b6c6fa4f`; Android-test APK 1,031,728 bytes, SHA-256 `663eed75577b6ac9c90950681a46ec41e8d6a1b842d6edd55e9770d40229fb7b`; release unsigned APK 409,390,599 bytes, SHA-256 `407f6461380cbf9823e64292f4ad25508591a4e3074f8e11163ca13d279a9df2`.
-- `./gradlew -Dkotlin.incremental=false :app:connectedUiTestAndroidTest --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **NOT RUN** on this host; Gradle failed before test execution with `No connected devices`. The previous actual API 36 run remains recorded in the visual artifact directory and is not re-attributed to this fresh build.
+- `./gradlew :app:testDebugUnitTest`, `:app:testReleaseUnitTest`, and `:app:testUiTestUnitTest` (run sequentially with `--no-daemon --rerun-tasks --max-workers=1 --console=plain`): **BUILD SUCCESSFUL** for each; **1,107 tests** in each variant, with 0 failures, errors, or skipped tests across 157 XML suites. The focused rerun covering `MediaEvidenceAdapterTest`, `ReverseImageLookupScreenTest`, `ExpandedDiscoveryAndVisualTest`, and `WebLocationSearcherTest` was **BUILD SUCCESSFUL** with 24 actionable tasks and 0 failures.
+- `./gradlew :app:assembleDebug :app:assembleUiTest :app:assembleUiTestAndroidTest :app:assembleRelease --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **BUILD SUCCESSFUL**. Current artifact readback: debug APK 115,974,584 bytes, SHA-256 `34ae2a211337ca7cf6b2e839fbecc6ca9a7817fc6c4c8c1ad868c208024cb3ff`; uiTest APK 243,571,081 bytes, SHA-256 `a465ee20911638ae9e8a399a9b959b6d19542f421f3d9a7efefdb5152beae5f9`; Android-test APK 1,031,728 bytes, SHA-256 `663eed75577b6ac9c90950681a46ec41e8d6a1b842d6edd55e9770d40229fb7b`; release unsigned APK 409,406,983 bytes, SHA-256 `d036be86357ebeb82958e5a5b7418a10ad3a5c0c70bd7142c478d9e4a6ce67bc`.
+- `./gradlew -Dkotlin.incremental=false :app:connectedUiTestAndroidTest --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **ATTEMPTED, NO TESTS RUN** on this host; Gradle failed before test execution with `No connected devices`. The previous actual API 36 run remains recorded in the visual artifact directory and is not re-attributed to this fresh build.
 - `./gradlew -Dkotlin.incremental=false :app:lintDebug :app:lintUiTest --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **BUILD SUCCESSFUL**; debug lint has 0 errors, 71 warnings and 6 hints; uiTest lint has 0 errors, 75 warnings and 6 hints.
-- `python3 -m unittest tools.test_repository_hygiene_audit`: **OK**, 2 tests (the session-generated ignored `.serena` directory was moved out of the repository before this rerun).
+- `python3 -m unittest tools.test_repository_hygiene_audit`: **OK**, 2 tests (the session-generated `.serena` directory was moved out of the repository before this rerun).
 - `python3 tools/provider_registry_audit.py --json`: `ok: true`, 78 authored providers, 716 pinned WhatsMyName source records, 644 executable rules, and 0 conversion errors.
 - `git diff --check`: clean before this documentation update.
 
@@ -54,7 +54,7 @@ The Python provider audit is the canonical pinned-catalog check in this tree; it
 
 The recursive pivot collector now handles completions as they arrive, persists frontier completion after each result, retains deterministic output order, leaves unfinished work pending across cancellation, and admits only verified existing results as later-depth seeds. Focused JVM coverage for this behavior is included in the totals above. The new Location admission/executor tests cover context-scoped corroborated place pivots and preservation of authorized Email/Phone queries. The uiTest visual fixture also clears stale lifecycle ownership before writing its encrypted result; a regression covers a stale terminal marker.
 
-Fresh visual QA was performed against the rebuilt and installed `uiTest` APK on `emulator-5554` (`dossier-api36`, API 36). Evidence is retained outside Git in the task-local visualization directory `2026/09/07/dossier-android-qa-final4/`, with paired PNG/XML captures for consent, universal search, local Name classification, the encrypted fixture report, every report tab (including horizontally scrolled Actions), Images, picker, selected photo, photo progress, camera preview, and camera cancellation return. The screenshots are 1080×1920 and every Dossier hierarchy identifies `package="io.dossier.app"`; fixture values use reserved `.test` domains. The selected-photo scan remained at `Fingerprinting locally + checking public candidates…` after approximately 30 seconds, so completion of the photo pipeline is not claimed. This is emulator evidence only; physical-device acceptance, broad accessibility, and the mission benchmark remain open.
+The prior fresh visual QA run used the earlier `0b13779` `uiTest` APK on `emulator-5554` (`dossier-api36`, API 36). Evidence is retained outside Git in `2026/09/07/dossier-android-qa-final4/`, with paired PNG/XML captures for consent, universal search, local Name classification, the encrypted fixture report, every report tab (including horizontally scrolled Actions), Images, picker, selected photo, photo progress, camera preview, and camera cancellation return. The screenshots are 1080×1920 and every Dossier hierarchy identifies `package="io.dossier.app"`; fixture values use reserved `.test` domains. The selected-photo scan remained at `Fingerprinting locally + checking public candidates…` after approximately 30 seconds; that is the pre-fix defect evidence. No connected device was available for a fresh post-fix screenshot, so the progressive result contract is not visually re-confirmed on the current APK. This remains emulator evidence only; physical-device acceptance, broad accessibility, and the mission benchmark remain open.
 
 ## 2. Repository/PR scale at reset
 
@@ -420,13 +420,18 @@ The scanner now also performs a bounded local comparison between a Photo seed
 and directly verified profile avatars when the profile pass supplies both
 images. The comparison retains structured supporting provenance and never
 promotes visual similarity to identity proof. This is a local enrichment step,
-not the complete photo fan-out or recursive pipeline.
+not the complete photo fan-out or recursive pipeline. Reverse-image lookup now
+also runs local EXIF, OCR, face, and label stages concurrently, publishes a
+local partial result through a progress callback, and bounds public visual and
+location enrichment. The durable scan starts optional media work alongside
+profile discovery, retains a latest partial result, and cancels a slow media
+join before later scan stages are blocked.
 
-**Truth:** strong base with universal Photo input, local classification, and
-bounded verified-avatar comparison; the selected-photo scan still performs its
-media lookup before it can expose media evidence, so progressive/bounded media
-execution remains incomplete. Parallel metadata/OCR/face/reverse-image/
-location fusion and mission-level benchmark coverage remain incomplete.
+**Truth:** progressive/bounded media enrichment, universal Photo input, local
+classification, and bounded verified-avatar comparison are implemented. Full
+multi-provider photo fan-out, recursive source-page/identity pivots, complete
+location evidence fusion, and mission-level benchmark coverage remain
+incomplete.
 
 ## 12. Photo location reconstruction truth
 
@@ -458,7 +463,9 @@ The reset target is a provider-adapter model where documented APIs are preferred
 
 Playwright may be useful for CI/browser adapter regression testing or external tooling, but Playwright-over-ADB is not the planned Android runtime architecture.
 
-**Truth:** reverse-image support exists, but not yet at the desired multi-provider, recursively integrated level.
+**Truth:** reverse-image support now has cancellable candidate fetches,
+progressive local evidence, and bounded visual/location stages, but it is not
+yet at the desired multi-provider, recursively integrated level.
 
 ## 14. PII and repository hygiene audit
 
@@ -723,10 +730,10 @@ These are qualitative reset states, not a disguised numeric score.
 | Archives/history | **Partial useful base** | Wayback/history exists, needs deeper frontier integration. |
 | Breach awareness | **Partial useful base** | HIBP/scaffolding exists; exact exposure reconstruction remains source-dependent. |
 | Local case security | **Strong base** | Encrypted/bounded persistence work is reusable. |
-| Photo metadata | **Partial base** | EXIF support exists and a Photo URI is accepted as a universal initial input; bounded verified-avatar comparison exists, while orchestration/fan-out/fusion/recursive execution remains incomplete. |
+| Photo metadata | **Progressive bounded base** | EXIF/OCR/face/label stages run concurrently and publish partial evidence; full fan-out/fusion/recursive execution remains incomplete. |
 | OCR/image analysis | **Partial base** | Dependencies/code exist; not yet central recursive discovery. |
 | Face correlation | **Substantial base, calibration incomplete** | Local pipeline exists; candidate acquisition and mission benchmark need work. |
-| Reverse image | **Partial** | Candidate/matching work exists; multi-provider recursively integrated product does not. |
+| Reverse image | **Partial, progressive and bounded** | Candidate matching has cancellable fetches and explicit stage bounds; multi-provider recursive integration does not yet exist. |
 | Photo geolocation | **Partial components only** | Corroborated Location can feed a context-scoped public search, but no complete evidence-ranked location reconstruction contract exists yet. |
 | Remediation/export | **Useful base** | Worth preserving, but dependent on better discovery. |
 | Performance | **Improved but incomplete** | WhatsMyName uses rolling workers and aggregate health/yield ordering; general coordinator/frontier scheduling and live yield calibration remain open. |
@@ -742,8 +749,8 @@ work should target measurable discovery utility:
 1. connect the typed Exposure Ledger to every scanner/parser output and persist
    discovery paths without duplicating evidence truth;
 2. extend the persisted frontier beyond the current URL-family, bounded
-   public-search, and corroborated-Location tranche to Photo/Image execution
-   and scanner-wide coordinator ownership;
+   public-search, corroborated-Location, and progressive media tranche to full
+   Photo/Image execution and scanner-wide coordinator ownership;
 3. add a representative synthetic/consented end-to-end corpus and publish
    Recall@known-exposure, precision, false-positive, and time-to-result metrics;
 4. feed measured source yield and provider failure/cooldown data into the

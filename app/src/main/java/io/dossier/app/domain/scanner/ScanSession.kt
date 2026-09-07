@@ -69,11 +69,14 @@ import io.dossier.app.domain.discovery.TypedSeedAdmissionSnapshot
 import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicReference
 
 internal class ScanExecutionException(
     val failureCode: String = ScanLifecycleErrors.SCAN_EXECUTION_FAILED
@@ -92,6 +95,8 @@ private data class BreachStageRun(
 object ScanSession {
     /** Keep draft correction metadata bounded until the user explicitly saves a case. */
     const val MAX_DRAFT_CORRECTIONS = 256
+    private const val MEDIA_JOIN_TIMEOUT_MS = 1_000L
+    private const val MEDIA_AVATAR_COMPARISON_TIMEOUT_MS = 15_000L
 
     var tempInput: IdentityInput? = null
     val selectedModel = MutableStateFlow(LocalAiModelType.DEFAULT)
@@ -443,6 +448,7 @@ object ScanSession {
         input: IdentityInput,
         deepResearch: Boolean,
         bindingToken: String,
+        onProgress: suspend (ReverseImageLookupResult) -> Unit = {},
         lookup: suspend (String, Boolean, String) -> ReverseImageLookupResult
     ): ReverseImageLookupResult? {
         val selfieUri = input.selfieUri?.trim()?.takeIf(String::isNotBlank) ?: return null
@@ -451,6 +457,7 @@ object ScanSession {
             currentCoroutineContext().ensureActive()
             val result = lookup(selfieUri, deepResearch, bindingToken)
             currentCoroutineContext().ensureActive()
+            onProgress(result)
             result
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -524,30 +531,36 @@ object ScanSession {
                             )
                         )
                     }.getOrNull()
-                }
+            }
 
             var mediaRetrievedAtEpochMillis: Long? = null
-            var mediaEvidence = EvidenceCollection()
-            if (!inputToUse.selfieUri.isNullOrBlank()) {
-                _progressText.value = "ANALYZING_MEDIA..."
-                val mediaStartedAt = System.currentTimeMillis()
-                val mediaResult = lookupMediaForScan(
-                    input = inputToUse,
-                    deepResearch = deepResearch,
-                    bindingToken = mediaBindingToken
-                ) { uri, deep, token ->
-                    ReverseImageLookupService(context).lookup(Uri.parse(uri), deep, token)
-                }
-                if (mediaResult != null) {
-                    mediaRetrievedAtEpochMillis = mediaStartedAt
-                    mediaEvidence = MediaIntelligenceSession.snapshotFor(inputToUse, mediaBindingToken)
-                        .toEvidenceCollection(
-                            discoveryPath = listOf("seed:photo"),
-                            retrievedAtEpochMillis = mediaRetrievedAtEpochMillis,
-                            mediaSourceUri = inputToUse.selfieUri
+            val mediaStartedAt = System.currentTimeMillis()
+            val latestMediaResult = AtomicReference<ReverseImageLookupResult?>()
+            val mediaJob = if (!inputToUse.selfieUri.isNullOrBlank()) {
+                _progressText.value = "ANALYZING_MEDIA + DISCOVERING_USERNAMES..."
+                async(Dispatchers.IO) {
+                    val mediaResult = lookupMediaForScan(
+                        input = inputToUse,
+                        deepResearch = deepResearch,
+                        bindingToken = mediaBindingToken,
+                        onProgress = latestMediaResult::set
+                    ) { uri, deep, token ->
+                        ReverseImageLookupService(context).lookup(
+                            Uri.parse(uri),
+                            deep,
+                            token,
+                            onProgress = latestMediaResult::set
                         )
+                    }
+                    if (mediaResult == null) {
+                        latestMediaResult.get()?.let { partial ->
+                            MediaIntelligenceSession.recordImage(mediaBindingToken, partial)
+                        }
+                    }
+                    mediaResult
                 }
-                _progressText.value = "DISCOVERING_USERNAMES..."
+            } else {
+                null
             }
 
             val scanResults = profileScanner.scanIdentity(
@@ -557,23 +570,51 @@ object ScanSession {
                 checkpointOwnerId = checkpointOwnerId,
                 checkpointGeneration = checkpointGeneration,
                 planFingerprint = planFingerprint,
-                mediaEvidence = mediaEvidence
+                mediaEvidence = EvidenceCollection()
             )
             val typedSeedExecutionEvidence = profileScanner.typedSeedExecutionEvidence()
             currentCoroutineContext().ensureActive()
             _profileScanResults.value = scanResults
+            val mediaCompleted = mediaJob?.let { job ->
+                try {
+                    withTimeoutOrNull(MEDIA_JOIN_TIMEOUT_MS) {
+                        job.await()
+                        true
+                    } ?: false
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    false
+                }
+            } ?: true
+            if (!mediaCompleted) {
+                mediaJob?.cancel()
+                mediaJob?.join()
+                if (MediaIntelligenceSession.snapshotFor(inputToUse, mediaBindingToken).isEmpty) {
+                    latestMediaResult.get()?.let { partial ->
+                        MediaIntelligenceSession.recordImage(mediaBindingToken, partial)
+                    }
+                }
+            }
+            val mediaSnapshot = MediaIntelligenceSession.snapshotFor(inputToUse, mediaBindingToken)
+            if (!mediaSnapshot.isEmpty) {
+                mediaRetrievedAtEpochMillis = mediaStartedAt
+            }
+            _progressText.value = "DISCOVERING_USERNAMES..."
             MediaIntelligenceSession.recordVerifiedProfileAvatars(
                 token = mediaBindingToken,
                 input = inputToUse,
                 profiles = scanResults
             )
-            MediaIntelligenceSession.compareVerifiedProfileAvatars(
-                context = context,
-                token = mediaBindingToken,
-                input = inputToUse,
-                profiles = scanResults,
-                deepResearch = deepResearch
-            )
+            withTimeoutOrNull(MEDIA_AVATAR_COMPARISON_TIMEOUT_MS) {
+                MediaIntelligenceSession.compareVerifiedProfileAvatars(
+                    context = context,
+                    token = mediaBindingToken,
+                    input = inputToUse,
+                    profiles = scanResults,
+                    deepResearch = deepResearch
+                )
+            }
             checkpointStage(
                 context,
                 requestId,

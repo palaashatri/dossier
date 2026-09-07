@@ -3,6 +3,7 @@ package io.dossier.app.data.web
 import android.content.Context
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.scanner.WebViewScraper
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -55,6 +56,8 @@ class WebLocationSearcher(private val context: Context) {
                     html = response.body?.string()
                 }
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -68,6 +71,8 @@ class WebLocationSearcher(private val context: Context) {
                 if (render is WebViewScraper.Result.Rendered) {
                     html = render.html
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -123,6 +128,8 @@ class WebLocationSearcher(private val context: Context) {
                                 }
                             }
                         }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }

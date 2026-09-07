@@ -69,7 +69,9 @@ import io.dossier.app.ui.components.CircularWavyProgressIndicator
 import io.dossier.app.ui.components.GeminiSpark
 import io.dossier.app.ui.theme.NeuralTheme
 import java.time.Instant
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -134,7 +136,12 @@ fun ReverseImageLookupScreen(onNavigateToBrowser: (String) -> Unit) {
                 val result = ReverseImageLookupService(context).lookup(
                     uri,
                     deepResearch = ScanSession.deepResearchEnabled.value,
-                    bindingToken = bindingToken
+                    bindingToken = bindingToken,
+                    onProgress = { progress ->
+                        withContext(Dispatchers.Main.immediate) {
+                            if (requestGate.isCurrent(requestToken)) imageResult = progress
+                        }
+                    }
                 )
                 if (requestGate.isCurrent(requestToken)) imageResult = result
             } catch (throwable: Throwable) {

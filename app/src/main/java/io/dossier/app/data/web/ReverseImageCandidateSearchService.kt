@@ -3,6 +3,7 @@ package io.dossier.app.data.web
 import android.content.Context
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.scanner.WebViewScraper
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -10,6 +11,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -26,6 +28,8 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * Finds a bounded candidate corpus from public image indexes. The query image is never
@@ -137,7 +141,7 @@ internal class ReverseImageCandidateSearchService(private val context: Context) 
                     .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                     .header("Accept-Language", "en-US,en;q=0.8")
                     .build()
-                client.newCall(request).execute().use { response ->
+                executeCancellable(request).use { response ->
                     lastHtml = response.body?.string().orEmpty()
                     when {
                         response.isSuccessful && lastHtml.length >= MIN_HTML_BYTES &&
@@ -155,6 +159,8 @@ internal class ReverseImageCandidateSearchService(private val context: Context) 
                         DiscoveryHttpPolicy.looksBlocked(lastHtml) -> blocked = true
                     }
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 if (attempt < MAX_ATTEMPTS - 1) delay(DiscoveryHttpPolicy.retryDelayMillis(attempt, null))
             }
@@ -182,6 +188,26 @@ internal class ReverseImageCandidateSearchService(private val context: Context) 
         }
         return emptyList()
     }
+
+    /** Cancels the OkHttp call when the bounded public-search stage is cancelled. */
+    private suspend fun executeCancellable(request: Request): okhttp3.Response =
+        suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, error: java.io.IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(error)
+                }
+
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    if (continuation.isActive) {
+                        continuation.resume(response)
+                    } else {
+                        response.close()
+                    }
+                }
+            })
+        }
 
     private fun providers(): List<Provider> = listOf(
         Provider("Yandex Images", ::yandexImagesUrl),

@@ -11,15 +11,16 @@ The current branch is the product-contract discovery-v2 reset. Mission readiness
 Parent source baseline for this delivery:
 
 ```text
-ce8f7e6634cb5c765e1f3c63027a881561b280ae (bounded verified-page reuse/replay and typed public-search execution)
+0b137792a9de8f88bf87c1cc835cd0a5130ced11 (discovery contract hardening and Android QA)
 ```
 
-The current tranche extends the bounded public-search executor to Name and
-Username pivots with provenance and weak-signal admission guards. It also
-supports corroborated Location pivots only when scoped by an authorized
-name, organization, or username context; location-only and weak visual/EXIF
-guesses remain unavailable. Photo and Image execution plus a representative
-end-to-end benchmark remain open.
+The current tranche makes photo enrichment progressive and bounded: local
+metadata/OCR/face/label stages run concurrently, publish a partial result
+before public work completes, and public visual/location stages have explicit
+timeouts. Optional media work runs alongside profile discovery and cannot hold
+the scan's useful profile results indefinitely. Full Photo/Image fan-out,
+recursive source-page pivots, and a representative end-to-end benchmark remain
+open.
 
 The hardening history below is retained for context; the current source and validation record are listed above. `45520a1` added fail-closed frontier recovery for unreadable persisted pivot state and routed deep-research website traversal through the bounded declarative provider runtime with opaque host IDs, lifecycle events, redirect/auth/challenge classification, response limits and the existing six-page bound. `5f5ba8d` hardened calibration artifacts so configured contradiction weights cannot disable negative evidence.
 
@@ -32,31 +33,31 @@ Provider registry audit             PASS — 78 definitions (70 profile template
 WhatsMyName catalog integrity       PASS — 716 records / 644 executable HTTPS rules
 Provider contract fixtures          PASS — 468 deterministic six-state decisions / no network
 Provider maintenance audit tests    PASS — 11 tests / no-network schema, conversion-parity + pinned source-catalog fixtures
-Debug JVM unit tests                PASS — 1,106 tests / 157 result XML files / 0 failures, errors, or skips
-Release JVM unit tests              PASS — 1,106 tests / 157 result XML files / 0 failures, errors, or skips
-uiTest JVM unit tests               PASS — 1,106 tests / 157 result XML files / 0 failures, errors, or skips
+Debug JVM unit tests                PASS — 1,107 tests / 157 result XML files / 0 failures, errors, or skips
+Release JVM unit tests              PASS — 1,107 tests / 157 result XML files / 0 failures, errors, or skips
+uiTest JVM unit tests               PASS — 1,107 tests / 157 result XML files / 0 failures, errors, or skips
 TypedSeedAdmissionModelTest         PASS — 28 tests / 0 failures, errors, or skips
 Android-test Kotlin compilation    PASS — `compileUiTestAndroidTestKotlin`
-Debug APK assembly                  PASS — 115,958,200 bytes; SHA-256 `d8f746378b99b441519860c6b324331c40ebeba0a0ac14c4726368c74c3350e3`
-uiTest APK assembly                 PASS — 243,554,697 bytes; SHA-256 `bffcd72b0d1f4b93aadc82fbd02a5ba5508a1b781753f5f17b900595b6c6fa4f`
+Debug APK assembly                  PASS — 115,974,584 bytes; SHA-256 `34ae2a211337ca7cf6b2e839fbecc6ca9a7817fc6c4c8c1ad868c208024cb3ff`
+uiTest APK assembly                 PASS — 243,571,081 bytes; SHA-256 `a465ee20911638ae9e8a399a9b959b6d19542f421f3d9a7efefdb5152beae5f9`
 Android-test APK                    PASS — 1,031,728 bytes; SHA-256 `663eed75577b6ac9c90950681a46ec41e8d6a1b842d6edd55e9770d40229fb7b`
-Release unsigned APK assembly       PASS — 409,390,599 bytes; SHA-256 `407f6461380cbf9823e64292f4ad25508591a4e3074f8e11163ca13d279a9df2`
+Release unsigned APK assembly       PASS — 409,406,983 bytes; SHA-256 `d036be86357ebeb82958e5a5b7418a10ad3a5c0c70bd7142c478d9e4a6ce67bc`
 Debug lint                          PASS — 0 errors / 71 warnings / 6 hints
 uiTest lint                         PASS — 0 errors / 75 warnings / 6 hints
-Connected uiTest suite              NOT RUN — current host reported `No connected devices`; prior API 36 evidence remains in `2026/09/07/dossier-android-qa-final4/`
+Connected uiTest suite              ATTEMPTED, NO TESTS RUN — current host reported `No connected devices`; prior API 36 evidence remains in `2026/09/07/dossier-android-qa-final4/`
 ```
 
-The current debug, uiTest, Android-test, and release APKs were rebuilt from the working tree descended from `ce8f7e6`; their SHA-256 values are recorded above. Debug lint reported 0 errors, 71 warnings and 6 hints; uiTest lint reported 0 errors, 75 warnings and 6 hints. The fresh connected-suite attempt could not start because this host had no connected device. The Python hygiene audit passed (2 tests), the provider audit passed (78 authored providers, 716 pinned source records, 644 executable rules, 0 conversion errors), and `git diff --check` was clean. The prior API 36 run covered 58 tests and produced the visual evidence below.
+The current debug, uiTest, Android-test, and release APKs were rebuilt from the working tree descended from `0b13779`; their SHA-256 values are recorded above. Debug lint reported 0 errors, 71 warnings and 6 hints; uiTest lint reported 0 errors, 75 warnings and 6 hints. The fresh connected-suite attempt could not start because this host had no connected device. The Python hygiene audit passed (2 tests), the provider audit passed (78 authored providers, 716 pinned source records, 644 executable rules, 0 conversion errors), and `git diff --check` was clean before this documentation update.
 
-The connected suite covers the provider-health panel, WorkManager pause/resume, encrypted Activity-recreation recovery, live finding/profile/media correction semantics, graph/export redaction, HUD status, reverse-video picker semantics, report-tab reachability, and the universal-search seed-correction path. Fresh visual evidence from the rebuilt and installed uiTest APK is retained outside Git in the task-local visualization directory `2026/09/07/dossier-android-qa-final4/`, with paired PNG/XML captures for consent, universal search, local Name classification, the encrypted fixture report, every report tab (including horizontally scrolled Actions), Images, picker, selected photo, photo progress, camera preview, and cancellation return. Every Dossier hierarchy contains `package="io.dossier.app"`; fixture values and URLs use reserved `.test` domains. The selected-photo scan remained at `Fingerprinting locally + checking public candidates…` after approximately 30 seconds; photo-pipeline completion is not claimed. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
+The prior API 36 connected run covered 58 tests and produced the visual evidence in `2026/09/07/dossier-android-qa-final4/`. Those captures are tied to the earlier `0b13779` build: the selected-photo capture remained at `Fingerprinting locally + checking public candidates…` after approximately 30 seconds, which is the defect this follow-up changes. No connected device was available for a fresh post-fix screenshot, so progressive behavior is verified by JVM/build evidence but not yet visually re-confirmed on the current APK. Physical Samsung/Pixel/lower-memory devices, broad TalkBack/switch/keyboard, battery/thermal behavior, and full-stage process recovery remain unvalidated.
 
-This is not a production-readiness claim. Provider scale/live validation, progressive photo execution, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
+This is not a production-readiness claim. Full photo fan-out/geolocation, provider scale/live validation, calibrated identity and face benchmarks, complete coordinator/frontier ownership, broader automatic verified-account acquisition/correlation, and representative physical-device/accessibility/performance validation remain release gates.
 
-See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the target product contract. Email/Phone/Name/Username typed public-search execution and context-scoped corroborated Location pivots are implemented and bounded; Photo/Image execution, full photo geolocation, and a representative end-to-end benchmark remain open.
+See `TRUTH.md` for the authoritative score and blockers. `AGENTS.md` defines the target product contract. Email/Phone/Name/Username typed public-search execution, context-scoped corroborated Location pivots, and bounded progressive media enrichment are implemented; full Photo/Image execution, full photo geolocation, and a representative end-to-end benchmark remain open.
 
 ## Visual walkthrough
 
-The checked-in walkthrough captures are retained baseline images from the API 36 Medium Phone emulator. Fresh current-head captures are outside Git in `2026/09/07/dossier-android-qa-final4/`; `01-launch-consent.png`, `02-universal-search.png`, `03-name-classified.png`, `04-fixture-report.png`, `07-report-overview.png`, `08-report-evidence.png`, `10-report-timeline.png`, `11-report-connections.png`, `12-report-actions.png`, and `13-images.png` are current entry/report proofs, with additional picker/camera/photo-scan captures. Analysis and report states use deterministic **uiTest-only** fixtures; case data is written through the production encrypted stores. All identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish TalkBack, whole-product large-font, reduced-motion, adaptive-layout or physical-device acceptance.
+The checked-in walkthrough captures are retained baseline images from the API 36 Medium Phone emulator. The external captures in `2026/09/07/dossier-android-qa-final4/` are tied to the earlier `0b13779` APK; `01-launch-consent.png`, `02-universal-search.png`, `03-name-classified.png`, `04-fixture-report.png`, `07-report-overview.png`, `08-report-evidence.png`, `10-report-timeline.png`, `11-report-connections.png`, `12-report-actions.png`, and `13-images.png` are entry/report proofs, with additional picker/camera/photo-scan captures. Analysis and report states use deterministic **uiTest-only** fixtures; case data is written through the production encrypted stores. All identity values and URLs are synthetic and use reserved `.test` domains. The receiver exists only in the uiTest source set and is absent from the debug manifest. Static screenshots do not establish post-fix visual acceptance, TalkBack, whole-product large-font, reduced-motion, adaptive-layout or physical-device acceptance.
 
 | Consent and input validation | Scan configuration |
 |---|---|

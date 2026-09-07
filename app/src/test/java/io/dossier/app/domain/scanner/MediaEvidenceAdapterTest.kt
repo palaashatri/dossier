@@ -74,6 +74,25 @@ class MediaEvidenceAdapterTest {
     }
 
     @Test
+    fun mediaLookupReportsCompletedResultThroughProgressCallback() = runBlocking {
+        val input = IdentityInput(
+            fullName = "Jane Example",
+            selfieUri = "content://example/photo"
+        )
+        val token = MediaIntelligenceSession.beginFor(input)
+        var progress: ReverseImageLookupResult? = null
+
+        val result = ScanSession.lookupMediaForScan(
+            input = input,
+            deepResearch = false,
+            bindingToken = token,
+            onProgress = { progress = it }
+        ) { _, _, _ -> sampleResult() }
+
+        assertEquals(result, progress)
+    }
+
+    @Test
     fun mediaLookupPropagatesCancellation() = runBlocking {
         val input = IdentityInput(
             fullName = "Jane Example",
