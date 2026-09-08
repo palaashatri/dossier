@@ -67,6 +67,11 @@ class ProductTypedFrontierBenchmarkTest {
             fixture to runCase(fixture)
         }
 
+        assertTrue("product frontier must mark supplied seed echoes for evaluator exclusion", traces.all { (fixture, trace) ->
+            val seedEchoes = trace.events.filter { it.fact.matches(fixture.case.initialSeed) }
+            seedEchoes.isNotEmpty() && seedEchoes.all(DiscoveryEvent::isInitialSeed)
+        })
+
         assertUrlCascade(traces.first { it.first.id == "url-domain-document-archive" }.second)
         assertEmailSearch(traces.first { it.first.id == "email-search-replay" }.second)
         assertPhoneFailure(traces.first { it.first.id == "phone-provider-failure" }.second)
