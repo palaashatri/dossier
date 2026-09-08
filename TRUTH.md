@@ -4,14 +4,14 @@ This is the authoritative current-state record for Dossier.
 
 `AGENTS.md` defines the target product. This file records what actually exists, what has been validated, what is reusable, what is misleading under the new mission, and what must change next.
 
-## 1. Current reset state
+## 1. Current integrated state
 
-- **Current branch:** `codex/discovery-followup`
-- **Current head:** `1bddec31591618db404a19c1bff224330473ba0b` (`test: assert typed frontier seed provenance`)
-- **Current pull request:** none; a pull request for this follow-up has not yet been opened
+- **Current branch:** `main`
+- **Current head:** `ec50d49d2e99de962dcffce71b12cc22c9816118` (`feat: extend typed discovery and progressive evidence`)
+- **Current pull request:** none; the follow-up is integrated directly into `origin/main`
 - **Historical pull request:** PR #4 merged into `origin/main` as `0675dbadcf0c3acac0286948dd624d7e018d6733` on 2026-09-07
 - **Audited implementation baseline before the documentation reset:** `22b158fd45bcbe58c1a946ed0864ff8a2b3a3b69`
-- **Parent source baseline for this follow-up:** `0675dbadcf0c3acac0286948dd624d7e018d6733` (merged PR #4)
+- **Parent source baseline for the integrated follow-up:** `0675dbadcf0c3acac0286948dd624d7e018d6733` (merged PR #4)
 - **Task 1 repair commit:** `7c7a1bc2388d7edc94a5a26b5e1f53f7c1e389c6`
 - **Task 2 benchmark commits:** `babeb612aebe71b7660e9c8b048bf91e6db5f8c5`, `1bddec31591618db404a19c1bff224330473ba0b`
 - **Product-contract reset commit:** `cf0f11d67974ce881513ff36130bbe2d9a7aa3d7`
@@ -31,8 +31,9 @@ Until that question is measured against a real synthetic/consented corpus, missi
 
 ## 1.1 Follow-up evidence — 2026-09-08
 
-The follow-up branch contains two implementation tranches and their focused
-evidence, followed by fresh full-tree controller gates and API 35 VM evidence.
+The integrated follow-up contains two implementation tranches and their
+focused evidence, followed by fresh full-tree controller gates and API 35 VM
+evidence.
 
 - The post-merge Compose workflow `34125510659` supplied the preserved RED
   evidence: 58 tests, 2 failures, 0 skipped. The failures were
@@ -62,7 +63,7 @@ not wall-clock, device, network, SLA, live-provider, or representative-recall
 measurements. The existing arithmetic `DiscoveryBenchmark` fixtures remain
 regression evidence; neither harness establishes mission readiness.
 
-Fresh final controller evidence for this follow-up is now available:
+Fresh final controller evidence for the integrated follow-up is now available:
 
 - `./gradlew :app:testDebugUnitTest`, `:app:testReleaseUnitTest`, and
   `:app:testUiTestUnitTest` passed **1,132 tests each** with 0 failures, errors,
@@ -91,7 +92,7 @@ This establishes the exercised API 35 emulator flow; physical-device,
 accessibility-breadth, battery/thermal, and full process-death acceptance remain
 open.
 
-## 1.2 Prior reset validation — 2026-09-07 (not current follow-up head)
+## 1.2 Prior reset validation — 2026-09-07 (not current integrated head)
 
 The following gates were recorded for the prior reset working tree descended
 from parent `0b13779`; they are retained as historical evidence and must not be
@@ -613,13 +614,13 @@ They are not byte-for-byte duplicates, but coverage overlaps and should be conso
 
 ## 15. README truth
 
-README describes the follow-up as unscored, records the focused Task 1/API 35
+README describes the integrated follow-up as unscored, records the focused Task 1/API 35
 and Task 2 benchmark evidence, and keeps the prior reset gates explicitly
 historical. Its checked-in walkthrough images remain baseline captures for
 retained legacy and configuration surfaces; they are not independent
 current-head acceptance.
 
-**Status:** aligned with the current follow-up record; update the validation
+**Status:** aligned with the current integrated-main record; update the validation
 block when the controller refreshes full worktree gates or visual evidence.
 
 ## 16. Safety/authorization boundary
@@ -700,7 +701,7 @@ Completed and validated in the current working tree:
 - focused, product-backed typed-frontier benchmark regression (`babeb61`,
   `1bddec3`) with exact-value, provenance, recursion, status, and metric
   assertions;
-- README follow-up status and validation record.
+- README integrated-main status and validation record.
 
 ### P1 — Universal launch and Discovery Engine v3 scheduler
 
