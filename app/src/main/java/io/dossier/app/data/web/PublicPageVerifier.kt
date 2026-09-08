@@ -3,11 +3,17 @@ package io.dossier.app.data.web
 import io.dossier.app.domain.model.IdentityInput
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import java.net.URI
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -22,7 +28,10 @@ data class VerifiedPage(
     val historical: Boolean = false,
     val archiveProvider: String? = null,
     val archiveOriginalUrl: String? = null,
-    val archiveTimestamp: String? = null
+    val archiveTimestamp: String? = null,
+    /** Indexed URL(s) retained separately from the final replay URL. */
+    val sourceUrls: List<String> = emptyList(),
+    val indexedUrl: String? = null
 )
 
 /**
@@ -63,6 +72,7 @@ internal class PublicPageVerifier(
         data class Unavailable(val reason: String) : Outcome()
     }
 
+    @OptIn(InternalCoroutinesApi::class)
     suspend fun verify(
         input: IdentityInput,
         url: String,
@@ -78,8 +88,13 @@ internal class PublicPageVerifier(
                 .build()
         }.getOrElse { return@withContext Outcome.Rejected("Invalid source URL") }
 
+        val call = client.newCall(request)
+        val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion(
+            onCancelling = true,
+            invokeImmediately = true
+        ) { call.cancel() }
         try {
-            client.newCall(request).execute().use { response ->
+            call.execute().use { response ->
                 when {
                     response.code == 404 || response.code == 410 ->
                         return@withContext verifyArchivedVersion(
@@ -95,12 +110,16 @@ internal class PublicPageVerifier(
                         return@withContext Outcome.Unavailable("Source returned HTTP ${response.code}")
                 }
 
-                val contentLength = response.body?.contentLength() ?: -1L
+                val responseBody = response.body
+                    ?: return@withContext Outcome.Unavailable("Source returned an empty page")
+                val contentLength = responseBody.contentLength()
                 if (contentLength > MAX_BODY_BYTES) {
                     return@withContext Outcome.Unavailable("Source page exceeds verification size limit")
                 }
 
-                val body = response.body?.string().orEmpty()
+                val body = responseBody.byteStream().use { readBounded(it, MAX_BODY_BYTES) }
+                    ?.toString(Charsets.UTF_8)
+                    ?: return@withContext Outcome.Unavailable("Source page exceeds verification size limit")
                 if (body.isBlank()) return@withContext Outcome.Unavailable("Source returned an empty page")
                 if (DiscoveryHttpPolicy.looksBlocked(body)) {
                     return@withContext Outcome.Unavailable("Source presented a challenge page")
@@ -109,7 +128,8 @@ internal class PublicPageVerifier(
                 val finalUrl = response.request.url.toString()
                 val document = Jsoup.parse(body, finalUrl)
                 document.select("script,style,noscript,svg,template").remove()
-                val title = document.title().trim().ifBlank { indexedTitle.trim() }
+                val directTitle = document.title().trim()
+                val title = directTitle.ifBlank { indexedTitle.trim() }
                 val description = document
                     .select("meta[name=description],meta[property=og:description],meta[name=twitter:description]")
                     .firstOrNull()
@@ -125,14 +145,13 @@ internal class PublicPageVerifier(
                     }
                     .distinctBy(::canonical)
                     .take(MAX_LINKS)
-                val directContent = listOf(title, description, text)
+                // Indexed title/snippet values are lead metadata only. They may
+                // affect ranking/display, but can never establish attribution
+                // or create a direct-page pivot.
+                val assessmentContent = listOf(directTitle, description, text)
                     .filter { it.isNotBlank() }
                     .joinToString("\n")
-                val combined = listOf(directContent, indexedTitle, indexedSnippet)
-                    .filter { it.isNotBlank() }
-                    .joinToString("\n")
-
-                val assessment = assessIdentitySignals(input, finalUrl, combined)
+                val assessment = assessIdentitySignals(input, finalUrl, assessmentContent)
                 if (assessment.directScore <= 0f) {
                     return@withContext verifyArchivedVersion(
                         input = input,
@@ -168,14 +187,19 @@ internal class PublicPageVerifier(
                         text = text,
                         links = links,
                         contentHashSha256 = contentHash,
-                        description = description.take(360)
+                        description = description.take(360),
+                        sourceUrls = listOf(url, finalUrl).distinct().take(MAX_SOURCE_URLS),
+                        indexedUrl = url
                     )
                 )
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             Outcome.Unavailable(e.localizedMessage ?: e.javaClass.simpleName)
+        } finally {
+            cancellationHandle?.dispose()
         }
     }
 
@@ -225,7 +249,11 @@ internal class PublicPageVerifier(
                         historical = true,
                         archiveProvider = archive.provider,
                         archiveOriginalUrl = archive.originalUrl,
-                        archiveTimestamp = archive.timestamp
+                        archiveTimestamp = archive.timestamp,
+                        sourceUrls = listOf(originalUrl, archive.snapshotUrl)
+                            .distinct()
+                            .take(MAX_SOURCE_URLS),
+                        indexedUrl = originalUrl
                     )
                 )
             }
@@ -247,11 +275,30 @@ internal class PublicPageVerifier(
         private const val MAX_BODY_BYTES = 2_000_000L
         private const val MAX_TEXT_CHARS = 8_000
         private const val MAX_LINKS = 64
+        private const val MAX_SOURCE_URLS = 64
         private val URL_PATTERN = Regex("https?://[^\\s<>\\\"]+")
         private const val USER_AGENT =
             "Dossier/0.1 public-self-audit"
         private const val HISTORICAL_CONFIDENCE_CEILING = 0.78f
         private const val HISTORICAL_SCORE_FACTOR = 0.90f
+
+        /** Reads at most [maxBytes] plus one byte, without allocating an unbounded body. */
+        internal fun readBounded(input: InputStream, maxBytes: Long): ByteArray? {
+            require(maxBytes > 0L)
+            val limit = maxBytes + 1L
+            val output = ByteArrayOutputStream(minOf(limit, 32_768L).toInt())
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            var total = 0L
+            while (total < limit) {
+                val read = input.read(buffer, 0, minOf(buffer.size.toLong(), limit - total).toInt())
+                if (read < 0) break
+                if (read == 0) continue
+                total += read
+                if (total > maxBytes) return null
+                output.write(buffer, 0, read)
+            }
+            return output.toByteArray()
+        }
 
         internal fun historicalConfidenceCeiling(directCeiling: Float): Float =
             directCeiling.coerceAtMost(HISTORICAL_CONFIDENCE_CEILING)
@@ -290,17 +337,16 @@ internal class PublicPageVerifier(
             }
 
             val emails = input.emails.map { it.trim().lowercase() }.filter { it.contains('@') }
-            val exactEmailMatch = emails.any(normalizedText::contains)
+            val exactEmailMatch = emails.any { email -> containsExactEmail(normalizedText, email) }
             if (exactEmailMatch) {
                 score += 0.72f
                 signals += "Exact email appears on source page"
             }
 
-            val pageDigits = normalizedText.filter(Char::isDigit)
             val phones = input.phones
                 .map { it.filter(Char::isDigit) }
                 .filter { it.length >= 8 }
-            val exactPhoneMatch = phones.any(pageDigits::contains)
+            val exactPhoneMatch = phones.any { phone -> containsExactPhone(normalizedText, phone) }
             if (exactPhoneMatch) {
                 score += 0.70f
                 signals += "Exact phone number appears on source page"
@@ -417,6 +463,37 @@ internal class PublicPageVerifier(
             val afterOk = end >= text.length || !text[end].isLetterOrDigit()
             return beforeOk && afterOk
         }
+
+        /**
+         * Match an email as a complete identifier, not as a substring of a
+         * different address or a longer domain. Exact-value attribution must
+         * fail closed when the page only contains a near-match.
+         */
+        private fun containsExactEmail(text: String, email: String): Boolean {
+            val pattern = Regex(
+                "(?<![\\p{L}\\p{N}._%+\\-@])${Regex.escape(email)}(?![\\p{L}\\p{N}._%+\\-@])"
+            )
+            return pattern.containsMatchIn(text)
+        }
+
+        /** Match a phone's digit sequence without accepting a longer number. */
+        private fun containsExactPhone(text: String, digits: String): Boolean {
+            if (digits.length < 8) return false
+            val separatedDigits = digits
+                .map { Regex.escape(it.toString()) }
+                .joinToString("[^\\p{L}\\p{N}]*")
+            val pattern = Regex("(?<![\\p{L}\\p{N}])$separatedDigits(?![\\p{L}\\p{N}])")
+            return pattern.findAll(text).any { match ->
+                var start = match.range.first
+                var end = match.range.last + 1
+                while (start > 0 && isPhoneContinuation(text[start - 1])) start--
+                while (end < text.length && isPhoneContinuation(text[end])) end++
+                text.substring(start, end).filter(Char::isDigit) == digits
+            }
+        }
+
+        private fun isPhoneContinuation(char: Char): Boolean =
+            char.isDigit() || char in "+-()." || char.isWhitespace()
 
         private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray(Charsets.UTF_8))

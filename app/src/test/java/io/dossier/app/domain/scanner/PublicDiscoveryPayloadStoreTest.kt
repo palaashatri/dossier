@@ -5,6 +5,7 @@ import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.Platform
 import io.dossier.app.domain.model.ProfileScanResult
+import io.dossier.app.domain.model.PublicSearchPageMaterial
 import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.domain.model.UsernameCandidate
 import io.dossier.app.domain.model.UsernameMatchType
@@ -42,7 +43,20 @@ class PublicDiscoveryPayloadStoreTest {
     @Test
     fun `round trip retains exact bounded result and keeps ciphertext opaque`() {
         val store = store(PLAN)
-        val result = result()
+        val result = result().copy(
+            directPage = PublicSearchPageMaterial(
+                finalUrl = "https://example.test/public-candidate?view=full",
+                title = "Public candidate page",
+                text = "Synthetic direct page material",
+                links = listOf("https://example.test/public-candidate/contact"),
+                contentHashSha256 = "a".repeat(64),
+                sourceUrls = listOf(
+                    "https://search.example.test/result",
+                    "https://example.test/public-candidate?view=full"
+                ),
+                indexedUrl = "https://search.example.test/result"
+            )
+        )
 
         val summary = store.save(ScanPayloadStage.PublicSearch, listOf(result))
 
@@ -50,6 +64,10 @@ class PublicDiscoveryPayloadStoreTest {
         assertEquals(listOf(result), store.load(ScanPayloadStage.PublicSearch))
         assertEquals(summary, store.loadSummary(ScanPayloadStage.PublicSearch))
         assertFalse(store.payloadFileForTesting(ScanPayloadStage.PublicSearch).readText().contains(result.candidate.url))
+        assertFalse(
+            store.payloadFileForTesting(ScanPayloadStage.PublicSearch).readText()
+                .contains(result.directPage!!.finalUrl)
+        )
         assertTrue(store.payloadFileForTesting(ScanPayloadStage.PublicSearch).readText().isNotBlank())
     }
 
@@ -97,6 +115,23 @@ class PublicDiscoveryPayloadStoreTest {
                 listOf(result().copy(verified = true, verificationStatus = "verified account"))
             )
         )
+    }
+
+    @Test
+    fun `direct page text uses its larger bounded allowance`() {
+        val store = store(PLAN)
+        val directText = "x".repeat(5_000)
+        val result = result().copy(
+            directPage = PublicSearchPageMaterial(
+                finalUrl = "https://example.test/public-candidate",
+                title = "Public candidate page",
+                text = directText,
+                contentHashSha256 = "a".repeat(64)
+            )
+        )
+
+        assertTrue(store.save(ScanPayloadStage.PublicSearch, listOf(result)) != null)
+        assertEquals(directText, store.load(ScanPayloadStage.PublicSearch)?.single()?.directPage?.text)
     }
 
     @Test

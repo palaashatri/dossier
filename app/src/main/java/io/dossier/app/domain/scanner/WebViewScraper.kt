@@ -15,6 +15,8 @@ import io.dossier.app.data.web.StableProfileApiResolver
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -179,6 +181,7 @@ class WebViewScraper(private val context: Context) {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
+    @OptIn(InternalCoroutinesApi::class)
     private suspend fun scrapeWithBrowser(url: String): Result = withContext(Dispatchers.Main) {
         currentCoroutineContext().ensureActive()
         if (!WebViewScraperPolicy.isAllowedUrl(url)) {
@@ -293,6 +296,15 @@ class WebViewScraper(private val context: Context) {
             }
         }
 
+        val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion(
+            onCancelling = true,
+            invokeImmediately = true
+        ) {
+            // Stop navigation as soon as the caller's stage deadline fires;
+            // final cleanup below still owns destruction on the main thread.
+            webView.post { runCatching { webView.stopLoading() } }
+        }
+
         webView.loadUrl(url)
 
         try {
@@ -307,6 +319,7 @@ class WebViewScraper(private val context: Context) {
         } catch (error: Exception) {
             Result.Failed("Render failed: ${error.localizedMessage}")
         } finally {
+            cancellationHandle?.dispose()
             if (!rendered.isCompleted) rendered.cancel()
             try {
                 webView.stopLoading()

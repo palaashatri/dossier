@@ -6,8 +6,12 @@ import io.dossier.app.domain.model.Platform
 import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.model.UsernameCandidate
 import io.dossier.app.domain.model.UsernameMatchType
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -61,6 +65,52 @@ class ProfileInitialPassExecutorTest {
         assertEquals(candidates, results.map { it.candidate })
         assertEquals("cached", results[1].extractedText)
         assertEquals(setOf(key(candidates[0]), key(candidates[2])), access.savedKeys.toSet())
+    }
+
+    @Test
+    fun `publishes a completed profile before a slower sibling while returning candidate order`() = runBlocking {
+        val candidates = candidates()
+        val slowStarted = CompletableDeferred<Unit>()
+        val releaseSlow = CompletableDeferred<Unit>()
+        val fastPublished = CompletableDeferred<Unit>()
+        val snapshots = Collections.synchronizedList(mutableListOf<List<ProfileScanResult>>())
+
+        val scan = async {
+            ProfileInitialPassExecutor.execute(
+                candidates = listOf(candidates[0], candidates[1]),
+                checkpoint = null,
+                queueMiss = {},
+                fetchMiss = { candidate ->
+                    if (candidate == candidates[0]) {
+                        slowStarted.complete(Unit)
+                        releaseSlow.await()
+                    }
+                    result(candidate, ProviderVerificationState.Present, "fresh-${candidate.username}")
+                },
+                onProgress = { snapshot ->
+                    snapshots += snapshot
+                    if (snapshot.any { it.candidate == candidates[1] }) {
+                        fastPublished.complete(Unit)
+                    }
+                }
+            )
+        }
+
+        try {
+            slowStarted.await()
+            withTimeout(2_000L) { fastPublished.await() }
+            assertTrue(scan.isActive)
+            assertEquals(listOf(candidates[1]), snapshots.last().map(ProfileScanResult::candidate))
+
+            releaseSlow.complete(Unit)
+            assertEquals(
+                listOf(candidates[0], candidates[1]),
+                scan.await().map(ProfileScanResult::candidate)
+            )
+        } finally {
+            releaseSlow.complete(Unit)
+            scan.cancelAndJoin()
+        }
     }
 
     @Test

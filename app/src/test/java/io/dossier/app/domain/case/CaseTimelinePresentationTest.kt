@@ -330,4 +330,36 @@ class CaseTimelinePresentationTest {
         assertTrue(presentation.groups.all { !it.hasCurrentEvidence })
         assertTrue(presentation.groups.all { !it.changed })
     }
+
+    @Test
+    fun `verified direct evidence with retrieval time but no observation time counts as current`() {
+        val dossierCase = DossierCase(
+            createdAt = "2026-08-24 12:00",
+            subjectName = "Authorized subject",
+            input = IdentityInput(fullName = "Authorized subject"),
+            evidenceRecords = listOf(
+                Evidence(
+                    id = "retrieved-profile",
+                    kind = EvidenceKind.Profile,
+                    value = "https://social.example/profile",
+                    sourceUrl = "https://social.example/profile",
+                    retrievedAtEpochMillis = 2_000L,
+                    state = EvidenceState.Verified,
+                    reliability = EvidenceReliability.DirectPublicProfile
+                )
+            )
+        )
+
+        val presentation = CaseTimelineBuilder.presentation(dossierCase)
+        val retrieval = presentation.events.single()
+
+        assertEquals(TimelineEventKind.Retrieval, retrieval.kind)
+        assertTrue(retrieval.isVerifiedCurrent)
+        assertEquals(1, presentation.availability.currentObservationCount)
+        assertTrue(
+            CaseTimelineBuilder.presentation(dossierCase, filter = TimelineFilter.Live)
+                .events.single()
+                .isVerifiedCurrent
+        )
+    }
 }

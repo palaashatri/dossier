@@ -12,9 +12,12 @@ import io.dossier.app.data.web.TypedSeedPublicFetchExecutor
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
 import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.ExposureSourceClassification
+import io.dossier.app.domain.model.FindingAttribution
+import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
 import io.dossier.app.domain.model.ReverseImageLookupResult
 import kotlinx.coroutines.runBlocking
@@ -441,6 +444,90 @@ class TypedSeedFrontierTest {
     }
 
     @Test
+    fun retryableUnavailableReturnsToPendingUntilAttemptLimitThenBecomesTerminal() {
+        val frontier = TypedSeedFrontier(
+            requestId = uuid(),
+            config = config,
+            ownerId = uuid(),
+            generation = uuid(),
+            planFingerprint = plan
+        )
+        val seed = userSeed(TypedSeedKind.Url, "https://example.test/retryable")
+        assertTrue(frontier.offer(seed))
+        val key = frontier.entries.single().key
+
+        repeat(TypedSeedFrontier.MAX_ATTEMPTS - 1) { attempt ->
+            assertNotNull(frontier.begin(key))
+            assertTrue(frontier.unavailable(key, "provider timed out (attempt $attempt)", retryable = true))
+            assertEquals(TypedSeedFrontierEntryState.Pending, frontier.entries.single().state)
+            assertTrue(frontier.entries.single().retryable)
+        }
+
+        assertNotNull(frontier.begin(key))
+        assertTrue(frontier.unavailable(key, "provider timed out (final attempt)", retryable = true))
+        assertEquals(TypedSeedFrontierEntryState.Unavailable, frontier.entries.single().state)
+        assertFalse(frontier.entries.single().retryable)
+    }
+
+    @Test
+    fun terminalUnavailableDoesNotBecomePending() {
+        val frontier = TypedSeedFrontier(
+            requestId = uuid(),
+            config = config,
+            ownerId = uuid(),
+            generation = uuid(),
+            planFingerprint = plan
+        )
+        val seed = userSeed(TypedSeedKind.Url, "https://example.test/terminal")
+        assertTrue(frontier.offer(seed))
+        val key = frontier.entries.single().key
+        assertNotNull(frontier.begin(key))
+        assertTrue(frontier.unavailable(key, "unsupported parser response"))
+        assertEquals(TypedSeedFrontierEntryState.Unavailable, frontier.entries.single().state)
+        assertFalse(frontier.entries.single().retryable)
+    }
+
+    @Test
+    fun publicSearchProviderUnavailableExecutionIsRetryable() = runBlocking {
+        val executor = TypedSeedPublicFetchExecutor(
+            searchOutcomeSearcher = { _, _, _ ->
+                io.dossier.app.data.web.PublicSearchDiscoveryService.SearchOutcome.Unavailable(
+                    reason = "No public search provider was reachable"
+                )
+            }
+        )
+        val report = executor.executeDetailed(
+            seeds = listOf(userSeed(TypedSeedKind.Email, "person@example.test")),
+            input = io.dossier.app.domain.model.IdentityInput(fullName = ""),
+            scanId = ScanId("retryable-search")
+        )
+
+        assertTrue(report.executions.single().retryable)
+        assertEquals(TypedSeedPublicFetchExecutor.ExecutionState.Unavailable, report.executions.single().state)
+    }
+
+    @Test
+    fun metadataOnlyObservedSearchEvidenceCannotBecomeUrlPivot() {
+        val metadataOnly = Evidence(
+            id = "metadata-only-search",
+            kind = EvidenceKind.PublicSearchEvidence,
+            value = "https://result.example.test/profile",
+            sourceUrl = "https://result.example.test/profile",
+            state = EvidenceState.Observed,
+            reliability = EvidenceReliability.SearchEngineCandidate,
+            sourceClassification = ExposureSourceClassification.PUBLIC_WEB,
+            parserVersion = "typed-seed-public-v1",
+            attribution = FindingAttribution.Unconfirmed
+        )
+
+        val seeds = TypedSeedEvidenceAdapter
+            .fromCollection(EvidenceCollection(evidence = listOf(metadataOnly)), IdentityInput(fullName = ""))
+            .admittedSeeds
+
+        assertTrue(seeds.none { it.kind == TypedSeedKind.Url })
+    }
+
+    @Test
     fun executableEmailIsPersistedAsPendingAndTombstoneBlocksLateSave() {
         val request = uuid()
         val owner = uuid()
@@ -563,6 +650,42 @@ class TypedSeedFrontierTest {
         assertTrue(frontier.evidence.evidence.none { it.value == email && it.state == EvidenceState.Verified })
         assertTrue(frontier.evidence.evidence.any { it.value == document && it.discoveryPath.containsAll(listOf(urlA, urlB)) })
         assertTrue(frontier.evidence.evidence.any { it.value == archive && it.sourceClassification == ExposureSourceClassification.PUBLIC_WEB })
+    }
+
+    @Test
+    fun redirectedPublicFetchRetainsBothUrlsAndRedirectRelationship() = runBlocking {
+        val requested = "https://profile.example.test/old"
+        val final = "https://profile.example.test/new"
+        val executor = TypedSeedPublicFetchExecutor(
+            fetcher = TypedSeedPublicFetchExecutor.PublicSeedFetcher { _, url, _, _ ->
+                ProviderExecutionResult(
+                    decision = ProviderResponseDecision(ProviderVerificationState.Present, "fixture"),
+                    statusCode = 200,
+                    requestedUrl = url,
+                    finalUrl = final,
+                    bodyText = "<html><body>Redirected public page</body></html>",
+                    latencyMs = 1,
+                    attemptCount = 1,
+                    contentType = "text/html"
+                )
+            },
+            archiveResolver = TypedSeedPublicFetchExecutor.ArchiveSeedResolver { null }
+        )
+
+        val report = executor.executeDetailed(
+            seeds = listOf(userSeed(TypedSeedKind.Url, requested)),
+            input = io.dossier.app.domain.model.IdentityInput(fullName = ""),
+            scanId = ScanId("redirect-provenance")
+        )
+
+        val sourceEvidence = report.evidence.first { it.kind == EvidenceKind.Url }
+        assertTrue(sourceEvidence.sourceUrls.contains(requested))
+        assertTrue(sourceEvidence.sourceUrls.contains(final))
+        assertTrue(
+            report.collection.relationships.any {
+                it.relation == "redirects_to" && it.fromValue == requested && it.toValue == final
+            }
+        )
     }
 
     private fun frontier(request: String, owner: String, generation: String): TypedSeedFrontier =

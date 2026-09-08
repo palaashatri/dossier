@@ -12,6 +12,8 @@ import io.dossier.app.domain.discovery.TypedSeedKind
 import io.dossier.app.domain.discovery.TypedSeedSafety
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -21,6 +23,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -80,13 +83,22 @@ class PublicSearchDiscoveryService(private val context: Context) {
         /** Optional content hash supplied by a reviewed result producer. */
         val contentHashSha256: String? = null,
         /** Ephemeral page material already fetched by direct verification. */
-        val verifiedPage: VerifiedPage? = null
+        val verifiedPage: VerifiedPage? = null,
+        /** Bounded source provenance, including an indexed URL before redirects. */
+        val sourceUrls: List<String> = emptyList(),
+        /** Original indexed URL retained when [url] is replaced by a redirect target. */
+        val indexedUrl: String? = null
     )
 
     /** Distinguishes a healthy empty search from provider-wide unavailability. */
     sealed interface SearchOutcome {
         data class Success(val results: List<PublicSearchResult>) : SearchOutcome
-        data class Unavailable(val reason: String) : SearchOutcome
+        data class Unavailable(
+            val reason: String,
+            /** Results completed before a provider-wide failure or deadline. */
+            val partialResults: List<PublicSearchResult> = emptyList(),
+            val timedOut: Boolean = false
+        ) : SearchOutcome
     }
 
     private data class SearchProvider(
@@ -116,7 +128,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
         )
     ) {
         is SearchOutcome.Success -> outcome.results
-        is SearchOutcome.Unavailable -> emptyList()
+        is SearchOutcome.Unavailable -> outcome.partialResults
     }
 
     /**
@@ -137,6 +149,37 @@ class PublicSearchDiscoveryService(private val context: Context) {
          * multi-signal verification rules.
          */
         verificationInput: IdentityInput? = null
+    ): SearchOutcome {
+        val timeoutMs = if (deepResearch) DEEP_PUBLIC_SEARCH_TIMEOUT_MS else DEFAULT_PUBLIC_SEARCH_TIMEOUT_MS
+        val partial = PartialSearchResults()
+        return withPublicSearchBudget(
+            timeoutMs = timeoutMs,
+            onTimeout = {
+                SearchOutcome.Unavailable(
+                    reason = "Public search timed out after ${timeoutMs}ms",
+                    partialResults = partial.snapshot(),
+                    timedOut = true
+                )
+            }
+        ) {
+            discoverOutcomeWithinBudget(
+                input = input,
+                deepResearch = deepResearch,
+                verifiedResults = verifiedResults,
+                typedSeeds = typedSeeds,
+                verificationInput = verificationInput,
+                partial = partial
+            )
+        }
+    }
+
+    private suspend fun discoverOutcomeWithinBudget(
+        input: IdentityInput,
+        deepResearch: Boolean = false,
+        verifiedResults: List<ProfileScanResult> = emptyList(),
+        typedSeeds: List<io.dossier.app.domain.discovery.TypedSeed> = emptyList(),
+        verificationInput: IdentityInput? = null,
+        partial: PartialSearchResults
     ): SearchOutcome =
         withContext(Dispatchers.IO) {
             val queryLimit = if (deepResearch) MAX_DEEP_QUERIES else MAX_DEFAULT_QUERIES
@@ -176,28 +219,35 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 plan.mapIndexed { index, entry ->
                     async(Dispatchers.IO) {
                         querySemaphore.withPermit {
-                            searchWithFailover(
+                            val batch = searchWithFailover(
                                 query = entry.query,
                                 providers = providers,
                                 startIndex = index % providers.size,
                                 deepResearch = deepResearch
-                            ).let { batch ->
-                                SearchBatch(
-                                    attemptedProviders = batch.attemptedProviders,
-                                    healthyProviders = batch.healthyProviders,
-                                    results = batch.results.map {
-                                        it.copy(
-                                            pivotSeedKind = entry.pivotSeedKind,
-                                            pivotExactValue = entry.pivotExactValue,
-                                            pivotNormalizedValue = entry.pivotNormalizedValue,
-                                            pivotEvidenceIds = entry.pivotEvidenceIds,
-                                            pivotDiscoveryPath = entry.pivotDiscoveryPath,
-                                            pivotStage = entry.stage,
-                                            pivotSourceUrl = entry.pivotSourceUrl
-                                        )
-                                    }
+                            )
+                            val results = batch.results.map {
+                                it.copy(
+                                    pivotSeedKind = entry.pivotSeedKind,
+                                    pivotExactValue = entry.pivotExactValue,
+                                    pivotNormalizedValue = entry.pivotNormalizedValue,
+                                    pivotEvidenceIds = entry.pivotEvidenceIds,
+                                    pivotDiscoveryPath = entry.pivotDiscoveryPath,
+                                    pivotStage = entry.stage,
+                                    pivotSourceUrl = entry.pivotSourceUrl
                                 )
                             }
+                            // Keep completed query observations available if a
+                            // later provider consumes the stage deadline.
+                            partial.addAll(
+                                results.map { result ->
+                                    result.copy(score = scoreResult(scoringInput, result))
+                                }
+                            )
+                            SearchBatch(
+                                attemptedProviders = batch.attemptedProviders,
+                                healthyProviders = batch.healthyProviders,
+                                results = results
+                            )
                         }
                     }
                 }.awaitAll()
@@ -218,6 +268,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 .filter { it.score >= MIN_INDEX_SCORE }
                 .sortedByDescending { it.score }
                 .take(MAX_PRE_VERIFICATION_RESULTS)
+            partial.addAll(scored)
 
             val verificationKeys = scored
                 .take(MAX_DIRECT_VERIFICATIONS)
@@ -228,45 +279,60 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val verified = coroutineScope {
                 scored.map { result ->
                     async(Dispatchers.IO) {
-                        if (canonicalUrlKey(result.url) !in verificationKeys) {
-                            return@async result.copy(
+                        val verifiedResult = if (canonicalUrlKey(result.url) !in verificationKeys) {
+                            result.copy(
                                 score = result.score.coerceAtMost(INDEX_ONLY_CONFIDENCE_CEILING),
                                 verificationNote = "Indexed lead; source page not re-fetched due to scan budget"
                             )
-                        }
-
-                        verifySemaphore.withPermit {
-                            when (val verification = pageVerifier.verify(
-                                input = effectiveVerificationInput,
-                                url = result.url,
-                                indexedTitle = result.title,
-                                indexedSnippet = result.snippet
-                            )) {
-                                is PublicPageVerifier.Outcome.Verified -> {
-                                    val blended = (
-                                        result.score * INDEX_WEIGHT +
-                                            verification.directScore * DIRECT_PAGE_WEIGHT +
+                        } else {
+                            verifySemaphore.withPermit {
+                                when (val verification = pageVerifier.verify(
+                                    input = effectiveVerificationInput,
+                                    url = result.url,
+                                    indexedTitle = result.title,
+                                    indexedSnippet = result.snippet
+                                )) {
+                                    is PublicPageVerifier.Outcome.Verified -> {
+                                        val blended = (
+                                            result.score * INDEX_WEIGHT +
+                                                verification.directScore * DIRECT_PAGE_WEIGHT +
                                             consensusBonus(result.providerCount)
                                         ).coerceIn(0f, verification.confidenceCeiling)
-                                    result.copy(
-                                        title = verification.title.ifBlank { result.title },
-                                        snippet = verification.snippet.ifBlank { result.snippet },
-                                        url = verification.finalUrl,
-                                        score = blended,
-                                        directlyVerified = true,
-                                        contentHashSha256 = verification.contentHashSha256
-                                            ?: result.contentHashSha256,
-                                        verificationNote = verification.signals.joinToString("; "),
-                                        verifiedPage = verification.verifiedPage
+                                        val page = verification.verifiedPage
+                                        val sourceUrls = (
+                                            result.sourceUrls +
+                                                listOf(result.url, verification.finalUrl) +
+                                                page?.sourceUrls.orEmpty() +
+                                                listOfNotNull(page?.indexedUrl)
+                                            )
+                                            .map(String::trim)
+                                            .filter(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+                                            .distinctBy(::canonicalUrlKey)
+                                            .take(MAX_SOURCE_URLS)
+                                        result.copy(
+                                            title = verification.title.ifBlank { result.title },
+                                            snippet = verification.snippet.ifBlank { result.snippet },
+                                            url = verification.finalUrl,
+                                            score = blended,
+                                            directlyVerified = true,
+                                            contentHashSha256 = verification.contentHashSha256
+                                                ?: result.contentHashSha256,
+                                            verificationNote = verification.signals.joinToString("; "),
+                                            verifiedPage = page,
+                                            sourceUrls = sourceUrls,
+                                            indexedUrl = page?.indexedUrl ?: result.indexedUrl ?: result.url
+                                        )
+                                    }
+                                    is PublicPageVerifier.Outcome.Rejected -> null
+                                    is PublicPageVerifier.Outcome.Unavailable -> result.copy(
+                                        score = result.score.coerceAtMost(INDEX_ONLY_CONFIDENCE_CEILING),
+                                        verificationNote = "Indexed lead only: ${verification.reason}"
                                     )
                                 }
-                                is PublicPageVerifier.Outcome.Rejected -> null
-                                is PublicPageVerifier.Outcome.Unavailable -> result.copy(
-                                    score = result.score.coerceAtMost(INDEX_ONLY_CONFIDENCE_CEILING),
-                                    verificationNote = "Indexed lead only: ${verification.reason}"
-                                )
                             }
                         }
+                        verifiedResult?.let(partial::add)
+                        verifiedResult
                     }
                 }.awaitAll().filterNotNull()
             }
@@ -289,6 +355,34 @@ class PublicSearchDiscoveryService(private val context: Context) {
         val healthyProviders: Int,
         val results: List<PublicSearchResult>
     )
+
+    /** Thread-safe bounded accumulator used when a stage deadline cuts work short. */
+    private class PartialSearchResults {
+        private val byUrl = LinkedHashMap<String, PublicSearchResult>()
+
+        fun addAll(results: Iterable<PublicSearchResult>) = synchronized(this) {
+            results.forEach(::addLocked)
+        }
+
+        fun add(result: PublicSearchResult) = synchronized(this) {
+            addLocked(result)
+        }
+
+        fun snapshot(): List<PublicSearchResult> = synchronized(this) {
+            byUrl.values.toList()
+        }
+
+        private fun addLocked(result: PublicSearchResult) {
+            val key = canonicalUrlKey(result.url)
+            val existing = byUrl[key]
+            byUrl[key] = when {
+                existing == null -> result
+                result.directlyVerified && !existing.directlyVerified -> result
+                result.directlyVerified == existing.directlyVerified && result.score > existing.score -> result
+                else -> existing
+            }
+        }
+    }
 
     private suspend fun searchWithFailover(
         query: String,
@@ -346,6 +440,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
         val healthy: Boolean
     )
 
+    @OptIn(InternalCoroutinesApi::class)
     private suspend fun fetchProviderResults(
         provider: SearchProvider,
         query: String
@@ -373,31 +468,42 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     .header("Cache-Control", "no-cache")
                     .build()
 
-                client.newCall(request).execute().use { response ->
-                    lastHtml = response.body?.string().orEmpty()
-                    when {
-                        response.isSuccessful && lastHtml.length >= MIN_SEARCH_HTML_BYTES &&
-                            !DiscoveryHttpPolicy.looksBlocked(lastHtml) -> {
-                            providerHealthy = true
-                            val parsed = parseSearchResults(provider.name, query, lastHtml)
-                            if (parsed.isNotEmpty() || looksLikeNoResults(lastHtml)) {
-                                breaker.recordSuccess(provider.name)
-                                cache[cacheKey] = CachedResults(System.currentTimeMillis(), parsed)
-                                return ProviderFetchResult(parsed, healthy = true)
+                val call = client.newCall(request)
+                val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion(
+                    onCancelling = true,
+                    invokeImmediately = true
+                ) { call.cancel() }
+                try {
+                    call.execute().use { response ->
+                        lastHtml = response.body?.string().orEmpty()
+                        currentCoroutineContext().ensureActive()
+                        when {
+                            response.isSuccessful && lastHtml.length >= MIN_SEARCH_HTML_BYTES &&
+                                !DiscoveryHttpPolicy.looksBlocked(lastHtml) -> {
+                                providerHealthy = true
+                                val parsed = parseSearchResults(provider.name, query, lastHtml)
+                                if (parsed.isNotEmpty() || looksLikeNoResults(lastHtml)) {
+                                    breaker.recordSuccess(provider.name)
+                                    cache[cacheKey] = CachedResults(System.currentTimeMillis(), parsed)
+                                    return ProviderFetchResult(parsed, healthy = true)
+                                }
                             }
-                        }
-                        DiscoveryHttpPolicy.isTransientHttpStatus(response.code) -> {
-                            if (attempt < MAX_HTTP_ATTEMPTS - 1) {
-                                delay(DiscoveryHttpPolicy.retryDelayMillis(attempt, response.header("Retry-After")))
+                            DiscoveryHttpPolicy.isTransientHttpStatus(response.code) -> {
+                                if (attempt < MAX_HTTP_ATTEMPTS - 1) {
+                                    delay(DiscoveryHttpPolicy.retryDelayMillis(attempt, response.header("Retry-After")))
+                                }
                             }
+                            DiscoveryHttpPolicy.looksBlocked(lastHtml) -> blocked = true
                         }
-                        DiscoveryHttpPolicy.looksBlocked(lastHtml) -> blocked = true
                     }
+                } finally {
+                    cancellationHandle?.dispose()
                 }
                 if (blocked) break
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
+                currentCoroutineContext().ensureActive()
                 if (attempt < MAX_HTTP_ATTEMPTS - 1) {
                     delay(DiscoveryHttpPolicy.retryDelayMillis(attempt, null))
                 }
@@ -407,6 +513,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
         if (provider.allowBrowserFallback &&
             (lastHtml.isBlank() || blocked || (providerHealthy && !looksLikeNoResults(lastHtml)))) {
             val rendered = browserSemaphore.withPermit {
+                currentCoroutineContext().ensureActive()
                 when (val result = io.dossier.app.domain.scanner.WebViewScraper(context).scrape(searchUrl)) {
                     is io.dossier.app.domain.scanner.WebViewScraper.Result.Rendered ->
                         parseSearchResults(provider.name, query, result.html)
@@ -441,6 +548,26 @@ class PublicSearchDiscoveryService(private val context: Context) {
     )
 
     companion object {
+        /** Keep ordinary scans useful without allowing blocked indexes to stall them. */
+        internal const val DEFAULT_PUBLIC_SEARCH_TIMEOUT_MS = 30_000L
+        internal const val DEEP_PUBLIC_SEARCH_TIMEOUT_MS = 60_000L
+
+        /**
+         * Runs one public-search stage under a cancellable wall-clock budget.
+         * The fallback is evaluated only after a child timeout; parent
+         * cancellation is rethrown by [ensureActive] instead of being
+         * misreported as a provider outage.
+         */
+        internal suspend fun <T> withPublicSearchBudget(
+            timeoutMs: Long,
+            onTimeout: () -> T,
+            block: suspend () -> T
+        ): T {
+            val result = withTimeoutOrNull(timeoutMs.coerceAtLeast(1L)) { block() }
+            currentCoroutineContext().ensureActive()
+            return result ?: onTimeout()
+        }
+
         private const val MAX_DEFAULT_QUERIES = 24
         private const val MAX_DEEP_QUERIES = 40
         private const val MAX_PARALLEL_SEARCH_QUERIES = 3
@@ -449,6 +576,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
         private const val MAX_PRE_VERIFICATION_RESULTS = 58
         private const val MAX_PUBLIC_SEARCH_RESULTS = 34
         private const val MAX_RESULTS_PER_QUERY = 8
+        private const val MAX_SOURCE_URLS = 64
         private const val MIN_RESULTS_BEFORE_STOP = 5
         private const val MIN_HIGH_SIGNAL_RESULTS_BEFORE_STOP = 2
         private const val MIN_PROVIDERS_FOR_HIGH_SIGNAL_QUERY = 3
@@ -1028,7 +1156,15 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 val url = normalizeSearchUrl(anchor.attr("href")) ?: return@mapNotNull null
                 if (isNoisyResultUrl(url)) return@mapNotNull null
                 val title = anchor.text().trim().takeIf { it.length >= 4 } ?: return@mapNotNull null
-                PublicSearchResult(title.take(160), "", url, query, source)
+                PublicSearchResult(
+                    title = title.take(160),
+                    snippet = "",
+                    url = url,
+                    query = query,
+                    source = source,
+                    sourceUrls = listOf(url),
+                    indexedUrl = url
+                )
             }
         }
 
@@ -1056,7 +1192,9 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 snippet = snippet.take(320),
                 url = url,
                 query = query,
-                source = source
+                source = source,
+                sourceUrls = listOf(url),
+                indexedUrl = url
             )
         }
 
@@ -1206,6 +1344,19 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 ) ?: group.first()
                 val sources = group.map { it.source }.distinct()
                 val pivot = group.firstOrNull { it.pivotSeedKind != null }
+                val verifiedPage = best.verifiedPage
+                    ?: pivot?.verifiedPage
+                    ?: group.firstNotNullOfOrNull { it.verifiedPage }
+                val sourceUrls = (
+                    group.flatMap { it.sourceUrls } +
+                        group.map { it.url } +
+                        verifiedPage?.sourceUrls.orEmpty() +
+                        listOfNotNull(verifiedPage?.indexedUrl)
+                    )
+                    .map(String::trim)
+                    .filter(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+                    .distinctBy(::canonicalUrlKey)
+                    .take(MAX_SOURCE_URLS)
                 best.copy(
                     source = sources.joinToString("+"),
                     providerCount = sources.size,
@@ -1227,9 +1378,13 @@ class PublicSearchDiscoveryService(private val context: Context) {
                     contentHashSha256 = best.contentHashSha256
                         ?: pivot?.contentHashSha256
                         ?: group.firstNotNullOfOrNull { it.contentHashSha256 },
-                    verifiedPage = best.verifiedPage
-                        ?: pivot?.verifiedPage
-                        ?: group.firstNotNullOfOrNull { it.verifiedPage }
+                    verifiedPage = verifiedPage,
+                    sourceUrls = sourceUrls,
+                    indexedUrl = best.indexedUrl
+                        ?: pivot?.indexedUrl
+                        ?: verifiedPage?.indexedUrl
+                        ?: group.firstNotNullOfOrNull { it.indexedUrl }
+                        ?: group.firstOrNull()?.url
                 )
             }
 

@@ -39,6 +39,10 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
 import java.net.URI
+import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.security.MessageDigest
 import java.time.LocalDateTime
 import java.time.ZoneOffset
@@ -181,7 +185,9 @@ class TypedSeedPublicFetchExecutor(
         val state: ExecutionState,
         val reason: String? = null,
         val fetchAttempted: Boolean = false,
-        val evidenceIds: List<String> = emptyList()
+        val evidenceIds: List<String> = emptyList(),
+        /** Transient provider failure; the durable frontier may retry it. */
+        val retryable: Boolean = false
     )
 
     data class Report(
@@ -190,6 +196,23 @@ class TypedSeedPublicFetchExecutor(
     ) {
         val evidence: List<Evidence> get() = collection.evidence
         val outcomes: List<SeedExecution> get() = executions
+    }
+
+    /**
+     * Retains page material already fetched by a public-search verifier so a
+     * later typed URL seed can use the replay path instead of fetching it a
+     * second time. Unsafe or oversized pages are ignored fail-closed.
+     */
+    fun retainVerifiedPage(page: VerifiedPage, providerId: String = "public-search-verified") {
+        val safePage = sanitizeVerifiedPage(page) ?: return
+        rememberVerifiedPage(
+            safePage.finalUrl,
+            ReusableVerifiedPage(
+                page = safePage,
+                providerId = providerId.trim().take(MAX_SEARCH_PROVIDER_CHARS)
+                    .ifBlank { "public-search-verified" }
+            )
+        )
     }
 
     /** Executes safe URL-like fetches and Email/Phone/Name/Username searches into canonical evidence. */
@@ -280,7 +303,8 @@ class TypedSeedPublicFetchExecutor(
                 seed,
                 error.message?.take(MAX_REASON_CHARS)
                     ?: "Seed execution failed",
-                fetchAttempted = true
+                fetchAttempted = true,
+                retryable = isRetryableFailure(error.message, error = error)
             )
         }
     }
@@ -378,7 +402,8 @@ class TypedSeedPublicFetchExecutor(
             sourceUrls = listOf(requestedUrl, finalUrl)
                 .distinct()
                 .take(Evidence.MAX_SOURCE_URLS),
-            discoveryPathExtra = listOf(requestedUrl)
+            discoveryPathExtra = listOf(requestedUrl),
+            redirectedFromUrl = requestedUrl
         )
     }
 
@@ -429,16 +454,21 @@ class TypedSeedPublicFetchExecutor(
         // late response into canonical evidence in that case.
         currentCoroutineContext().ensureActive()
 
-        if (outcome is PublicSearchDiscoveryService.SearchOutcome.Unavailable) {
+        val partialUnavailable = outcome as? PublicSearchDiscoveryService.SearchOutcome.Unavailable
+        val rawResults = when (outcome) {
+            is PublicSearchDiscoveryService.SearchOutcome.Success -> outcome.results
+            is PublicSearchDiscoveryService.SearchOutcome.Unavailable -> outcome.partialResults
+        }
+        if (partialUnavailable != null && rawResults.isEmpty()) {
             return unavailable(
                 seed,
-                outcome.reason.take(MAX_REASON_CHARS).ifBlank { "Public search provider unavailable" },
-                fetchAttempted = true
+                partialUnavailable.reason.take(MAX_REASON_CHARS).ifBlank { "Public search provider unavailable" },
+                fetchAttempted = true,
+                retryable = true
             )
         }
 
-        val normalizedResults = (outcome as PublicSearchDiscoveryService.SearchOutcome.Success)
-            .results
+        val normalizedResults = rawResults
             .asSequence()
             .mapNotNull(::sanitizeSearchResult)
             .groupBy { PublicSearchDiscoveryService.canonicalUrlKey(it.url) }
@@ -504,7 +534,11 @@ class TypedSeedPublicFetchExecutor(
                     ExposureSourceClassification.PUBLIC_WEB
                 },
                 contentHashSha256 = result.contentHashSha256,
-                parserVersion = PARSER_VERSION,
+                parserVersion = if (result.directlyVerified && result.verifiedPage != null) {
+                    DIRECT_PAGE_PARSER_VERSION
+                } else {
+                    PARSER_VERSION
+                },
                 discoveryPath = path,
                 sourceUrls = sourceUrls,
                 supportingEvidenceIds = supportingEvidenceIds,
@@ -514,14 +548,27 @@ class TypedSeedPublicFetchExecutor(
         }
         currentCoroutineContext().ensureActive()
 
+        val unavailableRun = partialUnavailable?.let {
+            unavailable(
+                seed,
+                it.reason.take(MAX_REASON_CHARS).ifBlank { "Public search provider unavailable" },
+                fetchAttempted = true,
+                retryable = true
+            )
+        }
+        val unavailableEvidence = unavailableRun?.evidence.orEmpty()
         return SeedRun(
             execution = SeedExecution(
                 seed = seed,
-                state = ExecutionState.Completed,
+                state = unavailableRun?.execution?.state ?: ExecutionState.Completed,
+                reason = unavailableRun?.execution?.reason,
                 fetchAttempted = true,
-                evidenceIds = evidenceList.map(Evidence::id).distinct().take(MAX_EVIDENCE_IDS)
+                evidenceIds = (evidenceList + unavailableEvidence)
+                    .map(Evidence::id)
+                    .distinct()
+                    .take(MAX_EVIDENCE_IDS)
             ),
-            evidence = evidenceList,
+            evidence = (evidenceList + unavailableEvidence).distinctBy(Evidence::id),
             relationships = evidenceList.map { evidence ->
                 EvidenceRelationship(
                     fromValue = seed.exactValue,
@@ -600,6 +647,8 @@ class TypedSeedPublicFetchExecutor(
         }
 
         val sourceUrls = listOf(seed.exactValue, sourceUrl)
+            .plus(page.sourceUrls)
+            .plus(listOfNotNull(page.indexedUrl))
             .map(String::trim)
             .filter(DiscoveryHttpPolicy::isSafePublicHttpUrl)
             .distinctBy(::canonicalUrl)
@@ -620,7 +669,8 @@ class TypedSeedPublicFetchExecutor(
             html = null,
             contentHashSha256 = page.contentHashSha256,
             sourceUrls = sourceUrls,
-            discoveryPathExtra = listOf(seed.exactValue)
+            discoveryPathExtra = listOf(seed.exactValue),
+            redirectedFromUrl = page.indexedUrl
         )
     }
 
@@ -844,7 +894,8 @@ class TypedSeedPublicFetchExecutor(
         contentHashSha256: String? = null,
         archiveDescription: String? = null,
         sourceUrls: List<String> = listOf(seed.exactValue),
-        discoveryPathExtra: List<String> = emptyList()
+        discoveryPathExtra: List<String> = emptyList(),
+        redirectedFromUrl: String? = null
     ): SeedRun {
         val retrievedAt = nowMillis()
         val path = discoveryPath(seed, sourceUrl, discoveryPathExtra)
@@ -891,6 +942,20 @@ class TypedSeedPublicFetchExecutor(
                 evidenceIds = listOf(seedEvidence.id)
             )
         )
+        redirectedFromUrl
+            ?.trim()
+            ?.takeIf { it.length <= MAX_SEARCH_URL_CHARS }
+            ?.takeIf(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+            ?.takeIf { canonicalUrl(it) != canonicalUrl(sourceUrl) }
+            ?.let { originalUrl ->
+                relationships += EvidenceRelationship(
+                    fromValue = originalUrl,
+                    toValue = sourceUrl,
+                    relation = "redirects_to",
+                    evidence = "HTTP redirect retained by public source verification",
+                    evidenceIds = listOf(seedEvidence.id)
+                )
+            }
 
         val findings = piiExtractor.extract(text, sourceUrl, input)
         findings.forEach { finding ->
@@ -1202,6 +1267,23 @@ class TypedSeedPublicFetchExecutor(
             .map { it.take(TypedSeed.MAX_VALUE_CHARS) }
             .take(TypedSeed.MAX_EVIDENCE_IDS)
             .toList()
+        val sourceUrls = (
+            result.sourceUrls +
+                listOf(url) +
+                result.verifiedPage?.sourceUrls.orEmpty() +
+                listOfNotNull(result.indexedUrl, result.verifiedPage?.indexedUrl)
+            )
+            .asSequence()
+            .map(String::trim)
+            .filter { it.length <= MAX_SEARCH_URL_CHARS }
+            .filter(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+            .distinctBy(::canonicalUrl)
+            .take(Evidence.MAX_SOURCE_URLS)
+            .toList()
+        val indexedUrl = listOfNotNull(result.indexedUrl, result.verifiedPage?.indexedUrl, url)
+            .asSequence()
+            .map(String::trim)
+            .firstOrNull { it.length <= MAX_SEARCH_URL_CHARS && DiscoveryHttpPolicy.isSafePublicHttpUrl(it) }
 
         return result.copy(
             title = title,
@@ -1235,7 +1317,9 @@ class TypedSeedPublicFetchExecutor(
                 ?.take(MAX_SEARCH_HASH_CHARS)
                 ?.takeIf(String::isNotBlank)
                 ?: verifiedPage?.contentHashSha256,
-            verifiedPage = verifiedPage
+            verifiedPage = verifiedPage,
+            sourceUrls = sourceUrls,
+            indexedUrl = indexedUrl
         )
     }
 
@@ -1258,6 +1342,17 @@ class TypedSeedPublicFetchExecutor(
             .distinctBy(::canonicalUrl)
             .take(MAX_LINKS)
             .toList()
+        val sourceUrls = (page.sourceUrls + listOf(finalUrl) + listOfNotNull(page.indexedUrl, page.archiveOriginalUrl))
+            .asSequence()
+            .map(String::trim)
+            .filter { it.length <= MAX_SEARCH_URL_CHARS }
+            .filter(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+            .distinctBy(::canonicalUrl)
+            .take(Evidence.MAX_SOURCE_URLS)
+            .toList()
+        val indexedUrl = page.indexedUrl
+            ?.trim()
+            ?.takeIf { it.length <= MAX_SEARCH_URL_CHARS && DiscoveryHttpPolicy.isSafePublicHttpUrl(it) }
         return page.copy(
             finalUrl = finalUrl,
             title = page.title.trim().take(MAX_SEARCH_TITLE_CHARS),
@@ -1276,7 +1371,9 @@ class TypedSeedPublicFetchExecutor(
             archiveTimestamp = page.archiveTimestamp
                 ?.trim()
                 ?.take(MAX_ARCHIVE_TIMESTAMP_CHARS)
-                ?.takeIf(String::isNotBlank)
+                ?.takeIf(String::isNotBlank),
+            sourceUrls = sourceUrls,
+            indexedUrl = indexedUrl
         )
     }
 
@@ -1297,8 +1394,12 @@ class TypedSeedPublicFetchExecutor(
         result: PublicSearchDiscoveryService.PublicSearchResult
     ): List<String> = listOfNotNull(
         result.url,
+        result.indexedUrl,
+        *result.sourceUrls.toTypedArray(),
         seed.sourceUrl,
         result.pivotSourceUrl,
+        result.verifiedPage?.indexedUrl,
+        *result.verifiedPage?.sourceUrls.orEmpty().toTypedArray(),
         result.verifiedPage?.archiveOriginalUrl
     )
         .map(String::trim)
@@ -1315,6 +1416,9 @@ class TypedSeedPublicFetchExecutor(
         add("Query: ${result.query}")
         add("Provider/source: ${result.source}")
         add("Directly verified: ${result.directlyVerified}")
+        if (result.directlyVerified && result.verifiedPage != null) {
+            add("Page content retained for bounded typed-seed replay")
+        }
         result.verificationNote?.let { add("Verification note: $it") }
         result.pivotSeedKind?.let { add("Pivot seed kind: ${it.name}") }
         result.pivotExactValue?.let { add("Pivot exact value: $it") }
@@ -1372,8 +1476,11 @@ class TypedSeedPublicFetchExecutor(
         reason: String,
         fetchAttempted: Boolean = false,
         providerId: String? = null,
-        status: ProviderVerificationState? = null
+        status: ProviderVerificationState? = null,
+        retryable: Boolean? = null
     ): SeedRun {
+        val boundedReason = reason.take(MAX_REASON_CHARS)
+        val shouldRetry = retryable ?: isRetryableFailure(reason, status = status)
         val safeSourceUrls = listOfNotNull(
             requestUrl(seed),
             seed.sourceUrl
@@ -1390,7 +1497,7 @@ class TypedSeedPublicFetchExecutor(
             kind = seed.kind.toEvidenceKind(),
             value = seed.exactValue,
             sourceUrl = safeUrl,
-            snippet = reason.take(MAX_REASON_CHARS),
+            snippet = boundedReason,
             confidence = 0f,
             risk = RiskLevel.Low,
             signals = buildList {
@@ -1420,13 +1527,55 @@ class TypedSeedPublicFetchExecutor(
             execution = SeedExecution(
                 seed = seed,
                 state = ExecutionState.Unavailable,
-                reason = reason.take(MAX_REASON_CHARS),
+                reason = boundedReason,
                 fetchAttempted = fetchAttempted,
-                evidenceIds = listOf(record.id)
+                evidenceIds = listOf(record.id),
+                retryable = shouldRetry
             ),
             evidence = listOf(record),
             relationships = emptyList()
         )
+    }
+
+    /** Classifies provider failures that are safe to retry on a later pass. */
+    private fun isRetryableFailure(
+        reason: String?,
+        status: ProviderVerificationState? = null,
+        error: Throwable? = null
+    ): Boolean {
+        if (status in setOf(
+                ProviderVerificationState.Timeout,
+                ProviderVerificationState.NetworkUnavailable,
+                ProviderVerificationState.RateLimited,
+                ProviderVerificationState.AutomationChallenged
+            )
+        ) return true
+        if (error is SocketTimeoutException ||
+            error is java.io.InterruptedIOException ||
+            error is UnknownHostException ||
+            error is ConnectException ||
+            error is IOException
+        ) return true
+
+        val normalized = reason.orEmpty().lowercase(Locale.ROOT)
+        if (normalized.isBlank()) return false
+        if (status == ProviderVerificationState.UnexpectedStatus &&
+            Regex("\\b(?:408|425|429|5\\d{2})\\b").containsMatchIn(normalized)
+        ) return true
+        return listOf(
+            "timed out",
+            "timeout",
+            "network unavailable",
+            "network failure",
+            "rate limit",
+            "rate-limited",
+            "challenge",
+            "captcha",
+            "no public search provider was reachable",
+            "provider unavailable",
+            "temporarily unavailable",
+            "remote service unavailable"
+        ).any(normalized::contains)
     }
 
     private fun requestUrl(seed: TypedSeed): String? = when (seed.kind) {
@@ -1708,6 +1857,7 @@ class TypedSeedPublicFetchExecutor(
         private const val MAX_TITLE_CHARS = 240
         private const val MAX_REASON_CHARS = 256
         private const val PARSER_VERSION = "typed-seed-public-v1"
+        private const val DIRECT_PAGE_PARSER_VERSION = "public-page-verifier-v1"
         private const val ARCHIVE_PARSER_VERSION = "typed-seed-archive-v1"
         private val UNSUPPORTED_DOCUMENT_EXTENSIONS = setOf(
             "pdf", "doc", "docx", "rtf", "odt", "xls", "xlsx", "ods", "ppt", "pptx", "odp"

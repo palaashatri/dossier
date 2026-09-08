@@ -2,10 +2,13 @@ package io.dossier.app.domain.scanner
 
 import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.model.UsernameCandidate
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Restores stable direct-profile results and executes only the remaining work.
@@ -30,10 +33,42 @@ internal object ProfileInitialPassExecutor {
         checkpoint: ProfileCheckpointAccess?,
         queueMiss: (UsernameCandidate) -> Unit,
         fetchMiss: suspend (UsernameCandidate) -> ProfileScanResult,
-        onRecovery: (RecoverySummary) -> Unit = {}
+        onRecovery: (RecoverySummary) -> Unit = {},
+        onProgress: suspend (List<ProfileScanResult>) -> Unit = {}
     ): List<ProfileScanResult> = coroutineScope {
         val orderedResults = arrayOfNulls<ProfileScanResult>(candidates.size)
         val misses = mutableListOf<IndexedValue<UsernameCandidate>>()
+        val progressLock = Mutex()
+
+        suspend fun publishProgress() {
+            progressLock.withLock {
+                val snapshot = orderedResults.filterNotNull()
+                if (snapshot.isEmpty()) return@withLock
+                try {
+                    onProgress(snapshot)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // A UI/progress observer must never turn a valid profile
+                    // result into a failed scan. The scanner still commits the
+                    // result and returns it in deterministic candidate order.
+                }
+            }
+        }
+
+        suspend fun publishCompleted(index: Int, result: ProfileScanResult) {
+            progressLock.withLock {
+                orderedResults[index] = result
+                try {
+                    onProgress(orderedResults.filterNotNull())
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // See publishProgress: observers are best effort, while
+                    // profile persistence/return semantics remain authoritative.
+                }
+            }
+        }
 
         candidates.forEachIndexed { index, candidate ->
             val cached = runCatching { checkpoint?.load(candidate) }.getOrNull()
@@ -45,12 +80,14 @@ internal object ProfileInitialPassExecutor {
         }
 
         misses.forEach { queueMiss(it.value) }
+        publishProgress()
         misses.map { indexedCandidate ->
             async(Dispatchers.IO) {
                 val result = fetchMiss(indexedCandidate.value)
                 if (checkpoint != null && ProfileScanCheckpointStore.isReusable(result)) {
                     runCatching { checkpoint.save(result) }
                 }
+                publishCompleted(indexedCandidate.index, result)
                 indexedCandidate.index to result
             }
         }.awaitAll().forEach { (index, result) ->

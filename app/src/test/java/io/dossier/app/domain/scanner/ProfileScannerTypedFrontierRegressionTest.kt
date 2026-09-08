@@ -11,6 +11,7 @@ import io.dossier.app.domain.discovery.ProviderResponseDecision
 import io.dossier.app.domain.discovery.ProviderVerificationState
 import io.dossier.app.domain.discovery.ScanId
 import io.dossier.app.domain.discovery.TypedSeed
+import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
 import io.dossier.app.domain.discovery.TypedSeedKind
 import io.dossier.app.domain.evidence.Evidence
 import io.dossier.app.domain.evidence.EvidenceCollection
@@ -19,6 +20,14 @@ import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.Platform
+import io.dossier.app.domain.model.ProfileScanResult
+import io.dossier.app.domain.model.PublicSearchPageMaterial
+import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.model.UsernameCandidate
+import io.dossier.app.domain.model.UsernameMatchType
+import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.username.UsernameVariantGenerator
 import kotlinx.coroutines.CompletableDeferred
@@ -53,6 +62,42 @@ class ProfileScannerTypedFrontierRegressionTest {
     fun tearDown() {
         BackgroundScanManager.resetSeams()
         root.deleteRecursively()
+    }
+
+    @Test
+    fun `scan identity emits cumulative profile snapshots after each result stage`() = runBlocking {
+        val snapshots = mutableListOf<List<ProfileScanResult>>()
+        val stages = mutableListOf<String>()
+        val scanner = ProfileScanner(
+            context = FakeContext(root),
+            piiExtractor = PiiExtractor(),
+            variantGenerator = UsernameVariantGenerator(),
+            typedSeedExecutorOverride = TypedSeedPublicFetchExecutor(
+                searchOutcomeSearcher = { _, _, _ ->
+                    PublicSearchDiscoveryService.SearchOutcome.Success(emptyList())
+                }
+            )
+        )
+
+        val result = scanner.scanIdentity(
+            input = IdentityInput(fullName = ""),
+            onProgress = { snapshot -> snapshots += snapshot },
+            onStage = { stage -> stages += stage }
+        )
+
+        assertEquals(4, snapshots.size)
+        assertTrue(snapshots.zipWithNext().all { (previous, current) -> previous.size <= current.size })
+        assertEquals(result, snapshots.last())
+        assertEquals(
+            listOf(
+                "DISCOVERING_PIVOTS...",
+                "SEARCHING_PUBLIC_INDEXES...",
+                "FETCHING_TYPED_SEEDS...",
+                "SEARCHING_PUBLIC_IMAGES...",
+                "DISCOVERY_COMPLETE"
+            ),
+            stages
+        )
     }
 
     @Test
@@ -468,6 +513,117 @@ class ProfileScannerTypedFrontierRegressionTest {
         assertEquals(normalizedSearchUrl, output.evidence.first {
             it.kind == EvidenceKind.Phone && it.value == downstreamPhone
         }.sourceUrl)
+    }
+
+    @Test
+    fun `direct public-search page feeds typed recursion while index-only lead stays review-only`() = runBlocking {
+        val context = FakeContext(root)
+        val downstreamEmail = "downstream.bridge@example.test"
+        val directUrl = "https://profile.example.test/direct"
+        val indexedUrl = "https://search.example.test/redirected-direct"
+        val indexOnlyUrl = "https://profile.example.test/index-only"
+        val input = IdentityInput(fullName = "Jane Example")
+        val directResult = ProfileScanResult(
+            candidate = UsernameCandidate(
+                username = "direct",
+                platform = Platform.Website,
+                url = directUrl,
+                matchType = UsernameMatchType.FuzzyVariant,
+                confidence = 0.9f
+            ),
+            exists = true,
+            httpStatus = null,
+            displayName = "Direct result",
+            bio = "",
+            links = emptyList(),
+            extractedText = "Indexed snippet only",
+            findings = listOf(
+                Finding(
+                    type = FindingType.PublicSearchEvidence,
+                    value = directUrl,
+                    sourceUrl = directUrl,
+                    evidenceSnippet = "Directly re-fetched synthetic page",
+                    confidence = 0.9f,
+                    risk = RiskLevel.Low,
+                    remediation = "Review"
+                )
+            ),
+            confidenceSignals = listOf("Fixture direct verification"),
+            verified = false,
+            provenance = "public search via fixture",
+            directPage = PublicSearchPageMaterial(
+                finalUrl = directUrl,
+                title = "Direct result",
+                text = "Jane Example contact $downstreamEmail",
+                contentHashSha256 = "b".repeat(64),
+                sourceUrls = listOf(indexedUrl, directUrl),
+                indexedUrl = indexedUrl
+            )
+        )
+        val indexOnlyResult = directResult.copy(
+            candidate = directResult.candidate.copy(
+                username = "index-only",
+                url = indexOnlyUrl,
+                confidence = 0.5f
+            ),
+            displayName = "Index-only result",
+            directPage = null,
+            findings = directResult.findings.map { finding ->
+                finding.copy(value = indexOnlyUrl, sourceUrl = indexOnlyUrl)
+            }
+        )
+        val searchEvidence = listOf(directResult, indexOnlyResult).toEvidenceCollection(input)
+        val directPageEvidence = searchEvidence.evidence.single {
+            it.kind == EvidenceKind.PublicSearchEvidence && it.value == directUrl &&
+                it.state == EvidenceState.Observed
+        }
+        assertEquals(FindingAttribution.Unconfirmed, directPageEvidence.attribution)
+        assertEquals(
+            EvidenceState.Candidate,
+            searchEvidence.evidence.single { it.kind == EvidenceKind.Profile && it.value == indexOnlyUrl }.state
+        )
+
+        val admitted = TypedSeedEvidenceAdapter.fromCollection(searchEvidence, input).admittedSeeds
+        assertTrue(admitted.any { it.kind == TypedSeedKind.Url && it.normalizedValue == directUrl })
+        assertTrue(admitted.none { it.kind == TypedSeedKind.Url && it.normalizedValue == indexOnlyUrl })
+
+        val fetchCalls = AtomicInteger(0)
+        val executor = TypedSeedPublicFetchExecutor(
+            fetcher = TypedSeedPublicFetchExecutor.PublicSeedFetcher { provider, requested, _, _ ->
+                fetchCalls.incrementAndGet()
+                throw AssertionError("direct page replay should not fetch the page again: provider=${provider.id} url=$requested")
+            },
+            searchOutcomeSearcher = { _, _, _ ->
+                PublicSearchDiscoveryService.SearchOutcome.Success(emptyList())
+            },
+            piiExtractor = PiiExtractor()
+        )
+        val scanner = ProfileScanner(
+            context = context,
+            piiExtractor = PiiExtractor(),
+            variantGenerator = UsernameVariantGenerator(),
+            typedSeedExecutorOverride = executor
+        )
+        val output = scanner.runTypedSeedFrontier(
+            input = input,
+            deepResearch = true,
+            requestId = null,
+            checkpointOwnerId = null,
+            checkpointGeneration = null,
+            planFingerprint = null,
+            seedEvidence = searchEvidence,
+            directPageResults = listOf(directResult, indexOnlyResult),
+            scanId = ScanId("public-search-page-bridge")
+        )
+
+        assertEquals(0, fetchCalls.get())
+        assertTrue(output.evidence.any {
+            it.kind == EvidenceKind.Email && it.value == downstreamEmail && it.sourceUrl == directUrl
+        })
+        assertTrue(output.relationships.any {
+            it.relation == "redirects_to" && it.fromValue == indexedUrl && it.toValue == directUrl
+        })
+        assertTrue(output.evidence.none { it.value == indexOnlyUrl && it.state == EvidenceState.Verified })
     }
 
     @Test

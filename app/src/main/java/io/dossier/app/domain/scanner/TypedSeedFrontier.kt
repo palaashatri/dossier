@@ -48,7 +48,9 @@ internal data class TypedSeedFrontierEntry(
     val state: TypedSeedFrontierEntryState = TypedSeedFrontierEntryState.Pending,
     val attempts: Int = 0,
     val lastAttemptAtEpochMillis: Long? = null,
-    val unavailableReason: String? = null
+    val unavailableReason: String? = null,
+    /** A transient failure leaves this entry pending for a later retry. */
+    val retryable: Boolean = false
 ) {
     init {
         require(key.isNotBlank()) { "Typed frontier entry key must not be blank." }
@@ -442,17 +444,19 @@ internal class TypedSeedFrontier internal constructor(
     fun complete(key: String): Boolean = transition(
         key = key,
         state = TypedSeedFrontierEntryState.Completed,
-        reason = null
+        reason = null,
+        retryable = false
     )
 
     /**
      * Unsupported or failed work remains inspectable.  It is not retried
      * until a future executor explicitly re-admits a new generation.
      */
-    fun unavailable(key: String, reason: String): Boolean = transition(
+    fun unavailable(key: String, reason: String, retryable: Boolean = false): Boolean = transition(
         key = key,
         state = TypedSeedFrontierEntryState.Unavailable,
-        reason = reason
+        reason = reason,
+        retryable = retryable
     )
 
     /** Parent cancellation releases an in-flight item back to Pending. */
@@ -498,12 +502,22 @@ internal class TypedSeedFrontier internal constructor(
     private fun transition(
         key: String,
         state: TypedSeedFrontierEntryState,
-        reason: String?
+        reason: String?,
+        retryable: Boolean = false
     ): Boolean {
         val current = entriesByKey[key] ?: return false
+        val canRetry = retryable &&
+            current.state == TypedSeedFrontierEntryState.InFlight &&
+            current.attempts < MAX_ATTEMPTS
+        val nextState = if (canRetry) {
+            TypedSeedFrontierEntryState.Pending
+        } else {
+            state
+        }
         entriesByKey[key] = current.copy(
-            state = state,
-            unavailableReason = reason?.trim()?.take(MAX_REASON_CHARS)
+            state = nextState,
+            unavailableReason = reason?.trim()?.take(MAX_REASON_CHARS),
+            retryable = canRetry
         )
         return true
     }
@@ -578,7 +592,12 @@ internal class TypedSeedFrontier internal constructor(
         return existing.copy(
             seed = mergedSeed,
             state = nextState,
-            unavailableReason = reason
+            unavailableReason = reason,
+            retryable = if (nextState == TypedSeedFrontierEntryState.Pending) {
+                existing.retryable
+            } else {
+                false
+            }
         )
     }
 

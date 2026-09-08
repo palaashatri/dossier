@@ -90,7 +90,12 @@ data class TimelineEvent(
     val isVerifiedCurrent: Boolean
         get() = !rawAuditOnly &&
             !historical &&
-            kind == TimelineEventKind.ObservedEvidence &&
+            (kind == TimelineEventKind.ObservedEvidence ||
+                // A live source can be verified even when it supplied no
+                // capture timestamp. In that case the timeline retains only
+                // the retrieval event; count it once without inventing an
+                // observation time.
+                (kind == TimelineEventKind.Retrieval && observedAtEpochMillis == null)) &&
             evidenceState == EvidenceState.Verified &&
             evidenceReliability in setOf(
                 EvidenceReliability.AuthoritativeApi,

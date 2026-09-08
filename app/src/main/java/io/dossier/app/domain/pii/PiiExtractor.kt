@@ -9,7 +9,7 @@ import java.net.URI
 
 /** Attribution-aware PII extraction for public pages and search snippets. */
 class PiiExtractor {
-    private val emailRegex = Regex("(?i)\\b[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}\\b")
+    private val emailRegex = Regex("(?i)(?<!@)\\b[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}\\b")
     private val phoneRegex = Regex("(?<!\\d)(?:\\+\\d{1,3}[ .-]?)?(?:\\(?\\d{2,4}\\)?[ .-]?){2,5}\\d{2,4}(?!\\d)")
     private val locationRegex = Regex(
         "\\b(?i:lives in|based in|located in|from|location\\s*:)\\s+" +

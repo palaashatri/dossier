@@ -39,6 +39,17 @@ class PiiExtractorTest {
     }
 
     @Test
+    fun chainedHandleIsNotMisclassifiedAsEmail() {
+        val findings = PiiExtractor().extract(
+            "Follow @sample_user@example.test for updates; contact mailto:contact@example.test.",
+            "https://example.org/about"
+        )
+
+        assertTrue(findings.none { it.type == FindingType.Email && it.value == "sample_user@example.test" })
+        assertTrue(findings.any { it.type == FindingType.Email && it.value == "contact@example.test" })
+    }
+
+    @Test
     fun genericPhoneRequiresPhoneContextAndStaysReviewOnly() {
         val findings = PiiExtractor().extract(
             "My direct phone number is +1-555-0199.",

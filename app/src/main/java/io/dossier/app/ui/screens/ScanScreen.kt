@@ -38,6 +38,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.dossier.app.data.face.FaceCorrelationCalibrationStore
@@ -73,7 +74,8 @@ fun ScanScreen(
     onScanFailed: () -> Unit,
     onScanCancelled: () -> Unit,
     onInvalidInput: () -> Unit = onScanCancelled,
-    onScanBackgrounded: (() -> Unit)? = null
+    onScanBackgrounded: (() -> Unit)? = null,
+    diagnosticTopInset: Dp = 0.dp
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -316,7 +318,8 @@ fun ScanScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .safeDrawingPadding()
-                .padding(24.dp),
+                .padding(horizontal = 24.dp, vertical = 24.dp)
+                .padding(top = diagnosticTopInset),
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -642,6 +645,12 @@ private fun formatFacePackSize(bytes: Long): String =
     "%.1f MB".format(bytes.toDouble() / (1024.0 * 1024.0))
 
 private fun friendlyStage(raw: String): String = when {
+    raw.contains("DISCOVERING_PIVOTS", ignoreCase = true) -> "Following verified profile pivots"
+    raw.contains("SEARCHING_PUBLIC_INDEXES", ignoreCase = true) -> "Searching public indexes"
+    raw.contains("FETCHING_TYPED_SEEDS", ignoreCase = true) -> "Following verified typed pivots"
+    raw.contains("SEARCHING_PUBLIC_IMAGES", ignoreCase = true) -> "Searching public image indexes"
+    raw.contains("FINALIZING_DISCOVERY", ignoreCase = true) -> "Finalizing discovery"
+    raw.contains("DISCOVERY_COMPLETE", ignoreCase = true) -> "Discovery complete"
     raw.contains("DISCOVERING", ignoreCase = true) -> "Resolving name → username variants"
     raw.contains("COMPARING", ignoreCase = true) -> "Comparing selfie vs profile avatars"
     raw.contains("BREACH", ignoreCase = true) -> "Checking email breach / public exposure"
@@ -656,6 +665,12 @@ private fun friendlyStage(raw: String): String = when {
 
 private fun friendlyStageLabel(raw: String): String = when {
     raw.isBlank() -> "Initializing"
+    raw.contains("DISCOVERING_PIVOTS", ignoreCase = true) -> "Following profile pivots"
+    raw.contains("SEARCHING_PUBLIC_INDEXES", ignoreCase = true) -> "Searching public indexes"
+    raw.contains("FETCHING_TYPED_SEEDS", ignoreCase = true) -> "Following typed pivots"
+    raw.contains("SEARCHING_PUBLIC_IMAGES", ignoreCase = true) -> "Searching public image indexes"
+    raw.contains("FINALIZING_DISCOVERY", ignoreCase = true) -> "Finalizing discovery"
+    raw.contains("DISCOVERY_COMPLETE", ignoreCase = true) -> "Discovery complete"
     raw.contains("DISCOVERING", ignoreCase = true) -> "Discovering usernames"
     raw.contains("COMPARING", ignoreCase = true) -> "Comparing visual consistency"
     raw.contains("BREACH", ignoreCase = true) -> "Breach and exposure coverage"

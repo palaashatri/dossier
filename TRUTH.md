@@ -6,16 +6,20 @@ This is the authoritative current-state record for Dossier.
 
 ## 1. Current reset state
 
-- **Current branch:** `feat/product-contract-discovery-v2`
-- **Open pull request:** PR #4
+- **Current branch:** `codex/discovery-followup`
+- **Current head:** `1bddec31591618db404a19c1bff224330473ba0b` (`test: assert typed frontier seed provenance`)
+- **Current pull request:** none; a pull request for this follow-up has not yet been opened
+- **Historical pull request:** PR #4 merged into `origin/main` as `0675dbadcf0c3acac0286948dd624d7e018d6733` on 2026-09-07
 - **Audited implementation baseline before the documentation reset:** `22b158fd45bcbe58c1a946ed0864ff8a2b3a3b69`
-- **Parent source baseline for the current tranche:** `0b137792a9de8f88bf87c1cc835cd0a5130ced11`
+- **Parent source baseline for this follow-up:** `0675dbadcf0c3acac0286948dd624d7e018d6733` (merged PR #4)
+- **Task 1 repair commit:** `7c7a1bc2388d7edc94a5a26b5e1f53f7c1e389c6`
+- **Task 2 benchmark commits:** `babeb612aebe71b7660e9c8b048bf91e6db5f8c5`, `1bddec31591618db404a19c1bff224330473ba0b`
 - **Product-contract reset commit:** `cf0f11d67974ce881513ff36130bbe2d9a7aa3d7`
-- **Audit/reset date:** 2026-09-04
+- **Audit/reset date:** 2026-09-04; follow-up documentation date: 2026-09-08
 - **Previous strict readiness score:** **83/100 — RETIRED as the primary product metric**
 - **Current mission-readiness score:** **UNSCORED / NOT ESTABLISHED**
 - **Declarative provider definitions:** **78 authored**
-- **Reason:** Dossier does not yet have a representative end-to-end exposure-reconstruction benchmark, so publishing another flattering overall score would be misleading.
+- **Reason:** the follow-up adds a small deterministic product-backed synthetic regression, but Dossier still does not have a representative end-to-end exposure-reconstruction benchmark. Publishing another overall score would be misleading.
 
 The previous implementation accumulated substantial engineering hardening, provenance, persistence, graph, image, face, recovery, remediation, and UI work. That work is not discarded. The failure was primarily a product-contract and discovery-architecture mismatch: Dossier was optimized heavily for bounded, conservative provider checks and implementation completeness instead of maximizing measurable exact exposure recovery from a minimal seed.
 
@@ -25,32 +29,88 @@ The new acceptance question is:
 
 Until that question is measured against a real synthetic/consented corpus, mission readiness is not numerically established.
 
-## 1.1 Current working-tree validation — 2026-09-07
+## 1.1 Follow-up evidence — 2026-09-08
 
-The current working tree is on `feat/product-contract-discovery-v2`, descended from parent `0b13779`. Fresh post-change gates produced:
+The follow-up branch contains two implementation tranches and their focused
+evidence, followed by fresh full-tree controller gates and API 35 VM evidence.
+
+- The post-merge Compose workflow `34125510659` supplied the preserved RED
+  evidence: 58 tests, 2 failures, 0 skipped. The failures were
+  `BackgroundResultActivityRecreationTest.encryptedResultRestoresTruthfulAnalysisStateAfterActivityRecreation`
+  (analysis route sampled before the asynchronous route appeared) and
+  `UniversalSearchSeedCorrectionTest.ambiguousTextCanBeCorrectedFromUsernameToName`
+  (correction menu item timed out). Commit `7c7a1bc` repairs those root causes.
+- A fresh local API 35 ARM AVD focused run of those target Compose classes
+  passed 3 tests with 0 failures and 0 skipped (`BUILD SUCCESSFUL in 2m 3s`).
+  This is focused connected evidence only; it is not the final API 35 workflow,
+  full connected suite, or fresh visual acceptance.
+- Task 2 commits `babeb61` and `1bddec3` add
+  `ProductTypedFrontierBenchmarkTest`. Its focused GREEN run passed 1 test
+  with 0 failures, errors, or skipped tests; the broader focused rerun of that
+  benchmark plus the existing typed-frontier tests passed 9 tests with no
+  failures, errors, or skipped tests.
+
+The new benchmark is a small, network-free product-wiring regression. It drives
+the real `ProfileScanner.runTypedSeedFrontier` path through
+`TypedSeedPublicFetchExecutor` and derives benchmark events from product
+evidence. Its synthetic cases cover a URL → Domain/Document/Archive cascade,
+one Email search, one Phone provider-failure case, and explicit Photo/Image
+unavailability. It checks exact values, discovery paths, recursive pivots,
+attacker-seed exclusion, status separation, and aggregate precision/recall
+accounting. Fixed fixture timestamps and durations are simulated milestones,
+not wall-clock, device, network, SLA, live-provider, or representative-recall
+measurements. The existing arithmetic `DiscoveryBenchmark` fixtures remain
+regression evidence; neither harness establishes mission readiness.
+
+Fresh final controller evidence for this follow-up is now available:
+
+- `./gradlew :app:testDebugUnitTest`, `:app:testReleaseUnitTest`, and
+  `:app:testUiTestUnitTest` passed **1,132 tests each** with 0 failures, errors,
+  or skipped tests across 159 result XML files.
+- `./gradlew -Dkotlin.incremental=false :app:connectedUiTestAndroidTest
+  --no-daemon --max-workers=1 --console=plain` passed **58/58
+  tests**, with 0 failures and 0 skipped, on the connected API 35 emulator
+  (`emulator-5554`).
+- Debug, uiTest, Android-test, and unsigned release APK assembly passed. Fresh
+  artifact readback is recorded in `README.md`; Debug and uiTest lint passed
+  with 0 errors (71 and 75 warnings respectively).
+- A fresh private API 35 VM pass exercised the real app from consent through a
+  name-only scan, progressive stages, report, Evidence, Timeline, Connections,
+  and Actions. It produced 76 reportable findings, 10 directly verified
+  profiles, 25 review-only candidates, 23 unverifiable checks, 0 confirmed HIBP
+  records, 0 local visual comparisons, and an exposure score of 80/100. The
+  timeline contained 150 verified-current observations, 27 other observations,
+  and 0 historical observations; Connections opened with 343 entities and 947
+  relationships. Exact values, URLs, hierarchy dumps, and screenshots remain
+  in a private untracked artifact bundle and are not copied into the repository.
+
+The fresh scan screenshots show the post-fix layout with the scan title clear of
+diagnostic cards, and the stage text advancing through `Discovering usernames`,
+`Searching public indexes`, and `Following typed pivots` in the authorized run.
+This establishes the exercised API 35 emulator flow; physical-device,
+accessibility-breadth, battery/thermal, and full process-death acceptance remain
+open.
+
+## 1.2 Prior reset validation — 2026-09-07 (not current follow-up head)
+
+The following gates were recorded for the prior reset working tree descended
+from parent `0b13779`; they are retained as historical evidence and must not be
+read as validation of `codex/discovery-followup`:
 
 - `./gradlew :app:testDebugUnitTest`, `:app:testReleaseUnitTest`, and `:app:testUiTestUnitTest` (run sequentially with `--no-daemon --rerun-tasks --max-workers=1 --console=plain`): **BUILD SUCCESSFUL** for each; **1,107 tests** in each variant, with 0 failures, errors, or skipped tests across 157 XML suites. The focused rerun covering `MediaEvidenceAdapterTest`, `ReverseImageLookupScreenTest`, `ExpandedDiscoveryAndVisualTest`, and `WebLocationSearcherTest` was **BUILD SUCCESSFUL** with 24 actionable tasks and 0 failures.
-- `./gradlew :app:assembleDebug :app:assembleUiTest :app:assembleUiTestAndroidTest :app:assembleRelease --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **BUILD SUCCESSFUL**. Current artifact readback: debug APK 115,974,584 bytes, SHA-256 `34ae2a211337ca7cf6b2e839fbecc6ca9a7817fc6c4c8c1ad868c208024cb3ff`; uiTest APK 243,571,081 bytes, SHA-256 `a465ee20911638ae9e8a399a9b959b6d19542f421f3d9a7efefdb5152beae5f9`; Android-test APK 1,031,728 bytes, SHA-256 `663eed75577b6ac9c90950681a46ec41e8d6a1b842d6edd55e9770d40229fb7b`; release unsigned APK 409,406,983 bytes, SHA-256 `d036be86357ebeb82958e5a5b7418a10ad3a5c0c70bd7142c478d9e4a6ce67bc`.
+- `./gradlew :app:assembleDebug :app:assembleUiTest :app:assembleUiTestAndroidTest :app:assembleRelease --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **BUILD SUCCESSFUL**. Prior artifact readback: debug APK 115,974,584 bytes, SHA-256 `34ae2a211337ca7cf6b2e839fbecc6ca9a7817fc6c4c8c1ad868c208024cb3ff`; uiTest APK 243,571,081 bytes, SHA-256 `a465ee20911638ae9e8a399a9b959b6d19542f421f3d9a7efefdb5152beae5f9`; Android-test APK 1,031,728 bytes, SHA-256 `663eed75577b6ac9c90950681a46ec41e8d6a1b842d6edd55e9770d40229fb7b`; release unsigned APK 409,406,983 bytes, SHA-256 `d036be86357ebeb82958e5a5b7418a10ad3a5c0c70bd7142c478d9e4a6ce67bc`.
 - `./gradlew -Dkotlin.incremental=false :app:connectedUiTestAndroidTest --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **ATTEMPTED, NO TESTS RUN** on this host; Gradle failed before test execution with `No connected devices`. The previous actual API 36 run remains recorded in the visual artifact directory and is not re-attributed to this fresh build.
 - `./gradlew -Dkotlin.incremental=false :app:lintDebug :app:lintUiTest --no-daemon --rerun-tasks --max-workers=1 --console=plain`: **BUILD SUCCESSFUL**; debug lint has 0 errors, 71 warnings and 6 hints; uiTest lint has 0 errors, 75 warnings and 6 hints.
 - `python3 -m unittest tools.test_repository_hygiene_audit`: **OK**, 2 tests (the session-generated `.serena` directory was moved out of the repository before this rerun).
 - `python3 tools/provider_registry_audit.py --json`: `ok: true`, 78 authored providers, 716 pinned WhatsMyName source records, 644 executable rules, and 0 conversion errors.
 - `git diff --check`: clean before this documentation update.
 
-The working tree also contains a network-free synthetic discovery benchmark
-harness in `DiscoveryBenchmark`: a deterministic multi-hop fixture exercises
-exact-value matching, unavailable-vs-recovered facts, recursive pivot counts,
-timing thresholds, provider failure rate, and incomplete-ground-truth handling.
-Observed exact values are included in exposure recall while remaining separate
-from identity-verified finding counts; the attacker-supplied initial seed is
-excluded from recovery, precision, and milestone metrics. Candidate,
-unavailable, and provider-failure events remain distinct, and observed
-known-negative contacts do not become verified false positives.
-Its metrics are regression evidence only; no mission-readiness score is derived
-from the fixture. Host-like URLs entered without a scheme are normalized to an
-`https://` seed locally and covered by a classifier regression test.
+The prior working tree also contained a network-free synthetic discovery
+benchmark harness in `DiscoveryBenchmark`. Its metrics were regression
+evidence only; no mission-readiness score was derived from the fixture.
 
-The Python provider audit is the canonical pinned-catalog check in this tree; it supplied the conversion evidence without network access.
+The Python provider audit was the canonical pinned-catalog check for that
+prior tree; it supplied conversion evidence without network access.
 
 The recursive pivot collector now handles completions as they arrive, persists frontier completion after each result, retains deterministic output order, leaves unfinished work pending across cancellation, and admits only verified existing results as later-depth seeds. Focused JVM coverage for this behavior is included in the totals above. The new Location admission/executor tests cover context-scoped corroborated place pivots and preservation of authorized Email/Phone queries. The uiTest visual fixture also clears stale lifecycle ownership before writing its encrypted result; a regression covers a stale terminal marker.
 
@@ -60,7 +120,9 @@ The prior fresh visual QA run used the earlier `0b13779` `uiTest` APK on `emulat
 
 At the audited PR head before this documentation reset:
 
-- PR #4 was open and mergeable.
+- PR #4 was open and mergeable at audit time, then merged into `origin/main` as
+  `0675dbad` on 2026-09-07. No pull request has been opened for the current
+  `codex/discovery-followup` branch yet.
 - The branch was **343 commits** ahead through the PR history.
 - The PR touched **277 files**.
 - The diff contained roughly **75k additions** and **2.3k deletions**.
@@ -322,7 +384,14 @@ The product now has a bounded, encrypted, request/owner/plan-bound typed frontie
 
 ### 7.5 Real-world recall is not measured
 
-The existing `DiscoveryPrecisionRecallTest` verifies metric arithmetic using constructed observations. It does not execute the discovery engine against a known multi-hop identity/exposure corpus.
+`ProductTypedFrontierBenchmarkTest` now executes the real typed-frontier path
+against a small, network-free synthetic corpus and verifies product-derived
+events and metric accounting. It is deterministic product-wiring regression
+evidence only: its URL, Email, Phone, and unsupported Photo/Image cases do not
+measure live-provider yield, representative recall, or device/network timing.
+The existing `DiscoveryPrecisionRecallTest` still verifies metric arithmetic
+using constructed observations. Neither test executes the engine against a
+representative identity/exposure corpus.
 
 Therefore:
 
@@ -332,7 +401,8 @@ Therefore:
 - exact-value recovery rate is unknown;
 - source-yield ranking is not grounded in a mission benchmark.
 
-**Truth:** this is the largest measurement hole in the project.
+**Truth:** representative end-to-end recall and time-to-result remain the
+largest measurement hole in the project.
 
 ## 8. Provider/source catalogue truth
 
@@ -543,13 +613,14 @@ They are not byte-for-byte duplicates, but coverage overlaps and should be conso
 
 ## 15. README truth
 
-README now describes the reset as unscored, records the current 2026-09-07
-validation gates for this delivery, and points to the fresh emulator evidence outside Git. Its
-checked-in walkthrough images remain baseline captures for retained legacy and
-configuration surfaces; they are not independent current-head acceptance.
+README describes the follow-up as unscored, records the focused Task 1/API 35
+and Task 2 benchmark evidence, and keeps the prior reset gates explicitly
+historical. Its checked-in walkthrough images remain baseline captures for
+retained legacy and configuration surfaces; they are not independent
+current-head acceptance.
 
-**Status:** aligned with the current reset; update the validation block whenever
-the worktree gates or visual evidence change.
+**Status:** aligned with the current follow-up record; update the validation
+block when the controller refreshes full worktree gates or visual evidence.
 
 ## 16. Safety/authorization boundary
 
@@ -626,7 +697,10 @@ Completed and validated in the current working tree:
   checks;
 - pinned WhatsMyName catalog/license audit correction;
 - synthetic multi-hop benchmark harness and local-only fixture rules;
-- README reset and current validation record.
+- focused, product-backed typed-frontier benchmark regression (`babeb61`,
+  `1bddec3`) with exact-value, provenance, recursion, status, and metric
+  assertions;
+- README follow-up status and validation record.
 
 ### P1 — Universal launch and Discovery Engine v3 scheduler
 
@@ -658,7 +732,8 @@ Still required:
 - scanner-wide canonical ledger ownership;
 - recursive pivots from every verified fact kind;
 - stronger documents/directories/archives/public-web extraction and a
-  representative end-to-end benchmark.
+  representative end-to-end benchmark. The current product-backed synthetic
+  regression is not a substitute for that corpus.
 
 ### P3 — Photo investigation and location reconstruction
 
@@ -699,7 +774,8 @@ Still open:
 
 ## 20. What is deliberately lower priority now
 
-Until the new benchmark and discovery engine exist, do not spend major effort on:
+Until a representative benchmark and the broader discovery engine exist, do
+not spend major effort on:
 
 - adding hundreds more username sites merely to raise provider count;
 - decorative UI polish unrelated to the universal search/results flow;
@@ -717,7 +793,7 @@ These are qualitative reset states, not a disguised numeric score.
 
 | Area | Current reset assessment | Why |
 |---|---|---|
-| Universal one-box launch | **Implemented and emulator-verified** | `MainHubScreen` now starts `UniversalSearchScreen`; text and photo seeds route into the existing scan flow, with cancellation/reset returning to the same entry. |
+| Universal one-box launch | **Implemented; API 35 emulator-verified** | `MainHubScreen` now starts `UniversalSearchScreen`; text and photo seeds route into the existing scan flow, with cancellation/reset returning to the same entry. Fresh API 35 screenshots cover consent, universal search, seed classification, scan progression, and cancellation. |
 | Public web discovery | **Partial** | Multiple search engines and direct verification exist, but hard caps and shallow stopping dominate. |
 | Username discovery | **Implemented but bounded** | Large pinned catalogue uses rolling workers and aggregate health/yield ordering; broader measured source yield and general frontier integration remain open. |
 | Recursive exposure frontier | **Partial, typed URL-family + public-search + corroborated-Location execution** | Encrypted typed frontier persistence, rolling completion, URL/domain/document/archive execution, bounded Email/Phone/Name/Username public-search pivots, and context-scoped corroborated Location pivots exist; Photo/Image execution, full photo geolocation, and broader coordinator ownership remain open. |
@@ -737,14 +813,15 @@ These are qualitative reset states, not a disguised numeric score.
 | Photo geolocation | **Partial components only** | Corroborated Location can feed a context-scoped public search, but no complete evidence-ranked location reconstruction contract exists yet. |
 | Remediation/export | **Useful base** | Worth preserving, but dependent on better discovery. |
 | Performance | **Improved but incomplete** | WhatsMyName uses rolling workers and aggregate health/yield ordering; general coordinator/frontier scheduling and live yield calibration remain open. |
-| Real-world recall benchmark | **Synthetic regression harness only** | The deterministic multi-hop harness is regression evidence; a representative synthetic/consented mission benchmark is still absent, so readiness remains unscored. |
-| Physical-device acceptance | **Not established** | Prior evidence is primarily emulator-based. |
+| Real-world recall benchmark | **Small product-backed synthetic regression only** | `ProductTypedFrontierBenchmarkTest` drives the real typed-frontier path for narrow URL/Email/Phone cases and explicit Photo/Image unavailability. Fixture timing is simulated; representative synthetic/consented recall, live-provider yield, and device/network timing remain absent, so readiness remains unscored. |
+| Physical-device acceptance | **Not established** | Current visual and connected evidence is API 35 emulator-only; physical Samsung/Pixel/lower-memory devices remain unvalidated. |
 
 ## 22. Immediate next audit/implementation tranche
 
 The universal-entry, rolling-username, parallel-family, initial ledger, and
-synthetic-harness tranche is implemented and validated above. The next narrow
-work should target measurable discovery utility:
+product-backed synthetic-harness tranches are implemented, with focused
+validation recorded above. The next narrow work should target measurable
+discovery utility:
 
 1. connect the typed Exposure Ledger to every scanner/parser output and persist
    discovery paths without duplicating evidence truth;

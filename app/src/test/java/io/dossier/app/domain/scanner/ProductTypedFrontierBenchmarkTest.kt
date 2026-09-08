@@ -39,6 +39,8 @@ import org.junit.Test
 import java.io.File
 import java.net.URI
 import java.nio.file.Files
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Network-free synthetic benchmark over the product's rolling typed frontier.
@@ -126,7 +128,7 @@ class ProductTypedFrontierBenchmarkTest {
         assertEquals(0, phoneMetrics.unavailableEventCount)
         assertEquals(1, phoneMetrics.providerFailureEventCount)
         assertEquals(40L, phoneMetrics.totalScanDurationMs)
-        assertEquals(1, phoneMetrics.totalProviderRequestCount)
+        assertEquals(8, phoneMetrics.totalProviderRequestCount)
 
         val aggregate = DiscoveryBenchmark.aggregate(metrics)
         assertEquals(3, aggregate.totalCases)
@@ -141,9 +143,9 @@ class ProductTypedFrontierBenchmarkTest {
         assertEquals(1, aggregate.candidateCount)
         assertEquals(1, aggregate.unavailableEventCount)
         assertEquals(1, aggregate.providerFailureEventCount)
-        assertEquals(11, aggregate.totalProviderRequestCount)
+        assertEquals(18, aggregate.totalProviderRequestCount)
         assertEquals(2, aggregate.totalFailedRequestCount)
-        assertEquals(2.0 / 11.0, aggregate.providerFailureRate, 0.0001)
+        assertEquals(2.0 / 18.0, aggregate.providerFailureRate, 0.0001)
         assertEquals(90.0, checkNotNull(aggregate.averageTimeToFirstUsefulResultMs), 0.0001)
         assertEquals(90.0, checkNotNull(aggregate.averageTimeToFirstHighValueExactIdentifierMs), 0.0001)
         assertEquals(2, aggregate.timeToFirstUsefulResultCaseCount)
@@ -151,9 +153,11 @@ class ProductTypedFrontierBenchmarkTest {
     }
 
     private suspend fun runCase(fixture: Fixture): Trace {
-        val fetchRequests = mutableListOf<String>()
-        val searchRequests = mutableListOf<String>()
-        val providerFailureRequests = mutableSetOf<String>()
+        // The rolling frontier runs independent fetches concurrently; keep
+        // harness accounting lossless when those callbacks overlap.
+        val fetchRequests = CopyOnWriteArrayList<String>()
+        val searchRequests = CopyOnWriteArrayList<String>()
+        val providerFailureRequests = ConcurrentHashMap.newKeySet<String>()
         val searchResultToRequest = fixture.searches.flatMap { (requestKey, response) ->
             when (response) {
                 is SearchFixture.Success -> response.results.map { result ->
@@ -220,7 +224,7 @@ class ProductTypedFrontierBenchmarkTest {
                 EvidenceState.Probable,
                 EvidenceState.Conflicting,
                 EvidenceState.Rejected -> EventStatus.CANDIDATE
-                EvidenceState.Unavailable -> if (requestKey in providerFailureRequests) {
+                EvidenceState.Unavailable -> if (requestKey != null && requestKey in providerFailureRequests) {
                     EventStatus.PROVIDER_FAILURE
                 } else {
                     EventStatus.UNAVAILABLE
@@ -336,7 +340,9 @@ class ProductTypedFrontierBenchmarkTest {
         assertTrue(trace.events.any { it.status == EventStatus.PROVIDER_FAILURE })
         assertTrue(trace.evidence.evidence.any { it.state == EvidenceState.Unavailable })
         assertTrue(trace.fetchRequests.isEmpty())
-        assertEquals(1, trace.searchRequests.size)
+        // Search unavailability is retryable; the bounded typed frontier makes
+        // all eight attempts before retaining the terminal failure.
+        assertEquals(8, trace.searchRequests.size)
     }
 
     private suspend fun assertUnsupportedSeedIsExplicit() {

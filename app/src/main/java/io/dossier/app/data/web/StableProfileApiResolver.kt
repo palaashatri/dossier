@@ -1,7 +1,12 @@
 package io.dossier.app.data.web
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -122,6 +127,7 @@ internal class StableProfileApiResolver(
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    @OptIn(InternalCoroutinesApi::class)
     suspend fun resolve(profileUrl: String): Resolution = withContext(Dispatchers.IO) {
         val endpoint = endpointFor(profileUrl) ?: return@withContext Resolution.Unsupported
         val cacheKey = endpoint.apiUrl
@@ -145,7 +151,13 @@ internal class StableProfileApiResolver(
                     .header("User-Agent", USER_AGENT)
                     .header("Accept", "application/json, application/activity+json;q=0.9, */*;q=0.5")
                     .build()
-                client.newCall(request).execute().use { response ->
+                val call = client.newCall(request)
+                val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion(
+                    onCancelling = true,
+                    invokeImmediately = true
+                ) { call.cancel() }
+                try {
+                    call.execute().use { response ->
                     when {
                         response.code == 404 -> {
                             sharedBreaker.recordSuccess(breakerKey)
@@ -195,8 +207,14 @@ internal class StableProfileApiResolver(
                             return@withContext resolution
                         }
                     }
+                    }
+                } finally {
+                    cancellationHandle?.dispose()
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
                 lastReason = e.localizedMessage ?: e.javaClass.simpleName
                 if (attempt < MAX_ATTEMPTS - 1) {
                     delay(DiscoveryHttpPolicy.retryDelayMillis(attempt, null))
@@ -366,6 +384,7 @@ internal class StableProfileApiResolver(
         )
     }
 
+    @OptIn(InternalCoroutinesApi::class)
     private suspend fun hydrateFediverse(webFingerBody: String): ProfilePayload? {
         val root = runCatching { json.parseToJsonElement(webFingerBody) as? JsonObject }.getOrNull() ?: return null
         val actorUrl = root.array("links").orEmpty()
@@ -378,13 +397,22 @@ internal class StableProfileApiResolver(
             ?.string("href")
             ?: return null
 
-        return try {
+        val call = try {
             val request = Request.Builder()
                 .url(actorUrl)
                 .header("User-Agent", USER_AGENT)
                 .header("Accept", "application/activity+json, application/ld+json, application/json")
                 .build()
-            client.newCall(request).execute().use { response ->
+            client.newCall(request)
+        } catch (_: Exception) {
+            return null
+        }
+        val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion(
+            onCancelling = true,
+            invokeImmediately = true
+        ) { call.cancel() }
+        return try {
+            call.execute().use { response ->
                 if (!response.isSuccessful) return null
                 val actor = runCatching {
                     json.parseToJsonElement(response.body?.string().orEmpty()) as? JsonObject
@@ -410,8 +438,13 @@ internal class StableProfileApiResolver(
                     extraSignals = attachmentSignals
                 )
             }
-        } catch (_: Exception) {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
             null
+        } finally {
+            cancellationHandle?.dispose()
         }
     }
 

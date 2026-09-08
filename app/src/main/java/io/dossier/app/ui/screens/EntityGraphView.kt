@@ -8,11 +8,13 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -26,10 +28,12 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,6 +58,7 @@ import io.dossier.app.domain.model.EntityGraph
 import io.dossier.app.domain.model.EntityType
 import io.dossier.app.ui.theme.NeuralTheme
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /** A scrollable visual relationship map with a complete text alternative. */
@@ -98,7 +103,8 @@ fun EntityGraphView(
         EntityType.Breach to danger,
         EntityType.Website to textSecondary
     )
-    val layout = remember(graph) { layoutGraph(graph) }
+    val density = LocalDensity.current.density
+    val layout = remember(graph, density) { layoutGraph(graph, density) }
     val adjacency = remember(graph) { buildAdjacency(graph) }
 
     Column(modifier = modifier.fillMaxWidth()) {
@@ -262,99 +268,164 @@ private fun GraphCanvas(
         "Relationship graph with ${graph.entities.size} entities and ${graph.edges.size} connections. Use Accessible list for complete text navigation."
     }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
             .height(360.dp)
-            .background(surface, RoundedCornerShape(10.dp))
-            .border(1.dp, border, RoundedCornerShape(10.dp))
-            .horizontalScroll(horizontal)
-            .verticalScroll(vertical)
-            .semantics { contentDescription = semanticSummary }
     ) {
-        Canvas(
+        LaunchedEffect(layout) {
+            // The layout is translated into positive coordinates for the scrollable canvas,
+            // which can place the subject thousands of pixels from the origin. Center it once
+            // after the scroll range has been measured so the initial graph is useful.
+            withFrameNanos { }
+            val subject = graph.entities.firstOrNull { it.type == EntityType.Person }
+                ?: graph.entities.firstOrNull()
+            val subjectPosition = subject?.let { layout.positions[it.id] } ?: return@LaunchedEffect
+            val viewportWidthPx = maxWidth.value * density
+            val viewportHeightPx = maxHeight.value * density
+            if (viewportWidthPx.isFinite()) {
+                horizontal.scrollTo(
+                    centeredGraphScrollOffset(
+                        contentCoordinatePx = subjectPosition.x * density,
+                        viewportSizePx = viewportWidthPx,
+                        maxScrollPx = horizontal.maxValue
+                    )
+                )
+            }
+            if (viewportHeightPx.isFinite()) {
+                vertical.scrollTo(
+                    centeredGraphScrollOffset(
+                        contentCoordinatePx = subjectPosition.y * density,
+                        viewportSizePx = viewportHeightPx,
+                        maxScrollPx = vertical.maxValue
+                    )
+                )
+            }
+        }
+        Box(
             modifier = Modifier
-                .width(layout.width)
-                .height(layout.height)
-                .pointerInput(graph, density) {
-                    detectTapGestures { tapped ->
-                        val hit = layout.positions.minByOrNull { (_, unitPosition) ->
-                            squaredDistance(unitPosition.toPixels(density), tapped)
-                        }
-                        hit?.let { (id, unitPosition) ->
-                            val radius = (NODE_RADIUS_DP + 16f) * density
-                            if (squaredDistance(unitPosition.toPixels(density), tapped) <= radius * radius) {
-                                onSelect(id)
+                .fillMaxSize()
+                .background(surface, RoundedCornerShape(10.dp))
+                .border(1.dp, border, RoundedCornerShape(10.dp))
+                .horizontalScroll(horizontal)
+                .verticalScroll(vertical)
+                .semantics { contentDescription = semanticSummary }
+        ) {
+            Canvas(
+                modifier = Modifier
+                    .width(layout.width)
+                    .height(layout.height)
+                    .pointerInput(graph, density) {
+                        detectTapGestures { tapped ->
+                            val hit = layout.positions.minByOrNull { (_, unitPosition) ->
+                                squaredDistance(unitPosition.toPixels(density), tapped)
+                            }
+                            hit?.let { (id, unitPosition) ->
+                                val radius = (NODE_RADIUS_DP + 16f) * density
+                                if (squaredDistance(unitPosition.toPixels(density), tapped) <= radius * radius) {
+                                    onSelect(id)
+                                }
                             }
                         }
                     }
+            ) {
+                val activeIds = selectedId?.let { adjacency[it].orEmpty() + it }
+                val visibleLabelIds = graphLabelIds(graph, adjacency, selectedId)
+                graph.edges.forEach { edge ->
+                    val from = layout.positions[edge.fromId]?.toPixels(density) ?: return@forEach
+                    val to = layout.positions[edge.toId]?.toPixels(density) ?: return@forEach
+                    val active = activeIds == null || edge.fromId in activeIds || edge.toId in activeIds
+                    val edgeAlpha = when {
+                        selectedId == null -> 0.16f
+                        active -> 0.82f
+                        else -> 0.07f
+                    }
+                    drawLine(
+                        color = (if (active) accent else border)
+                            .copy(alpha = edgeAlpha),
+                        start = from,
+                        end = to,
+                        strokeWidth = if (edge.fromId == selectedId || edge.toId == selectedId) {
+                            2.4f * density
+                        } else 1.2f * density
+                    )
                 }
-        ) {
-            val activeIds = selectedId?.let { adjacency[it].orEmpty() + it }
-            graph.edges.forEach { edge ->
-                val from = layout.positions[edge.fromId]?.toPixels(density) ?: return@forEach
-                val to = layout.positions[edge.toId]?.toPixels(density) ?: return@forEach
-                val active = activeIds == null || edge.fromId in activeIds || edge.toId in activeIds
-                drawLine(
-                    color = (if (active) accent else border)
-                        .copy(alpha = if (active) 0.75f else 0.35f),
-                    start = from,
-                    end = to,
-                    strokeWidth = if (edge.fromId == selectedId || edge.toId == selectedId) {
-                        2.4f * density
-                    } else 1.2f * density
-                )
-            }
 
-            graph.entities.forEach { entity ->
-                val position = layout.positions[entity.id]?.toPixels(density) ?: return@forEach
-                val nodeColor = typeColors[entity.type] ?: textSecondary
-                val dimmed = activeIds != null && entity.id !in activeIds
-                val radius = NODE_RADIUS_DP *
-                    (0.78f + entity.confidence.coerceIn(0f, 1f) * 0.45f) * density
-                drawCircle(
-                    color = nodeColor.copy(alpha = if (dimmed) 0.25f else 0.95f),
-                    radius = radius,
-                    center = position
-                )
-                if (entity.id == selectedId) {
+                graph.entities.forEach { entity ->
+                    val position = layout.positions[entity.id]?.toPixels(density) ?: return@forEach
+                    val nodeColor = typeColors[entity.type] ?: textSecondary
+                    val dimmed = activeIds != null && entity.id !in activeIds
+                    val radius = NODE_RADIUS_DP *
+                        (0.78f + entity.confidence.coerceIn(0f, 1f) * 0.45f) * density
                     drawCircle(
-                        color = textPrimary,
-                        radius = radius + 4f * density,
-                        center = position,
-                        style = Stroke(width = 2f * density)
+                        color = nodeColor.copy(alpha = if (dimmed) 0.25f else 0.95f),
+                        radius = radius,
+                        center = position
+                    )
+                    if (entity.id == selectedId) {
+                        drawCircle(
+                            color = textPrimary,
+                            radius = radius + 4f * density,
+                            center = position,
+                            style = Stroke(width = 2f * density)
+                        )
+                    }
+                    if (entity.id !in visibleLabelIds) return@forEach
+                    val labelPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        textSize = 11f * density
+                        color = android.graphics.Color.argb(
+                            if (dimmed) 110 else 255,
+                            (textPrimary.red * 255).toInt(),
+                            (textPrimary.green * 255).toInt(),
+                            (textPrimary.blue * 255).toInt()
+                        )
+                        textAlign = android.graphics.Paint.Align.CENTER
+                    }
+                    val rawLabel = "${entity.type.name.take(3).uppercase()} · ${entity.label}"
+                    val edgePadding = GRAPH_LABEL_EDGE_PADDING_DP * density
+                    val labelHorizontalPadding = GRAPH_LABEL_HORIZONTAL_PADDING_DP * density
+                    val maxLabelWidth = minOf(
+                        (size.width - edgePadding * 2f - labelHorizontalPadding * 2f)
+                            .coerceAtLeast(0f),
+                        GRAPH_LABEL_MAX_WIDTH_DP * density
+                    )
+                    val label = fitGraphLabelText(rawLabel, labelPaint, maxLabelWidth)
+                    val placement = clampGraphLabelPlacement(
+                        nodeCenterX = position.x,
+                        nodeBaselineY = position.y - radius - 7f * density,
+                        labelWidth = labelPaint.measureText(label) + labelHorizontalPadding * 2f,
+                        canvasWidth = size.width,
+                        canvasHeight = size.height,
+                        fontAscent = labelPaint.fontMetrics.ascent,
+                        fontDescent = labelPaint.fontMetrics.descent,
+                        edgePadding = edgePadding
+                    )
+                    val labelWidth = labelPaint.measureText(label)
+                    val labelMetrics = labelPaint.fontMetrics
+                    val labelBackgroundPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        color = android.graphics.Color.argb(
+                            if (dimmed) 130 else 225,
+                            (surface.red * 255).toInt(),
+                            (surface.green * 255).toInt(),
+                            (surface.blue * 255).toInt()
+                        )
+                    }
+                    drawContext.canvas.nativeCanvas.drawRoundRect(
+                        placement.centerX - labelWidth / 2f - labelHorizontalPadding,
+                        placement.baselineY + labelMetrics.ascent - labelHorizontalPadding / 2f,
+                        placement.centerX + labelWidth / 2f + labelHorizontalPadding,
+                        placement.baselineY + labelMetrics.descent + labelHorizontalPadding / 2f,
+                        5f * density,
+                        5f * density,
+                        labelBackgroundPaint
+                    )
+                    drawContext.canvas.nativeCanvas.drawText(
+                        label,
+                        placement.centerX,
+                        placement.baselineY,
+                        labelPaint
                     )
                 }
-                val labelPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                    textSize = 11f * density
-                    color = android.graphics.Color.argb(
-                        if (dimmed) 110 else 255,
-                        (textPrimary.red * 255).toInt(),
-                        (textPrimary.green * 255).toInt(),
-                        (textPrimary.blue * 255).toInt()
-                    )
-                    textAlign = android.graphics.Paint.Align.CENTER
-                }
-                val rawLabel = "${entity.type.name.take(3).uppercase()} · ${entity.label}"
-                val edgePadding = GRAPH_LABEL_EDGE_PADDING_DP * density
-                val maxLabelWidth = (size.width - edgePadding * 2f).coerceAtLeast(0f)
-                val label = fitGraphLabelText(rawLabel, labelPaint, maxLabelWidth)
-                val placement = clampGraphLabelPlacement(
-                    nodeCenterX = position.x,
-                    nodeBaselineY = position.y - radius - 7f * density,
-                    labelWidth = labelPaint.measureText(label),
-                    canvasWidth = size.width,
-                    canvasHeight = size.height,
-                    fontAscent = labelPaint.fontMetrics.ascent,
-                    fontDescent = labelPaint.fontMetrics.descent,
-                    edgePadding = edgePadding
-                )
-                drawContext.canvas.nativeCanvas.drawText(
-                    label,
-                    placement.centerX,
-                    placement.baselineY,
-                    labelPaint
-                )
             }
         }
     }
@@ -450,24 +521,29 @@ private fun EntityGraphLegend(typeColors: Map<EntityType, Color>, textSecondary:
     }
 }
 
-private data class GraphLayout(
+internal data class GraphLayout(
     val positions: Map<String, Offset>,
     val width: Dp,
     val height: Dp
 )
 
-private fun layoutGraph(graph: EntityGraph): GraphLayout {
+/**
+ * Lays out every graph entity while keeping both finite canvas dimensions below
+ * Compose's packed-constraint limit. Positions are scaled together so the
+ * visual graph remains complete and scrollable instead of clipping outer rings.
+ */
+internal fun layoutGraph(graph: EntityGraph, density: Float = 1f): GraphLayout {
     val subject = graph.entities.firstOrNull { it.type == EntityType.Person }
         ?: graph.entities.first()
     val raw = mutableMapOf(subject.id to Offset.Zero)
     val others = graph.entities.filterNot { it.id == subject.id }
-    val perRing = 8
+    val perRing = GRAPH_NODES_PER_RING
     others.forEachIndexed { index, entity ->
         val ring = index / perRing + 1
         val slot = index % perRing
         val itemsInRing = minOf(perRing, others.size - (ring - 1) * perRing)
         val angle = Math.PI * 2.0 * slot / itemsInRing + ring * 0.35
-        val radius = 100f * ring
+        val radius = GRAPH_RING_RADIUS_DP * ring
         raw[entity.id] = Offset(
             (radius * cos(angle)).toFloat(),
             (radius * sin(angle)).toFloat()
@@ -479,13 +555,65 @@ private fun layoutGraph(graph: EntityGraph): GraphLayout {
     val maxX = raw.values.maxOf(Offset::x)
     val maxY = raw.values.maxOf(Offset::y)
     val padding = 85f
+    val rawWidth = maxOf(360f, maxX - minX + padding * 2f)
+    val rawHeight = maxOf(320f, maxY - minY + padding * 2f)
+    val safeDensity = density.takeIf { it.isFinite() && it > 0f } ?: 1f
+    val maxDimensionDp = GRAPH_MAX_CANVAS_PX / safeDensity
+    val scale = minOf(
+        1f,
+        maxDimensionDp / rawWidth,
+        maxDimensionDp / rawHeight
+    )
     return GraphLayout(
         positions = raw.mapValues { (_, point) ->
-            Offset(point.x - minX + padding, point.y - minY + padding)
+            Offset(
+                (point.x - minX + padding) * scale,
+                (point.y - minY + padding) * scale
+            )
         },
-        width = maxOf(360f, maxX - minX + padding * 2f).dp,
-        height = maxOf(320f, maxY - minY + padding * 2f).dp
+        width = (rawWidth * scale).dp,
+        height = (rawHeight * scale).dp
     )
+}
+
+/**
+ * Selects a bounded set of labels for the visual canvas. The full graph stays
+ * available through the accessible list; limiting labels keeps a dense graph
+ * legible and selected-node exploration exposes its local neighborhood.
+ */
+internal fun graphLabelIds(
+    graph: EntityGraph,
+    adjacency: Map<String, Set<String>>,
+    selectedId: String?
+): Set<String> {
+    if (graph.entities.isEmpty()) return emptySet()
+    val subjectId = graph.entities.firstOrNull { it.type == EntityType.Person }?.id
+        ?: graph.entities.first().id
+    val limit = when {
+        selectedId != null -> GRAPH_SELECTED_LABEL_LIMIT
+        graph.entities.size <= GRAPH_SMALL_GRAPH_LABEL_LIMIT -> graph.entities.size
+        else -> GRAPH_DEFAULT_LABEL_LIMIT
+    }
+    val candidates = if (selectedId == null) {
+        graph.entities
+            .asSequence()
+            .filterNot { it.id == subjectId }
+            .sortedWith(compareByDescending<DossierEntity> { it.confidence }.thenBy { it.id })
+            .toList()
+    } else {
+        val connected = adjacency[selectedId].orEmpty() + selectedId
+        graph.entities
+            .asSequence()
+            .filter { it.id in connected && it.id != subjectId && it.id != selectedId }
+            .sortedWith(compareByDescending<DossierEntity> { it.confidence }.thenBy { it.id })
+            .toList()
+    }
+    val labels = linkedSetOf(subjectId)
+    selectedId?.let(labels::add)
+    candidates.forEach { entity ->
+        if (labels.size < limit) labels.add(entity.id)
+    }
+    return labels
 }
 
 private fun buildAdjacency(graph: EntityGraph): Map<String, Set<String>> {
@@ -502,6 +630,16 @@ private fun squaredDistance(first: Offset, second: Offset): Float {
     val dx = first.x - second.x
     val dy = first.y - second.y
     return dx * dx + dy * dy
+}
+
+/** Returns the scroll offset that places a content coordinate at the viewport center. */
+internal fun centeredGraphScrollOffset(
+    contentCoordinatePx: Float,
+    viewportSizePx: Float,
+    maxScrollPx: Int
+): Int {
+    val target = contentCoordinatePx - viewportSizePx / 2f
+    return target.coerceIn(0f, maxScrollPx.toFloat()).roundToInt()
 }
 
 /** Pixel placement for one canvas label, constrained to the drawable viewport. */
@@ -566,5 +704,15 @@ private fun fitGraphLabelText(
 }
 
 private const val NODE_RADIUS_DP = 17f
+// Compose packs two finite dimensions into 31 bits; keeping each below 32,767
+// pixels leaves both dimensions representable even on dense graphs.
+private const val GRAPH_MAX_CANVAS_PX = 32_766f
+private const val GRAPH_NODES_PER_RING = 6
+private const val GRAPH_RING_RADIUS_DP = 150f
+private const val GRAPH_DEFAULT_LABEL_LIMIT = 7
+private const val GRAPH_SELECTED_LABEL_LIMIT = 10
+private const val GRAPH_SMALL_GRAPH_LABEL_LIMIT = 10
 private const val GRAPH_LABEL_EDGE_PADDING_DP = 10f
+private const val GRAPH_LABEL_HORIZONTAL_PADDING_DP = 5f
+private const val GRAPH_LABEL_MAX_WIDTH_DP = 124f
 private const val GRAPH_LABEL_ELLIPSIS = "…"

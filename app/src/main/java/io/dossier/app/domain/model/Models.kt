@@ -116,7 +116,36 @@ data class ProfileScanResult(
     /** Normalized form of the typed pivot used to build the query. */
     val pivotNormalizedValue: String? = null,
     /** Public source URL from which the typed pivot was derived. */
-    val pivotSourceUrl: String? = null
+    val pivotSourceUrl: String? = null,
+    /**
+     * Bounded page material fetched while verifying a public-search result.
+     * The profile result remains unverified for ownership; this field only
+     * records that the source page itself was directly re-fetched so the
+     * typed frontier can replay it without a second network request.
+     */
+    val directPage: PublicSearchPageMaterial? = null
+)
+
+/**
+ * Serializable, bounded page material retained for a directly verified
+ * public-search result. It is intentionally separate from [ProfileScanResult.verified]:
+ * page availability/identity signals do not prove account ownership.
+ */
+@Serializable
+data class PublicSearchPageMaterial(
+    val finalUrl: String,
+    val title: String = "",
+    val text: String = "",
+    val links: List<String> = emptyList(),
+    val contentHashSha256: String? = null,
+    val description: String = "",
+    val historical: Boolean = false,
+    val archiveProvider: String? = null,
+    val archiveOriginalUrl: String? = null,
+    val archiveTimestamp: String? = null,
+    /** Indexed/redirect source URLs retained alongside the replay URL. */
+    val sourceUrls: List<String> = emptyList(),
+    val indexedUrl: String? = null
 )
 
 @Serializable

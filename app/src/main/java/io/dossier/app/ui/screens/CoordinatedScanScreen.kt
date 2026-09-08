@@ -23,8 +23,10 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.dossier.app.domain.discovery.LiveScanSnapshot
 import io.dossier.app.domain.discovery.ScanCoordinatorRuntime
 import io.dossier.app.domain.discovery.ScanRunState
 import io.dossier.app.ui.theme.NeuralTheme
@@ -53,7 +55,8 @@ fun CoordinatedScanScreen(
             onScanFailed = onScanFailed,
             onScanCancelled = onScanCancelled,
             onInvalidInput = onInvalidInput,
-            onScanBackgrounded = onScanBackgrounded
+            onScanBackgrounded = onScanBackgrounded,
+            diagnosticTopInset = scanDiagnosticsTopInset(snapshot)
         )
 
         if (snapshot.state == ScanRunState.Running) {
@@ -133,7 +136,11 @@ fun CoordinatedScanScreen(
                         color = NeuralTheme.TextSecondary,
                         fontSize = 9.sp,
                         fontFamily = FontFamily.Monospace,
-                        maxLines = 3,
+                        // Keep the diagnostic stack compact enough to coexist
+                        // with the scan title and controls on a phone viewport.
+                        // The full, unsummarized text remains available through
+                        // the semantics content description below.
+                        maxLines = 2,
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         modifier = Modifier
                             .widthIn(max = 360.dp)
@@ -186,6 +193,20 @@ fun CoordinatedScanScreen(
             }
         }
     }
+}
+
+/**
+ * Reserve the space occupied by the live diagnostics stack so it cannot cover
+ * the scan title or progress indicator. The metric strip alone fits beside
+ * the title; the optional pivot/recovery cards are the taller stack that needs
+ * an explicit inset. Keep this policy deterministic so the layout remains
+ * stable while asynchronous diagnostics arrive.
+ */
+internal fun scanDiagnosticsTopInset(snapshot: LiveScanSnapshot): Dp = when {
+    snapshot.state != ScanRunState.Running -> 0.dp
+    snapshot.pivotMaxDepth > 0 && snapshot.recoveryStage.isNotBlank() -> 120.dp
+    snapshot.pivotMaxDepth > 0 || snapshot.recoveryStage.isNotBlank() -> 96.dp
+    else -> 0.dp
 }
 
 @Composable

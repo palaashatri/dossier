@@ -4,6 +4,7 @@ import android.content.Context
 import io.dossier.app.domain.discovery.ProviderPlanFingerprint
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.ProfileScanResult
+import io.dossier.app.domain.model.PublicSearchPageMaterial
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -245,8 +246,39 @@ internal class PublicDiscoveryPayloadStore internal constructor(
             result.confidenceSignals.all { it.isSafeText(MAX_TEXT_CHARS) } &&
             result.verificationStatus.isSafeText(MAX_TEXT_CHARS) &&
             result.provenance.isSafeText(MAX_TEXT_CHARS) &&
+            result.directPage?.let(::isSafeDirectPage) != false &&
             result.candidate.confidence.isFinite() &&
             result.candidate.confidence in 0f..1f
+    }
+
+    private fun isSafeDirectPage(page: PublicSearchPageMaterial): Boolean {
+        val finalUrl = parseHttpUrl(page.finalUrl) ?: return false
+        if (page.finalUrl.length > MAX_URL_CHARS || finalUrl.rawUserInfo != null) return false
+        if (!page.title.isSafeText(MAX_TEXT_CHARS) ||
+            !page.text.isSafeText(MAX_DIRECT_PAGE_TEXT_CHARS)
+        ) return false
+        if (!page.description.isSafeText(MAX_TEXT_CHARS) || page.links.size > MAX_LINKS) return false
+        if (page.links.any { link ->
+                link.length > MAX_URL_CHARS || parseHttpUrl(link)?.let { it.rawUserInfo != null } != false
+            }) return false
+        if (page.sourceUrls.size > MAX_SOURCE_URLS || page.sourceUrls.any { source ->
+                source.length > MAX_URL_CHARS || parseHttpUrl(source)?.let { it.rawUserInfo != null } != false
+            }) return false
+        if (page.indexedUrl?.let {
+                it.length > MAX_URL_CHARS || parseHttpUrl(it)?.let { uri -> uri.rawUserInfo != null } != false
+            } == true
+        ) return false
+        if (page.archiveProvider != null) {
+            if (!page.archiveProvider.isSafeText(MAX_SHORT_CHARS) ||
+                page.archiveOriginalUrl?.let {
+                    it.length <= MAX_URL_CHARS && parseHttpUrl(it)?.rawUserInfo == null
+                } == false ||
+                !page.archiveTimestamp.isSafeText(MAX_SHORT_CHARS)
+            ) {
+                return false
+            }
+        }
+        return page.contentHashSha256.isSafeHash()
     }
 
     private fun isSafeFinding(finding: Finding): Boolean =
@@ -258,6 +290,9 @@ internal class PublicDiscoveryPayloadStore internal constructor(
 
     private fun String?.isSafeText(max: Int): Boolean =
         this == null || (length <= max && indexOf('\u0000') < 0)
+
+    private fun String?.isSafeHash(): Boolean =
+        this == null || (length <= MAX_HASH_CHARS && matches(HEX_HASH_PATTERN))
 
     private fun parseHttpUrl(value: String): URI? = runCatching {
         URI(value.trim()).takeIf { uri ->
@@ -384,14 +419,18 @@ internal class PublicDiscoveryPayloadStore internal constructor(
         private const val MAX_URL_CHARS = 2_048
         private const val MAX_SHORT_CHARS = 256
         private const val MAX_TEXT_CHARS = 4_096
+        private const val MAX_DIRECT_PAGE_TEXT_CHARS = 8_000
         private const val MAX_LINKS = 64
+        private const val MAX_SOURCE_URLS = 64
         private const val MAX_FINDINGS = 64
         private const val MAX_SIGNALS = 32
+        private const val MAX_HASH_CHARS = 128
         private const val ROOT_DIRECTORY = "dossier_scan_payloads/public-v1"
         private const val FILE_EXTENSION = ".payload"
         private const val CLEAR_TOMBSTONE_EXTENSION = ".cleared"
         private const val TEMP_EXTENSION = ".tmp"
         private val CLEAR_TOMBSTONE_BYTES = "public-discovery-payload-cleared-v1\n".toByteArray(Charsets.UTF_8)
+        private val HEX_HASH_PATTERN = Regex("[0-9a-fA-F]{64}")
         private val STORE_LOCK = Any()
 
         internal fun clearRequest(context: Context, requestId: String): Boolean = runCatching {

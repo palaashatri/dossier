@@ -167,6 +167,8 @@ object TypedSeedEvidenceAdapter {
         if (state != EvidenceState.Observed ||
             reliability != EvidenceReliability.SearchEngineCandidate ||
             attribution != FindingAttribution.Unconfirmed ||
+            parserVersion != DIRECT_PAGE_PARSER_VERSION ||
+            "Page content retained for bounded typed-seed replay" !in signals ||
             id.isBlank() ||
             sourceUrl?.let(TypedSeedSafety::isSafeEvidenceSourceUrl) != true
         ) return false
@@ -184,6 +186,8 @@ object TypedSeedEvidenceAdapter {
             ExposureSourceClassification.AUTHORIZED_API
         ) && DiscoveryHttpPolicy.isSafePublicHttpUrl(value)
     }
+
+    private const val DIRECT_PAGE_PARSER_VERSION = "public-page-verifier-v1"
 
     private fun EvidenceKind.toTypedSeedKind(): TypedSeedKind? = when (this) {
         EvidenceKind.Email -> TypedSeedKind.Email

@@ -616,6 +616,8 @@ class TypedSeedAdmissionModelTest {
             reliability = EvidenceReliability.SearchEngineCandidate,
             sourceClassification = ExposureSourceClassification.PUBLIC_WEB,
             contentHashSha256 = "hash-direct",
+            parserVersion = "public-page-verifier-v1",
+            signals = listOf("Page content retained for bounded typed-seed replay"),
             discoveryPath = listOf("seed@example.test", "search-results"),
             attribution = FindingAttribution.Unconfirmed
         )

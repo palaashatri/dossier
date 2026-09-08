@@ -563,6 +563,7 @@ object ScanSession {
                 null
             }
 
+            var discoveryStage = "DISCOVERING_USERNAMES..."
             val scanResults = profileScanner.scanIdentity(
                 input = inputToUse,
                 deepResearch = deepResearch,
@@ -570,7 +571,31 @@ object ScanSession {
                 checkpointOwnerId = checkpointOwnerId,
                 checkpointGeneration = checkpointGeneration,
                 planFingerprint = planFingerprint,
-                mediaEvidence = EvidenceCollection()
+                mediaEvidence = EvidenceCollection(),
+                onStage = { stage ->
+                    currentCoroutineContext().ensureActive()
+                    discoveryStage = stage
+                    _progressText.value = stage
+                },
+                onProgress = { partialResults ->
+                    currentCoroutineContext().ensureActive()
+                    _profileScanResults.value = partialResults
+                    val partialFindings = partialResults
+                        .asSequence()
+                        .filter { it.exists }
+                        .flatMap { it.findings.asSequence() }
+                        .distinctBy(::findingIdentityKey)
+                        .toList()
+                    val capped = MemoryGuard.cap(partialFindings)
+                    _findings.value = capped.retained
+                    _memoryDropped.value = capped.droppedCount
+                    val verifiedProfiles = partialResults.count { it.exists && it.verified }
+                    val reviewProfiles = partialResults.count { it.exists && !it.verified }
+                    _progressText.value =
+                        "$discoveryStage $verifiedProfiles verified · " +
+                            "$reviewProfiles review · ${partialResults.size} checks · " +
+                            "${capped.retained.size} findings"
+                }
             )
             val typedSeedExecutionEvidence = profileScanner.typedSeedExecutionEvidence()
             currentCoroutineContext().ensureActive()
@@ -600,7 +625,7 @@ object ScanSession {
             if (!mediaSnapshot.isEmpty) {
                 mediaRetrievedAtEpochMillis = mediaStartedAt
             }
-            _progressText.value = "DISCOVERING_USERNAMES..."
+            _progressText.value = "FINALIZING_DISCOVERY..."
             MediaIntelligenceSession.recordVerifiedProfileAvatars(
                 token = mediaBindingToken,
                 input = inputToUse,

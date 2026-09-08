@@ -499,6 +499,12 @@ class BackgroundScanWorker(
             STAGE_FAILED,
             STAGE_RUNNING,
             "DISCOVERING_USERNAMES...",
+            "DISCOVERING_PIVOTS...",
+            "SEARCHING_PUBLIC_INDEXES...",
+            "FETCHING_TYPED_SEEDS...",
+            "SEARCHING_PUBLIC_IMAGES...",
+            "FINALIZING_DISCOVERY...",
+            "DISCOVERY_COMPLETE",
             "COMPARING_FACE_CONSISTENCY...",
             "CHECKING_BREACH_EXPOSURE...",
             "BUILDING_ENTITY_GRAPH...",
@@ -563,7 +569,9 @@ class BackgroundScanWorker(
             val persistedStage = when {
                 stage in SAFE_PROGRESS_STAGES -> stage
                 stage.startsWith("$STAGE_FAILED:") -> STAGE_FAILED
-                else -> STAGE_RUNNING
+                else -> SAFE_PROGRESS_STAGES
+                    .firstOrNull { it.endsWith("...") && stage.startsWith("$it ") }
+                    ?: STAGE_RUNNING
             }
             return workDataOf(KEY_STAGE to persistedStage)
         }

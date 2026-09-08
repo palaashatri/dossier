@@ -5,6 +5,7 @@ import io.dossier.app.data.platform.ProviderCatalogV2
 import io.dossier.app.data.platform.resolveProfileUrl
 import io.dossier.app.data.web.PublicImageSearchService
 import io.dossier.app.data.web.DiscoveryHttpPolicy
+import io.dossier.app.data.web.VerifiedPage
 import io.dossier.app.data.web.PublicSearchDiscoveryService
 import io.dossier.app.data.web.TypedSeedPublicFetchExecutor
 import io.dossier.app.domain.discovery.DiscoveryScanPreferences
@@ -28,6 +29,7 @@ import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.toEvidence
 import io.dossier.app.domain.evidence.withResolvedRelationshipEvidence
@@ -84,11 +86,29 @@ class ProfileScanner(
         checkpointOwnerId: String? = null,
         checkpointGeneration: String? = null,
         planFingerprint: String? = null,
-        mediaEvidence: EvidenceCollection = EvidenceCollection()
+        mediaEvidence: EvidenceCollection = EvidenceCollection(),
+        /**
+         * Receives cumulative profile observations as each discovery stage
+         * completes.  The callback is deliberately suspending so durable
+         * callers can publish on their own dispatcher without blocking the
+         * scanner's provider workers.
+         */
+        onProgress: suspend (List<ProfileScanResult>) -> Unit = {},
+        /**
+         * Receives truthful boundaries for rolling discovery passes. The
+         * callback carries stage labels only; evidence and identity values stay
+         * in the profile/evidence callbacks.
+         */
+        onStage: suspend (String) -> Unit = {}
     ): List<ProfileScanResult> {
         val scanId = ScanCoordinatorRuntime.claimProviderScanId()
         typedSeedExecutionEvidence = EvidenceCollection()
         val results = mutableListOf<ProfileScanResult>()
+
+        suspend fun publishProgress(snapshot: List<ProfileScanResult>) {
+            currentCoroutineContext().ensureActive()
+            onProgress(snapshot.toList())
+        }
 
         // Public search/image observations are resumable only for a durable
         // WorkManager request.  The catalog-plan commitment prevents a cache
@@ -235,6 +255,7 @@ class ProfileScanner(
             scanId = scanId,
             requestId = requestId,
             deepResearch = deepResearch,
+            onProgress = onProgress,
             onRecovery = { summary ->
                 ScanCoordinatorRuntime.onRecoveryDiagnostics(
                     scanId = scanId,
@@ -245,6 +266,7 @@ class ProfileScanner(
                 )
             }
         )
+        publishProgress(initialResults)
 
         // The recursive pass is backed by a request-scoped encrypted frontier
         // when WorkManager supplied a canonical request ID. A process-local
@@ -279,6 +301,7 @@ class ProfileScanner(
         // FAIL-SAFE: the entire pivot pass is wrapped so ANY failure here never
         // destroys the Pass-1 results. A broken pivot must not make the scan
         // return empty — Pass 1's findings are always surfaced.
+        onStage("DISCOVERING_PIVOTS...")
         val pivotResults: List<ProfileScanResult> = try {
             drainPivotFrontier(
                 initialResults = initialResults,
@@ -299,29 +322,19 @@ class ProfileScanner(
             // the durable queue remains resumable on the next request.
             frontierStore?.save(pivotFrontier)
         }
+        publishProgress(initialResults + pivotResults)
 
-        // General typed frontier: every user/evidence seed is retained, while
-        // URL/document/archive pages are executed one bounded hop at a time.
-        // Newly verified links/PII are admitted back into the same queue, so a
-        // URL A -> URL B -> email/document/archive chain survives retries.
         val typedSeedInputEvidence = (initialResults + pivotResults).toEvidenceCollection(input)
             .merge(mediaEvidence)
-        typedSeedExecutionEvidence = runTypedSeedFrontier(
-            input = input,
-            deepResearch = deepResearch,
-            requestId = requestId,
-            checkpointOwnerId = checkpointOwnerId,
-            checkpointGeneration = checkpointGeneration,
-            planFingerprint = planFingerprint,
-            seedEvidence = typedSeedInputEvidence,
-            scanId = scanId
-        )
 
         // ---- Pass 3: public-search discovery. This broadens coverage beyond
         // deterministic username templates by querying public indexes for the
         // audited name/handles/emails and site-specific sources (including
         // Reddit + 4chan). These hits are review candidates, not verified account
-        // ownership, so they are surfaced with verified=false.
+        // ownership, so they are surfaced with verified=false. This pass runs
+        // before the typed frontier so directly re-fetched pages can become
+        // bounded URL navigation pivots in the same scan.
+        onStage("SEARCHING_PUBLIC_INDEXES...")
         val publicSearchResults: List<ProfileScanResult> = payloadStore?.load(ScanPayloadStage.PublicSearch)
             ?: try {
                 val verifiedResults = (initialResults + pivotResults)
@@ -345,10 +358,32 @@ class ProfileScanner(
             } catch (_: Exception) {
                 emptyList()
             }
+        publishProgress(initialResults + pivotResults + publicSearchResults)
+
+        // General typed frontier: every user/evidence seed is retained, while
+        // URL/document/archive pages are executed one bounded hop at a time.
+        // Newly verified links/PII are admitted back into the same queue, so a
+        // URL A -> URL B -> email/document/archive chain survives retries. A
+        // directly verified public-search page is replayed from the verifier's
+        // bounded material rather than fetched a second time.
+        onStage("FETCHING_TYPED_SEEDS...")
+        typedSeedExecutionEvidence = runTypedSeedFrontier(
+            input = input,
+            deepResearch = deepResearch,
+            requestId = requestId,
+            checkpointOwnerId = checkpointOwnerId,
+            checkpointGeneration = checkpointGeneration,
+            planFingerprint = planFingerprint,
+            seedEvidence = typedSeedInputEvidence
+                .merge(publicSearchResults.toEvidenceCollection(input)),
+            directPageResults = publicSearchResults,
+            scanId = scanId
+        )
 
         // ---- Pass 4: public image-index discovery. This searches image indexes
         // by identity terms only; it does not upload the user's selfie or perform
         // face recognition.
+        onStage("SEARCHING_PUBLIC_IMAGES...")
         val publicImageResults: List<ProfileScanResult> = payloadStore?.load(ScanPayloadStage.PublicImage)
             ?: try {
                 val discovered = runPublicImagePass(input, publicSearchResults, deepResearch)
@@ -360,7 +395,10 @@ class ProfileScanner(
                 emptyList()
             }
 
-        return initialResults + pivotResults + publicSearchResults + publicImageResults
+        val finalResults = initialResults + pivotResults + publicSearchResults + publicImageResults
+        publishProgress(finalResults)
+        onStage("DISCOVERY_COMPLETE")
+        return finalResults
     }
 
     private suspend fun executeInitialPass(
@@ -369,6 +407,7 @@ class ProfileScanner(
         scanId: ScanId,
         requestId: String?,
         deepResearch: Boolean,
+        onProgress: suspend (List<ProfileScanResult>) -> Unit = {},
         onRecovery: (ProfileInitialPassExecutor.RecoverySummary) -> Unit = {}
     ): List<ProfileScanResult> {
         val planFingerprint = if (requestId != null && BackgroundScanWorker.isCanonicalUuid(requestId)) {
@@ -388,6 +427,7 @@ class ProfileScanner(
             fetchMiss = { candidate ->
                 fetchAndParse(candidate, input, provenance = null, scanId = scanId)
             },
+            onProgress = onProgress,
             onRecovery = onRecovery
         )
     }
@@ -626,7 +666,8 @@ class ProfileScanner(
         checkpointGeneration: String?,
         planFingerprint: String?,
         seedEvidence: EvidenceCollection,
-        scanId: ScanId
+        scanId: ScanId,
+        directPageResults: List<ProfileScanResult> = emptyList()
     ): EvidenceCollection {
         val durable = requestId != null &&
             checkpointOwnerId != null &&
@@ -739,6 +780,19 @@ class ProfileScanner(
                     }
                 )
             }
+        // Public-search verification already fetched these pages. Retain the
+        // bounded material in the same executor instance so the URL seed can
+        // replay through the canonical parser/extractor path without another
+        // network request. Ownership remains unverified; only page material is
+        // being reused.
+        directPageResults.forEach { result ->
+            result.directPage?.let { page ->
+                executor.retainVerifiedPage(
+                    page = page.toVerifiedPage(),
+                    providerId = result.providerId ?: result.candidate.providerId ?: "public-search-verified"
+                )
+            }
+        }
         data class RunningSeed(
             val order: Int,
             val key: String,
@@ -826,7 +880,8 @@ class ProfileScanner(
                         } else {
                             frontier.unavailable(
                                 ready.key,
-                                outcome?.reason ?: "Typed seed execution returned no verified result"
+                                outcome?.reason ?: "Typed seed execution returned no verified result",
+                                retryable = outcome?.retryable == true
                             )
                         }
 
@@ -1032,10 +1087,16 @@ class ProfileScanner(
         searchResult: PublicSearchDiscoveryService.PublicSearchResult,
         input: IdentityInput
     ): ProfileScanResult {
-        val resolved = resolveProfileUrl(searchResult.url)
-        val candidateUrl = resolved?.url ?: searchResult.url
+        val directPage = searchResult.verifiedPage
+            ?.takeIf { DiscoveryHttpPolicy.isSafePublicHttpUrl(it.finalUrl) }
+        val pageOrResultUrl = directPage?.finalUrl ?: searchResult.url
+        val resolved = resolveProfileUrl(pageOrResultUrl)
+        // A directly verified page may redirect away from the indexed URL. Keep
+        // the final fetched URL as the candidate so the typed frontier can
+        // replay the exact page material without a second lookup.
+        val candidateUrl = directPage?.finalUrl ?: resolved?.url ?: searchResult.url
         val platform = resolved?.platform ?: Platform.Website
-        val username = resolved?.username ?: hostLabel(searchResult.url)
+        val username = resolved?.username ?: hostLabel(candidateUrl)
         val snippetText = listOf(searchResult.title, searchResult.snippet)
             .filter { it.isNotBlank() }
             .joinToString("\n")
@@ -1102,7 +1163,12 @@ class ProfileScanner(
             httpStatus = null,
             displayName = searchResult.title.ifBlank { null },
             bio = searchResult.snippet.ifBlank { null },
-            links = listOf(candidateUrl),
+            // The indexed result URL is already represented by the profile
+            // observation (and, for direct verification, by directPage
+            // material). Do not model it as a page-published link: doing so
+            // would manufacture a domain pivot from an index lead before the
+            // source page has been parsed.
+            links = emptyList(),
             extractedText = snippetText.take(1000),
             findings = findings.distinctBy { it.type.name + it.value + it.sourceUrl },
             confidenceSignals = confidenceSignals,
@@ -1119,9 +1185,41 @@ class ProfileScanner(
             pivotEvidenceIds = searchResult.pivotEvidenceIds,
             pivotDiscoveryPath = searchResult.pivotDiscoveryPath,
             pivotStage = searchResult.pivotStage,
-            pivotSourceUrl = searchResult.pivotSourceUrl
+            pivotSourceUrl = searchResult.pivotSourceUrl,
+            directPage = directPage?.toPublicSearchPageMaterial()
         )
     }
+
+    private fun PublicSearchPageMaterial.toVerifiedPage(): VerifiedPage = VerifiedPage(
+        finalUrl = finalUrl,
+        title = title,
+        text = text,
+        links = links,
+        contentHashSha256 = contentHashSha256,
+        description = description,
+        historical = historical,
+        archiveProvider = archiveProvider,
+        archiveOriginalUrl = archiveOriginalUrl,
+        archiveTimestamp = archiveTimestamp,
+        sourceUrls = sourceUrls,
+        indexedUrl = indexedUrl
+    )
+
+    private fun VerifiedPage.toPublicSearchPageMaterial(): PublicSearchPageMaterial =
+        PublicSearchPageMaterial(
+            finalUrl = finalUrl,
+            title = title,
+            text = text,
+            links = links,
+            contentHashSha256 = contentHashSha256,
+            description = description,
+            historical = historical,
+            archiveProvider = archiveProvider,
+            archiveOriginalUrl = archiveOriginalUrl,
+            archiveTimestamp = archiveTimestamp,
+            sourceUrls = sourceUrls,
+            indexedUrl = indexedUrl
+        )
 
     private fun hostLabel(url: String): String = try {
         URI(url).host?.removePrefix("www.") ?: "web"
@@ -2683,6 +2781,14 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
             emptyList()
         }
         val verifiedProfile = result.exists && result.verified
+        // Public-search index leads are review-only until their source page is
+        // directly re-fetched. Keep their profile/link projections as
+        // candidates so they cannot silently become typed URL pivots. A
+        // directly verified page carries separate page-material evidence and
+        // is intentionally allowed to re-enter bounded navigation.
+        val indexOnlyPublicSearch = result.directPage == null &&
+            result.provenance?.startsWith("public search via ", ignoreCase = true) == true
+        val candidateOnlyProfile = indexOnlyPublicSearch || !result.exists
         val pivotSourceUrl = result.pivotSourceUrl
             ?.trim()
             ?.takeIf { it.isNotBlank() && DiscoveryHttpPolicy.isSafePublicHttpUrl(it) }
@@ -2733,7 +2839,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
             providerId = result.providerId ?: result.candidate.providerId,
             retrievedAtEpochMillis = retrievedAtEpochMillis,
             state = when {
-                !result.exists -> EvidenceState.Candidate
+                candidateOnlyProfile -> EvidenceState.Candidate
                 verifiedProfile -> EvidenceState.Verified
                 else -> EvidenceState.Observed
             },
@@ -2746,6 +2852,97 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
             sourceUrls = pivotSourceUrls
         )
         evidence.add(profileEvidence)
+
+        // Preserve the verifier's directly fetched page as a first-class
+        // navigation observation. This is deliberately separate from the
+        // candidate profile record: page availability/content is useful
+        // evidence, but it does not prove account ownership. The typed-seed
+        // adapter recognizes this exact state/source combination as the only
+        // public-search URL pivot; index-only records above remain candidates.
+        result.directPage
+            ?.takeIf { DiscoveryHttpPolicy.isSafePublicHttpUrl(it.finalUrl) }
+            ?.let { page ->
+                val pageUrl = page.finalUrl.trim()
+                val pageSourceUrls = listOfNotNull(
+                    pageUrl,
+                    page.archiveOriginalUrl,
+                    page.indexedUrl,
+                    pivotSourceUrl
+                )
+                    .plus(page.sourceUrls)
+                    .map(String::trim)
+                    .filter(DiscoveryHttpPolicy::isSafePublicHttpUrl)
+                    .distinctBy { PublicSearchDiscoveryService.canonicalUrlKey(it) }
+                    .take(Evidence.MAX_SOURCE_URLS)
+                val pagePath = (path + pageUrl)
+                    .filter(String::isNotBlank)
+                    .take(Evidence.MAX_DISCOVERY_PATH_STEPS)
+                val pageEvidence = Evidence(
+                    id = stableProfileEvidenceId(
+                        "public-page",
+                        pageUrl,
+                        page.contentHashSha256 ?: page.text
+                    ),
+                    kind = EvidenceKind.PublicSearchEvidence,
+                    value = pageUrl,
+                    sourceUrl = pageUrl,
+                    snippet = listOf(page.title, page.description)
+                        .filter(String::isNotBlank)
+                        .joinToString(" — ")
+                        .takeIf(String::isNotBlank),
+                    confidence = conf,
+                    risk = RiskLevel.Low,
+                    signals = listOf(
+                        "Public search result page was directly re-fetched",
+                        "Page content retained for bounded typed-seed replay",
+                        "Ownership attribution remains unconfirmed"
+                    ),
+                    providerId = result.providerId ?: result.candidate.providerId,
+                    retrievedAtEpochMillis = retrievedAtEpochMillis,
+                    state = EvidenceState.Observed,
+                    reliability = if (page.historical) {
+                        EvidenceReliability.ArchiveSnapshot
+                    } else {
+                        EvidenceReliability.SearchEngineCandidate
+                    },
+                    sourceClassification = if (page.historical) {
+                        ExposureSourceClassification.ARCHIVE
+                    } else {
+                        ExposureSourceClassification.PUBLIC_PROFILE
+                    },
+                    contentHashSha256 = page.contentHashSha256,
+                    parserVersion = "public-page-verifier-v1",
+                    historical = page.historical,
+                    discoveryPath = pagePath,
+                    sourceUrls = pageSourceUrls,
+                    attribution = FindingAttribution.Unconfirmed
+                )
+                evidence.add(pageEvidence)
+                page.indexedUrl
+                    ?.takeIf { !sameSourceUrl(it, pageUrl) }
+                    ?.let { indexedUrl ->
+                        relationships.add(
+                            EvidenceRelationship(
+                                fromValue = indexedUrl,
+                                toValue = pageUrl,
+                                relation = "redirects_to",
+                                evidence = "Public search index URL redirected to directly fetched page",
+                                evidenceIds = listOf(pageEvidence.id)
+                            )
+                        )
+                    }
+                if (!sameSourceUrl(pageUrl, url) && page.indexedUrl?.let { sameSourceUrl(it, url) } != true) {
+                    relationships.add(
+                        EvidenceRelationship(
+                            fromValue = url,
+                            toValue = pageUrl,
+                            relation = "direct_page_material",
+                            evidence = "Public page directly re-fetched; ownership remains unconfirmed",
+                            evidenceIds = listOf(pageEvidence.id)
+                        )
+                    )
+                }
+            }
 
         // Username → profile assertion (scanner knowledge).
         if (result.candidate.username.isNotBlank()
@@ -2840,6 +3037,7 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
             // Observed/Candidate below and therefore cannot become typed pivots.
             val explicitlyAttributed = verifiedProfile
             val linkState = when {
+                indexOnlyPublicSearch -> EvidenceState.Candidate
                 explicitlyAttributed -> EvidenceState.Verified
                 result.exists -> EvidenceState.Observed
                 else -> EvidenceState.Candidate

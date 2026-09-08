@@ -3,6 +3,8 @@ package io.dossier.app
 import io.dossier.app.data.web.PublicSearchDiscoveryService
 import io.dossier.app.data.web.PublicPageVerifier
 import io.dossier.app.domain.model.IdentityInput
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -15,8 +17,47 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.security.MessageDigest
+import java.io.ByteArrayInputStream
 
 class PublicSearchDiscoveryServiceTest {
+
+    @Test
+    fun publicSearchBudgetCancelsSlowWorkAndReturnsExplicitUnavailableState() = runBlocking {
+        val cancelled = CompletableDeferred<Unit>()
+        val partial = PublicSearchDiscoveryService.PublicSearchResult(
+            title = "Synthetic result",
+            snippet = "Completed before the deadline",
+            url = "https://result.example.test/profile",
+            query = "\"synthetic\"",
+            source = "Fixture",
+            score = 0.4f
+        )
+
+        val outcome = PublicSearchDiscoveryService.withPublicSearchBudget(
+            timeoutMs = 25L,
+            onTimeout = {
+                PublicSearchDiscoveryService.SearchOutcome.Unavailable(
+                    reason = "Public search timed out",
+                    partialResults = listOf(partial),
+                    timedOut = true
+                )
+            }
+        ) {
+            try {
+                delay(500L)
+                PublicSearchDiscoveryService.SearchOutcome.Success(emptyList())
+            } finally {
+                cancelled.complete(Unit)
+            }
+        }
+
+        cancelled.await()
+        assertTrue("Slow search work was not cancelled", cancelled.isCompleted)
+        val unavailable = outcome as? PublicSearchDiscoveryService.SearchOutcome.Unavailable
+        assertNotNull("Deadline should produce an unavailable outcome", unavailable)
+        assertTrue(unavailable?.timedOut == true)
+        assertEquals(listOf(partial), unavailable?.partialResults)
+    }
 
     @Test
     fun buildQueries_includesProfileAndPublicForumSources() {
@@ -95,6 +136,57 @@ class PublicSearchDiscoveryServiceTest {
         assertNotNull(page)
         assertEquals(sha256(body), page?.contentHashSha256)
         assertTrue(page?.text.orEmpty().contains("Jane Example"))
+    }
+
+    @Test
+    fun publicPageVerifierDoesNotUseIndexedOnlyIdentitySignals() = runBlocking {
+        val url = "https://profile.example.test/indexed-only"
+        val body = "<html><head><title>Welcome</title></head><body>Generic landing page</body></html>"
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val requested = chain.request().url.toString()
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(if (requested.contains("archive", ignoreCase = true)) 404 else 200)
+                    .message("OK")
+                    .body(body.toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+            .build()
+        val input = IdentityInput(
+            fullName = "Jane Example",
+            emails = listOf("jane@example.test"),
+            phones = listOf("+1 (555) 010-0001"),
+            usernames = listOf("janedoe")
+        )
+
+        val outcome = PublicPageVerifier(
+            client = client,
+            archiveResolver = io.dossier.app.data.web.ArchivePageResolver(client)
+        ).verify(
+            input = input,
+            url = url,
+            indexedTitle = "Jane Example janedoe jane@example.test +1 (555) 010-0001",
+            indexedSnippet = "Indexed contact result"
+        )
+
+        assertFalse("Indexed-only identifiers must not verify the direct page", outcome is PublicPageVerifier.Outcome.Verified)
+        assertFalse("Indexed-only identifiers must not create replay material", outcome is PublicPageVerifier.Outcome.Verified &&
+            (outcome as PublicPageVerifier.Outcome.Verified).verifiedPage != null)
+    }
+
+    @Test
+    fun publicPageVerifierReadBoundedNeverReadsPastConfiguredLimit() {
+        assertEquals(
+            "abc",
+            PublicPageVerifier.readBounded(ByteArrayInputStream("abc".toByteArray()), 3L)
+                ?.toString(Charsets.UTF_8)
+        )
+        assertEquals(
+            null,
+            PublicPageVerifier.readBounded(ByteArrayInputStream("abcd".toByteArray()), 3L)
+        )
     }
 
     @Test

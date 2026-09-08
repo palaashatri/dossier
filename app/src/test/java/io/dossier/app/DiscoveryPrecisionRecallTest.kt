@@ -98,6 +98,57 @@ class DiscoveryPrecisionRecallTest {
     }
 
     @Test
+    fun directVerification_emailSubstringCannotQualifyAttribution() {
+        val assessment = PublicPageVerifier.assessIdentitySignals(
+            input = IdentityInput(fullName = "", emails = listOf("user@example.test")),
+            url = "https://example.test/contact",
+            pageText = "Contact notuser@example.test for support"
+        )
+
+        assertFalse("A longer adjacent address must not satisfy an exact email pivot", assessment.verificationQualified)
+        assertEquals(0f, assessment.directScore, 0.0001f)
+    }
+
+    @Test
+    fun directVerification_phoneSubstringCannotQualifyAttribution() {
+        val assessment = PublicPageVerifier.assessIdentitySignals(
+            input = IdentityInput(fullName = "", phones = listOf("4155552671")),
+            url = "https://example.test/contact",
+            pageText = "Call 991415555267199 for the office"
+        )
+
+        assertFalse("A longer adjacent number must not satisfy an exact phone pivot", assessment.verificationQualified)
+        assertEquals(0f, assessment.directScore, 0.0001f)
+    }
+
+    @Test
+    fun directVerification_phoneSubstringInsideFormattedNumberCannotQualifyAttribution() {
+        val assessment = PublicPageVerifier.assessIdentitySignals(
+            input = IdentityInput(fullName = "", phones = listOf("4155552671")),
+            url = "https://example.test/contact",
+            pageText = "Call 991-415-555-2671 for the office"
+        )
+
+        assertFalse(
+            "A longer formatted number must not satisfy an exact phone pivot",
+            assessment.verificationQualified
+        )
+        assertEquals(0f, assessment.directScore, 0.0001f)
+    }
+
+    @Test
+    fun directVerification_formattedPhoneStillQualifiesAttribution() {
+        val assessment = PublicPageVerifier.assessIdentitySignals(
+            input = IdentityInput(fullName = "", phones = listOf("+1 415 555 2671")),
+            url = "https://example.test/contact",
+            pageText = "Call +1 (415) 555-2671 for the office"
+        )
+
+        assertTrue(assessment.verificationQualified)
+        assertEquals(0.97f, assessment.confidenceCeiling, 0.0001f)
+    }
+
+    @Test
     fun directVerification_explicitUrlIsQualifiedWhenItExists() {
         val url = "https://example.com/users/jane"
         val assessment = PublicPageVerifier.assessIdentitySignals(
