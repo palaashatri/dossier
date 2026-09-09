@@ -510,7 +510,10 @@ class PublicSearchDiscoveryService(private val context: Context) {
             }
         }
 
-        if (provider.allowBrowserFallback &&
+        // Phone-only searches are intentionally HTTP/index-only. Browser
+        // rendering is a single serialized resource and blocked phone
+        // queries otherwise hold that renderer while yielding little value.
+        if (provider.allowBrowserFallback && !isPhoneOnlyQuery(query) &&
             (lastHtml.isBlank() || blocked || (providerHealthy && !looksLikeNoResults(lastHtml)))) {
             val rendered = browserSemaphore.withPermit {
                 currentCoroutineContext().ensureActive()
@@ -824,9 +827,9 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val aliases = input.aliases.mapNotNull(::cleanTerm)
             val originalEmails = input.emails.mapNotNull(::cleanTerm)
             val originalPhones = input.phones
-                .map { value -> value.filter(Char::isDigit) }
-                .filter { it.length >= 8 }
-                .distinct()
+                .map(String::trim)
+                .filter { phoneDigits(it).length in 8..15 }
+                .distinctBy(::phoneDigits)
             val organizations = input.organizations.mapNotNull(::cleanTerm)
             val locations = input.locations.mapNotNull(::cleanTerm)
             val originalHandles = buildHandleTerms(input)
@@ -907,9 +910,17 @@ class PublicSearchDiscoveryService(private val context: Context) {
             }
 
             safeSeeds.filter { it.kind == TypedSeedKind.Email || it.kind == TypedSeedKind.Phone }.forEach { seed ->
-                addQuery(quote(seed.exactValue), "typed-seed-exact", seed)
-                if (seed.kind == TypedSeedKind.Phone && seed.normalizedValue != seed.exactValue) {
-                    addQuery(quote(seed.normalizedValue), "typed-seed-normalized", seed)
+                if (seed.kind == TypedSeedKind.Phone) {
+                    phoneQueryVariants(seed.exactValue).forEach { variant ->
+                        val stage = when {
+                            variant == seed.exactValue.trim() -> "typed-seed-exact"
+                            variant == seed.normalizedValue -> "typed-seed-normalized"
+                            else -> "typed-seed-phone-variant"
+                        }
+                        addQuery(quote(variant), stage, seed)
+                    }
+                } else {
+                    addQuery(quote(seed.exactValue), "typed-seed-exact", seed)
                 }
             }
 
@@ -919,6 +930,15 @@ class PublicSearchDiscoveryService(private val context: Context) {
                 if (i < discovered.handles.size) addQuery(quote(discovered.handles[i]), "discovered-handle")
                 if (i < discovered.emails.size) addQuery(quote(discovered.emails[i]), "discovered-email")
                 if (i < discovered.phones.size) addQuery(quote(discovered.phones[i]), "discovered-phone")
+            }
+
+            // Keep one exact query per discovered term in the high-priority
+            // round-robin above, then spend remaining budget on formatting and
+            // international variants without starving the other pivots.
+            discovered.phones.forEach { phone ->
+                phoneQueryVariants(phone).drop(1).forEach { variant ->
+                    addQuery(quote(variant), "discovered-phone-variant")
+                }
             }
 
             // Phase 1b: Other Safe typed seeds (URLs, domains, documents, archives).
@@ -953,10 +973,15 @@ class PublicSearchDiscoveryService(private val context: Context) {
             }
 
             val allPhones = (discovered.phones + originalPhones)
-                .distinct()
+                .filter { phoneDigits(it).length in 8..15 }
+                .distinctBy(::phoneDigits)
                 .take(discovered.phones.size + (if (deepResearch) 3 else 2))
 
-            allPhones.forEach { digits ->
+            allPhones.forEach { rawPhone ->
+                phoneQueryVariants(rawPhone).forEach { variant ->
+                    addQuery(quote(variant), "original-phone-variant")
+                }
+                val digits = phoneDigits(rawPhone)
                 if (digits.length >= 10) addQuery(quote(digits.takeLast(10)), "phone-partial-probe")
             }
 
@@ -1495,6 +1520,49 @@ class PublicSearchDiscoveryService(private val context: Context) {
             return unquoted.contains('@') || digits >= 8 ||
                 (!query.contains("site:", true) && query.startsWith('"') && query.endsWith('"'))
         }
+
+        /**
+         * Identifies a query containing only one phone value and its display
+         * punctuation. These queries can use ordinary HTTP indexes, but a
+         * browser renderer must not be held on a blocked search-engine page.
+         */
+        internal fun isPhoneOnlyQuery(query: String): Boolean {
+            val trimmed = query.trim()
+            val unquoted = trimmed.removePrefix("\"").removeSuffix("\"").trim()
+            if (unquoted.length == trimmed.length && trimmed.contains('"')) return false
+            if (unquoted.contains("site:", ignoreCase = true) || unquoted.any(Char::isLetter)) return false
+            val digits = phoneDigits(unquoted)
+            return digits.length in 8..15 && unquoted.all { it.isDigit() || it in "+-(). /" }
+        }
+
+        /**
+         * Returns source-preserving, international/compact, and national
+         * forms without guessing a country code for an unprefixed number.
+         */
+        private fun phoneQueryVariants(raw: String): List<String> {
+            val source = raw.trim()
+            val digits = phoneDigits(source)
+            if (digits.length !in 8..15) return emptyList()
+
+            val variants = linkedSetOf<String>()
+            if (source.any { !it.isDigit() }) variants += source
+
+            val internationalCompact = when {
+                source.startsWith("+") -> "+$digits"
+                source.startsWith("00") && digits.length > 2 -> "+${digits.drop(2)}"
+                else -> null
+            }
+            internationalCompact?.let { variants += it }
+            variants += digits
+
+            // A country-prefixed number commonly has a ten-digit national
+            // subscriber component. Retain that compact national probe while
+            // avoiding invented prefixes for shorter/unprefixed values.
+            if (digits.length > 10) variants += digits.takeLast(10)
+            return variants.toList()
+        }
+
+        private fun phoneDigits(value: String): String = value.filter(Char::isDigit)
 
         private fun handleAppearsInProfilePath(url: String, handle: String): Boolean {
             val uri = runCatching { URI(url) }.getOrNull() ?: return false

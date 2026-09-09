@@ -8,8 +8,11 @@ import io.dossier.app.domain.evidence.EvidenceRelationship
 import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.EvidenceState
 import io.dossier.app.domain.evidence.ImportEvidenceIdPolicy
+import io.dossier.app.domain.model.FindingAttribution
+import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.model.IdentityInput
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.pii.PiiExtractor
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -36,6 +39,8 @@ import java.util.Locale
  * scanner hit is therefore discovery, not an identity conclusion.
  */
 object ExternalOsintReportParser {
+    private val piiExtractor = PiiExtractor()
+
     enum class ScopeSignal { Handle, Email, Phone, ProfileUrl, Domain, Organization }
 
     enum class Source(
@@ -253,7 +258,7 @@ object ExternalOsintReportParser {
         var sensitiveRejected = 0
 
         records.forEach { record ->
-            if (source.rejectCredentialFields && record.hasSensitiveField) {
+            if (record.hasSensitiveField) {
                 rejected++
                 sensitiveRejected++
                 return@forEach
@@ -273,6 +278,70 @@ object ExternalOsintReportParser {
                 .toList()
 
             var emitted = false
+
+            // A locally selected authorized report may carry exact exposure
+            // values even when it has no public URL. Keep those observations
+            // inspectable, but never promote them to verified identity facts
+            // or recursive pivots from the import path.
+            val localFindings = if (source == Source.GenericPublicReport) {
+                piiExtractor.extract(
+                    text = localExposureText(record),
+                    sourceUrl = LOCAL_EXPOSURE_SOURCE_URL,
+                    identity = input
+                ).filter { finding ->
+                    finding.type in setOf(
+                        FindingType.Email,
+                        FindingType.Phone,
+                        FindingType.Address,
+                        FindingType.PostalCode
+                    )
+                }
+            } else {
+                emptyList()
+            }
+            localFindings.forEach { finding ->
+                val exactValue = finding.value.trim()
+                if (exactValue.isBlank()) return@forEach
+                val id = ImportEvidenceIdPolicy.stableId(
+                    prefix = "external-osint:${source.providerId}:exposure",
+                    providerId = source.providerId,
+                    importDigest = importDigest,
+                    rowMaterial = sanitized,
+                    discriminator = "${finding.type}|${canonicalFindingValue(finding.type, exactValue)}"
+                )
+                evidence += Evidence(
+                    id = id,
+                    kind = finding.type.toEvidenceKind(),
+                    value = exactValue,
+                    sourceUrl = null,
+                    snippet = sanitized.take(MAX_SNIPPET_CHARS),
+                    confidence = LOCAL_EXPOSURE_CONFIDENCE,
+                    risk = finding.risk,
+                    signals = listOf(
+                        "Exact ${finding.type.name.lowercase(Locale.ROOT)} value retained from a user-selected authorized exposure report",
+                        "Local import is an observation only; direct public verification is required",
+                        "Record matched explicit audit seed(s): ${matches.joinToString()}"
+                    ),
+                    providerId = source.providerId,
+                    retrievedAtEpochMillis = System.currentTimeMillis(),
+                    state = EvidenceState.Observed,
+                    reliability = EvidenceReliability.UserSupplied,
+                    sourceClassification = io.dossier.app.domain.evidence.ExposureSourceClassification.LOCAL_IMPORT,
+                    contentHashSha256 = sha256(sanitized),
+                    parserVersion = PARSER_VERSION,
+                    historical = source in HISTORICAL_SOURCES,
+                    attribution = FindingAttribution.Unconfirmed
+                )
+                relationships += EvidenceRelationship(
+                    fromValue = matches.first(),
+                    toValue = exactValue,
+                    relation = "IMPORTED_EXPOSURE_OBSERVATION",
+                    evidence = "Exact local ${finding.type.name.lowercase(Locale.ROOT)} observation; identity remains unverified",
+                    evidenceIds = listOf(id)
+                )
+                emitted = true
+            }
+
             urls.forEach { url ->
                 if (!urlAllowedByScope(url, scope, matches, source.allowedSignals)) return@forEach
                 val id = ImportEvidenceIdPolicy.stableId(
@@ -518,7 +587,7 @@ object ExternalOsintReportParser {
     }
 
     private fun recordFromFields(fields: Map<String, String>, fallbackText: String): Record {
-        val sensitive = fields.keys.any(::sensitiveKey)
+        val sensitive = fields.keys.any(::sensitiveKey) || containsCredentialMaterial(fallbackText)
         val safeFields = fields.filterKeys { !sensitiveKey(it) }
             .mapValues { (_, value) -> sanitize(value).take(MAX_FIELD_CHARS) }
         val text = safeFields.entries.joinToString(" | ") { "${it.key}=${it.value}" }
@@ -571,8 +640,28 @@ object ExternalOsintReportParser {
     }
 
     private fun containsCredentialMaterial(text: String): Boolean {
-        val lower = text.lowercase(Locale.ROOT)
-        return CREDENTIAL_MARKERS.any(lower::contains)
+        return CREDENTIAL_MARKER_REGEX.containsMatchIn(text)
+    }
+
+    private fun localExposureText(record: Record): String = record.fields.entries
+        .joinToString("\n") { (key, value) ->
+            "${key.replace(Regex("[._-]+"), " ")}: $value"
+        }
+        .ifBlank { record.text }
+        .take(MAX_RECORD_CHARS)
+
+    private fun FindingType.toEvidenceKind(): EvidenceKind = when (this) {
+        FindingType.Email -> EvidenceKind.Email
+        FindingType.Phone -> EvidenceKind.Phone
+        FindingType.Address -> EvidenceKind.Address
+        FindingType.PostalCode -> EvidenceKind.PostalCode
+        else -> EvidenceKind.PublicSearchEvidence
+    }
+
+    private fun canonicalFindingValue(type: FindingType, value: String): String = when (type) {
+        FindingType.Email -> value.lowercase(Locale.ROOT)
+        FindingType.Phone -> value.filter(Char::isDigit)
+        else -> value.lowercase(Locale.ROOT).replace(Regex("\\s+"), " ").trim()
     }
 
     private fun containsHandle(text: String, handle: String): Boolean {
@@ -632,16 +721,18 @@ object ExternalOsintReportParser {
     private const val MAX_SUMMARY_CHARS = 700
     private const val IMPORT_CONFIDENCE = 0.50f
     private const val SUMMARY_CONFIDENCE = 0.34f
+    private const val LOCAL_EXPOSURE_CONFIDENCE = 0.55f
     private const val PARSER_VERSION = "external-osint-report-v1"
+    private const val LOCAL_EXPOSURE_SOURCE_URL = "https://local.invalid/external-osint-report"
 
     private val HISTORICAL_SOURCES = setOf(Source.Pushshift, Source.GhArchive)
     private val SENSITIVE_KEYS = setOf(
         "password", "passwd", "pwd", "hash", "cookie", "session", "token",
         "secret", "credential", "privatekey", "apikey", "authorization", "stealer"
     )
-    private val CREDENTIAL_MARKERS = listOf(
-        "password=", "passwd=", "pwd=", "cookie=", "session=", "token=",
-        "private key", "api key=", "authorization: bearer", "stealer log"
+    private val CREDENTIAL_MARKER_REGEX = Regex(
+        "(?i)\\b(?:password|passwd|pwd|cookie|session|token|secret|credential|api[ -]?key|authorization)\\b\\s*[:=]|" +
+            "private\\s+key|authorization\\s*:\\s*bearer|stealer\\s+log"
     )
     private val URL = Regex("(?i)https?://[^\\s<>\\[\\]{}\\\"']+")
     private val JSON = Json { ignoreUnknownKeys = true; isLenient = true }

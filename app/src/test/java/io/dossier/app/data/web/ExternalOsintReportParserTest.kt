@@ -3,6 +3,7 @@ package io.dossier.app.data.web
 import io.dossier.app.domain.evidence.EvidenceKind
 import io.dossier.app.domain.evidence.EvidenceReliability
 import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.model.IdentityInput
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -137,6 +138,56 @@ Reddit,https://www.reddit.com/user/janedoe,found
 
         assertEquals(1, result.collection.evidence.size)
         assertEquals(EvidenceKind.Phone, result.collection.evidence.single().kind)
+    }
+
+    @Test
+    fun authorizedExposureRowsRetainExactContactAddressAndPostalObservationsLocally() {
+        val input = IdentityInput(fullName = "", emails = listOf("jane@example.test"))
+        val report = """{
+          "email": "jane@example.test",
+          "phone": "+1 (555) 010-1111",
+          "address": "123 Example Street, Testville, ZZ 12345",
+          "postal_code": "12345",
+          "source": "authorized export"
+        }""".trimIndent()
+
+        val result = ExternalOsintReportParser.parse(
+            ExternalOsintReportParser.Source.GenericPublicReport,
+            report,
+            input
+        )
+
+        val byKind = result.collection.evidence.associateBy { it.kind }
+        assertEquals("jane@example.test", byKind[EvidenceKind.Email]?.value)
+        assertEquals("+1 (555) 010-1111", byKind[EvidenceKind.Phone]?.value)
+        assertEquals("123 Example Street, Testville, ZZ 12345", byKind[EvidenceKind.Address]?.value)
+        assertEquals("12345", byKind[EvidenceKind.PostalCode]?.value)
+        assertTrue(result.collection.evidence.all { evidence ->
+            evidence.sourceUrl == null &&
+                evidence.state == EvidenceState.Observed &&
+                evidence.reliability == EvidenceReliability.UserSupplied &&
+                evidence.sourceClassification == ExposureSourceClassification.LOCAL_IMPORT
+        })
+    }
+
+    @Test
+    fun authorizedExposureRowsWithCredentialFieldsAreRejectedEntirely() {
+        val input = IdentityInput(fullName = "", emails = listOf("jane@example.test"))
+        val report = """{
+          "email": "jane@example.test",
+          "address": "123 Example Street, Testville, ZZ 12345",
+          "password": "must-not-import"
+        }""".trimIndent()
+
+        val result = ExternalOsintReportParser.parse(
+            ExternalOsintReportParser.Source.GenericPublicReport,
+            report,
+            input
+        )
+
+        assertTrue(result.collection.evidence.isEmpty())
+        assertTrue(result.collection.relationships.isEmpty())
+        assertTrue(result.warnings.any { it.contains("credential/secret", ignoreCase = true) })
     }
 
     @Test

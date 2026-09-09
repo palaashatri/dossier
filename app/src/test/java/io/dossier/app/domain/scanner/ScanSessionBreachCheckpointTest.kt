@@ -1,6 +1,18 @@
 package io.dossier.app.domain.scanner
 
+import io.dossier.app.domain.evidence.Evidence
+import io.dossier.app.domain.evidence.EvidenceCollection
+import io.dossier.app.domain.evidence.EvidenceKind
+import io.dossier.app.domain.evidence.EvidenceState
+import io.dossier.app.domain.evidence.ExposureSourceClassification
+import io.dossier.app.domain.model.Finding
+import io.dossier.app.domain.model.FindingAttribution
 import io.dossier.app.domain.model.FindingType
+import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.model.Platform
+import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.model.ProfileScanResult
+import io.dossier.app.domain.model.UsernameCandidate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -73,5 +85,59 @@ class ScanSessionBreachCheckpointTest {
 
         assertEquals("Public index mentions this email (1 hit(s)).", finding.evidenceSnippet)
         assertTrue(finding.evidenceSnippet!!.contains("1 hit(s)"))
+    }
+
+    @Test
+    fun breachEmailCollectionIncludesVerifiedDirectEmailsButNotCandidateSnippets() {
+        val profileUrl = "https://profile.example.test/jane"
+        val profile = ProfileScanResult(
+            candidate = UsernameCandidate(
+                username = "jane",
+                platform = Platform.Website,
+                url = profileUrl,
+                matchType = io.dossier.app.domain.model.UsernameMatchType.Exact,
+                confidence = 0.95f
+            ),
+            exists = true,
+            httpStatus = 200,
+            displayName = "Jane Example",
+            bio = null,
+            links = emptyList(),
+            extractedText = "Jane Example discovered@example.test",
+            findings = listOf(
+                Finding(
+                    type = FindingType.Email,
+                    value = "discovered@example.test",
+                    sourceUrl = profileUrl,
+                    evidenceSnippet = "Email: discovered@example.test",
+                    confidence = 0.95f,
+                    risk = RiskLevel.High,
+                    remediation = "Review email exposure",
+                    attribution = FindingAttribution.Verified
+                )
+            ),
+            confidenceSignals = listOf("direct profile"),
+            verified = true
+        )
+        val candidateSnippet = Evidence(
+            id = "candidate-email",
+            kind = EvidenceKind.Email,
+            value = "snippet@example.test",
+            sourceUrl = "https://search.example.test",
+            state = EvidenceState.Candidate,
+            sourceClassification = ExposureSourceClassification.PUBLIC_WEB
+        )
+
+        val emails = ScanSession.emailsForBreachChecks(
+            input = IdentityInput(fullName = "Jane Example", emails = listOf("input@example.test")),
+            profileResults = listOf(profile),
+            typedSeedEvidence = EvidenceCollection(evidence = listOf(candidateSnippet))
+        )
+
+        assertEquals(
+            listOf("input@example.test", "discovered@example.test"),
+            emails
+        )
+        assertTrue(emails.none { it == "snippet@example.test" })
     }
 }

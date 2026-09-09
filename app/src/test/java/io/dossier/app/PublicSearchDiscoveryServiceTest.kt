@@ -250,6 +250,28 @@ class PublicSearchDiscoveryServiceTest {
     }
 
     @Test
+    fun buildQueries_emitsFormattedInternationalCompactAndNationalPhoneVariants() {
+        val input = IdentityInput(
+            fullName = "",
+            phones = listOf("+1 (415) 555-2671")
+        )
+
+        val queries = PublicSearchDiscoveryService.buildSearchQueries(input)
+
+        assertTrue(queries.contains("\"+1 (415) 555-2671\""))
+        assertTrue(queries.contains("\"+14155552671\""))
+        assertTrue(queries.contains("\"14155552671\""))
+        assertTrue(queries.contains("\"4155552671\""))
+    }
+
+    @Test
+    fun phoneOnlyQueriesDoNotPermitBrowserFallback() {
+        assertTrue(PublicSearchDiscoveryService.isPhoneOnlyQuery("\"+1 (415) 555-2671\""))
+        assertTrue(PublicSearchDiscoveryService.isPhoneOnlyQuery("\"4155552671\""))
+        assertFalse(PublicSearchDiscoveryService.isPhoneOnlyQuery("\"4155552671\" site:example.test"))
+    }
+
+    @Test
     fun buildQueries_deepResearchAddsEmailSiteProbes() {
         val input = IdentityInput(
             fullName = "Jane Doe",

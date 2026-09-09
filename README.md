@@ -224,10 +224,10 @@ Equivalent extraction across every archive/provider source and universal archive
 ## Breach checks
 
 - Pwned Passwords five-character SHA-1 range lookup; the full password is not transmitted.
-- HIBP account range lookup when user-supplied supported access is available.
-- No silent fallback to sending a complete email address when the privacy-preserving account-range flow is unavailable.
+- HIBP authenticated breached-account lookup when user-supplied supported access is available; the normalized email is sent to HIBP only for this explicit network operation.
+- No silent fallback or misleading clean result when the account endpoint is unsupported, credentials are rejected, rate-limited, or unavailable.
 - Authoritative breach coverage remains distinct from general public-web exposure.
-- Not-configured, rejected, rate-limited and unavailable states are explicit.
+- Not-configured, unsupported, rejected, rate-limited and unavailable states are explicit.
 - Breach dates, provider/retrieval metadata and data classes are retained.
 - Dossier does not bundle or distribute stolen credential databases or leaked passwords.
 
@@ -284,7 +284,7 @@ A production-sized/adversarial AI evaluation corpus remains incomplete; correcte
 
 Dossier has no required project-operated backend and does not include analytics telemetry. It is not fully offline.
 
-Network-dependent operations can include public profile/source checks, search/image-index acquisition, archive retrieval, public candidate-image/model downloads, HIBP range queries and optional remote AI.
+Network-dependent operations can include public profile/source checks, search/image-index acquisition, archive retrieval, public candidate-image/model downloads, authenticated HIBP breached-account checks and optional remote AI.
 
 Local operations include reference-image processing, exact/perceptual image comparison, YuNet/SFace inference, PII parsing, graph/risk analysis, encrypted case and scan-checkpoint state, report generation and share-safe redaction.
 

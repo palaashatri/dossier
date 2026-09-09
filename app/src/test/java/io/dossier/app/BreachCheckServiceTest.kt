@@ -1,8 +1,10 @@
 package io.dossier.app
 
 import io.dossier.app.data.breach.BreachCheckService
+import io.dossier.app.domain.breach.EmailExposureResult
+import io.dossier.app.domain.breach.HibpCoverage
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class BreachCheckServiceTest {
@@ -16,9 +18,16 @@ class BreachCheckServiceTest {
     }
 
     @Test
-    fun emailHashPrefix_normalizesAddressAndUsesSixCharacters() {
-        assertEquals("567159", BreachCheckService.emailHashPrefix("  TEST@example.com  "))
-        assertEquals("test@example.com", BreachCheckService.normalizeEmailForHash(" TEST@Example.COM "))
+    fun hibpBreachedAccountUrl_normalizesAndEncodesOneAccountPathSegment() {
+        assertEquals(
+            "https://haveibeenpwned.com/api/v3/breachedaccount/test%40example.com",
+            BreachCheckService.hibpBreachedAccountUrl("  TEST@example.com  ")
+        )
+        assertEquals(
+            "https://haveibeenpwned.com/api/v3/breachedaccount/person%2Btag%40example.com",
+            BreachCheckService.hibpBreachedAccountUrl("person+tag@example.com")
+        )
+        assertEquals("test@example.com", BreachCheckService.normalizeEmailForLookup(" TEST@Example.COM "))
     }
 
     @Test
@@ -35,33 +44,6 @@ class BreachCheckServiceTest {
         )
 
         assertEquals(123456, count)
-    }
-
-    @Test
-    fun parseHibpEmailRange_retainsOnlyExactLocalSuffix() {
-        val body = """
-            [
-              {
-                "hashSuffix": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                "websites": ["UnrelatedBreach"]
-              },
-              {
-                "hashSuffix": "D622FFBB50B11B0EFD307BE358624A26EE",
-                "websites": ["Adobe", "Gawker", "Adobe"]
-              }
-            ]
-        """.trimIndent()
-
-        val breaches = BreachCheckService.parseHibpEmailRange(
-            body,
-            "D622FFBB50B11B0EFD307BE358624A26EE"
-        )
-
-        assertEquals(listOf("Adobe", "Gawker"), breaches)
-        assertTrue(
-            BreachCheckService.parseHibpEmailRange(body, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
-                .isEmpty()
-        )
     }
 
     @Test
@@ -83,5 +65,22 @@ class BreachCheckServiceTest {
         assertEquals(1, breaches.size)
         assertEquals("ExampleBreach", breaches.first().name)
         assertEquals("Passwords", breaches.first().dataClasses.last())
+    }
+
+    @Test
+    fun hibpHttpStatusesKeepUnsupportedAndRateLimitedCoverageExplicit() {
+        assertEquals(HibpCoverage.ConfirmedNoBreaches, BreachCheckService.hibpCoverageForHttpStatus(404))
+        assertEquals(HibpCoverage.CredentialsRejected, BreachCheckService.hibpCoverageForHttpStatus(401))
+        assertEquals(HibpCoverage.Unsupported, BreachCheckService.hibpCoverageForHttpStatus(403))
+        assertEquals(HibpCoverage.RateLimited, BreachCheckService.hibpCoverageForHttpStatus(429))
+        assertEquals(HibpCoverage.Unavailable, BreachCheckService.hibpCoverageForHttpStatus(503))
+        assertFalse(
+            EmailExposureResult(
+                email = "jane@example.test",
+                breaches = emptyList(),
+                publicEvidence = emptyList(),
+                hibpCoverage = HibpCoverage.Unsupported
+            ).hasAuthoritativeBreachCoverage
+        )
     }
 }

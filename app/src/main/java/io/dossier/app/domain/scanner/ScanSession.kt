@@ -29,6 +29,7 @@ import io.dossier.app.domain.evidence.EvidenceRuntimeCache
 import io.dossier.app.domain.evidence.EvidenceRelationshipPolicy
 import io.dossier.app.domain.evidence.ExposureEngine
 import io.dossier.app.domain.evidence.ExposureLedger
+import io.dossier.app.domain.evidence.ExposureSourceClassification
 import io.dossier.app.domain.evidence.RelationshipConfidence
 import io.dossier.app.domain.evidence.SharedDomainContributor
 import io.dossier.app.domain.evidence.SharedIdentifierContributor
@@ -97,6 +98,14 @@ object ScanSession {
     const val MAX_DRAFT_CORRECTIONS = 256
     private const val MEDIA_JOIN_TIMEOUT_MS = 1_000L
     private const val MEDIA_AVATAR_COMPARISON_TIMEOUT_MS = 15_000L
+    private val BREACH_ELIGIBLE_SOURCE_CLASSES = setOf(
+        ExposureSourceClassification.PUBLIC_WEB,
+        ExposureSourceClassification.PUBLIC_PROFILE,
+        ExposureSourceClassification.PUBLIC_DOCUMENT,
+        ExposureSourceClassification.PUBLIC_RECORD,
+        ExposureSourceClassification.ARCHIVE,
+        ExposureSourceClassification.AUTHORIZED_API
+    )
 
     var tempInput: IdentityInput? = null
     val selectedModel = MutableStateFlow(LocalAiModelType.DEFAULT)
@@ -760,7 +769,11 @@ object ScanSession {
             } else {
                 runBreachChecks(
                     context = context,
-                    emails = inputToUse.emails,
+                    emails = emailsForBreachChecks(
+                        input = inputToUse,
+                        profileResults = scanResults,
+                        typedSeedEvidence = typedSeedExecutionEvidence
+                    ),
                     deepResearch = deepResearch
                 )
             }
@@ -1394,6 +1407,48 @@ object ScanSession {
         }
     }
 
+    /**
+     * Returns launch emails plus exact emails whose public-page evidence was
+     * explicitly verified during this scan. Candidate snippets, breach/import
+     * records, and other unverified observations never become breach pivots.
+     */
+    internal fun emailsForBreachChecks(
+        input: IdentityInput,
+        profileResults: List<ProfileScanResult>,
+        typedSeedEvidence: EvidenceCollection = EvidenceCollection()
+    ): List<String> {
+        val launchEmails = input.emails
+            .map(String::trim)
+            .filter(String::isNotBlank)
+
+        val verifiedPublicEmails = (
+            profileResults.toEvidenceCollection(input).evidence + typedSeedEvidence.evidence
+            )
+            .asSequence()
+            .filter { evidence ->
+                evidence.kind == EvidenceKind.Email &&
+                    evidence.state == EvidenceState.Verified &&
+                    evidence.sourceClassification in BREACH_ELIGIBLE_SOURCE_CLASSES
+            }
+            .mapNotNull { evidence -> normalizeBreachEmail(evidence.value) }
+            .toList()
+
+        return (launchEmails + verifiedPublicEmails)
+            .distinctBy { it.lowercase(java.util.Locale.ROOT) }
+    }
+
+    private fun normalizeBreachEmail(value: String): String? {
+        val trimmed = value.trim()
+        if (trimmed.length !in 5..254 || trimmed.count { it == '@' } != 1 ||
+            trimmed.any(Char::isWhitespace) || trimmed.any { it.code < 0x20 || it.code == 0x7f }
+        ) return null
+        val local = trimmed.substringBefore('@')
+        val domain = trimmed.substringAfter('@')
+        if (local.isBlank() || domain.length < 3 || !domain.contains('.') ||
+            domain.startsWith('.') || domain.endsWith('.') || domain.contains("..")
+        ) return null
+        return trimmed
+    }
     private fun buildBreachCheckpoint(
         context: Context,
         requestId: String?,

@@ -96,7 +96,7 @@ fun BreachCheckScreen(onNavigateToBrowser: (String) -> Unit) {
                 modifier = Modifier.semantics { heading() }
             )
             Text(
-                text = "Authoritative HIBP results and ordinary public-web mentions are shown separately. Supported email lookups send a six-character SHA-1 prefix; password checks send a five-character prefix. Full passwords never leave this device.",
+                text = "Authoritative HIBP results and ordinary public-web mentions are shown separately. When an API key is configured, HIBP account checks send the normalized email address over HTTPS. Password checks send only a five-character SHA-1 prefix; full passwords never leave this device.",
                 color = NeuralTheme.TextSecondary,
                 fontSize = 12.5.sp,
                 lineHeight = 18.sp,
@@ -302,6 +302,7 @@ private fun EmailExposureCard(result: EmailExposureResult, onNavigateToBrowser: 
         result.hibpCoverage == HibpCoverage.ConfirmedNoBreaches -> "HIBP: NOT FOUND"
         result.hibpCoverage == HibpCoverage.NotConfigured -> "HIBP NOT RUN"
         result.hibpCoverage == HibpCoverage.CredentialsRejected -> "KEY REJECTED"
+        result.hibpCoverage == HibpCoverage.Unsupported -> "UNSUPPORTED"
         result.hibpCoverage == HibpCoverage.RateLimited -> "RATE LIMITED"
         result.hibpCoverage == HibpCoverage.Unavailable -> "HIBP UNAVAILABLE"
         else -> "REVIEW"
@@ -414,6 +415,7 @@ private fun coverageDescription(coverage: HibpCoverage): String = when (coverage
     HibpCoverage.ConfirmedNoBreaches -> "HIBP completed and returned no breached-account record."
     HibpCoverage.NotConfigured -> "No authoritative email breach lookup was performed."
     HibpCoverage.CredentialsRejected -> "Authoritative lookup failed because the API key was rejected."
+    HibpCoverage.Unsupported -> "Authoritative lookup is not supported for this HIBP account or endpoint."
     HibpCoverage.RateLimited -> "Authoritative lookup could not complete because HIBP rate-limited the request."
     HibpCoverage.Unavailable -> "Authoritative lookup was unavailable; do not interpret this as clear."
 }

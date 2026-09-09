@@ -30,6 +30,7 @@ enum class HibpCoverage {
     ConfirmedNoBreaches,
     NotConfigured,
     CredentialsRejected,
+    Unsupported,
     RateLimited,
     Unavailable
 }

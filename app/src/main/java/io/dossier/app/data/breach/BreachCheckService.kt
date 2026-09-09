@@ -20,6 +20,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.net.URLEncoder
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.Locale
@@ -32,11 +33,10 @@ import java.util.concurrent.TimeUnit
  * separate channels. A missing API key can never be mistaken for a confirmed
  * zero-breach result.
  *
- * Email breach lookups use HIBP's authenticated k-anonymity range API: Dossier
- * normalizes and hashes the email locally, sends only the first six SHA-1
- * characters, matches the returned suffix locally, and immediately discards
- * every non-matching range entry. The complete email address is never sent to
- * HIBP by this client.
+ * Email breach lookups use HIBP's authenticated breached-account endpoint. The
+ * account is normalized locally and URL-encoded as one path segment; this
+ * network operation is only performed when the user has configured an HIBP API
+ * key and started the breach check.
  */
 class BreachCheckService(private val context: Context) {
 
@@ -45,9 +45,6 @@ class BreachCheckService(private val context: Context) {
         .readTimeout(15, TimeUnit.SECONDS)
         .callTimeout(20, TimeUnit.SECONDS)
         .build()
-
-    @Volatile
-    private var breachCatalogue: Map<String, EmailBreach>? = null
 
     suspend fun checkPasswords(passwords: List<String>): List<PasswordExposureResult> =
         withContext(Dispatchers.IO) {
@@ -131,13 +128,9 @@ class BreachCheckService(private val context: Context) {
             )
         }
 
-        val emailHash = sha1Hex(normalizeEmailForHash(email))
-        val prefix = emailHash.take(EMAIL_PREFIX_LENGTH)
-        val suffix = emailHash.drop(EMAIL_PREFIX_LENGTH)
-
         return try {
             val request = Request.Builder()
-                .url("https://haveibeenpwned.com/api/v3/breachedaccount/range/$prefix")
+                .url(hibpBreachedAccountUrl(email))
                 .header("User-Agent", USER_AGENT)
                 .header("hibp-api-key", key)
                 .build()
@@ -145,36 +138,32 @@ class BreachCheckService(private val context: Context) {
                 when (response.code) {
                     200 -> {
                         val retrievedAt = Instant.now().toString()
-                        // Only the exact local suffix match is retained. All other
-                        // records in the anonymity range are discarded immediately.
-                        val breachNames = parseHibpEmailRange(
-                            response.body?.string().orEmpty(),
-                            suffix
-                        )
-                        if (breachNames.isEmpty()) {
+                        val body = response.body?.string().orEmpty()
+                        if (body.isBlank()) {
+                            return@use HibpFetchResult(
+                                emptyList(),
+                                HibpCoverage.Unavailable,
+                                "HIBP breached-account response was empty."
+                            )
+                        }
+                        val breaches = runCatching {
+                            parseHibpBreaches(body)
+                                .map { it.copy(retrievedAtUtc = retrievedAt) }
+                        }.getOrElse { error ->
+                            return@use HibpFetchResult(
+                                emptyList(),
+                                HibpCoverage.Unavailable,
+                                "HIBP breached-account response could not be parsed: " +
+                                    (error.localizedMessage ?: error.javaClass.simpleName)
+                            )
+                        }
+                        if (breaches.isEmpty()) {
                             HibpFetchResult(
                                 emptyList(),
                                 HibpCoverage.ConfirmedNoBreaches,
                                 null
                             )
                         } else {
-                            val catalogue = getBreachCatalogue()
-                            val breaches = breachNames.map { name ->
-                                val catalogued = catalogue[name.lowercase(Locale.ROOT)]
-                                if (catalogued != null) {
-                                    catalogued.copy(retrievedAtUtc = retrievedAt)
-                                } else {
-                                    EmailBreach(
-                                        name = name,
-                                        title = name,
-                                        domain = "",
-                                        breachDate = null,
-                                        dataClasses = emptyList(),
-                                        sourceProvider = HIBP_PROVIDER,
-                                        retrievedAtUtc = retrievedAt
-                                    )
-                                }
-                            }
                             HibpFetchResult(
                                 breaches,
                                 HibpCoverage.ConfirmedBreaches,
@@ -182,25 +171,29 @@ class BreachCheckService(private val context: Context) {
                             )
                         }
                     }
-                    401 -> HibpFetchResult(
+                    404 -> HibpFetchResult(
                         emptyList(),
-                        HibpCoverage.CredentialsRejected,
-                        "HIBP API credentials were rejected."
+                        HibpCoverage.ConfirmedNoBreaches,
+                        null
                     )
-                    403 -> HibpFetchResult(
-                        emptyList(),
-                        HibpCoverage.Unavailable,
-                        "HIBP denied the privacy-preserving email range lookup. The configured subscription may not include this endpoint. Dossier did not fall back to sending the complete email address."
-                    )
-                    429 -> HibpFetchResult(
-                        emptyList(),
-                        HibpCoverage.RateLimited,
-                        "HIBP rate limit reached. Try again later."
-                    )
+                    401, 403, 429 -> {
+                        val coverage = hibpCoverageForHttpStatus(response.code)
+                        HibpFetchResult(
+                            emptyList(),
+                            coverage,
+                            when (coverage) {
+                                HibpCoverage.CredentialsRejected -> "HIBP API credentials were rejected."
+                                HibpCoverage.Unsupported ->
+                                    "HIBP does not support the breached-account lookup for this account or subscription."
+                                HibpCoverage.RateLimited -> "HIBP rate limit reached. Try again later."
+                                else -> "HIBP email lookup did not complete."
+                            }
+                        )
+                    }
                     else -> HibpFetchResult(
                         emptyList(),
                         HibpCoverage.Unavailable,
-                        "HIBP k-anonymity lookup failed: HTTP ${response.code}"
+                        "HIBP breached-account lookup failed: HTTP ${response.code}"
                     )
                 }
             }
@@ -210,35 +203,8 @@ class BreachCheckService(private val context: Context) {
             HibpFetchResult(
                 emptyList(),
                 HibpCoverage.Unavailable,
-                "HIBP k-anonymity lookup failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
+                "HIBP breached-account lookup failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
             )
-        }
-    }
-
-    /**
-     * The public breach catalogue contains incident metadata only; it does not
-     * search for an email address. Cache it per service instance and use it only
-     * to enrich breach names returned by the locally matched range record.
-     */
-    private fun getBreachCatalogue(): Map<String, EmailBreach> {
-        breachCatalogue?.let { return it }
-        return synchronized(this) {
-            breachCatalogue?.let { return@synchronized it }
-            val fetched = runCatching {
-                val request = Request.Builder()
-                    .url("https://haveibeenpwned.com/api/v3/breaches")
-                    .header("User-Agent", USER_AGENT)
-                    .build()
-                client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use emptyMap()
-                    val retrievedAt = Instant.now().toString()
-                    parseHibpBreaches(response.body?.string().orEmpty())
-                        .map { it.copy(retrievedAtUtc = retrievedAt) }
-                        .associateBy { it.name.lowercase(Locale.ROOT) }
-                }
-            }.getOrDefault(emptyMap())
-            breachCatalogue = fetched
-            fetched
         }
     }
 
@@ -271,18 +237,27 @@ class BreachCheckService(private val context: Context) {
         private const val USER_AGENT = "Dossier Android self-audit app"
         private const val HIBP_PROVIDER = "Have I Been Pwned"
         private const val PASSWORD_PREFIX_LENGTH = 5
-        private const val EMAIL_PREFIX_LENGTH = 6
-
         fun sha1Hex(input: String): String {
             val digest = MessageDigest.getInstance("SHA-1").digest(input.toByteArray(Charsets.UTF_8))
             return digest.joinToString("") { "%02X".format(Locale.US, it) }
         }
 
-        fun normalizeEmailForHash(email: String): String =
+        fun normalizeEmailForLookup(email: String): String =
             email.trim().lowercase(Locale.ROOT)
 
-        fun emailHashPrefix(email: String): String =
-            sha1Hex(normalizeEmailForHash(email)).take(EMAIL_PREFIX_LENGTH)
+        /** URL-encodes one normalized account as the HIBP path segment. */
+        fun hibpBreachedAccountUrl(email: String): String =
+            "https://haveibeenpwned.com/api/v3/breachedaccount/" +
+                URLEncoder.encode(normalizeEmailForLookup(email), "UTF-8")
+
+        /** Maps non-success HIBP responses without collapsing unsupported or rate-limited coverage into a clean result. */
+        fun hibpCoverageForHttpStatus(statusCode: Int): HibpCoverage = when (statusCode) {
+            404 -> HibpCoverage.ConfirmedNoBreaches
+            401 -> HibpCoverage.CredentialsRejected
+            403 -> HibpCoverage.Unsupported
+            429 -> HibpCoverage.RateLimited
+            else -> HibpCoverage.Unavailable
+        }
 
         fun parsePwnedPasswordRange(body: String, suffix: String): Int {
             val suffixUpper = suffix.uppercase(Locale.ROOT)
@@ -295,22 +270,6 @@ class BreachCheckService(private val context: Context) {
                 }
                 .firstOrNull { (candidateSuffix, _) -> candidateSuffix == suffixUpper }
                 ?.second ?: 0
-        }
-
-        /** Returns only breach names associated with the exact local hash suffix. */
-        fun parseHibpEmailRange(body: String, suffix: String): List<String> {
-            if (body.isBlank()) return emptyList()
-            val suffixUpper = suffix.uppercase(Locale.ROOT)
-            val matches = runCatching {
-                Json { ignoreUnknownKeys = true }
-                    .decodeFromString<List<HibpEmailRangeDto>>(body)
-            }.getOrDefault(emptyList())
-            return matches
-                .firstOrNull { it.hashSuffix.uppercase(Locale.ROOT) == suffixUpper }
-                ?.websites
-                ?.filter { it.isNotBlank() }
-                ?.distinct()
-                .orEmpty()
         }
 
         fun parseHibpBreaches(body: String): List<EmailBreach> {
@@ -333,12 +292,6 @@ class BreachCheckService(private val context: Context) {
         }
     }
 }
-
-@Serializable
-private data class HibpEmailRangeDto(
-    val hashSuffix: String,
-    val websites: List<String> = emptyList()
-)
 
 @Serializable
 private data class HibpBreachDto(
