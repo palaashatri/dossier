@@ -109,4 +109,29 @@ class PiiExtractorTest {
         assertEquals(FindingType.Organization, replit?.type)
         assertEquals(FindingType.Location, delhi?.type)
     }
+
+    @Test
+    fun extractsStreetAddressOnlyFromAddressContextAndPreservesSourceString() {
+        val findings = PiiExtractor().extract(
+            "Jane Example\nAddress: 123 Example Street, Testville, ZZ 12345\nViews: 12345",
+            "https://profile.example.test/jane"
+        )
+
+        val address = findings.firstOrNull { it.type == FindingType.Address }
+        assertEquals("123 Example Street, Testville, ZZ 12345", address?.value)
+        assertTrue(address?.evidenceSnippet?.contains("123 Example Street, Testville, ZZ 12345") == true)
+        assertTrue(findings.none { it.type == FindingType.Address && it.value == "12345" })
+        assertEquals("12345", findings.single { it.type == FindingType.PostalCode }.value)
+        assertTrue(findings.none { it.type == FindingType.PostalCode && it.evidenceSnippet?.contains("Views") == true })
+    }
+
+    @Test
+    fun extractsPostalCodeOnlyFromPostalContextAndRejectsCountersAndBoilerplate() {
+        val findings = PiiExtractor().extract(
+            "Postal code: 12345\nViews: 54321\nPostal code lookup: 99999\nNext page: 11111",
+            "https://directory.example.test/search"
+        )
+
+        assertEquals(listOf("12345"), findings.filter { it.type == FindingType.PostalCode }.map { it.value })
+    }
 }

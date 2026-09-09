@@ -576,6 +576,7 @@ object CaseTimelineBuilder {
         EvidenceKind.Email.name,
         EvidenceKind.Phone.name,
         EvidenceKind.Address.name,
+        EvidenceKind.PostalCode.name,
         EvidenceKind.Location.name,
         EvidenceKind.Username.name,
         EvidenceKind.Profile.name,

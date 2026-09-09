@@ -3118,12 +3118,34 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                 }
                 if (
                     directlyObservedOnProfile &&
-                    finding.type in setOf(FindingType.Email, FindingType.Phone) &&
-                    finding.attribution == FindingAttribution.ExactSelfSupplied
+                    finding.type in setOf(
+                        FindingType.Email,
+                        FindingType.Phone,
+                        FindingType.Address,
+                        FindingType.PostalCode
+                    ) &&
+                    finding.attribution !in setOf(
+                        FindingAttribution.Candidate,
+                        FindingAttribution.Conflicting
+                    )
                 ) {
+                    // The scanner's verified-profile result is the explicit
+                    // provenance marker here: the exact value was parsed from
+                    // the same page that independently passed identity
+                    // verification. Preserve the extractor attribution (it
+                    // still explains whether the value matched user input),
+                    // while upgrading only the evidence state used by the
+                    // bounded typed frontier. Candidate/conflicting findings
+                    // remain evidence-only even when a result object is
+                    // malformed or manually assembled in a test.
                     withPivotMetadata.copy(
                         state = EvidenceState.Verified,
-                        reliability = EvidenceReliability.DirectPublicProfile
+                        reliability = EvidenceReliability.DirectPublicProfile,
+                        sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+                        signals = (
+                            withPivotMetadata.signals +
+                                "Exact high-entropy value observed on directly verified public profile"
+                            ).distinct()
                     )
                 } else {
                     withPivotMetadata

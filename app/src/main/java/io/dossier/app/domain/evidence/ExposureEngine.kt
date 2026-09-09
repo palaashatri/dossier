@@ -85,7 +85,9 @@ class ExposureEngine {
     private fun dimensionOf(finding: Finding): List<ExposureDimension> = when (finding.type) {
         FindingType.Email -> listOf(ExposureDimension.Contact, ExposureDimension.Identity)
         FindingType.Phone -> listOf(ExposureDimension.Contact)
-        FindingType.Address, FindingType.Location -> listOf(ExposureDimension.Location, ExposureDimension.Personal)
+        FindingType.Address,
+        FindingType.PostalCode,
+        FindingType.Location -> listOf(ExposureDimension.Location, ExposureDimension.Personal)
         FindingType.Username, FindingType.UsernameReuse -> listOf(ExposureDimension.Identity)
         FindingType.Profile, FindingType.PlausibleProfileMatch -> listOf(ExposureDimension.Professional, ExposureDimension.Identity)
         FindingType.Organization -> listOf(ExposureDimension.Professional)

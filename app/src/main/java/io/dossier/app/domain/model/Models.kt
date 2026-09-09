@@ -57,6 +57,7 @@ enum class FindingType {
     Email,
     Phone,
     Address,
+    PostalCode,
     Location,
     Username,
     Profile,

@@ -1962,6 +1962,7 @@ object ScanSession {
         EvidenceKind.Email,
         EvidenceKind.Phone,
         EvidenceKind.Address,
+        EvidenceKind.PostalCode,
         EvidenceKind.Location,
         EvidenceKind.Organization,
         EvidenceKind.Username,

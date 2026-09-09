@@ -372,7 +372,7 @@ data class AiAnalysisSnapshot(
                 EntityType.Username -> emptySet()
                 EntityType.Profile -> setOf(EvidenceKind.Profile, EvidenceKind.PlausibleProfileMatch)
                 EntityType.Organization -> setOf(EvidenceKind.Organization)
-                EntityType.Location -> setOf(EvidenceKind.Location, EvidenceKind.Address)
+                EntityType.Location -> setOf(EvidenceKind.Location, EvidenceKind.Address, EvidenceKind.PostalCode)
                 EntityType.Image -> setOf(EvidenceKind.ImageConsistency, EvidenceKind.PublicImageEvidence)
                 EntityType.Website -> setOf(EvidenceKind.PublicSearchEvidence, EvidenceKind.PublicImageEvidence)
                 EntityType.Person,
@@ -561,6 +561,7 @@ data class AiAnalysisSnapshot(
                 FindingType.Email -> EvidenceKind.Email
                 FindingType.Phone -> EvidenceKind.Phone
                 FindingType.Address -> EvidenceKind.Address
+                FindingType.PostalCode -> EvidenceKind.PostalCode
                 FindingType.Location -> EvidenceKind.Location
                 FindingType.Username -> EvidenceKind.Username
                 FindingType.Profile -> EvidenceKind.Profile

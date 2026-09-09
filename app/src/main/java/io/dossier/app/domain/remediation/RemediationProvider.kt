@@ -166,7 +166,9 @@ class RemediationProvider {
     private fun problemFor(f: Finding): String = when (f.type) {
         FindingType.Email -> "Email address exposed publicly"
         FindingType.Phone -> "Phone number exposed publicly"
-        FindingType.Location, FindingType.Address -> "Physical location exposed"
+        FindingType.Location,
+        FindingType.Address,
+        FindingType.PostalCode -> "Physical location exposed"
         FindingType.Username, FindingType.UsernameReuse -> "Username reused across platforms"
         FindingType.Profile, FindingType.PlausibleProfileMatch -> "Public profile linked to identity"
         FindingType.Organization -> "Organization affiliation exposed"
@@ -179,7 +181,9 @@ class RemediationProvider {
     private fun defaultFixFor(f: Finding): String = when (f.type) {
         FindingType.Email -> "Use an email forwarder for public bios."
         FindingType.Phone -> "Remove the number and switch to TOTP 2FA."
-        FindingType.Location, FindingType.Address -> "Generalize the location in public profiles."
+        FindingType.Location,
+        FindingType.Address,
+        FindingType.PostalCode -> "Generalize the location in public profiles."
         FindingType.Username, FindingType.UsernameReuse -> "Adopt distinct handles per platform."
         FindingType.Profile, FindingType.PlausibleProfileMatch -> "Review and tighten the profile's visibility."
         FindingType.Organization -> "Limit public mention of the affiliation."
@@ -203,4 +207,3 @@ class RemediationProvider {
         RiskLevel.Critical -> 100
     }
 }
-

@@ -23,6 +23,7 @@ internal fun Finding.toEvidence(
         FindingType.Email -> EvidenceKind.Email
         FindingType.Phone -> EvidenceKind.Phone
         FindingType.Address -> EvidenceKind.Address
+        FindingType.PostalCode -> EvidenceKind.PostalCode
         FindingType.Location -> EvidenceKind.Location
         FindingType.Username -> EvidenceKind.Username
         FindingType.Profile -> EvidenceKind.Profile

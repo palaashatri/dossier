@@ -192,6 +192,8 @@ object TypedSeedEvidenceAdapter {
     private fun EvidenceKind.toTypedSeedKind(): TypedSeedKind? = when (this) {
         EvidenceKind.Email -> TypedSeedKind.Email
         EvidenceKind.Phone -> TypedSeedKind.Phone
+        EvidenceKind.Address -> TypedSeedKind.Address
+        EvidenceKind.PostalCode -> TypedSeedKind.PostalCode
         EvidenceKind.Profile,
         EvidenceKind.Url -> TypedSeedKind.Url
         EvidenceKind.Domain -> TypedSeedKind.Domain

@@ -1235,6 +1235,15 @@ class PublicSearchDiscoveryService(private val context: Context) {
                         score += 0.24f
                         directIdentitySignals++
                     }
+                    TypedSeedKind.Address,
+                    TypedSeedKind.PostalCode -> {
+                        // These high-entropy values are not represented in
+                        // IdentityInput, so give an exact typed query its own
+                        // bounded signal instead of dropping every result
+                        // below the index threshold.
+                        score += 0.22f
+                        directIdentitySignals++
+                    }
                     TypedSeedKind.Location -> {
                         // Location is only queryable through the dedicated
                         // location+identity-context plan. This modest boost

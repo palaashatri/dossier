@@ -438,7 +438,9 @@ object EntityGraphBuilder {
     private fun evidenceKindToEntityType(kind: EvidenceKind): EntityType? = when (kind) {
         EvidenceKind.Email -> EntityType.Email
         EvidenceKind.Phone -> EntityType.Phone
-        EvidenceKind.Address, EvidenceKind.Location -> EntityType.Location
+        EvidenceKind.Address,
+        EvidenceKind.PostalCode,
+        EvidenceKind.Location -> EntityType.Location
         EvidenceKind.Username, EvidenceKind.UsernameReuse -> EntityType.Username
         EvidenceKind.Profile, EvidenceKind.PlausibleProfileMatch -> EntityType.Profile
         EvidenceKind.Organization -> EntityType.Organization
@@ -475,6 +477,7 @@ object EntityGraphBuilder {
             EvidenceKind.Email -> GraphEntityKind.Email
             EvidenceKind.Phone -> GraphEntityKind.Phone
             EvidenceKind.Address,
+            EvidenceKind.PostalCode,
             EvidenceKind.Location -> GraphEntityKind.Location
             EvidenceKind.Username,
             EvidenceKind.UsernameReuse -> GraphEntityKind.Username
@@ -498,7 +501,9 @@ object EntityGraphBuilder {
     private fun findingTypeToEntityType(type: FindingType): EntityType? = when (type) {
         FindingType.Email -> EntityType.Email
         FindingType.Phone -> EntityType.Phone
-        FindingType.Address, FindingType.Location -> EntityType.Location
+        FindingType.Address,
+        FindingType.PostalCode,
+        FindingType.Location -> EntityType.Location
         FindingType.Username, FindingType.UsernameReuse -> EntityType.Username
         FindingType.Profile, FindingType.PlausibleProfileMatch -> EntityType.Profile
         FindingType.Organization -> EntityType.Organization

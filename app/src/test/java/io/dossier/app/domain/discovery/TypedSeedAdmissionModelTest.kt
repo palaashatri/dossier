@@ -73,6 +73,8 @@ class TypedSeedAdmissionModelTest {
         val kinds = listOf(
             TypedSeedKind.Email,
             TypedSeedKind.Phone,
+            TypedSeedKind.Address,
+            TypedSeedKind.PostalCode,
             TypedSeedKind.Url,
             TypedSeedKind.Domain,
             TypedSeedKind.Document,
@@ -88,6 +90,8 @@ class TypedSeedAdmissionModelTest {
             val value = when (kind) {
                 TypedSeedKind.Email -> "pivot@example.test"
                 TypedSeedKind.Phone -> "15550100100"
+                TypedSeedKind.Address -> "123 Example Street, Testville, ZZ 12345"
+                TypedSeedKind.PostalCode -> "12345"
                 TypedSeedKind.Url,
                 TypedSeedKind.Document,
                 TypedSeedKind.Archive,

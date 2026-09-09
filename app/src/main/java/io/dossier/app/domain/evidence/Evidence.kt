@@ -153,6 +153,7 @@ enum class EvidenceKind {
     Email,
     Phone,
     Address,
+    PostalCode,
     Location,
     Username,
     Profile,
@@ -354,6 +355,7 @@ fun Evidence.toFinding(): Finding = Finding(
         EvidenceKind.Email -> FindingType.Email
         EvidenceKind.Phone -> FindingType.Phone
         EvidenceKind.Address -> FindingType.Address
+        EvidenceKind.PostalCode -> FindingType.PostalCode
         EvidenceKind.Location -> FindingType.Location
         EvidenceKind.Username -> FindingType.Username
         EvidenceKind.Profile -> FindingType.Profile
@@ -408,6 +410,7 @@ fun Finding.toEvidence(): Evidence = Evidence(
         FindingType.Email -> EvidenceKind.Email
         FindingType.Phone -> EvidenceKind.Phone
         FindingType.Address -> EvidenceKind.Address
+        FindingType.PostalCode -> EvidenceKind.PostalCode
         FindingType.Location -> EvidenceKind.Location
         FindingType.Username -> EvidenceKind.Username
         FindingType.Profile -> EvidenceKind.Profile

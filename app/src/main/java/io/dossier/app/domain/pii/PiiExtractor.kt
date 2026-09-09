@@ -11,6 +11,15 @@ import java.net.URI
 class PiiExtractor {
     private val emailRegex = Regex("(?i)(?<!@)\\b[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}\\b")
     private val phoneRegex = Regex("(?<!\\d)(?:\\+\\d{1,3}[ .-]?)?(?:\\(?\\d{2,4}\\)?[ .-]?){2,5}\\d{2,4}(?!\\d)")
+    private val addressContextRegex = Regex(
+        """(?im)\b(?:street\s+address|mailing\s+address|home\s+address|postal\s+address|address|residence|lives\s+at|located\s+at)\s*[:\-]?\s*([^\r\n]{1,220})"""
+    )
+    private val streetAddressShapeRegex = Regex(
+        """(?i)^\d{1,6}[A-Z]?(?:[-/]\d{1,6}[A-Z]?)?\s+[A-Z\p{L}][\p{L}0-9.'-]*(?:\s+[A-Z0-9\p{L}][\p{L}0-9.'-]*){0,8}\s+(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|parkway|pkwy\.?|highway|hwy\.?|court|ct\.?|circle|cir\.?|terrace|ter\.?|trail|trl\.?|place|pl\.?)\b.*"""
+    )
+    private val postalCodeRegex = Regex(
+        """(?i)(?<![\p{L}\d])(?:\d{5}(?:-\d{4})?|\d{6}|[A-Z]\d[A-Z]\s?\d[A-Z]\d)(?![\p{L}\d])"""
+    )
     private val locationRegex = Regex(
         "\\b(?i:lives in|based in|located in|from|location\\s*:)\\s+" +
             "([A-Z][\\p{L}.'-]+(?:\\s+[A-Z][\\p{L}.'-]+){0,4})"
@@ -77,6 +86,47 @@ class PiiExtractor {
                 } else {
                     FindingAttribution.Unconfirmed
                 }
+            )
+        }
+
+        val addressRanges = mutableListOf<IntRange>()
+        addressContextRegex.findAll(text).forEach { match ->
+            val candidate = cleanAddressCandidate(match.groupValues[1])
+            if (!streetAddressShapeRegex.matches(candidate)) return@forEach
+            val groupRange = match.groups[1]?.range ?: return@forEach
+            val valueStart = text.indexOf(candidate, groupRange.first)
+            if (valueStart < 0) return@forEach
+            val valueRange = valueStart..(valueStart + candidate.length - 1)
+            addressRanges += valueRange
+            addHighEntropyFinding(
+                findings = findings,
+                type = FindingType.Address,
+                value = candidate,
+                evidence = match.value,
+                sourceUrl = sourceUrl,
+                attribution = attribution,
+                remediation = "Review and reduce precise public address exposure."
+            )
+        }
+
+        postalCodeRegex.findAll(text).forEach { match ->
+            val raw = match.value
+            val normalized = raw.filterNot(Char::isWhitespace)
+            if (looksLikeDateOrCounter(normalized, raw) || isPostalBoilerplate(text, match.range)) {
+                return@forEach
+            }
+            if (!hasPostalContext(text, match.range, addressRanges)) return@forEach
+            addHighEntropyFinding(
+                findings = findings,
+                type = FindingType.PostalCode,
+                value = raw,
+                // Postal evidence is intentionally line-scoped. A generic
+                // +/- character snippet can pull an unrelated counter or
+                // provider panel into the provenance shown for this value.
+                evidence = lineSnippet(text, match.range),
+                sourceUrl = sourceUrl,
+                attribution = attribution,
+                remediation = "Review and reduce precise public postal-code exposure."
             )
         }
 
@@ -154,6 +204,95 @@ class PiiExtractor {
                 else -> FindingAttribution.Unconfirmed
             }
         )
+    }
+
+    private fun addHighEntropyFinding(
+        findings: MutableList<Finding>,
+        type: FindingType,
+        value: String,
+        evidence: String,
+        sourceUrl: String,
+        attribution: Attribution,
+        remediation: String
+    ) {
+        val associated = attribution.strong
+        findings += Finding(
+            type = type,
+            value = value,
+            sourceUrl = sourceUrl,
+            evidenceSnippet = "$evidence ${label(false, associated)}".take(260),
+            confidence = if (associated) 0.68f else 0.36f,
+            risk = if (associated) RiskLevel.High else RiskLevel.Low,
+            remediation = remediation,
+            attribution = if (associated) {
+                FindingAttribution.IndependentPageSignals
+            } else {
+                FindingAttribution.Unconfirmed
+            }
+        )
+    }
+
+    private fun cleanAddressCandidate(raw: String): String {
+        var value = raw.trim()
+        TRAILING_CONTEXT_REGEX.find(value)?.let { boundary ->
+            value = value.substring(0, boundary.range.first).trim()
+        }
+        SENTENCE_BOUNDARY_REGEX.find(value)?.let { boundary ->
+            value = value.substring(0, boundary.range.first).trim()
+        }
+        value = value.trimEnd(',', ';', ':')
+        if (value.endsWith('.') && !ADDRESS_ABBREVIATION_PERIOD_REGEX.containsMatchIn(value)) {
+            value = value.dropLast(1)
+        }
+        return value.trim()
+    }
+
+    private fun hasPostalContext(
+        text: String,
+        range: IntRange,
+        addressRanges: List<IntRange>
+    ): Boolean {
+        if (addressRanges.any { range.first in it }) return true
+        // Keep the label check on the same rendered line. Looking back across
+        // an arbitrary character window lets a nearby navigation counter (for
+        // example, "Views: 12345") inherit a postal label from an unrelated
+        // address or provider panel above it.
+        val lineStart = text.lastIndexOf('\n', range.first).let { index ->
+            if (index < 0) 0 else index + 1
+        }
+        val lineEnd = text.indexOf('\n', range.last).let { index ->
+            if (index < 0) text.length else index
+        }
+        val beforeMatch = text.substring(lineStart, range.first).lowercase()
+        return POSTAL_CONTEXT_REGEX.containsMatchIn(beforeMatch) &&
+            range.last < lineEnd
+    }
+
+    private fun isPostalBoilerplate(text: String, range: IntRange): Boolean {
+        val lineStart = lineStart(text, range.first)
+        val lineEnd = lineEnd(text, range.last)
+        val line = text.substring(lineStart, lineEnd).lowercase()
+        val matchStart = range.first - lineStart
+        val matchEnd = range.last - lineStart + 1
+
+        // Only treat boilerplate as belonging to this value when it is on the
+        // same rendered line and close to the matched code. Looking through a
+        // broad snippet lets a valid postal value inherit "postal code lookup"
+        // from a later, unrelated panel.
+        return POSTAL_BOILERPLATE.any { phrase ->
+            var phraseStart = line.indexOf(phrase)
+            while (phraseStart >= 0) {
+                val phraseEnd = phraseStart + phrase.length
+                val distance = when {
+                    phraseEnd <= matchStart -> matchStart - phraseEnd
+                    matchEnd <= phraseStart -> phraseStart - matchEnd
+                    else -> 0
+                }
+                if (distance <= POSTAL_BOILERPLATE_CONTEXT_CHARS) return@any true
+                phraseStart = line.indexOf(phrase, phraseStart + 1)
+            }
+            false
+        }
     }
 
     private fun addNamedExposure(
@@ -271,6 +410,36 @@ class PiiExtractor {
         return text.substring(start, end).replace(Regex("\\s+"), " ").trim().take(240)
     }
 
+    private fun lineSnippet(text: String, range: IntRange): String {
+        val start = lineStart(text, range.first)
+        val end = lineEnd(text, range.last)
+        val rawLine = text.substring(start, end)
+        val line = rawLine.replace(Regex("\\s+"), " ").trim()
+        if (rawLine.length <= 240) return line
+
+        // Keep a bounded local context while ensuring the exact value remains
+        // visible when a source renders one very long line.
+        val relativeStart = (range.first - start).coerceIn(0, rawLine.length)
+        val windowStart = (relativeStart - 100).coerceAtLeast(0)
+        val windowEnd = (windowStart + 240).coerceAtMost(rawLine.length)
+        return rawLine.substring(windowStart, windowEnd).replace(Regex("\\s+"), " ").trim()
+    }
+
+    private fun lineStart(text: String, index: Int): Int {
+        val newline = text.lastIndexOf('\n', index)
+        val carriageReturn = text.lastIndexOf('\r', index)
+        return maxOf(newline, carriageReturn) + 1
+    }
+
+    private fun lineEnd(text: String, index: Int): Int {
+        val newline = text.indexOf('\n', index)
+        val carriageReturn = text.indexOf('\r', index)
+        return listOf(newline, carriageReturn)
+            .filter { it >= 0 }
+            .minOrNull()
+            ?: text.length
+    }
+
     private fun exactTermRegex(value: String) =
         Regex("(?i)(?<![\\p{L}0-9])${Regex.escape(value)}(?![\\p{L}0-9])")
 
@@ -284,6 +453,27 @@ class PiiExtractor {
 
     private companion object {
         val PHONE_CONTEXT = listOf("phone", "mobile", "telephone", "tel:", "call", "contact", "whatsapp", "signal")
+        val POSTAL_CONTEXT_REGEX = Regex(
+            "(?i)\\b(?:postal\\s+code|postcode|zip(?:\\s+code)?|zipcode|pin(?:\\s+code)?|pincode)\\b\\s*(?::|=|-)?\\s*$"
+        )
+        val POSTAL_BOILERPLATE = listOf(
+            "postal code lookup",
+            "postcode lookup",
+            "zip code lookup",
+            "pincode search",
+            "enter your postal",
+            "enter your zip",
+            "postal code required",
+            "zip code required"
+        )
+        const val POSTAL_BOILERPLATE_CONTEXT_CHARS = 32
+        val TRAILING_CONTEXT_REGEX = Regex(
+            """(?i)\s+(?:phone|mobile|telephone|tel|email|e-mail|contact|views?|followers?|following|likes?|posted|updated|build|date|website|url|navigation|search|lookup|enter)\s*(?::|=|-|\b)"""
+        )
+        val SENTENCE_BOUNDARY_REGEX = Regex("\\.(?=\\s+[A-Z])")
+        val ADDRESS_ABBREVIATION_PERIOD_REGEX = Regex(
+            """(?i)\b(?:st|rd|ave|blvd|dr|ln|pkwy|hwy|ct|cir|ter|trl|pl)\.$"""
+        )
         val ORG_SUFFIXES = listOf(" inc", " corp", " ltd", " llc", " university", " college", " systems", " technologies", " labs")
         val LOCATION_SUFFIXES = listOf(" city", " state", " province", " county", " district")
         val KNOWN_ORGS = setOf("Replit", "Google", "Microsoft", "Meta", "Amazon", "Apple", "GitHub", "GitLab", "Azul", "Azul Systems", "OpenAI", "Anthropic", "IIT Delhi", "MIT", "Stanford")

@@ -23,6 +23,8 @@ private fun ReverseImageLookupResult.LocationEvidenceClass.toTypedSeedEvidenceSt
 enum class TypedSeedKind {
     Email,
     Phone,
+    Address,
+    PostalCode,
     Url,
     Domain,
     Document,
@@ -58,6 +60,8 @@ internal val PUBLIC_FETCH_TYPED_SEED_KINDS: Set<TypedSeedKind> = setOf(
 internal val PUBLIC_SEARCH_TYPED_SEED_KINDS: Set<TypedSeedKind> = setOf(
     TypedSeedKind.Email,
     TypedSeedKind.Phone,
+    TypedSeedKind.Address,
+    TypedSeedKind.PostalCode,
     TypedSeedKind.Name,
     TypedSeedKind.Username,
     // Location search is available only through the specialized
@@ -246,6 +250,8 @@ data class TypedSeedAdmissionConfig(
         fun defaultBudgets(): Map<TypedSeedKind, Int> = mapOf(
             TypedSeedKind.Email to 5,
             TypedSeedKind.Phone to 5,
+            TypedSeedKind.Address to 4,
+            TypedSeedKind.PostalCode to 4,
             TypedSeedKind.Url to 10,
             TypedSeedKind.Domain to 10,
             TypedSeedKind.Document to 5,
@@ -595,6 +601,8 @@ class TypedSeedAdmissionModel(
         return when (kind) {
             TypedSeedKind.Email -> normalizeEmail(trimmed)
             TypedSeedKind.Phone -> normalizePhone(trimmed)
+            TypedSeedKind.Address -> normalizeAddress(trimmed)
+            TypedSeedKind.PostalCode -> normalizePostalCode(trimmed)
             TypedSeedKind.Url,
             TypedSeedKind.Document,
             TypedSeedKind.Archive -> normalizeHttpUrl(trimmed)
@@ -631,6 +639,15 @@ class TypedSeedAdmissionModel(
         ) return null
         val digits = value.filter(Char::isDigit)
         return digits.takeIf { digits.length in 7..15 }
+    }
+
+    private fun normalizeAddress(value: String): String? =
+        ExposureLedgerPolicy.normalizeValue(ExposureFactKind.Address, value)
+            .takeIf { it.length in 5..512 && it.any(Char::isDigit) && it.any(Char::isLetter) }
+
+    private fun normalizePostalCode(value: String): String? {
+        val compact = value.filterNot(Char::isWhitespace).uppercase(Locale.ROOT)
+        return compact.takeIf { POSTAL_CODE.matches(it) }
     }
 
     private fun normalizeHttpUrl(value: String): String? {
@@ -680,6 +697,7 @@ class TypedSeedAdmissionModel(
     private fun containsUnsafeCharacters(value: String): Boolean = value.any { it.isISOControl() }
 
     private val PHONE_ALLOWED = Regex("\\+?[0-9\\s().-]+")
+    private val POSTAL_CODE = Regex("(?:\\d{5}(?:-\\d{4})?|\\d{6}|[A-Z]\\d[A-Z]\\d[A-Z]\\d)")
 
     private fun TypedSeedOrigin.defaultEvidenceState(): EvidenceState = when (this) {
         TypedSeedOrigin.UserInput -> EvidenceState.Observed

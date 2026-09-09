@@ -487,6 +487,7 @@ private fun EvidenceKind.toExposureFactKind(): ExposureFactKind = when (this) {
     EvidenceKind.Email -> ExposureFactKind.Email
     EvidenceKind.Phone -> ExposureFactKind.Phone
     EvidenceKind.Address -> ExposureFactKind.Address
+    EvidenceKind.PostalCode -> ExposureFactKind.PostalCode
     EvidenceKind.Location -> ExposureFactKind.Location
     EvidenceKind.Username,
     EvidenceKind.UsernameReuse -> ExposureFactKind.Username

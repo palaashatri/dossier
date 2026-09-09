@@ -287,6 +287,8 @@ class TypedSeedPublicFetchExecutor(
                 TypedSeedKind.Document -> executePublic(seed, input, scanId)
                 TypedSeedKind.Email,
                 TypedSeedKind.Phone,
+                TypedSeedKind.Address,
+                TypedSeedKind.PostalCode,
                 TypedSeedKind.Name,
                 TypedSeedKind.Username,
                 TypedSeedKind.Location -> executeSearch(seed, input, scanId)
@@ -1146,6 +1148,7 @@ class TypedSeedPublicFetchExecutor(
             FindingType.Email -> EvidenceKind.Email
             FindingType.Phone -> EvidenceKind.Phone
             FindingType.Address -> EvidenceKind.Address
+            FindingType.PostalCode -> EvidenceKind.PostalCode
             FindingType.Location -> EvidenceKind.Location
             FindingType.Organization -> EvidenceKind.Organization
             FindingType.Username -> EvidenceKind.Username
@@ -1593,6 +1596,11 @@ class TypedSeedPublicFetchExecutor(
     }
 
     private fun TypedSeedKind.toEvidenceKind(): EvidenceKind = when (this) {
+        TypedSeedKind.Email -> EvidenceKind.Email
+        TypedSeedKind.Phone -> EvidenceKind.Phone
+        TypedSeedKind.Address -> EvidenceKind.Address
+        TypedSeedKind.PostalCode -> EvidenceKind.PostalCode
+        TypedSeedKind.Username -> EvidenceKind.Username
         TypedSeedKind.Url -> EvidenceKind.Url
         TypedSeedKind.Domain -> EvidenceKind.Domain
         TypedSeedKind.Document -> EvidenceKind.Document
