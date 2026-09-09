@@ -33,7 +33,10 @@ import java.util.Locale
  *  2. passwords, hashes, cookies, tokens, session material and other credential
  *     fields are never imported; breach-oriented records containing those fields
  *     are rejected entirely;
- *  3. imported evidence is Candidate/ThirdPartyAggregation, never Verified.
+ *  3. imported public evidence is Candidate/ThirdPartyAggregation, never
+ *     Verified. Exact values from a generic authorized local exposure report
+ *     remain Observed/UserSupplied/LOCAL_IMPORT and likewise never become
+ *     verified identity facts through the import path.
  *
  * A direct public URL can later be re-fetched by Dossier's verifier. Importing a
  * scanner hit is therefore discovery, not an identity conclusion.
