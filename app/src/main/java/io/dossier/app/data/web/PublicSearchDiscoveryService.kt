@@ -828,7 +828,11 @@ class PublicSearchDiscoveryService(private val context: Context) {
             val originalEmails = input.emails.mapNotNull(::cleanTerm)
             val originalPhones = input.phones
                 .map(String::trim)
-                .filter { phoneDigits(it).length in 8..15 }
+                // The universal launch classifier and typed-seed admission
+                // accept seven-digit local numbers. Keep that authorized
+                // launch value searchable; discovered PII remains subject
+                // to the stricter eight-digit expansion gate below.
+                .filter { phoneDigits(it).length in MIN_PUBLIC_SEARCH_PHONE_DIGITS..MAX_PUBLIC_SEARCH_PHONE_DIGITS }
                 .distinctBy(::phoneDigits)
             val organizations = input.organizations.mapNotNull(::cleanTerm)
             val locations = input.locations.mapNotNull(::cleanTerm)
@@ -956,7 +960,15 @@ class PublicSearchDiscoveryService(private val context: Context) {
             // Phase 2: Original terms exact queries followed by richer site probes as budget permits.
             originalHandles.forEach { addQuery(quote(it), "original-handle") }
             originalEmails.forEach { addQuery(quote(it), "original-email") }
-            originalPhones.forEach { addQuery(quote(it), "original-phone") }
+            // Keep the compact digit form as the canonical original-phone
+            // query for compatibility with the launch classifier and the
+            // existing query-plan contract. Formatting/international forms
+            // are emitted below as bounded phone variants, so retaining the
+            // user's exact display string does not displace the normalized
+            // original pivot.
+            originalPhones.forEach { phone ->
+                addQuery(quote(phoneDigits(phone)), "original-phone")
+            }
 
             val allEmails = (discovered.emails + originalEmails)
                 .distinctBy { it.lowercase(Locale.ROOT) }
@@ -973,7 +985,7 @@ class PublicSearchDiscoveryService(private val context: Context) {
             }
 
             val allPhones = (discovered.phones + originalPhones)
-                .filter { phoneDigits(it).length in 8..15 }
+                .filter { phoneDigits(it).length in MIN_PUBLIC_SEARCH_PHONE_DIGITS..MAX_PUBLIC_SEARCH_PHONE_DIGITS }
                 .distinctBy(::phoneDigits)
                 .take(discovered.phones.size + (if (deepResearch) 3 else 2))
 
@@ -1532,7 +1544,8 @@ class PublicSearchDiscoveryService(private val context: Context) {
             if (unquoted.length == trimmed.length && trimmed.contains('"')) return false
             if (unquoted.contains("site:", ignoreCase = true) || unquoted.any(Char::isLetter)) return false
             val digits = phoneDigits(unquoted)
-            return digits.length in 8..15 && unquoted.all { it.isDigit() || it in "+-(). /" }
+            return digits.length in MIN_PUBLIC_SEARCH_PHONE_DIGITS..MAX_PUBLIC_SEARCH_PHONE_DIGITS &&
+                unquoted.all { it.isDigit() || it in "+-(). /" }
         }
 
         /**
@@ -1542,7 +1555,9 @@ class PublicSearchDiscoveryService(private val context: Context) {
         private fun phoneQueryVariants(raw: String): List<String> {
             val source = raw.trim()
             val digits = phoneDigits(source)
-            if (digits.length !in 8..15) return emptyList()
+            if (digits.length !in MIN_PUBLIC_SEARCH_PHONE_DIGITS..MAX_PUBLIC_SEARCH_PHONE_DIGITS) {
+                return emptyList()
+            }
 
             val variants = linkedSetOf<String>()
             if (source.any { !it.isDigit() }) variants += source
@@ -1563,6 +1578,10 @@ class PublicSearchDiscoveryService(private val context: Context) {
         }
 
         private fun phoneDigits(value: String): String = value.filter(Char::isDigit)
+
+        /** Launch/user phone values may be seven-digit local numbers. */
+        private const val MIN_PUBLIC_SEARCH_PHONE_DIGITS = 7
+        private const val MAX_PUBLIC_SEARCH_PHONE_DIGITS = 15
 
         private fun handleAppearsInProfilePath(url: String, handle: String): Boolean {
             val uri = runCatching { URI(url) }.getOrNull() ?: return false

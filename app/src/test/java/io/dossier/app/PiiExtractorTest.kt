@@ -155,4 +155,71 @@ class PiiExtractorTest {
 
         assertEquals(listOf("12345"), findings.filter { it.type == FindingType.PostalCode }.map { it.value })
     }
+
+    @Test
+    fun authorizedNameAndNearbyContactBundleAttributesUnsuppliedHighEntropyValues() {
+        val identity = IdentityInput(fullName = "Jane Example")
+        val text = """
+            Jane Example
+            Email: jane.public@example.test
+            Phone: +1 (555) 010-0199
+            Address: 123 Example Street, Testville, ZZ 12345
+        """.trimIndent()
+
+        val findings = PiiExtractor().extract(
+            text,
+            "https://profile.example.test/jane",
+            identity
+        )
+        val highEntropy = findings.filter {
+            it.type in setOf(
+                FindingType.Email,
+                FindingType.Phone,
+                FindingType.Address,
+                FindingType.PostalCode
+            )
+        }
+
+        assertEquals(
+            setOf(
+                "jane.public@example.test",
+                "+1 (555) 010-0199",
+                "123 Example Street, Testville, ZZ 12345",
+                "12345"
+            ),
+            highEntropy.map { it.value }.toSet()
+        )
+        assertTrue(
+            highEntropy.joinToString { it.type.toString() + ":" + it.value + ":" + it.attribution },
+            highEntropy.all {
+                it.attribution == io.dossier.app.domain.model.FindingAttribution.IndependentPageSignals
+            }
+        )
+    }
+
+    @Test
+    fun contactBundleDoesNotAttributeSupportOrDistantValues() {
+        val identity = IdentityInput(fullName = "Jane Example")
+        val supportFindings = PiiExtractor().extract(
+            "Jane Example. For customer support, contact support@example.test.",
+            "https://profile.example.test/jane",
+            identity
+        )
+        val support = supportFindings.single { it.type == FindingType.Email }
+        assertEquals(
+            io.dossier.app.domain.model.FindingAttribution.Unconfirmed,
+            support.attribution
+        )
+
+        val distantFindings = PiiExtractor().extract(
+            "Jane Example.\n${"Profile biography. ".repeat(30)}\nEmail: unrelated@example.test",
+            "https://profile.example.test/jane",
+            identity
+        )
+        val distant = distantFindings.single { it.type == FindingType.Email }
+        assertEquals(
+            io.dossier.app.domain.model.FindingAttribution.Unconfirmed,
+            distant.attribution
+        )
+    }
 }

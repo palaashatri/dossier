@@ -109,7 +109,7 @@ class ProductTypedFrontierBenchmarkTest {
         assertEquals(1.0, emailMetrics.recall, 0.0001)
         assertEquals(1.0, emailMetrics.precision, 0.0001)
         assertEquals(1, emailMetrics.candidateCount)
-        assertEquals(0, emailMetrics.unavailableEventCount)
+        assertEquals(1, emailMetrics.unavailableEventCount)
         assertEquals(0, emailMetrics.providerFailureEventCount)
         assertEquals(80L, emailMetrics.timeToFirstUsefulResultMs)
         assertEquals(80L, emailMetrics.timeToFirstVerifiedIdentityAnchorMs)
@@ -117,7 +117,7 @@ class ProductTypedFrontierBenchmarkTest {
         assertEquals(80L, emailMetrics.timeTo50PercentRecallMs)
         assertEquals(80L, emailMetrics.timeTo80PercentRecallMs)
         assertEquals(160L, emailMetrics.totalScanDurationMs)
-        assertEquals(3, emailMetrics.totalProviderRequestCount)
+        assertEquals(11, emailMetrics.totalProviderRequestCount)
         assertEquals(0.0, checkNotNull(emailMetrics.falsePositiveRate), 0.0001)
 
         assertEquals(0, phoneMetrics.truePositives)
@@ -139,17 +139,27 @@ class ProductTypedFrontierBenchmarkTest {
         assertEquals(0.5, checkNotNull(aggregate.corpusFalsePositiveRate), 0.0001)
         assertEquals(8.0 / 9.0, aggregate.recallAtKnownExposure, 0.0001)
         assertEquals((1.0 + 1.0 + 0.0) / 3.0, aggregate.averageRecall, 0.0001)
-        assertEquals(3, aggregate.unresolvedCandidateCount)
+        assertEquals(4, aggregate.unresolvedCandidateCount)
         assertEquals(1, aggregate.candidateCount)
-        assertEquals(1, aggregate.unavailableEventCount)
+        assertEquals(2, aggregate.unavailableEventCount)
         assertEquals(1, aggregate.providerFailureEventCount)
-        assertEquals(18, aggregate.totalProviderRequestCount)
+        assertEquals(26, aggregate.totalProviderRequestCount)
         assertEquals(2, aggregate.totalFailedRequestCount)
-        assertEquals(2.0 / 18.0, aggregate.providerFailureRate, 0.0001)
+        assertEquals(2.0 / 26.0, aggregate.providerFailureRate, 0.0001)
         assertEquals(90.0, checkNotNull(aggregate.averageTimeToFirstUsefulResultMs), 0.0001)
         assertEquals(90.0, checkNotNull(aggregate.averageTimeToFirstHighValueExactIdentifierMs), 0.0001)
         assertEquals(2, aggregate.timeToFirstUsefulResultCaseCount)
         assertEquals(2, aggregate.timeToFirstVerifiedIdentityAnchorCaseCount)
+    }
+
+    @Test
+    fun productBackedPhoneProviderFailureIsNotOrdinaryUnavailable() = runBlocking {
+        val trace = runCase(phoneFailureFixture())
+        val phoneEvents = trace.events.filter { it.fact.normalizedKind == "phone" }
+
+        assertEquals(1, phoneEvents.size)
+        assertEquals(EventStatus.PROVIDER_FAILURE, phoneEvents.single().status)
+        assertTrue(phoneEvents.none { it.status == EventStatus.UNAVAILABLE })
     }
 
     private suspend fun runCase(fixture: Fixture): Trace {
@@ -333,7 +343,7 @@ class ProductTypedFrontierBenchmarkTest {
             trace.fetchRequests.toSet()
         )
         assertEquals(2, trace.fetchRequests.size)
-        assertEquals(1, trace.searchRequests.size)
+        assertEquals(9, trace.searchRequests.size)
     }
 
     private fun assertPhoneFailure(trace: Trace) {
@@ -411,8 +421,15 @@ class ProductTypedFrontierBenchmarkTest {
             }
         }
         val initial = fixture.case.initialSeed
-        if (evidence.kind == EvidenceKind.PublicSearchEvidence &&
-            evidence.value.equals(initial.exactValue, ignoreCase = true)
+        val matchesInitialSeed = evidence.value.equals(initial.exactValue, ignoreCase = true) &&
+            factKind(evidence, fixture) == initial.normalizedKind
+        // Search failures are represented by the typed seed's unavailable
+        // evidence (for example, Phone) and have no source URL to key from.
+        // Keep the provider outcome distinction while recovering that key from
+        // the exact typed seed value; ordinary unavailable outcomes still do
+        // not appear in providerFailureRequests.
+        if (matchesInitialSeed &&
+            (evidence.kind == EvidenceKind.PublicSearchEvidence || evidence.state == EvidenceState.Unavailable)
         ) {
             return searchKey(initialTypedSeedKind(initial), initial.normalizedValue)
         }

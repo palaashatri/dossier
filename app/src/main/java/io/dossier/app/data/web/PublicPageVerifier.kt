@@ -1,6 +1,7 @@
 package io.dossier.app.data.web
 
 import io.dossier.app.domain.model.IdentityInput
+import io.dossier.app.domain.pii.PiiExtractor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
@@ -391,6 +392,13 @@ internal class PublicPageVerifier(
                 signals += "Known location appears on source page"
             }
 
+            val contextualContactBundle = PiiExtractor()
+                .hasAuthorizedNameContactBundle(pageText, url, input)
+            if (contextualContactBundle) {
+                score += 0.28f
+                signals += "Authorized full name and contact value appear in a bounded contextual bundle"
+            }
+
             // A recursive Name pivot may be carried as an alias when the
             // authorized name differs. Treat that alias as an identity signal
             // only with independent organization/location context; alias alone
@@ -408,6 +416,7 @@ internal class PublicPageVerifier(
             val verificationQualified = when {
                 explicitUrl -> true
                 exactEmailMatch || exactPhoneMatch -> true
+                contextualContactBundle -> true
                 handleInPath != null && contextualCorroborators >= 1 -> true
                 nameMatch && (independentAliasMatch || organizationMatch || locationMatch) -> true
                 scopedNameWithContext -> true
@@ -418,6 +427,7 @@ internal class PublicPageVerifier(
             val ceiling = when {
                 explicitUrl -> 0.99f
                 exactEmailMatch || exactPhoneMatch -> 0.97f
+                contextualContactBundle -> 0.86f
                 handleInPath != null && contextualCorroborators >= 2 -> 0.95f
                 handleInPath != null && contextualCorroborators == 1 -> 0.88f
                 (nameMatch && (organizationMatch || locationMatch || independentAliasMatch)) ||

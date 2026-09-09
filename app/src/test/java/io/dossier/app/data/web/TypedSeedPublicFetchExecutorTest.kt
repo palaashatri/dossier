@@ -95,6 +95,70 @@ class TypedSeedPublicFetchExecutorTest {
     }
 
     @Test
+    fun replayOfDirectlyVerifiedPagePromotesIndependentHighEntropyPii() = runBlocking {
+        val profileUrl = "https://profile.example.test/contact"
+        val page = VerifiedPage(
+            finalUrl = profileUrl,
+            title = "Jane Example",
+            text = "Jane Example. Email contact@example.test. Phone: +1 555 0123.",
+            contentHashSha256 = "synthetic-direct-page"
+        )
+        val executor = TypedSeedPublicFetchExecutor()
+        executor.retainVerifiedPage(page, providerId = "synthetic-search")
+
+        val report = executor.executeDetailed(
+            seeds = listOf(userSeed(TypedSeedKind.Url, profileUrl)),
+            input = IdentityInput(fullName = "", emails = listOf("contact@example.test")),
+            scanId = scanId
+        )
+        val phone = report.evidence.single {
+            it.kind == io.dossier.app.domain.evidence.EvidenceKind.Phone &&
+                it.value == "+1 555 0123"
+        }
+
+        assertEquals(EvidenceState.Verified, phone.state)
+        assertEquals(FindingAttribution.Verified, phone.attribution)
+        assertEquals(EvidenceReliability.DirectPersonalWebsite, phone.reliability)
+        assertEquals(ExposureSourceClassification.PUBLIC_WEB, phone.sourceClassification)
+        assertTrue(phone.signals.any { it.contains("directly verified public page") })
+    }
+
+    @Test
+    fun replayOfNameSearchPagePromotesNearbyContactBundle() = runBlocking {
+        val profileUrl = "https://profile.example.test/jane"
+        val page = VerifiedPage(
+            finalUrl = profileUrl,
+            title = "Jane Example",
+            text = """
+                Jane Example
+                Email: jane.public@example.test
+                Phone: +1 (555) 010-0199
+                Address: 123 Example Street, Testville, ZZ 12345
+            """.trimIndent()
+        )
+        val executor = TypedSeedPublicFetchExecutor()
+        executor.retainVerifiedPage(page, providerId = "synthetic-name-search")
+
+        val report = executor.executeDetailed(
+            seeds = listOf(userSeed(TypedSeedKind.Url, profileUrl)),
+            input = IdentityInput(fullName = "Jane Example"),
+            scanId = scanId
+        )
+        val highEntropy = report.evidence.filter {
+            it.kind in setOf(
+                io.dossier.app.domain.evidence.EvidenceKind.Email,
+                io.dossier.app.domain.evidence.EvidenceKind.Phone,
+                io.dossier.app.domain.evidence.EvidenceKind.Address,
+                io.dossier.app.domain.evidence.EvidenceKind.PostalCode
+            )
+        }
+
+        assertEquals(4, highEntropy.size)
+        assertTrue(highEntropy.all { it.state == EvidenceState.Verified })
+        assertTrue(highEntropy.all { it.attribution == FindingAttribution.Verified })
+    }
+
+    @Test
     fun sourceClassificationIsRetainedForDocumentsAndDownstreamRecords() = runBlocking {
         val documentSeed = userSeed(TypedSeedKind.Document, "https://docs.example.test/resume")
         val executor = executor { _, requested, _, _ ->

@@ -190,6 +190,76 @@ class PublicSearchDiscoveryServiceTest {
     }
 
     @Test
+    fun publicPageVerifierQualifiesNameAndNearbyContactBundle() {
+        val input = IdentityInput(fullName = "Jane Example")
+        val assessment = PublicPageVerifier.assessIdentitySignals(
+            input,
+            "https://profile.example.test/jane",
+            "Jane Example Email: jane.public@example.test Phone: +1 (555) 010-0199 " +
+                "Address: 123 Example Street, Testville, ZZ 12345"
+        )
+
+        assertTrue(assessment.verificationQualified)
+        assertTrue(assessment.signals.any { it.contains("contextual", ignoreCase = true) })
+    }
+
+    @Test
+    fun publicPageVerifierFetchesAndRetainsNameContactBundle() = runBlocking {
+        val url = "https://profile.example.test/jane"
+        val body = """
+            <html><body>
+              <h1>Jane Example</h1>
+              <p>Email: jane.public@example.test</p>
+              <p>Phone: +1 (555) 010-0199</p>
+              <p>Address: 123 Example Street, Testville, ZZ 12345</p>
+            </body></html>
+        """.trimIndent()
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val outcome = PublicPageVerifier(client).verify(
+            input = IdentityInput(fullName = "Jane Example"),
+            url = url,
+            indexedTitle = "Jane Example",
+            indexedSnippet = "Indexed profile"
+        )
+
+        assertTrue(outcome is PublicPageVerifier.Outcome.Verified)
+        assertTrue(
+            (outcome as PublicPageVerifier.Outcome.Verified)
+                .signals
+                .any { it.contains("contextual", ignoreCase = true) }
+        )
+        assertTrue(
+            (outcome as PublicPageVerifier.Outcome.Verified)
+                .verifiedPage
+                ?.text
+                .orEmpty()
+                .contains("jane.public@example.test")
+        )
+    }
+
+    @Test
+    fun publicPageVerifierRejectsNamePlusUnrelatedSupportContact() {
+        val assessment = PublicPageVerifier.assessIdentitySignals(
+            IdentityInput(fullName = "Jane Example"),
+            "https://profile.example.test/jane",
+            "Jane Example. For customer support, contact support@example.test."
+        )
+
+        assertFalse(assessment.verificationQualified)
+    }
+
+    @Test
     fun verificationInput_mergedWithScopedInput_acceptsDiscoveredSignalsThatOriginalRejects() {
         val url = "https://profile.example.test/discovered_user"
         val body = "Original User profile for discovered_user."
@@ -265,9 +335,23 @@ class PublicSearchDiscoveryServiceTest {
     }
 
     @Test
+    fun buildQueries_keepsSevenDigitInitialPhoneSearchableWithExactVariants() {
+        val input = IdentityInput(
+            fullName = "",
+            phones = listOf("555-0100")
+        )
+
+        val queries = PublicSearchDiscoveryService.buildSearchQueries(input)
+
+        assertTrue("Formatted launch phone should be searched exactly", queries.contains("\"555-0100\""))
+        assertTrue("Compact launch phone should remain searchable", queries.contains("\"5550100\""))
+    }
+
+    @Test
     fun phoneOnlyQueriesDoNotPermitBrowserFallback() {
         assertTrue(PublicSearchDiscoveryService.isPhoneOnlyQuery("\"+1 (415) 555-2671\""))
         assertTrue(PublicSearchDiscoveryService.isPhoneOnlyQuery("\"4155552671\""))
+        assertTrue(PublicSearchDiscoveryService.isPhoneOnlyQuery("\"555-0100\""))
         assertFalse(PublicSearchDiscoveryService.isPhoneOnlyQuery("\"4155552671\" site:example.test"))
     }
 

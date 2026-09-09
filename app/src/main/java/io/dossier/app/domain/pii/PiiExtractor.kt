@@ -39,7 +39,13 @@ class PiiExtractor {
 
         emailRegex.findAll(text).forEach { match ->
             val exact = match.value.lowercase() in suppliedEmails
-            val associated = exact || attribution.strong
+            val bundled = hasNameContactBundle(
+                text = text,
+                valueRange = match.range,
+                identity = identity,
+                type = FindingType.Email
+            ) || hasSuppliedContactBundle(text, match.range, identity)
+            val associated = exact || bundled
             findings += Finding(
                 FindingType.Email,
                 match.value,
@@ -58,7 +64,7 @@ class PiiExtractor {
                 // profile can upgrade it for recursive pivoting.
                 attribution = when {
                     exact -> FindingAttribution.ExactSelfSupplied
-                    attribution.strong -> FindingAttribution.IndependentPageSignals
+                    bundled -> FindingAttribution.IndependentPageSignals
                     else -> FindingAttribution.Unconfirmed
                 }
             )
@@ -69,7 +75,13 @@ class PiiExtractor {
             val exact = normalized in suppliedPhones
             if (normalized.length !in 8..15 || looksLikeDateOrCounter(normalized, match.value)) return@forEach
             if (!exact && !hasPhoneContext(text, match.range)) return@forEach
-            val associated = exact || attribution.strong
+            val bundled = hasNameContactBundle(
+                text = text,
+                valueRange = match.range,
+                identity = identity,
+                type = FindingType.Phone
+            ) || hasSuppliedContactBundle(text, match.range, identity)
+            val associated = exact || bundled
             findings += Finding(
                 FindingType.Phone,
                 match.value.trim(),
@@ -84,7 +96,7 @@ class PiiExtractor {
                 },
                 attribution = when {
                     exact -> FindingAttribution.ExactSelfSupplied
-                    attribution.strong -> FindingAttribution.IndependentPageSignals
+                    bundled -> FindingAttribution.IndependentPageSignals
                     else -> FindingAttribution.Unconfirmed
                 }
             )
@@ -105,7 +117,12 @@ class PiiExtractor {
                 value = candidate,
                 evidence = match.value,
                 sourceUrl = sourceUrl,
-                attribution = attribution,
+                contextualBundle = hasNameContactBundle(
+                    text = text,
+                    valueRange = valueRange,
+                    identity = identity,
+                    type = FindingType.Address
+                ) || hasSuppliedContactBundle(text, valueRange, identity),
                 remediation = "Review and reduce precise public address exposure."
             )
         }
@@ -126,7 +143,12 @@ class PiiExtractor {
                 // provider panel into the provenance shown for this value.
                 evidence = lineSnippet(text, match.range),
                 sourceUrl = sourceUrl,
-                attribution = attribution,
+                contextualBundle = hasNameContactBundle(
+                    text = text,
+                    valueRange = match.range,
+                    identity = identity,
+                    type = FindingType.PostalCode
+                ) || hasSuppliedContactBundle(text, match.range, identity),
                 remediation = "Review and reduce precise public postal-code exposure."
             )
         }
@@ -213,10 +235,10 @@ class PiiExtractor {
         value: String,
         evidence: String,
         sourceUrl: String,
-        attribution: Attribution,
+        contextualBundle: Boolean = false,
         remediation: String
     ) {
-        val associated = attribution.strong
+        val associated = contextualBundle
         findings += Finding(
             type = type,
             value = value,
@@ -230,6 +252,103 @@ class PiiExtractor {
             } else {
                 FindingAttribution.Unconfirmed
             }
+        )
+    }
+
+    /**
+     * A contact value can be attributed from a name/username search only when
+     * the authorized full name and that exact value occur in one bounded,
+     * personal-looking context. Page-wide identity matches are deliberately
+     * insufficient: support desks and unrelated page values remain observed.
+     */
+    internal fun hasAuthorizedNameContactBundle(
+        text: String,
+        sourceUrl: String,
+        identity: IdentityInput?
+    ): Boolean = extract(text, sourceUrl, identity).any { finding ->
+        finding.type in HIGH_ENTROPY_TYPES &&
+            finding.attribution == FindingAttribution.IndependentPageSignals
+    }
+
+    private fun hasNameContactBundle(
+        text: String,
+        valueRange: IntRange,
+        identity: IdentityInput?,
+        type: FindingType
+    ): Boolean {
+        if (identity == null || type !in HIGH_ENTROPY_TYPES) return false
+        val name = identity.fullName.trim()
+        if (name.length < 3 || name.split(Regex("\\s+")).count { it.isNotBlank() } < 2) return false
+
+        val nameMatches = flexibleTermRegex(name).findAll(text).toList()
+        return nameMatches.any { nameMatch ->
+            val distance = rangeDistance(nameMatch.range, valueRange)
+            if (distance > MAX_NAME_CONTACT_DISTANCE) return false
+
+            val contextStart = minOf(nameMatch.range.first, valueRange.first)
+            val contextEnd = maxOf(nameMatch.range.last, valueRange.last) + 1
+            val bundle = text.substring(contextStart, contextEnd)
+            if (UNRELATED_CONTACT_CONTEXT_REGEX.containsMatchIn(bundle)) return false
+
+            val valueContextStart = (valueRange.first - CONTACT_CONTEXT_CHARS).coerceAtLeast(0)
+            val valueContextEnd = (valueRange.last + CONTACT_CONTEXT_CHARS + 1).coerceAtMost(text.length)
+            val valueContext = text.substring(valueContextStart, valueContextEnd)
+            when (type) {
+                // An unlabeled address/phone is still governed by their
+                // existing shape/context gates. Email values may be rendered
+                // as a bare token only when another authorized contact anchor
+                // is present in the same bundle.
+                FindingType.Email -> EMAIL_CONTEXT_REGEX.containsMatchIn(valueContext)
+                FindingType.Phone -> hasPhoneContext(text, valueRange)
+                FindingType.Address,
+                FindingType.PostalCode -> true
+                else -> false
+            }
+        }
+    }
+
+    private fun hasSuppliedContactBundle(
+        text: String,
+        valueRange: IntRange,
+        identity: IdentityInput?
+    ): Boolean {
+        if (identity == null) return false
+        val suppliedRanges = buildList {
+            identity.emails
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .forEach { email ->
+                    exactTermRegex(email).findAll(text).forEach { add(it.range) }
+                }
+            identity.phones
+                .map(::digits)
+                .filter { it.length >= 8 }
+                .forEach { suppliedPhone ->
+                    phoneRegex.findAll(text)
+                        .filter { digits(it.value) == suppliedPhone }
+                        .forEach { add(it.range) }
+                }
+        }
+        return suppliedRanges.any { anchorRange ->
+            if (rangeDistance(anchorRange, valueRange) > MAX_NAME_CONTACT_DISTANCE) return@any false
+            val contextStart = minOf(anchorRange.first, valueRange.first)
+            val contextEnd = maxOf(anchorRange.last, valueRange.last) + 1
+            !UNRELATED_CONTACT_CONTEXT_REGEX.containsMatchIn(text.substring(contextStart, contextEnd))
+        }
+    }
+
+    private fun rangeDistance(first: IntRange, second: IntRange): Int = when {
+        first.last < second.first -> second.first - first.last - 1
+        second.last < first.first -> first.first - second.last - 1
+        else -> 0
+    }
+
+    private fun flexibleTermRegex(value: String): Regex {
+        val words = value.trim().split(Regex("\\s+")).filter(String::isNotBlank)
+        return Regex(
+            "(?i)(?<![\\p{L}0-9])" +
+                words.joinToString("\\s+") { Regex.escape(it) } +
+                "(?![\\p{L}0-9])"
         )
     }
 
@@ -455,6 +574,20 @@ class PiiExtractor {
     }
 
     private companion object {
+        val HIGH_ENTROPY_TYPES = setOf(
+            FindingType.Email,
+            FindingType.Phone,
+            FindingType.Address,
+            FindingType.PostalCode
+        )
+        val EMAIL_CONTEXT_REGEX = Regex("(?i)\\b(?:e[- ]?mail|email|contact|mailto)\\b")
+        val UNRELATED_CONTACT_CONTEXT_REGEX = Regex(
+            "(?i)\\b(?:support|help(?:desk)?|customer\\s+(?:support|service)|sales|billing|" +
+                "press|media|abuse|webmaster|privacy|administrator|admin|general\\s+inquir(?:y|ies)|" +
+                "contact\\s+us|recruit(?:ing|ment)?|careers?)\\b"
+        )
+        const val MAX_NAME_CONTACT_DISTANCE = 320
+        const val CONTACT_CONTEXT_CHARS = 96
         val PHONE_CONTEXT = listOf("phone", "mobile", "telephone", "tel:", "call", "contact", "whatsapp", "signal")
         val POSTAL_CONTEXT_REGEX = Regex(
             "(?i)\\b(?:postal\\s+code|postcode|zip(?:\\s+code)?|zipcode|pin(?:\\s+code)?|pincode)\\b\\s*(?::|=|-)?\\s*$"

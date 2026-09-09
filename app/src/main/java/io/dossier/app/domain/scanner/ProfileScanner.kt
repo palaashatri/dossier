@@ -87,6 +87,8 @@ class ProfileScanner(
         checkpointGeneration: String? = null,
         planFingerprint: String? = null,
         mediaEvidence: EvidenceCollection = EvidenceCollection(),
+        /** Resolves optional media evidence at the recursion boundary. */
+        mediaEvidenceProvider: suspend () -> EvidenceCollection = { mediaEvidence },
         /**
          * Receives cumulative profile observations as each discovery stage
          * completes.  The callback is deliberately suspending so durable
@@ -324,8 +326,17 @@ class ProfileScanner(
         }
         publishProgress(initialResults + pivotResults)
 
+        val resolvedMediaEvidence = try {
+            mediaEvidenceProvider()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Media is optional; a late provider failure must not discard
+            // profile observations already collected by this scan.
+            EvidenceCollection()
+        }
         val typedSeedInputEvidence = (initialResults + pivotResults).toEvidenceCollection(input)
-            .merge(mediaEvidence)
+            .merge(resolvedMediaEvidence)
 
         // ---- Pass 3: public-search discovery. This broadens coverage beyond
         // deterministic username templates by querying public indexes for the

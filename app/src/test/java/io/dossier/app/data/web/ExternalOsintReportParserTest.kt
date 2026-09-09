@@ -191,6 +191,25 @@ Reddit,https://www.reddit.com/user/janedoe,found
     }
 
     @Test
+    fun unstructuredAuthorizedRowsWithHashOrPrivateKeyAreRejectedEntirely() {
+        val input = IdentityInput(fullName = "", emails = listOf("jane@example.test"))
+        val report = """
+            email=jane@example.test hash=synthetic-hash
+            email=jane@example.test privatekey=synthetic-key
+        """.trimIndent()
+
+        val result = ExternalOsintReportParser.parse(
+            ExternalOsintReportParser.Source.GenericPublicReport,
+            report,
+            input
+        )
+
+        assertTrue(result.collection.evidence.isEmpty())
+        assertTrue(result.collection.relationships.isEmpty())
+        assertTrue(result.warnings.any { it.contains("credential/secret", ignoreCase = true) })
+    }
+
+    @Test
     fun amassOnlyRetainsInScopeDomainUrls() {
         val input = IdentityInput(fullName = "", emails = listOf("security@example.com"))
         val report = """host,url

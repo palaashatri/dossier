@@ -672,7 +672,8 @@ class TypedSeedPublicFetchExecutor(
             contentHashSha256 = page.contentHashSha256,
             sourceUrls = sourceUrls,
             discoveryPathExtra = listOf(seed.exactValue),
-            redirectedFromUrl = page.indexedUrl
+            redirectedFromUrl = page.indexedUrl,
+            promoteDirectPageFindings = true
         )
     }
 
@@ -897,7 +898,8 @@ class TypedSeedPublicFetchExecutor(
         archiveDescription: String? = null,
         sourceUrls: List<String> = listOf(seed.exactValue),
         discoveryPathExtra: List<String> = emptyList(),
-        redirectedFromUrl: String? = null
+        redirectedFromUrl: String? = null,
+        promoteDirectPageFindings: Boolean = false
     ): SeedRun {
         val retrievedAt = nowMillis()
         val path = discoveryPath(seed, sourceUrl, discoveryPathExtra)
@@ -975,7 +977,29 @@ class TypedSeedPublicFetchExecutor(
                 contentHash = seedEvidence.contentHashSha256,
                 sourceUrls = sourceUrls,
                 parserVersion = parserVersion
-            )
+            ).let { record ->
+                if (
+                    promoteDirectPageFindings &&
+                    finding.type in setOf(
+                        FindingType.Email,
+                        FindingType.Phone,
+                        FindingType.Address,
+                        FindingType.PostalCode
+                    ) &&
+                    finding.attribution == FindingAttribution.IndependentPageSignals
+                ) {
+                    record.copy(
+                        state = EvidenceState.Verified,
+                        attribution = FindingAttribution.Verified,
+                        signals = (
+                            record.signals +
+                                "Exact high-entropy value observed on directly verified public page"
+                        ).distinct()
+                    )
+                } else {
+                    record
+                }
+            }
             evidence += ev
             relationships += EvidenceRelationship(
                 fromValue = sourceUrl,
@@ -1168,7 +1192,7 @@ class TypedSeedPublicFetchExecutor(
             providerId = providerId,
             retrievedAtEpochMillis = retrievedAtEpochMillis,
             observedAtEpochMillis = observedAtEpochMillis,
-            state = findingState(finding),
+            state = findingState(finding, historical),
             reliability = reliability,
             sourceClassification = sourceClassification,
             contentHashSha256 = contentHash,
@@ -1711,14 +1735,17 @@ class TypedSeedPublicFetchExecutor(
         return controls > maxOf(2, sample.length / 100)
     }
 
-    private fun findingState(finding: Finding): EvidenceState = when (finding.attribution) {
-        FindingAttribution.ExactSelfSupplied -> EvidenceState.Verified
-        FindingAttribution.IndependentPageSignals -> EvidenceState.Probable
-        FindingAttribution.Verified -> EvidenceState.Verified
-        FindingAttribution.Probable -> EvidenceState.Probable
-        FindingAttribution.Candidate -> EvidenceState.Candidate
-        FindingAttribution.Conflicting -> EvidenceState.Conflicting
-        FindingAttribution.Unconfirmed -> EvidenceState.Observed
+    private fun findingState(finding: Finding, historical: Boolean): EvidenceState = when {
+        historical && finding.attribution == FindingAttribution.IndependentPageSignals -> EvidenceState.Observed
+        else -> when (finding.attribution) {
+            FindingAttribution.ExactSelfSupplied -> EvidenceState.Verified
+            FindingAttribution.IndependentPageSignals -> EvidenceState.Probable
+            FindingAttribution.Verified -> EvidenceState.Verified
+            FindingAttribution.Probable -> EvidenceState.Probable
+            FindingAttribution.Candidate -> EvidenceState.Candidate
+            FindingAttribution.Conflicting -> EvidenceState.Conflicting
+            FindingAttribution.Unconfirmed -> EvidenceState.Observed
+        }
     }
 
     private fun isExplicitlyAttributedPublicLink(sourceUrl: String, link: String): Boolean {

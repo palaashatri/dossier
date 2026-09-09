@@ -50,8 +50,7 @@ object ExternalOsintReportParser {
         val providerId: String,
         val displayName: String,
         val allowedSignals: Set<ScopeSignal>,
-        val allowSummaryWithoutUrl: Boolean = false,
-        val rejectCredentialFields: Boolean = false
+        val allowSummaryWithoutUrl: Boolean = false
     ) {
         GenericPublicReport(
             "external-osint-import", "External OSINT report",
@@ -80,8 +79,7 @@ object ExternalOsintReportParser {
         Holehe(
             "holehe-import", "Holehe",
             setOf(ScopeSignal.Email),
-            allowSummaryWithoutUrl = true,
-            rejectCredentialFields = true
+            allowSummaryWithoutUrl = true
         ),
         Pushshift(
             "pushshift-import", "Pushshift",
@@ -115,26 +113,22 @@ object ExternalOsintReportParser {
         LeakCheckSummary(
             "leakcheck-summary-import", "LeakCheck redacted summary",
             setOf(ScopeSignal.Email),
-            allowSummaryWithoutUrl = true,
-            rejectCredentialFields = true
+            allowSummaryWithoutUrl = true
         ),
         DehashedSummary(
             "dehashed-summary-import", "DeHashed redacted summary",
             setOf(ScopeSignal.Email),
-            allowSummaryWithoutUrl = true,
-            rejectCredentialFields = true
+            allowSummaryWithoutUrl = true
         ),
         BreachParseSummary(
             "breach-parse-summary-import", "Breach-Parse redacted summary",
             setOf(ScopeSignal.Email),
-            allowSummaryWithoutUrl = true,
-            rejectCredentialFields = true
+            allowSummaryWithoutUrl = true
         ),
         BusterBreachFinderSummary(
             "breachfinder-summary-import", "Buster / BreachFinder redacted summary",
             setOf(ScopeSignal.Email),
-            allowSummaryWithoutUrl = true,
-            rejectCredentialFields = true
+            allowSummaryWithoutUrl = true
         ),
         OpenCorporates(
             "opencorporates-import", "OpenCorporates",
@@ -162,8 +156,7 @@ object ExternalOsintReportParser {
         Foca(
             "foca-import", "FOCA metadata report",
             setOf(ScopeSignal.Domain, ScopeSignal.Email, ScopeSignal.Organization),
-            allowSummaryWithoutUrl = true,
-            rejectCredentialFields = true
+            allowSummaryWithoutUrl = true
         ),
         Censys(
             "censys-import", "Censys",
@@ -734,7 +727,7 @@ object ExternalOsintReportParser {
         "secret", "credential", "privatekey", "apikey", "authorization", "stealer"
     )
     private val CREDENTIAL_MARKER_REGEX = Regex(
-        "(?i)\\b(?:password|passwd|pwd|cookie|session|token|secret|credential|api[ -]?key|authorization)\\b\\s*[:=]|" +
+        "(?i)(?<![a-z0-9])(?:password|passwd|pwd|hash|cookie|session|token|secret|credential|api[._ -]?key|authorization|private[._ -]?key)(?![a-z0-9])\\s*[:=]|" +
             "private\\s+key|authorization\\s*:\\s*bearer|stealer\\s+log"
     )
     private val URL = Regex("(?i)https?://[^\\s<>\\[\\]{}\\\"']+")

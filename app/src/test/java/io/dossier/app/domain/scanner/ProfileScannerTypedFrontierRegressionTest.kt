@@ -24,11 +24,13 @@ import io.dossier.app.domain.model.Platform
 import io.dossier.app.domain.model.ProfileScanResult
 import io.dossier.app.domain.model.PublicSearchPageMaterial
 import io.dossier.app.domain.model.RiskLevel
+import io.dossier.app.domain.model.ReverseImageLookupResult
 import io.dossier.app.domain.model.UsernameCandidate
 import io.dossier.app.domain.model.UsernameMatchType
 import io.dossier.app.domain.model.Finding
 import io.dossier.app.domain.model.FindingType
 import io.dossier.app.domain.pii.PiiExtractor
+import io.dossier.app.domain.place.MediaIntelligenceSnapshot
 import io.dossier.app.domain.username.UsernameVariantGenerator
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -42,8 +44,10 @@ import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.nio.file.Files
-import java.util.Base64
 import java.security.SecureRandom
+import java.util.Base64
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -97,6 +101,115 @@ class ProfileScannerTypedFrontierRegressionTest {
                 "DISCOVERY_COMPLETE"
             ),
             stages
+        )
+    }
+
+    @Test
+    fun `same scan executes media source page and corroborated location pivots after media resolves`() = runBlocking {
+        val context = FakeContext(root)
+        val mediaResolved = AtomicBoolean(false)
+        val executedSeeds = CopyOnWriteArrayList<TypedSeed>()
+        val executedUrls = CopyOnWriteArrayList<String>()
+        val sourcePageUrl = "https://pages.example.test/reverse-result"
+        val imageUrl = "https://images.example.test/reverse-result.jpg"
+        val location = "Example City"
+        val locationSourceUrl = "https://geo.example.test/example-city"
+
+        val mediaEvidence = MediaIntelligenceSnapshot(
+            imageResults = listOf(
+                ReverseImageLookupResult(
+                    gps = null,
+                    extractedText = null,
+                    labels = emptyList(),
+                    faceDetected = false,
+                    faceWarning = null,
+                    resolvedLocation = null,
+                    mapsUrl = null,
+                    webEvidence = listOf(
+                        ReverseImageLookupResult.WebEvidence(
+                            title = location,
+                            snippet = "Fixture geocoder corroboration",
+                            url = locationSourceUrl,
+                            origin = ReverseImageLookupResult.WebEvidenceOrigin.GeoCorroboration
+                        )
+                    ),
+                    visualMatches = listOf(
+                        ReverseImageLookupResult.VisualMatch(
+                            title = "Fixture reverse-image result",
+                            imageUrl = imageUrl,
+                            sourcePageUrl = sourcePageUrl,
+                            source = "fixture-reverse-image",
+                            similarity = 0.91f,
+                            matchType = "exact-content",
+                            evidence = "Fixture source page"
+                        )
+                    ),
+                    locationCandidates = listOf(
+                        ReverseImageLookupResult.LocationCandidate(
+                            value = location,
+                            evidenceClass = ReverseImageLookupResult.LocationEvidenceClass.CORROBORATED_LOCATION,
+                            reason = "Fixture geocoder corroboration",
+                            sourceUrls = listOf(locationSourceUrl)
+                        )
+                    )
+                )
+            )
+        ).toEvidenceCollection(
+            discoveryPath = listOf("seed:photo"),
+            mediaSourceUri = "content://fixture/photo"
+        )
+
+        val executor = TypedSeedPublicFetchExecutor(
+            fetcher = TypedSeedPublicFetchExecutor.PublicSeedFetcher { _, requested, _, _ ->
+                assertTrue("Media evidence must resolve before URL execution", mediaResolved.get())
+                executedUrls += requested
+                ProviderExecutionResult(
+                    decision = ProviderResponseDecision(ProviderVerificationState.Present, "fixture"),
+                    statusCode = 200,
+                    requestedUrl = requested,
+                    finalUrl = requested,
+                    bodyText = "<html><body>Fixture source page</body></html>",
+                    latencyMs = 1,
+                    attemptCount = 1,
+                    contentType = "text/html"
+                )
+            },
+            searchOutcomeSearcher = { seed, scopedInput, _ ->
+                assertTrue("Media evidence must resolve before typed search execution", mediaResolved.get())
+                executedSeeds += seed
+                assertEquals(TypedSeedKind.Location, seed.kind)
+                assertEquals(location, seed.exactValue)
+                assertEquals(listOf(location), scopedInput.locations)
+                assertEquals(listOf("x"), scopedInput.organizations)
+                PublicSearchDiscoveryService.SearchOutcome.Success(emptyList())
+            },
+            archiveResolver = TypedSeedPublicFetchExecutor.ArchiveSeedResolver { null },
+            piiExtractor = PiiExtractor()
+        )
+        val scanner = ProfileScanner(
+            context = context,
+            piiExtractor = PiiExtractor(),
+            variantGenerator = UsernameVariantGenerator(),
+            typedSeedExecutorOverride = executor
+        )
+
+        scanner.scanIdentity(
+            input = IdentityInput(fullName = "", organizations = listOf("x")),
+            mediaEvidenceProvider = {
+                mediaResolved.set(true)
+                mediaEvidence
+            }
+        )
+
+        assertTrue("Media provider must be resolved during the scan", mediaResolved.get())
+        assertEquals(listOf(sourcePageUrl), executedUrls.toList())
+        assertEquals(1, executedSeeds.size)
+        assertEquals(TypedSeedKind.Location, executedSeeds.single().kind)
+        assertTrue(
+            "Corroborated media location must remain in the canonical typed-frontier evidence",
+            scanner.typedSeedExecutionEvidence().evidence.any {
+                it.kind == EvidenceKind.Location && it.value == location
+            }
         )
     }
 

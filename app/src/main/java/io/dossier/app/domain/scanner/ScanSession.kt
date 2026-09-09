@@ -572,6 +572,52 @@ object ScanSession {
                 null
             }
 
+            var mediaSnapshot = MediaIntelligenceSnapshot()
+            var mediaEvidenceForFrontier = EvidenceCollection()
+            var mediaEvidenceReady = false
+
+            suspend fun awaitMediaEvidence(): EvidenceCollection {
+                if (mediaEvidenceReady) return mediaEvidenceForFrontier
+
+                val completed = mediaJob?.let { job ->
+                    try {
+                        withTimeoutOrNull(MEDIA_JOIN_TIMEOUT_MS) {
+                            job.await()
+                            true
+                        } ?: false
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        false
+                    }
+                } ?: true
+                if (!completed) {
+                    mediaJob?.cancel()
+                    mediaJob?.join()
+                    if (MediaIntelligenceSession.snapshotFor(inputToUse, mediaBindingToken).isEmpty) {
+                        latestMediaResult.get()?.let { partial ->
+                            MediaIntelligenceSession.recordImage(mediaBindingToken, partial)
+                        }
+                    }
+                }
+
+                mediaSnapshot = MediaIntelligenceSession.snapshotFor(inputToUse, mediaBindingToken)
+                if (!mediaSnapshot.isEmpty) {
+                    mediaRetrievedAtEpochMillis = mediaStartedAt
+                    mediaEvidenceForFrontier = mediaSnapshot.toEvidenceCollection(
+                        discoveryPath = if (inputToUse.selfieUri.isNullOrBlank()) {
+                            emptyList()
+                        } else {
+                            listOf("seed:photo")
+                        },
+                        mediaSourceUri = inputToUse.selfieUri,
+                        retrievedAtEpochMillis = mediaStartedAt
+                    )
+                }
+                mediaEvidenceReady = true
+                return mediaEvidenceForFrontier
+            }
+
             var discoveryStage = "DISCOVERING_USERNAMES..."
             val scanResults = profileScanner.scanIdentity(
                 input = inputToUse,
@@ -581,6 +627,7 @@ object ScanSession {
                 checkpointGeneration = checkpointGeneration,
                 planFingerprint = planFingerprint,
                 mediaEvidence = EvidenceCollection(),
+                mediaEvidenceProvider = ::awaitMediaEvidence,
                 onStage = { stage ->
                     currentCoroutineContext().ensureActive()
                     discoveryStage = stage
@@ -609,31 +656,7 @@ object ScanSession {
             val typedSeedExecutionEvidence = profileScanner.typedSeedExecutionEvidence()
             currentCoroutineContext().ensureActive()
             _profileScanResults.value = scanResults
-            val mediaCompleted = mediaJob?.let { job ->
-                try {
-                    withTimeoutOrNull(MEDIA_JOIN_TIMEOUT_MS) {
-                        job.await()
-                        true
-                    } ?: false
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    false
-                }
-            } ?: true
-            if (!mediaCompleted) {
-                mediaJob?.cancel()
-                mediaJob?.join()
-                if (MediaIntelligenceSession.snapshotFor(inputToUse, mediaBindingToken).isEmpty) {
-                    latestMediaResult.get()?.let { partial ->
-                        MediaIntelligenceSession.recordImage(mediaBindingToken, partial)
-                    }
-                }
-            }
-            val mediaSnapshot = MediaIntelligenceSession.snapshotFor(inputToUse, mediaBindingToken)
-            if (!mediaSnapshot.isEmpty) {
-                mediaRetrievedAtEpochMillis = mediaStartedAt
-            }
+            awaitMediaEvidence()
             _progressText.value = "FINALIZING_DISCOVERY..."
             MediaIntelligenceSession.recordVerifiedProfileAvatars(
                 token = mediaBindingToken,
