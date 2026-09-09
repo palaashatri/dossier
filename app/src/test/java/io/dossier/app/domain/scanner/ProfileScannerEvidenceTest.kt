@@ -8,6 +8,7 @@ import io.dossier.app.domain.evidence.toExposureLedger
 import io.dossier.app.domain.discovery.TypedSeedEvidenceAdapter
 import io.dossier.app.domain.discovery.TypedSeedKind
 import io.dossier.app.domain.graph.EntityGraphBuilder
+import io.dossier.app.domain.pii.PiiExtractor
 import io.dossier.app.domain.model.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -301,7 +302,7 @@ class ProfileScannerEvidenceTest {
                         confidence = 0.36f,
                         risk = RiskLevel.Low,
                         remediation = "Review public phone exposure",
-                        attribution = FindingAttribution.IndependentPageSignals
+                        attribution = FindingAttribution.Unconfirmed
                     ),
                     Finding(
                         type = FindingType.Address,
@@ -321,7 +322,7 @@ class ProfileScannerEvidenceTest {
                         confidence = 0.36f,
                         risk = RiskLevel.Low,
                         remediation = "Review public postal exposure",
-                        attribution = FindingAttribution.IndependentPageSignals
+                        attribution = FindingAttribution.Unconfirmed
                     ),
                     Finding(
                         type = FindingType.Address,
@@ -363,6 +364,83 @@ class ProfileScannerEvidenceTest {
                 it.exactValue in setOf("public.contact@example.test", "+1 (555) 010-0199", address, "12345")
         })
         assertTrue(typed.admittedSeeds.none { it.exactValue == "999 Candidate Road, Example City, ZZ 99999" })
+    }
+
+    @Test
+    fun directlyVerifiedProfilePromotesExtractorAttributedValuesIntoTypedFrontier() {
+        val profileUrl = "https://profile.example.test/janedoe"
+        val input = IdentityInput(
+            fullName = "Jane Doe",
+            primaryUsername = "janedoe"
+        )
+        val pageText = """
+            Jane Doe
+            @janedoe
+            Contact: public.contact@example.test
+            Phone: +1 (555) 010-0199
+            Address: 123 Example Street, Testville, ZZ 12345
+        """.trimIndent()
+        val extracted = PiiExtractor().extract(pageText, profileUrl, input)
+        val highEntropy = extracted.filter {
+            it.type in setOf(FindingType.Email, FindingType.Phone, FindingType.Address, FindingType.PostalCode)
+        }
+        assertEquals(
+            setOf(
+                "public.contact@example.test",
+                "+1 (555) 010-0199",
+                "123 Example Street, Testville, ZZ 12345",
+                "12345"
+            ),
+            highEntropy.map { it.value }.toSet()
+        )
+        assertTrue(highEntropy.all { it.attribution == FindingAttribution.IndependentPageSignals })
+
+        val collection = listOf(
+            ProfileScanResult(
+                candidate = UsernameCandidate(
+                    username = "janedoe",
+                    platform = Platform.Website,
+                    url = profileUrl,
+                    matchType = UsernameMatchType.Exact,
+                    confidence = 0.92f,
+                    providerId = "fixture-profile"
+                ),
+                exists = true,
+                httpStatus = 200,
+                displayName = "Jane Doe",
+                bio = "",
+                links = emptyList(),
+                extractedText = pageText,
+                findings = highEntropy,
+                confidenceSignals = listOf("Fixture identity verification"),
+                verified = true,
+                verificationStatus = "Verified",
+                provenance = "fixture direct profile"
+            )
+        ).toEvidenceCollection(input)
+
+        val highEntropyEvidence = collection.evidence.filter {
+            it.sourceUrl == profileUrl &&
+                it.kind in setOf(EvidenceKind.Email, EvidenceKind.Phone, EvidenceKind.Address, EvidenceKind.PostalCode)
+        }
+        assertEquals(4, highEntropyEvidence.size)
+        assertTrue(highEntropyEvidence.all { it.state == EvidenceState.Verified })
+        assertTrue(highEntropyEvidence.all { it.reliability == EvidenceReliability.DirectPublicProfile })
+        assertTrue(highEntropyEvidence.all {
+            it.attribution == FindingAttribution.Verified
+        })
+
+        val admitted = TypedSeedEvidenceAdapter.fromCollection(collection, input).admittedSeeds
+        assertTrue(
+            admitted.filter {
+                it.kind in setOf(
+                    TypedSeedKind.Email,
+                    TypedSeedKind.Phone,
+                    TypedSeedKind.Address,
+                    TypedSeedKind.PostalCode
+                )
+            }.map { it.exactValue }.containsAll(highEntropy.map { it.value })
+        )
     }
 
     @Test

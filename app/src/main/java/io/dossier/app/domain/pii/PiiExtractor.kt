@@ -52,13 +52,14 @@ class PiiExtractor {
                 } else {
                     "Review the source before associating this email with the audited identity."
                 },
-                // A page-level name/handle match does not identify every
-                // contact value printed on that page. Only the exact
-                // user-supplied email may become a recursive pivot.
-                attribution = if (exact) {
-                    FindingAttribution.ExactSelfSupplied
-                } else {
-                    FindingAttribution.Unconfirmed
+                // A page-level name/handle match does not by itself verify
+                // every contact value printed on that page. Preserve the
+                // independent-signal attribution so only a directly verified
+                // profile can upgrade it for recursive pivoting.
+                attribution = when {
+                    exact -> FindingAttribution.ExactSelfSupplied
+                    attribution.strong -> FindingAttribution.IndependentPageSignals
+                    else -> FindingAttribution.Unconfirmed
                 }
             )
         }
@@ -81,10 +82,10 @@ class PiiExtractor {
                 } else {
                     "Review the context before treating this phone number as belonging to the subject."
                 },
-                attribution = if (exact) {
-                    FindingAttribution.ExactSelfSupplied
-                } else {
-                    FindingAttribution.Unconfirmed
+                attribution = when {
+                    exact -> FindingAttribution.ExactSelfSupplied
+                    attribution.strong -> FindingAttribution.IndependentPageSignals
+                    else -> FindingAttribution.Unconfirmed
                 }
             )
         }

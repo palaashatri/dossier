@@ -3126,19 +3126,30 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                     ) &&
                     finding.attribution in setOf(
                         FindingAttribution.ExactSelfSupplied,
-                        FindingAttribution.Verified
+                        FindingAttribution.Verified,
+                        // PiiExtractor uses this attribution when the page
+                        // has independent identity signals but the value was
+                        // not part of launch input.  A directly verified
+                        // profile supplies the missing page-level anchor;
+                        // weaker Unconfirmed findings remain evidence-only.
+                        FindingAttribution.IndependentPageSignals
                     )
                 ) {
                     // The scanner's verified-profile result is the explicit
-                    // provenance marker here, but profile containment alone is
-                    // not enough to establish ownership of a contact value.
-                    // Only explicit exact/verified attribution may become a
-                    // recursive typed pivot; all weaker or contradictory
-                    // attributions remain evidence-only.
+                    // provenance marker here.  IndependentPageSignals from
+                    // the extractor is promoted to explicit Verified only in
+                    // this same-page/direct-profile case; profile containment
+                    // alone still cannot promote Unconfirmed, Candidate, or
+                    // Conflicting values.
                     withPivotMetadata.copy(
                         state = EvidenceState.Verified,
                         reliability = EvidenceReliability.DirectPublicProfile,
                         sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+                        attribution = if (finding.attribution == FindingAttribution.IndependentPageSignals) {
+                            FindingAttribution.Verified
+                        } else {
+                            withPivotMetadata.attribution
+                        },
                         signals = (
                             withPivotMetadata.signals +
                                 "Exact high-entropy value observed on directly verified public profile"
