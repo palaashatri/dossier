@@ -124,7 +124,7 @@ class BreachCheckService(private val context: Context) {
             return HibpFetchResult(
                 breaches = emptyList(),
                 coverage = HibpCoverage.NotConfigured,
-                error = "HIBP account coverage was not run because no API key is configured. Public web exposure search ran separately."
+                error = "HIBP account coverage was not run because HIBP access is not configured. Public web exposure search ran separately."
             )
         }
 
