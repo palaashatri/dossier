@@ -252,20 +252,22 @@ class PiiExtractor {
         range: IntRange,
         addressRanges: List<IntRange>
     ): Boolean {
-        if (addressRanges.any { range.first in it }) return true
         // Keep the label check on the same rendered line. Looking back across
         // an arbitrary character window lets a nearby navigation counter (for
         // example, "Views: 12345") inherit a postal label from an unrelated
         // address or provider panel above it.
-        val lineStart = text.lastIndexOf('\n', range.first).let { index ->
-            if (index < 0) 0 else index + 1
-        }
-        val lineEnd = text.indexOf('\n', range.last).let { index ->
-            if (index < 0) text.length else index
-        }
+        val lineStart = lineStart(text, range.first)
+        val lineEnd = lineEnd(text, range.last)
         val beforeMatch = text.substring(lineStart, range.first).lowercase()
-        return POSTAL_CONTEXT_REGEX.containsMatchIn(beforeMatch) &&
-            range.last < lineEnd
+        if (range.last < lineEnd && POSTAL_CONTEXT_REGEX.containsMatchIn(beforeMatch)) return true
+
+        return addressRanges.any { addressRange ->
+            range.first >= addressRange.first &&
+                range.last <= addressRange.last &&
+                STREET_SUFFIX_REGEX.containsMatchIn(
+                    text.substring(addressRange.first, range.first)
+                )
+        }
     }
 
     private fun isPostalBoilerplate(text: String, range: IntRange): Boolean {
@@ -455,6 +457,9 @@ class PiiExtractor {
         val PHONE_CONTEXT = listOf("phone", "mobile", "telephone", "tel:", "call", "contact", "whatsapp", "signal")
         val POSTAL_CONTEXT_REGEX = Regex(
             "(?i)\\b(?:postal\\s+code|postcode|zip(?:\\s+code)?|zipcode|pin(?:\\s+code)?|pincode)\\b\\s*(?::|=|-)?\\s*$"
+        )
+        val STREET_SUFFIX_REGEX = Regex(
+            "(?i)\\b(?:street|st\\.?|road|rd\\.?|avenue|ave\\.?|boulevard|blvd\\.?|drive|dr\\.?|lane|ln\\.?|way|parkway|pkwy\\.?|highway|hwy\\.?|court|ct\\.?|circle|cir\\.?|terrace|ter\\.?|trail|trl\\.?|place|pl\\.?)\\b"
         )
         val POSTAL_BOILERPLATE = listOf(
             "postal code lookup",

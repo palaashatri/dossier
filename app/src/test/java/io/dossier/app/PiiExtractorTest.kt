@@ -126,6 +126,27 @@ class PiiExtractorTest {
     }
 
     @Test
+    fun houseNumberInsideAddressRangeIsNotPostalCode() {
+        val findings = PiiExtractor().extract(
+            "Address: 12345 Example Street, Testville",
+            "https://profile.example.test/jane"
+        )
+
+        assertEquals("12345 Example Street, Testville", findings.single { it.type == FindingType.Address }.value)
+        assertTrue(findings.none { it.type == FindingType.PostalCode })
+    }
+
+    @Test
+    fun postalLabelUsesCarriageReturnAsRenderedLineBoundary() {
+        val findings = PiiExtractor().extract(
+            "Postal code: 12345\rViews: 54321",
+            "https://directory.example.test/search"
+        )
+
+        assertEquals(listOf("12345"), findings.filter { it.type == FindingType.PostalCode }.map { it.value })
+    }
+
+    @Test
     fun extractsPostalCodeOnlyFromPostalContextAndRejectsCountersAndBoilerplate() {
         val findings = PiiExtractor().extract(
             "Postal code: 12345\nViews: 54321\nPostal code lookup: 99999\nNext page: 11111",

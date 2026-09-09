@@ -3124,20 +3124,17 @@ internal fun List<ProfileScanResult>.toEvidenceCollection(
                         FindingType.Address,
                         FindingType.PostalCode
                     ) &&
-                    finding.attribution !in setOf(
-                        FindingAttribution.Candidate,
-                        FindingAttribution.Conflicting
+                    finding.attribution in setOf(
+                        FindingAttribution.ExactSelfSupplied,
+                        FindingAttribution.Verified
                     )
                 ) {
                     // The scanner's verified-profile result is the explicit
-                    // provenance marker here: the exact value was parsed from
-                    // the same page that independently passed identity
-                    // verification. Preserve the extractor attribution (it
-                    // still explains whether the value matched user input),
-                    // while upgrading only the evidence state used by the
-                    // bounded typed frontier. Candidate/conflicting findings
-                    // remain evidence-only even when a result object is
-                    // malformed or manually assembled in a test.
+                    // provenance marker here, but profile containment alone is
+                    // not enough to establish ownership of a contact value.
+                    // Only explicit exact/verified attribution may become a
+                    // recursive typed pivot; all weaker or contradictory
+                    // attributions remain evidence-only.
                     withPivotMetadata.copy(
                         state = EvidenceState.Verified,
                         reliability = EvidenceReliability.DirectPublicProfile,

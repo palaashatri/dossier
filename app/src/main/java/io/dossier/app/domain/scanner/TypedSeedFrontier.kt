@@ -719,8 +719,9 @@ internal class TypedSeedFrontier internal constructor(
 
     private fun pendingPriority(seed: TypedSeed): Int = when {
         // Reviewed executor kinds receive the top slots. Navigation fetches
-        // stay ahead of Email/Phone searches so a high-entropy search cannot
-        // delay a directly actionable URL, document, or archive.
+        // stay ahead of Email/Phone/Address/PostalCode searches so a
+        // high-entropy search cannot delay a directly actionable URL,
+        // document, or archive.
         seed.kind in EXECUTABLE_NAVIGATION_KINDS && seed.evidenceState == EvidenceState.Verified -> 0
         seed.kind in EXECUTABLE_NAVIGATION_KINDS -> 1
         seed.kind == TypedSeedKind.Domain -> 2
@@ -741,7 +742,9 @@ internal class TypedSeedFrontier internal constructor(
 
         private val HIGH_ENTROPY_KINDS = setOf(
             TypedSeedKind.Email,
-            TypedSeedKind.Phone
+            TypedSeedKind.Phone,
+            TypedSeedKind.Address,
+            TypedSeedKind.PostalCode
         )
         private val EXECUTABLE_NAVIGATION_KINDS = setOf(
             TypedSeedKind.Url,

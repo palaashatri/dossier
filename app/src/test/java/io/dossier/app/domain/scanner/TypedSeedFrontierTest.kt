@@ -259,6 +259,42 @@ class TypedSeedFrontierTest {
     }
 
     @Test
+    fun pendingPrioritizesVerifiedAddressAndPostalCodeBeforeLowValueSeeds() {
+        val frontier = TypedSeedFrontier(
+            requestId = uuid(),
+            config = config
+        )
+        val lowValue = userSeed(TypedSeedKind.Name, "Example Name")
+        val address = userSeed(
+            TypedSeedKind.Address,
+            "123 Example Street, Testville, ZZ 12345"
+        ).copy(
+            isVerified = true,
+            evidenceState = EvidenceState.Verified,
+            origin = TypedSeedOrigin.Evidence,
+            sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+            evidenceIds = listOf("evidence-address"),
+            sourceUrl = "https://profile.example.test/jane"
+        )
+        val postalCode = userSeed(TypedSeedKind.PostalCode, "12345").copy(
+            isVerified = true,
+            evidenceState = EvidenceState.Verified,
+            origin = TypedSeedOrigin.Evidence,
+            sourceClassification = ExposureSourceClassification.PUBLIC_PROFILE,
+            evidenceIds = listOf("evidence-postal"),
+            sourceUrl = "https://profile.example.test/jane"
+        )
+
+        assertTrue(frontier.offer(lowValue))
+        assertTrue(frontier.offer(address))
+        assertTrue(frontier.offer(postalCode))
+
+        val pending = frontier.pending().map { it.seed.exactValue }
+        assertTrue(pending.indexOf(address.exactValue) < pending.indexOf(lowValue.exactValue))
+        assertTrue(pending.indexOf(postalCode.exactValue) < pending.indexOf(lowValue.exactValue))
+    }
+
+    @Test
     fun lateExecutableSeedDisplacesLowPriorityEntryAfterThirtyTwoMixedAdmissions() {
         val frontier = TypedSeedFrontier(
             requestId = uuid(),
